@@ -1,86 +1,114 @@
 # Aether3D Development Workflow
 
-本文件定义 Aether3D 的分支策略、提交规范与回滚流程。
-所有贡献者（包括 AI 工具）必须遵守。
+本文件定义 Aether3D 的**分支策略、开发流程、回滚规则与阶段约束**。  
+所有贡献者（包括作者本人）必须遵守。
+
+---
+
+## 核心原则（不可妥协）
+
+- **main 分支历史只允许向前追加**
+- **公共历史只允许修正（revert），禁止改写**
+- **所有功能开发必须通过 Pull Request**
+- **Phase Tag 是锚点，不可移动**
 
 ---
 
 ## 分支策略
 
-### main 分支
-- ✅ 只接受 Pull Request
-- ❌ 禁止直接 push
-- ❌ 禁止 force push
-- ✅ 历史只允许向前追加
+### main（最高保护级别）
+
+允许：
+- Pull Request 合并（**仅 squash merge**）
+
+禁止：
+- 直接 push
+- git reset
+- git rebase
+- git push --force / --force-with-lease
+
+回滚方式：
+- **只能通过 git revert**
+- revert 必须走 PR（Rollback via PR）
+
+---
+
+### feature / phase 分支
+
+命名规范：
+- `phase1/<topic>`
+- `feat/<topic>`
+- `hotfix/<topic>`
+
+来源规则：
+- 必须从 `main` 拉取
+- 禁止从其他 feature 分支派生
+
+同步规则：
+- 使用 `git merge origin/main`
+- ❌ 禁止 rebase main
+
+历史整理：
+- **未 push 前**：允许 git reset / amend
+- **已 push 或创建 PR 后**：只允许 revert 或新 commit 修复
+
+生命周期：
+- 合并到 main 后立即删除（本地 + 远端）
+
+---
+
+## Pull Request 规则
+
+- main 只接受 PR
+- PR 合并策略：**Squash merge**
+- 每个 PR 对应一个清晰目标
+- PR 描述必须说明：
+  - 做了什么
+  - 是否可能需要回滚
+  - 回滚方式
+
+---
+
+## Rollback via PR（强制）
+
+标准流程：
+1. 从 main 拉 rollback 分支
+2. 执行 git revert <commit>
+3. 解决冲突（如有）
+4. push 分支
+5. 创建 PR（说明原因与影响）
+6. 合并 PR
+
+详细演练见：`docs/ROLLBACK.md`
+
+---
+
+## Phase 进入与退出
 
 ### Phase 0
-- 以 Git Tag `phase0` 形式存在
-- 仅用于查看与回滚参考
-- 永不移动、永不修改
+- 只读锚点
+- 对应 tag：phase0
+- 永不移动
 
-### phase0.5 分支
-- 当前护栏分支
-- Phase 1 必须从此分支拉出
+### Phase 0.5
+- 仅允许文档 / 脚本 / CI
+- 禁止任何功能与工程文件变更
+- 验收标准：
+  - Workflow 文档齐全
+  - Rollback 文档齐全
+  - 至少一次真实 revert 演练
 
-### 功能分支命名规范
-- `phase1/*`：Phase 1 功能开发
-- `feat/*`：独立功能
-- `hotfix/*`：紧急修复
-- `release/*`：发布准备
-
----
-
-## 提交规范
-
-格式：
-{Phase}: {简要说明}
-示例：
-- `Phase 0.5-1: guardrails docs`
-- `Phase 1-1: camera capture MVP`
-
-规则：
-- 一个 commit 只做一件事
-- 禁止混杂文档 + 功能代码
+### Phase 1
+- 功能开发阶段
+- 必须基于最新 main（完成所有 0.5 护栏）
+- 出现事故必须可一键 revert
 
 ---
 
-## 标准开发流程（强制）
+## 禁止清单（Phase 0.5 特别强调）
 
-1. 运行 Preflight 检查
-2. 从 phase0.5 创建分支
-3. 开发
-4. 更新相关文档
-5. 提交 commit
-6. 创建 PR
-7. Code Review
-8. CI 通过
-9. 合并到 main
-10. 创建 Tag（如适用）
-
----
-
-## 回滚流程（唯一合法）
-
-### 允许
-```bash
-git revert <commit>
-git push
-
-禁止
-git reset --hard
-git rebase
-git push --force
-
-原则
-	•	所有回滚必须可追溯
-	•	不允许“假装没发生过”
----
-
-## 三、你现在该做的检查清单（很短）
-
-完成粘贴后，在终端跑：
-
-```bash
-wc -l README.md docs/PHASES.md docs/WORKFLOW.md
-git status --short
-
+- *.swift
+- *.metal
+- *.xcodeproj/project.pbxproj
+- Package.swift
+- Info.plist / Entitlements
