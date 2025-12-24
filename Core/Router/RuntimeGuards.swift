@@ -75,5 +75,10 @@ struct RuntimeGuards {
         
         return nil
     }
+    
+    /// 创建当前运行时状态快照（Pipeline 使用的便捷方法）
+    static func current() -> RuntimeGuards {
+        return snapshot()
+    }
 }
 

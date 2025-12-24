@@ -22,5 +22,13 @@ struct CaptureStats {
             coverageEstimate: 0.0
         )
     }
+    
+    /// 占位符（用于 Pipeline）
+    static var placeholder: CaptureStats {
+        return CaptureStats(
+            frameCount: 0,
+            coverageEstimate: 0.0
+        )
+    }
 }
 
