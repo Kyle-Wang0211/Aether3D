@@ -48,5 +48,10 @@ extension DeviceTier {
             return "H"
         }
     }
+    
+    /// 获取当前设备层级（Pipeline 使用的便捷方法）
+    static func current() -> DeviceTier {
+        return detect()
+    }
 }
 
