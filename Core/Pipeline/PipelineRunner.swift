@@ -38,6 +38,15 @@ final class PipelineRunner {
                 return .failure(.invalidInput)
             }
 
+            // 获取 sourceVideoURL（用于保存 output）
+            let sourceVideoURL: URL
+            if let urlAsset = asset as? AVURLAsset {
+                sourceVideoURL = urlAsset.url
+            } else {
+                // Fallback: 使用临时路径
+                sourceVideoURL = URL(fileURLWithPath: "/tmp/unknown_video.mov")
+            }
+
             let extractor = FrameExtractor()
             let extractStart = Date()
             let frames = try await extractor.extractFrames(
@@ -59,6 +68,22 @@ final class PipelineRunner {
             print("DONE: totalMs=\(totalMs)")
 
             onState?(.finished)
+
+            // 创建 PipelineOutput 并保存（Phase 1-3）
+            let output = PipelineOutput(
+                id: UUID(),
+                sourceVideoURL: sourceVideoURL,
+                frames: artifact.frames,
+                buildPlan: plan,
+                pluginResult: nil, // Phase 1-3 允许为 nil
+                state: .success,
+                metadata: PipelineMetadata(
+                    processingTimeMs: Double(totalMs),
+                    totalFrames: artifact.frames.count
+                ),
+                createdAt: Date()
+            )
+            OutputManager.shared.save(output)
 
             return .success(
                 BuildResult(
