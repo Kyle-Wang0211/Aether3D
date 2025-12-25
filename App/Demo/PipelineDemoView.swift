@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 
 struct PipelineDemoView: View {
     @StateObject private var viewModel = PipelineDemoViewModel()
+    @State private var showPreview = false
     
     var body: some View {
         NavigationView {
@@ -21,6 +22,11 @@ struct PipelineDemoView: View {
                     
                     // 运行按钮区域
                     runButtonsSection
+                    
+                    // 查看结果入口（Phase 1-3 新增）
+                    if OutputManager.shared.latestOutput() != nil {
+                        viewResultSection
+                    }
                     
                     // 状态显示区域
                     stateSection
@@ -43,6 +49,20 @@ struct PipelineDemoView: View {
                 .padding()
             }
             .navigationTitle("Pipeline Demo")
+            .sheet(isPresented: $showPreview) {
+                if let output = OutputManager.shared.latestOutput() {
+                    NavigationView {
+                        ResultPreviewView(output: output)
+                            .toolbar {
+                                ToolbarItem(placement: .navigationBarTrailing) {
+                                    Button("Done") {
+                                        showPreview = false
+                                    }
+                                }
+                            }
+                    }
+                }
+            }
         }
         .onChange(of: viewModel.selectedItem) { newItem in
             viewModel.handleVideoSelection(newItem)
@@ -124,11 +144,30 @@ struct PipelineDemoView: View {
         }
     }
     
+    // MARK: - View Result Section (Phase 1-3)
+    
+    private var viewResultSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("3. View Result")
+                .font(.headline)
+            
+            Button(action: {
+                showPreview = true
+            }) {
+                Label("View Latest Result", systemImage: "eye.fill")
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.green.opacity(0.1))
+                    .cornerRadius(8)
+            }
+        }
+    }
+    
     // MARK: - State Section
     
     private var stateSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("3. Pipeline State")
+            Text("4. Pipeline State")
                 .font(.headline)
             
             Text(stateDescription)
@@ -220,7 +259,6 @@ struct FrameThumbnailView: View {
     
     var body: some View {
         VStack(spacing: 4) {
-            // 将 CGImage 转换为 UIImage 用于显示
             if let uiImage = cgImageToUIImage(frame.image) {
                 Image(uiImage: uiImage)
                     .resizable()
@@ -241,7 +279,6 @@ struct FrameThumbnailView: View {
         }
     }
     
-    /// 将 CGImage 转换为 UIImage
     private func cgImageToUIImage(_ cgImage: CGImage) -> UIImage? {
         return UIImage(cgImage: cgImage)
     }

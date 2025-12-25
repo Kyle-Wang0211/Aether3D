@@ -52,19 +52,14 @@ final class PipelineDemoViewModel: ObservableObject {
                     return
                 }
                 
-                // 获取文件扩展名
                 let fileExtension = item.supportedContentTypes.first?.preferredFilenameExtension ?? "mov"
-                
-                // 创建目标目录
                 let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let targetDir = documentsPath.appendingPathComponent("Phase1-2b", isDirectory: true)
                 try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
                 
-                // 生成唯一文件名
                 let fileName = "\(UUID().uuidString).\(fileExtension)"
                 let targetURL = targetDir.appendingPathComponent(fileName)
                 
-                // 写入文件
                 try data.write(to: targetURL)
                 
                 await MainActor.run {
@@ -88,7 +83,6 @@ final class PipelineDemoViewModel: ObservableObject {
     func runPipeline(mode: BuildMode) {
         guard !isRunning, let url = selectedURL else { return }
         
-        // 清空上一次结果
         resultFrames = []
         planSummary = ""
         errorText = nil
@@ -97,9 +91,7 @@ final class PipelineDemoViewModel: ObservableObject {
         pipelineState = .idle
         
         currentTask = Task {
-            // Phase 1-2b demo 默认值：使用 DeviceTier.current()
             let deviceTier = DeviceTier.current()
-            
             let asset = AVAsset(url: url)
             let request = BuildRequest(
                 source: .video(asset: asset),
@@ -116,16 +108,12 @@ final class PipelineDemoViewModel: ObservableObject {
             await MainActor.run {
                 switch result {
                 case .success(let buildResult):
-                    // 获取 planSummary（按优先级）
                     if !buildResult.planSummary.isEmpty {
                         planSummary = buildResult.planSummary
+                    } else if let lastPlan = pipelineRunner.lastPlan {
+                        planSummary = lastPlan.debugSummary
                     } else {
-                        // 尝试从 PipelineRunner 获取 lastPlan
-                        if let plan = pipelineRunner.lastPlan {
-                            planSummary = plan.debugSummary
-                        } else {
-                            planSummary = "⚠️ No plan summary available (Phase 1-2b limitation)"
-                        }
+                        planSummary = "⚠️ No plan summary available (Phase 1-2b limitation)"
                     }
                     
                     resultFrames = Array(buildResult.artifact.frames.prefix(6))
