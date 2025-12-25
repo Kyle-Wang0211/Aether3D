@@ -412,6 +412,204 @@ git revert <phase1-0-commit-hash>
 
 ---
 
+### Phase 1-3 — Output Artifact & Preview
+
+#### 目标
+
+将 Phase 1-2c 的"跑通结果"升级为"可管理的输出产物 + 可重复打开的预览"。
+
+#### 进入条件（Entry Criteria）
+
+必须全部满足：
+
+- ✅ Phase 1-2c 已完成（真机可独立运行、Demo 入口稳定、UI 反作弊显示 plan summary）
+- ✅ Xcode 编译通过，无 duplicate outputs
+- ✅ Demo：PhotosPicker → Run → Finished 能完成（至少一次）
+- ✅ PipelineRunner 能正常返回 BuildResult
+
+#### 范围（Scope）
+
+**✅ 只做**：
+
+- 定义 `PipelineOutput`（产物结构，包含 buildPlan 和 artifact）
+- 实现 `OutputManager`（内存级管理，singleton 模式）
+- 新增 `ResultPreviewView`（可反复打开查看）
+- Demo UI 增加"查看结果"入口（稳定导航）
+
+**❌ 明确不做**：
+
+- 不做持久化（Phase 1-4 才做）
+- 不做分享/发布/账号/TestFlight
+- 不做算法/渲染/训练优化
+- 不做文件系统保存/加载
+
+#### 设计约束（Design Constraints）
+
+**OutputManager 必须是 singleton**：
+
+- `OutputManager.shared` 静态属性
+- 必须维护：
+  - `outputs: [UUID: PipelineOutput]`（私有 setter，公开 getter）
+  - `lastOutputID: UUID?`（用于 Preview 默认展示）
+- 必须提供：
+  - `func save(_ output: PipelineOutput) -> UUID`
+  - `func latestOutput() -> PipelineOutput?`
+  - `func output(id: UUID) -> PipelineOutput?`
+
+**PipelineOutput 必须包含**：
+
+- `let id: UUID`（唯一标识）
+- `let buildPlan: BuildPlan`（反作弊关键字段，必须存在）
+- `let artifact: PhotoSpaceArtifact`（或等价类型）
+- `let createdAt: Date`
+- `let sourceVideoName: String?`（可选，用于显示）
+
+**类型安全约束**：
+
+- `pluginResult` 允许为 `nil`，但类型必须明确（禁止 `Any`）
+- 所有字段必须符合 `Sendable` 协议
+
+#### 验收标准（Acceptance Criteria）
+
+##### A) 代码结构（可 grep 验证）
+
+**必须存在的文件与关键字段**：
+
+1. **Core/Output/PipelineOutput.swift** 存在
+   ```bash
+   ls -la Core/Output/PipelineOutput.swift
+   ```
+   - 包含 `let buildPlan: BuildPlan`
+   - 包含 `let id: UUID`
+   - 包含 `let createdAt: Date`
+   ```bash
+   grep -n "buildPlan\|id.*UUID\|createdAt" Core/Output/PipelineOutput.swift
+   ```
+
+2. **Core/Output/OutputManager.swift** 存在
+   ```bash
+   ls -la Core/Output/OutputManager.swift
+   ```
+   - 包含 `static let shared`
+   - 包含 `private(set) var lastOutputID: UUID?`
+   - 包含 `func latestOutput() -> PipelineOutput?`
+   ```bash
+   grep -n "static let shared\|lastOutputID\|func latestOutput" Core/Output/OutputManager.swift
+   ```
+
+3. **App/Demo/ResultPreviewView.swift** 存在
+   ```bash
+   ls -la App/Demo/ResultPreviewView.swift
+   ```
+   - 包含 `LazyVGrid`（用于帧网格显示）
+   - 包含 `debugSummary` 或 `planSummary`（反作弊显示）
+   ```bash
+   grep -n "LazyVGrid\|debugSummary\|planSummary" App/Demo/ResultPreviewView.swift
+   ```
+
+4. **PipelineRunner 完成点调用 OutputManager**
+   - `PipelineRunner.finish(...)` 或等价完成点必须调用 `OutputManager.shared.save(...)`
+   ```bash
+   grep -n "OutputManager.shared.save" Core/Pipeline/PipelineRunner.swift
+   ```
+
+##### B) 功能行为（可录屏验证）
+
+**Pipeline 完成后**：
+
+- ✅ 出现"查看结果"入口（按钮或导航链接）
+- ✅ 点击进入 Preview：
+  - 显示 `outputID` 前 8 位 + `createdAt` 时间戳
+  - 显示 `sourceVideo` 文件名（如有）
+  - 显示帧网格（至少 1 帧，最多 6 帧）
+  - 显示 `buildPlan.debugSummary` 原文（反作弊，原样展示，不改写）
+- ✅ 返回主界面，再次进入 Preview：仍看到同一 output（不依赖 ViewModel 生命周期）
+
+**录屏验证脚本（60 秒）**：
+
+1. 启动 App（0-2s）
+2. 选择视频并运行 Pipeline（2-15s）
+3. Pipeline 完成后，点击"查看结果"（15-16s）
+4. 验证 Preview 显示：outputID、时间、帧网格、debugSummary（16-25s）
+5. 返回主界面（25-26s）
+6. 再次点击"查看结果"（26-27s）
+7. 验证：outputID 相同，内容一致（27-35s）
+
+##### C) 生命周期策略（明确、可验证）
+
+**仅内存管理**：
+
+- ✅ App 重启后 `outputs` 清空是预期行为（不持久化）
+- ✅ 进程存活期间：销毁 ViewModel 不影响 `OutputManager` 中的 output
+- ✅ 验证命令：
+  ```bash
+  # 在 Xcode 调试器中
+  po OutputManager.shared.outputs.count > 0  # 运行 Pipeline 后应为 true
+  po OutputManager.shared.lastOutputID != nil  # 运行 Pipeline 后应为 true
+  ```
+
+#### Anti-cheat Validation（验收反作弊）
+
+必须提供三种证据：
+
+**1. 命令证据（文件存在 + grep 关键字段）**
+
+执行以下命令并截图：
+
+```bash
+# 文件存在性
+ls -la Core/Output/PipelineOutput.swift
+ls -la Core/Output/OutputManager.swift
+ls -la App/Demo/ResultPreviewView.swift
+
+# 关键字段验证
+grep -n "buildPlan.*BuildPlan" Core/Output/PipelineOutput.swift
+grep -n "static let shared" Core/Output/OutputManager.swift
+grep -n "debugSummary\|planSummary" App/Demo/ResultPreviewView.swift
+grep -n "OutputManager.shared.save" Core/Pipeline/PipelineRunner.swift
+```
+
+**2. 录屏脚本（60 秒，必须两次进入 Preview 且 outputID 相同）**
+
+录屏文件：`phase1-3-preview-replay.mp4`
+
+时间轴：
+- 0-15s：选择视频 → Run Enter → Finished
+- 15-16s：点击"查看结果"
+- 16-30s：验证 Preview 显示（outputID 前 8 位、createdAt、帧网格、debugSummary 原文）
+- 30-31s：返回主界面
+- 31-32s：再次点击"查看结果"
+- 32-45s：验证 outputID 相同，内容一致
+
+**3. 截图要求**
+
+- **Preview 页截图**（必须包含 4 个区域）：
+  1. outputID 显示区域（前 8 位）
+  2. createdAt 时间戳
+  3. 帧网格（至少 1 帧）
+  4. `buildPlan.debugSummary` 原文显示（反作弊）
+- **调试器命令截图**：
+  - `po OutputManager.shared.outputs.count`（应 > 0）
+  - `po OutputManager.shared.lastOutputID`（应不为 nil）
+
+#### 提交与回滚
+
+**Commit message 规范**：
+
+```
+docs: define Phase 1-3 (Output Artifact & Preview)
+```
+
+**回滚方式**：
+
+```bash
+git checkout -b rollback/before-phase1-3 main
+git revert <phase1-3-commit-hash>
+# 创建 PR 并合并
+```
+
+---
+
 ## 紧急情况例外（极少数）
 
 ### 适用场景
