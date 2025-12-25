@@ -1,1 +1,21 @@
 .DS_Store
+
+# Xcode
+DerivedData/
+*.xcodeproj.broken
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Build
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Archive
+*.xcarchive
+
+# TestFlight
+*.app.dSYM
+*.app.zip
