@@ -12,6 +12,12 @@ Aether3D 是一个基于 **Gaussian Splatting** 的 3D 资产生成与可视化�
 - Phase 0: Frozen Baseline（tag: `phase0`，只读）
 - Phase 0.5: Guardrails（制度护栏，当前阶段）
 
+### Whitebox（Phase 1）
+
+当前处于 Whitebox 验证阶段，用于判断 B1 主 pipeline 是否在 ≤180s fail-fast 约束下成立。
+- 规格说明：`docs/WHITEBOX.md`
+- 验收标准：`docs/ACCEPTANCE.md`
+
 ## 开发硬性约束
 - 禁止直接 push 到 `main`
 - 禁止 force push 到 `main`

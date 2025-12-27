@@ -111,6 +111,14 @@ Phase 0.5 用于建立**开发护栏与版本控制制度**，目标是：
 
 ## Phase 1 — Feature Development（功能开发）
 
+### Whitebox（Phase 1 验证子阶段）
+
+**Whitebox 是 Phase 1 的强制验收阶段，优先级高于本文档中其他 Phase 1–3 的描述。**  
+**若存在冲突，以 `docs/WHITEBOX.md` 为准。**
+
+Whitebox 的唯一目标：验证 B1 主 pipeline 在 ≤180s fail-fast 约束下是否成立。  
+详见：`docs/WHITEBOX.md` ｜ `docs/ACCEPTANCE.md`
+
 ### 定义
 Phase 1 是**核心功能开发阶段**。
 
@@ -274,6 +282,8 @@ Phase 1 是**核心功能开发阶段**。
 - `idle` - 空闲状态，等待用户操作
 - `building_enter` - 正在构建 Enter 阶段（T+0 到 T+1-2s）
 - `enter_ready` - Enter 阶段完成，可进入 Viewer
+
+<!-- Whitebox 阶段暂不实现，留待 Phase 2 / Phase 3 -->
 - `building_publish` - 正在构建 Publish 阶段（后台继续优化）
 - `publish_ready` - Publish 阶段完成，高质量结果可用
 
@@ -296,6 +306,8 @@ fail_soft  aborted      aborted
 ---
 
 #### 4. Fail-soft 明确定义
+
+<!-- Whitebox 阶段暂不实现，留待 Phase 2 / Phase 3 -->
 
 ##### 4.1 Fail-soft 的本质
 
@@ -334,6 +346,8 @@ fail_soft  aborted      aborted
 **Phase 1 Asset 是"一次性资产"**：
 - ❌ 不支持补帧 / 追加训练
 - ❌ 不支持增量素材追加
+
+<!-- Whitebox 阶段暂不实现，留待 Phase 2 / Phase 3 -->
 - ✅ 一次性构建完成后保存，后续只能加载查看
 
 ##### 5.2 最小结构
