@@ -12,6 +12,13 @@ import PhotosUI
 import UniformTypeIdentifiers
 import Combine
 
+enum UIState {
+    case idle
+    case generating(progress: Double?)
+    case success(artifact: ArtifactRef)
+    case failed(reason: String)
+}
+
 @MainActor
 final class PipelineDemoViewModel: ObservableObject {
     @Published var selectedItem: PhotosPickerItem?
@@ -20,11 +27,7 @@ final class PipelineDemoViewModel: ObservableObject {
     @Published var isCopyingVideo = false
     @Published var copyingError: String?
     
-    @Published var pipelineState: PipelineState = .idle
-    @Published var planSummary: String = ""
-    @Published var resultFrames: [Frame] = []
-    @Published var errorText: String?
-    
+    @Published var uiState: UIState = .idle
     @Published var isRunning = false
     
     private let pipelineRunner = PipelineRunner()
@@ -79,51 +82,37 @@ final class PipelineDemoViewModel: ObservableObject {
         }
     }
     
-    /// 运行 Pipeline（Enter 或 Publish 模式）
+    /// 运行 Pipeline（Day 2: 只支持 .enter 模式）
     func runPipeline(mode: BuildMode) {
         guard !isRunning, let url = selectedURL else { return }
         
-        resultFrames = []
-        planSummary = ""
-        errorText = nil
+        // Day 2: 只支持 .enter
+        guard mode == .enter else {
+            uiState = .failed(reason: "Day 2 only supports .enter mode")
+            return
+        }
         
+        uiState = .generating(progress: nil)
         isRunning = true
-        pipelineState = .idle
         
         currentTask = Task {
             let deviceTier = DeviceTier.current()
             let asset = AVAsset(url: url)
             let request = BuildRequest(
                 source: .video(asset: asset),
-                requestedMode: mode,
+                requestedMode: .enter,
                 deviceTier: deviceTier
             )
             
-            let result = await pipelineRunner.run(request: request) { [weak self] state in
-                Task { @MainActor in
-                    self?.pipelineState = state
-                }
-            }
+            let result = await pipelineRunner.runGenerate(request: request)
             
             await MainActor.run {
                 switch result {
-                case .success(let buildResult):
-                    if !buildResult.planSummary.isEmpty {
-                        planSummary = buildResult.planSummary
-                    } else if let lastPlan = pipelineRunner.lastPlan {
-                        planSummary = lastPlan.debugSummary
-                    } else {
-                        planSummary = "⚠️ No plan summary available (Phase 1-2b limitation)"
-                    }
+                case .success(let artifact, _):
+                    uiState = .success(artifact: artifact)
                     
-                    resultFrames = Array(buildResult.artifact.frames.prefix(6))
-                    errorText = nil
-                    
-                case .failure(let error):
-                    errorText = "Error: \(error)"
-                    if case .cancelled = error {
-                        pipelineState = .failed(message: "Cancelled")
-                    }
+                case .fail(let reason, _):
+                    uiState = .failed(reason: reason.rawValue)
                 }
                 
                 isRunning = false
@@ -134,10 +123,7 @@ final class PipelineDemoViewModel: ObservableObject {
     /// 取消 Pipeline
     func cancelPipeline() {
         currentTask?.cancel()
-        pipelineRunner.cancel()
         isRunning = false
-        pipelineState = .failed(message: "Cancelled")
-        errorText = "Cancelled"
+        uiState = .failed(reason: "Cancelled")
     }
 }
-

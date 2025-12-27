@@ -9,102 +9,161 @@ import Foundation
 import AVFoundation
 
 final class PipelineRunner {
-
+    private let remoteClient: RemoteB1Client
+    
+    init(remoteClient: RemoteB1Client = NotConfiguredRemoteB1Client()) {
+        self.remoteClient = remoteClient
+    }
+    
+    // MARK: - New Generate API (Day 2)
+    
+    func runGenerate(request: BuildRequest) async -> GenerateResult {
+        let startTime = Date()
+        
+        do {
+            guard case let .video(asset) = request.source else {
+                let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+                return .fail(reason: .inputInvalid, elapsedMs: elapsed)
+            }
+            
+            let videoURL: URL
+            if let urlAsset = asset as? AVURLAsset {
+                videoURL = urlAsset.url
+            } else {
+                let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+                return .fail(reason: .inputInvalid, elapsedMs: elapsed)
+            }
+            
+            let artifact: ArtifactRef = try await Timeout.withTimeout(seconds: 180) {
+                // Upload video
+                let assetId = try await remoteClient.upload(videoURL: videoURL)
+                
+                // Start job
+                let jobId = try await remoteClient.startJob(assetId: assetId)
+                
+                // Poll and download
+                let splatData = try await pollAndDownload(jobId: jobId)
+                
+                // Write to Documents/Whitebox/
+                let url = try writeSplatToDocuments(data: splatData, jobId: jobId)
+                
+                return ArtifactRef(localPath: url, format: .splat)
+            }
+            
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            return .success(artifact: artifact, elapsedMs: elapsed)
+            
+        } catch is TimeoutError {
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            return .fail(reason: .timeout, elapsedMs: elapsed)
+            
+        } catch let error as RemoteB1ClientError {
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            let reason = mapRemoteB1ClientError(error)
+            return .fail(reason: reason, elapsedMs: elapsed)
+            
+        } catch {
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            return .fail(reason: .unknownError, elapsedMs: elapsed)
+        }
+    }
+    
+    // MARK: - Legacy API (Compatibility Layer)
+    
     func run(
         request: BuildRequest,
         onState: ((PipelineState) -> Void)?
     ) async -> Result<BuildResult, PipelineError> {
-
-        let startTime = Date()
-
-        do {
-            onState?(.planning)
-
-            let planStart = Date()
-            let plan = RouterV0.makePlan(
-                input: .init(
-                    deviceTier: request.deviceTier,
-                    captureStats: .placeholder,
-                    runtimeState: .current(),
-                    requestedMode: request.requestedMode
-                )
-            )
-            let planMs = Int(Date().timeIntervalSince(planStart) * 1000)
-            print("PLAN:", plan.debugSummary)
-
-            onState?(.extractingFrames(progress: 0))
-
-            guard case let .video(asset) = request.source else {
-                return .failure(.invalidInput)
-            }
-
-            // 获取 sourceVideoURL（用于保存 output）
-            let sourceVideoURL: URL
-            if let urlAsset = asset as? AVURLAsset {
-                sourceVideoURL = urlAsset.url
-            } else {
-                // Fallback: 使用临时路径
-                sourceVideoURL = URL(fileURLWithPath: "/tmp/unknown_video.mov")
-            }
-
-            let extractor = FrameExtractor()
-            let extractStart = Date()
-            let frames = try await extractor.extractFrames(
-                asset: asset,
-                frameBudget: plan.frameBudget
-            )
-            let extractMs = Int(Date().timeIntervalSince(extractStart) * 1000)
-            print("EXTRACT: frames=\(frames.count) ms=\(extractMs)")
-
-            onState?(.buildingArtifact(progress: 0))
-
-            let builder = PhotoSpaceBuilderB()
-            let buildStart = Date()
-            let artifact = try await builder.build(plan: plan, frames: frames)
-            let buildMs = Int(Date().timeIntervalSince(buildStart) * 1000)
-            print("BUILD: framesUsed=\(artifact.frames.count) ms=\(buildMs)")
-
-            let totalMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            print("DONE: totalMs=\(totalMs)")
-
+        onState?(.planning)
+        
+        let generateResult = await runGenerate(request: request)
+        
+        switch generateResult {
+        case .success(let artifact, let elapsedMs):
             onState?(.finished)
-
-            // 创建 PipelineOutput 并保存（Phase 1-3）
-            let output = PipelineOutput(
-                id: UUID(),
-                sourceVideoURL: sourceVideoURL,
-                frames: artifact.frames,
-                buildPlan: plan,
-                pluginResult: nil, // Phase 1-3 允许为 nil
-                state: .success,
-                metadata: PipelineMetadata(
-                    processingTimeMs: Double(totalMs),
-                    totalFrames: artifact.frames.count
-                ),
-                createdAt: Date()
+            // Create minimal BuildResult for compatibility
+            let artifact_frames: [Frame] = []  // Day 2: no frames
+            let photoSpaceArtifact = PhotoSpaceArtifact(
+                frames: artifact_frames,
+                generatedAt: Date()
             )
-            OutputManager.shared.save(output)
-
             return .success(
                 BuildResult(
-                    planSummary: plan.debugSummary,
-                    artifact: artifact,
+                    planSummary: "Whitebox Generate (Day 2)",
+                    artifact: photoSpaceArtifact,
                     timings: .init(
-                        planMs: planMs,
-                        extractMs: extractMs,
-                        buildMs: buildMs,
-                        totalMs: totalMs
+                        planMs: 0,
+                        extractMs: 0,
+                        buildMs: 0,
+                        totalMs: elapsedMs
                     )
                 )
             )
-
-        } catch let error as PipelineError {
-            onState?(.failed(message: "\(error)"))
-            return .failure(error)
-        } catch {
-            onState?(.failed(message: "unknown"))
-            return .failure(.internalInconsistency)
+            
+        case .fail(let reason, let elapsedMs):
+            onState?(.failed(message: reason.rawValue))
+            // Map FailReason to PipelineError
+            let pipelineError: PipelineError
+            switch reason {
+            case .timeout:
+                pipelineError = .cancelled
+            case .inputInvalid:
+                pipelineError = .invalidInput
+            default:
+                pipelineError = .pluginFailed
+            }
+            return .failure(pipelineError)
+        }
+    }
+    
+    // MARK: - Private Helpers
+    
+    private func pollAndDownload(jobId: String) async throws -> Data {
+        let pollInterval: TimeInterval = 2.0
+        
+        while true {
+            let status = try await remoteClient.pollStatus(jobId: jobId)
+            
+            switch status {
+            case .completed:
+                return try await remoteClient.download(jobId: jobId)
+                
+            case .failed(let reason):
+                throw RemoteB1ClientError.jobFailed(reason)
+                
+            case .pending, .processing:
+                try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+                continue
+            }
+        }
+    }
+    
+    private func writeSplatToDocuments(data: Data, jobId: String) throws -> URL {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let whiteboxDir = documentsPath.appendingPathComponent("Whitebox", isDirectory: true)
+        
+        try FileManager.default.createDirectory(at: whiteboxDir, withIntermediateDirectories: true)
+        
+        let fileName = "\(jobId).splat"
+        let fileURL = whiteboxDir.appendingPathComponent(fileName)
+        
+        try data.write(to: fileURL)
+        
+        return fileURL
+    }
+    
+    private func mapRemoteB1ClientError(_ error: RemoteB1ClientError) -> FailReason {
+        switch error {
+        case .notConfigured:
+            return .apiNotConfigured
+        case .networkTimeout:
+            return .networkTimeout
+        case .uploadFailed:
+            return .uploadFailed
+        case .downloadFailed:
+            return .downloadFailed
+        case .networkError, .invalidResponse, .jobFailed:
+            return .apiError
         }
     }
 }
-
