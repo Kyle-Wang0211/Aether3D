@@ -42,12 +42,12 @@ final class PipelineRunner {
                 let jobId = try await remoteClient.startJob(assetId: assetId)
                 
                 // Poll and download
-                let splatData = try await pollAndDownload(jobId: jobId)
+                let (splatData, format) = try await pollAndDownload(jobId: jobId)
                 
                 // Write to Documents/Whitebox/
-                let url = try writeSplatToDocuments(data: splatData, jobId: jobId)
+                let url = try writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
                 
-                return ArtifactRef(localPath: url, format: .splat)
+                return ArtifactRef(localPath: url, format: format)
             }
             
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -56,6 +56,10 @@ final class PipelineRunner {
         } catch is TimeoutError {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
             return .fail(reason: .timeout, elapsedMs: elapsed)
+            
+        } catch let error as FailReason {
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            return .fail(reason: error, elapsedMs: elapsed)
             
         } catch let error as RemoteB1ClientError {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -118,7 +122,7 @@ final class PipelineRunner {
     
     // MARK: - Private Helpers
     
-    private func pollAndDownload(jobId: String) async throws -> Data {
+    private func pollAndDownload(jobId: String) async throws -> (data: Data, format: ArtifactFormat) {
         let pollInterval: TimeInterval = 2.0
         
         while true {
@@ -138,13 +142,19 @@ final class PipelineRunner {
         }
     }
     
-    private func writeSplatToDocuments(data: Data, jobId: String) throws -> URL {
+    private func writeSplatToDocuments(data: Data, format: ArtifactFormat, jobId: String) throws -> URL {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let whiteboxDir = documentsPath.appendingPathComponent("Whitebox", isDirectory: true)
         
         try FileManager.default.createDirectory(at: whiteboxDir, withIntermediateDirectories: true)
         
-        let fileName = "\(jobId).splat"
+        let fileName: String
+        switch format {
+        case .splat:
+            fileName = "\(jobId).splat"
+        case .splatPly:
+            fileName = "\(jobId).ply"
+        }
         let fileURL = whiteboxDir.appendingPathComponent(fileName)
         
         try data.write(to: fileURL)

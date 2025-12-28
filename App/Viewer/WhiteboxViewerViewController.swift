@@ -16,7 +16,7 @@ final class WhiteboxViewerViewController: UIViewController {
     private var artifact: ArtifactRef?
     
     func configure(artifact: ArtifactRef) throws {
-        guard artifact.format == .splat else {
+        guard artifact.format == .splat || artifact.format == .splatPly else {
             throw ViewerError.unsupportedFormat
         }
         guard FileManager.default.fileExists(atPath: artifact.localPath.path) else {

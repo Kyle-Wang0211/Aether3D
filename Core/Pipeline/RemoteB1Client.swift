@@ -21,7 +21,7 @@ protocol RemoteB1Client {
     func upload(videoURL: URL) async throws -> String  // assetId
     func startJob(assetId: String) async throws -> String  // jobId
     func pollStatus(jobId: String) async throws -> JobStatus
-    func download(jobId: String) async throws -> Data  // .splat bytes
+    func download(jobId: String) async throws -> (data: Data, format: ArtifactFormat)
 }
 
 enum JobStatus {
