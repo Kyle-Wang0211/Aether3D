@@ -18,10 +18,11 @@ struct ArtifactRef {
 }
 
 enum ArtifactFormat {
-    case splat  // Whitebox only
+    case splat        // .splat binary 3DGS
+    case splatPly     // .ply container with Gaussian Splatting data
 }
 
-enum FailReason: String {
+enum FailReason: String, Error {
     case timeout = "timeout"
     case networkTimeout = "network_timeout"
     case uploadFailed = "upload_failed"
