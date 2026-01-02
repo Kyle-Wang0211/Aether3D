@@ -72,54 +72,6 @@ final class PipelineRunner {
         }
     }
     
-    // MARK: - Legacy API (Compatibility Layer)
-    
-    func run(
-        request: BuildRequest,
-        onState: ((PipelineState) -> Void)?
-    ) async -> Result<BuildResult, PipelineError> {
-        onState?(.planning)
-        
-        let generateResult = await runGenerate(request: request)
-        
-        switch generateResult {
-        case .success(let artifact, let elapsedMs):
-            onState?(.finished)
-            // Create minimal BuildResult for compatibility
-            let artifact_frames: [Frame] = []  // Day 2: no frames
-            let photoSpaceArtifact = PhotoSpaceArtifact(
-                frames: artifact_frames,
-                generatedAt: Date()
-            )
-            return .success(
-                BuildResult(
-                    planSummary: "Whitebox Generate (Day 2)",
-                    artifact: photoSpaceArtifact,
-                    timings: .init(
-                        planMs: 0,
-                        extractMs: 0,
-                        buildMs: 0,
-                        totalMs: elapsedMs
-                    )
-                )
-            )
-            
-        case .fail(let reason, let elapsedMs):
-            onState?(.failed(message: reason.rawValue))
-            // Map FailReason to PipelineError
-            let pipelineError: PipelineError
-            switch reason {
-            case .timeout:
-                pipelineError = .cancelled
-            case .inputInvalid:
-                pipelineError = .invalidInput
-            default:
-                pipelineError = .pluginFailed
-            }
-            return .failure(pipelineError)
-        }
-    }
-    
     // MARK: - Private Helpers
     
     private func pollAndDownload(jobId: String) async throws -> (data: Data, format: ArtifactFormat) {
