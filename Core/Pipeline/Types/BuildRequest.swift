@@ -8,8 +8,8 @@
 import Foundation
 import AVFoundation
 
-struct BuildRequest: Sendable {
-    enum Source: Sendable {
+struct BuildRequest {
+    enum Source {
         case video(asset: AVAsset)
         // Phase 1-2a 只支持 video，照片留到 1-2b / 1-3
     }

@@ -36,16 +36,16 @@ final class PipelineRunner {
             
             let artifact: ArtifactRef = try await Timeout.withTimeout(seconds: 180) {
                 // Upload video
-                let assetId = try await remoteClient.upload(videoURL: videoURL)
+                let assetId = try await self.remoteClient.upload(videoURL: videoURL)
                 
                 // Start job
-                let jobId = try await remoteClient.startJob(assetId: assetId)
+                let jobId = try await self.remoteClient.startJob(assetId: assetId)
                 
                 // Poll and download
-                let (splatData, format) = try await pollAndDownload(jobId: jobId)
+                let (splatData, format) = try await self.pollAndDownload(jobId: jobId)
                 
                 // Write to Documents/Whitebox/
-                let url = try writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
+                let url = try self.writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
                 
                 return ArtifactRef(localPath: url, format: format)
             }
@@ -78,11 +78,11 @@ final class PipelineRunner {
         let pollInterval: TimeInterval = 2.0
         
         while true {
-            let status = try await remoteClient.pollStatus(jobId: jobId)
+            let status = try await self.remoteClient.pollStatus(jobId: jobId)
             
             switch status {
             case .completed:
-                return try await remoteClient.download(jobId: jobId)
+                return try await self.remoteClient.download(jobId: jobId)
                 
             case .failed(let reason):
                 throw RemoteB1ClientError.jobFailed(reason)

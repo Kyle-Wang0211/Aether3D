@@ -22,3 +22,7 @@ build/
 
 # Forbidden: deprecated directory must never exist
 /deprecated/
+
+# SwiftPM
+.build/
+.swiftpm/
