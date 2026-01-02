@@ -2,90 +2,13 @@
 
 Aether3D 是一个基于 **Gaussian Splatting** 的 3D 资产生成与可视化项目，目标是将真实世界的场景快速转换为**可交互、可保存、可分享**的三维空间。
 
-项目优先级明确：
-> **可进入速度 > 稳定性 > 质量上限**
+## Start here
 
----
+👉 [docs/constitution/INDEX.md](docs/constitution/INDEX.md)
 
-## 当前阶段
+## Documentation
 
-- Phase 0: Frozen Baseline（tag: `phase0`，只读）
-- Phase 0.5: Guardrails（制度护栏，当前阶段）
-
-### Whitebox（Phase 1）
-
-当前处于 Whitebox 验证阶段，用于判断 B1 主 pipeline 是否在 ≤180s fail-fast 约束下成立。
-- 规格说明：`docs/WHITEBOX.md`
-- 验收标准：`docs/ACCEPTANCE.md`
-
-## 开发硬性约束
-- 禁止直接 push 到 `main`
-- 禁止 force push 到 `main`
-- 所有破坏性变更必须使用 `git revert`（不得 reset/rebase）
-- `main` 历史只允许向前追加
-
-
-- **Phase 0**：Frozen Baseline  
-  - Tag：`phase0`
-  - 状态：只读（架构基线已冻结）
-
-- **Phase 0.5**：Guardrails（制度护栏）  
-  - 状态：✅ 已完成  
-  - 内容：
-    - 分支与合并规范（禁止直接 push / force push 到 `main`）
-    - 回滚规范（仅允许 `git revert`）
-    - 本地 Preflight 自检（`scripts/preflight.sh`）
-    - CI Preflight 检查（GitHub Actions）
-
-- **Phase 1**：Feature Development（功能开发）🚧  
-  - 当前进行中
-  - 核心目标：**一次性端上 3D 重建的最小闭环**
-
----
-
-## Phase 1 概览（已冻结的阶段划分）
-
-Phase 1 采用 **Router + Plugin** 架构，优先落地端上快速拟合式链路（Plugin B），e 1 的三条硬性成功标准：
-> 1. **1–2 秒内可进入**
-> 2. **不因机型 / 状态差异崩溃**
-> 3. **统一资产格式 + progressive 管线跑通**
-
-详细定义请见：`docs/PHASES.md`
-
----
-
-## 开发硬性约束（必须遵守）
-
-- ❌ 禁止直接 push 到 `main`
-- ❌ 禁止 force push 到 `main`
-- ✅ 所有破坏性变更必须使用 `git revert`
-- ✅ `main` 分支历史只允许向前追加
-
----
-
-## 回滚方式（正确 vs 错误）
-
-- ✅ 正确：  
-  ```bash
-  git revert <commit>
-- ❌ 错误：
-  git reset --hard phase0
-  git rebase phase0
-
-新开发者开始方式
-# 从主线拉取最新代码
-git checkout main
-git pull
-
-# 创建 Phase 1 功能分支
-git checkout -b phase1/<topic>
-	•	开发完成后通过 Pull Request 合并
-	•	合并后删除功能分支（本地 + 远端）
-
-
-文档索引
-	•	Phase 定义与边界：docs/PHASES.md
-	•	工作流与合并规范：docs/WORKFLOW.md
-	•	回滚与事故处理：docs/ROLLBACK.md
-
-
+- [Whitebox Specification](docs/WHITEBOX.md)
+- [Acceptance Criteria](docs/ACCEPTANCE.md)
+- [Workflow](docs/WORKFLOW.md)
+- [Rollback Procedures](docs/ROLLBACK.md)

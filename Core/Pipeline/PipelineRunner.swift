@@ -36,16 +36,16 @@ final class PipelineRunner {
             
             let artifact: ArtifactRef = try await Timeout.withTimeout(seconds: 180) {
                 // Upload video
-                let assetId = try await remoteClient.upload(videoURL: videoURL)
+                let assetId = try await self.remoteClient.upload(videoURL: videoURL)
                 
                 // Start job
-                let jobId = try await remoteClient.startJob(assetId: assetId)
+                let jobId = try await self.remoteClient.startJob(assetId: assetId)
                 
                 // Poll and download
-                let (splatData, format) = try await pollAndDownload(jobId: jobId)
+                let (splatData, format) = try await self.pollAndDownload(jobId: jobId)
                 
                 // Write to Documents/Whitebox/
-                let url = try writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
+                let url = try self.writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
                 
                 return ArtifactRef(localPath: url, format: format)
             }
@@ -72,65 +72,17 @@ final class PipelineRunner {
         }
     }
     
-    // MARK: - Legacy API (Compatibility Layer)
-    
-    func run(
-        request: BuildRequest,
-        onState: ((PipelineState) -> Void)?
-    ) async -> Result<BuildResult, PipelineError> {
-        onState?(.planning)
-        
-        let generateResult = await runGenerate(request: request)
-        
-        switch generateResult {
-        case .success(let artifact, let elapsedMs):
-            onState?(.finished)
-            // Create minimal BuildResult for compatibility
-            let artifact_frames: [Frame] = []  // Day 2: no frames
-            let photoSpaceArtifact = PhotoSpaceArtifact(
-                frames: artifact_frames,
-                generatedAt: Date()
-            )
-            return .success(
-                BuildResult(
-                    planSummary: "Whitebox Generate (Day 2)",
-                    artifact: photoSpaceArtifact,
-                    timings: .init(
-                        planMs: 0,
-                        extractMs: 0,
-                        buildMs: 0,
-                        totalMs: elapsedMs
-                    )
-                )
-            )
-            
-        case .fail(let reason, let elapsedMs):
-            onState?(.failed(message: reason.rawValue))
-            // Map FailReason to PipelineError
-            let pipelineError: PipelineError
-            switch reason {
-            case .timeout:
-                pipelineError = .cancelled
-            case .inputInvalid:
-                pipelineError = .invalidInput
-            default:
-                pipelineError = .pluginFailed
-            }
-            return .failure(pipelineError)
-        }
-    }
-    
     // MARK: - Private Helpers
     
     private func pollAndDownload(jobId: String) async throws -> (data: Data, format: ArtifactFormat) {
         let pollInterval: TimeInterval = 2.0
         
         while true {
-            let status = try await remoteClient.pollStatus(jobId: jobId)
+            let status = try await self.remoteClient.pollStatus(jobId: jobId)
             
             switch status {
             case .completed:
-                return try await remoteClient.download(jobId: jobId)
+                return try await self.remoteClient.download(jobId: jobId)
                 
             case .failed(let reason):
                 throw RemoteB1ClientError.jobFailed(reason)
