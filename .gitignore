@@ -19,3 +19,6 @@ build/
 # TestFlight
 *.app.dSYM
 *.app.zip
+
+# Forbidden: deprecated directory must never exist
+/deprecated/
