@@ -10,6 +10,7 @@ let package = Package(
   products: [
     .library(name: "Aether3DCore", targets: ["Aether3DCore"])
   ],
+  dependencies: [],
   targets: [
     .target(
       name: "Aether3DCore",
@@ -19,6 +20,16 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests/Aether3DCoreTests"
+    ),
+    .testTarget(
+      name: "InvariantTests",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/Invariants"
+    ),
+    .testTarget(
+      name: "GateTests",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/Gates"
     )
   ]
 )
