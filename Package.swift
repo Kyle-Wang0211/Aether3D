@@ -18,7 +18,7 @@ let package = Package(
     .testTarget(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
-      path: "Tests/Aether3DCoreTests"
+      path: "Tests"
     )
   ]
 )
