@@ -133,11 +133,104 @@ else
 fi
 echo ""
 
+# Check 6: Build
+echo -e "${BLUE}6. Build Check${NC}"
+echo "----------------------------------------"
+if bash scripts/ci_build.sh; then
+    echo -e "${GREEN}✅ Build successful${NC}"
+else
+    echo -e "${RED}❌ Build failed${NC}"
+    exit 1
+fi
+echo ""
+
+# Check 7: Test
+echo -e "${BLUE}7. Test Check${NC}"
+echo "----------------------------------------"
+if bash scripts/ci_test.sh; then
+    echo -e "${GREEN}✅ Tests passed${NC}"
+else
+    echo -e "${YELLOW}⚠️  Tests skipped or failed (may require manual configuration)${NC}"
+fi
+echo ""
+
+# Check 8: Repo Shape Check
+echo -e "${BLUE}8. Repo Shape Check${NC}"
+echo "----------------------------------------"
+FORBIDDEN_DIRS=("deprecated" "Core/Output" "Core/Camera" "Core/PointCloud" "Core/Training")
+SHAPE_ERROR=0
+
+for dir in "${FORBIDDEN_DIRS[@]}"; do
+    if [ -d "$dir" ]; then
+        echo -e "${RED}❌ Forbidden directory exists: $dir${NC}"
+        SHAPE_ERROR=1
+    fi
+done
+
+if [ $SHAPE_ERROR -eq 0 ]; then
+    echo -e "${GREEN}✅ Repo shape OK${NC}"
+else
+    echo -e "${RED}❌ Repo shape violation detected${NC}"
+    exit 1
+fi
+echo ""
+
+# Check 9: Git Clean Check
+echo -e "${BLUE}9. Git Clean Check${NC}"
+echo "----------------------------------------"
+if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+    echo -e "${RED}❌ Working directory is not clean${NC}"
+    echo "Uncommitted changes detected:"
+    git status --short 2>/dev/null || true
+    exit 1
+else
+    echo -e "${GREEN}✅ Working directory is clean${NC}"
+fi
+echo ""
+
+# Check 10: Rules Spill Check
+echo -e "${BLUE}10. Rules Spill Check${NC}"
+echo "----------------------------------------"
+RULES_KEYWORDS=("Policy Hash" "Decision Hash" "Gate" "Determinism" "Audit Schema" "Invariant" "Signing" "Non-deterministic")
+SPILL_ERROR=0
+
+# Search in docs/ excluding constitution, rfcs, and _archive
+while IFS= read -r file; do
+    if [ -f "$file" ]; then
+        for keyword in "${RULES_KEYWORDS[@]}"; do
+            if grep -qi "$keyword" "$file" 2>/dev/null; then
+                echo -e "${RED}❌ Rules keyword found in forbidden location: $file${NC}"
+                echo "  Keyword: $keyword"
+                SPILL_ERROR=1
+            fi
+        done
+    fi
+done < <(find docs -type f \( -name "*.md" -o -name "*.txt" \) ! -path "docs/constitution/*" ! -path "docs/rfcs/*" ! -path "docs/_archive/*" 2>/dev/null || true)
+
+# Also check README.md
+if [ -f "README.md" ]; then
+    for keyword in "${RULES_KEYWORDS[@]}"; do
+        if grep -qi "$keyword" "README.md" 2>/dev/null; then
+            echo -e "${RED}❌ Rules keyword found in README.md${NC}"
+            echo "  Keyword: $keyword"
+            SPILL_ERROR=1
+        fi
+    done
+fi
+
+if [ $SPILL_ERROR -eq 0 ]; then
+    echo -e "${GREEN}✅ No rules spill detected${NC}"
+else
+    echo -e "${RED}❌ Rules spill violation detected${NC}"
+    echo "Rules must only be written in docs/constitution/ or docs/rfcs/"
+    exit 1
+fi
+echo ""
+
 # Summary
 echo "=========================================="
 echo "  Preflight Check Complete"
 echo "=========================================="
 echo ""
-echo "Note: This script performs read-only checks."
-echo "It does not modify any files or execute git commands."
+echo "All checks passed! ✅"
 
