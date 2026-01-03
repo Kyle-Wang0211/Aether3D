@@ -1,28 +1,28 @@
 {
-  "buildMode" : {
-    "enterTimeoutMs" : 2000,
-    "failSoftEnabled" : true,
-    "publishTimeoutMs" : 30000
+  "buildMode": {
+    "enterTimeoutMs": 2000,
+    "failSoftEnabled": true,
+    "publishTimeoutMs": 30000
   },
-  "deviceTierHigh" : {
-    "maxMemoryMB" : 8192,
-    "maxSplats" : 2000000,
-    "shOrder" : 3
+  "deviceTierHigh": {
+    "maxMemoryMB": 8192,
+    "maxSplats": 2000000,
+    "shOrder": 3
   },
-  "deviceTierLow" : {
-    "maxMemoryMB" : 512,
-    "maxSplats" : 100000,
-    "shOrder" : 1
+  "deviceTierLow": {
+    "maxMemoryMB": 512,
+    "maxSplats": 100000,
+    "shOrder": 1
   },
-  "deviceTierMedium" : {
-    "maxMemoryMB" : 2048,
-    "maxSplats" : 500000,
-    "shOrder" : 2
+  "deviceTierMedium": {
+    "maxMemoryMB": 2048,
+    "maxSplats": 500000,
+    "shOrder": 2
   },
-  "router" : {
-    "maxTimeBudgetMs" : 180000,
-    "minCoverage" : 0.3,
-    "minPhotoCount" : 10
+  "router": {
+    "maxTimeBudgetMs": 180000,
+    "minCoverage": 0.3,
+    "minPhotoCount": 10
   },
-  "version" : "1.3.10"
+  "version": "1.3.10"
 }
