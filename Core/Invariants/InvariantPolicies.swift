@@ -1,5 +1,21 @@
+//
+//  InvariantPolicies.swift
+//  Aether3D
+//
+//  PR#7: Phase 2a - Core/Invariants
+//
+
 import Foundation
+
+#if canImport(CryptoKit)
 import CryptoKit
+typealias SHA256Impl = CryptoKit.SHA256
+#else
+import Crypto
+typealias SHA256Impl = Crypto.SHA256
+#endif
+
+
 
 public enum ViolationSeverity: String, Codable {
     case fatal
