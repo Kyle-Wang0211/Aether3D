@@ -10,9 +10,15 @@ let package = Package(
   products: [
     .library(name: "Aether3DCore", targets: ["Aether3DCore"])
   ],
+  dependencies: [
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
+  ],
   targets: [
     .target(
       name: "Aether3DCore",
+      dependencies: [
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
       path: "Core"
     ),
     .testTarget(
