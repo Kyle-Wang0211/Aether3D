@@ -6,7 +6,10 @@
 //
 
 import Foundation
+
+#if canImport(AVFoundation)
 import AVFoundation
+#endif
 
 final class PipelineRunner {
     private let remoteClient: RemoteB1Client
@@ -18,6 +21,7 @@ final class PipelineRunner {
     // MARK: - New Generate API (Day 2)
     
     func runGenerate(request: BuildRequest) async -> GenerateResult {
+        #if canImport(AVFoundation)
         let startTime = Date()
         
         do {
@@ -70,6 +74,10 @@ final class PipelineRunner {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
             return .fail(reason: .unknownError, elapsedMs: elapsed)
         }
+        #else
+        // Linux stub: AVFoundation unavailable
+        fatalError("AVFoundation unavailable on this platform")
+        #endif
     }
     
     // MARK: - Private Helpers

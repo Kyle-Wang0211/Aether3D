@@ -6,11 +6,20 @@
 //
 
 import Foundation
+
+#if canImport(AVFoundation)
 import AVFoundation
+typealias VideoAsset = AVAsset
+#else
+// Linux stub: minimal type to satisfy compilation
+struct VideoAsset {
+    // Stub type for Linux builds where AVFoundation is unavailable
+}
+#endif
 
 struct BuildRequest {
     enum Source {
-        case video(asset: AVAsset)
+        case video(asset: VideoAsset)
         // Phase 1-2a 只支持 video，照片留到 1-2b / 1-3
     }
 

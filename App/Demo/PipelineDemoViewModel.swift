@@ -7,7 +7,9 @@
 
 import Foundation
 import SwiftUI
+#if canImport(AVFoundation)
 import AVFoundation
+#endif
 import PhotosUI
 import UniformTypeIdentifiers
 import Combine
@@ -96,6 +98,7 @@ final class PipelineDemoViewModel: ObservableObject {
         isRunning = true
         
         currentTask = Task {
+            #if canImport(AVFoundation)
             let deviceTier = DeviceTier.current()
             let asset = AVAsset(url: url)
             let request = BuildRequest(
@@ -105,6 +108,10 @@ final class PipelineDemoViewModel: ObservableObject {
             )
             
             let result = await pipelineRunner.runGenerate(request: request)
+            #else
+            // Linux stub: AVFoundation unavailable
+            let result: GenerateResult = .fail(reason: .inputInvalid, elapsedMs: 0)
+            #endif
             
             await MainActor.run {
                 switch result {
