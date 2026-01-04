@@ -1,4 +1,3 @@
-fp1/v1.3.10-pr1-6-repo-seal
 //
 //  InvariantPolicies.swift
 //  Aether3D
