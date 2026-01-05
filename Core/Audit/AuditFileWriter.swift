@@ -13,6 +13,7 @@ enum AuditFileWriterError: Error {
     case writeFailed
     case recoveryFailed
     case skipRecoveryNotSupported
+    case invalidInput(String)   // PR9: for appendRawLine validation
 }
 
 /// NDJSON 文件写入器，支持 crash recovery
@@ -130,6 +131,43 @@ final class AuditFileWriter {
         }
         
         fileHandle.write(lineData)
+        fileHandle.synchronizeFile()
+    }
+
+    // MARK: - SignedAuditLog Support (PR9)
+
+    /// Append raw NDJSON line (for SignedAuditLog).
+    /// - Parameter line: Raw JSON string (without trailing newline)
+    /// - Throws: If write fails or line contains newline
+    ///
+    /// CRITICAL:
+    /// - Runtime check enforces single-line NDJSON safety.
+    /// - Caller must ensure `line` is valid single-line JSON.
+    /// - This method appends exactly one "\n".
+    /// - Patch A: UTF-8 roundtrip check and JSON shape validation.
+    func appendRawLine(_ line: String) throws {
+        // Defense in depth: NDJSON must be single line.
+        guard !line.contains("\n") && !line.contains("\r") else {
+            throw AuditFileWriterError.invalidInput("appendRawLine: line contains newline characters")
+        }
+
+        // Patch A: UTF-8 roundtrip check
+        let bytes = Data(line.utf8)
+        guard String(decoding: bytes, as: UTF8.self) == line else {
+            throw AuditFileWriterError.invalidInput("appendRawLine: UTF-8 roundtrip failed")
+        }
+
+        // Patch A: JSON shape check (cheap sanity check, no parsing)
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            throw AuditFileWriterError.invalidInput("appendRawLine: line is empty after trimming")
+        }
+        guard trimmed.hasPrefix("{") && trimmed.hasSuffix("}") else {
+            throw AuditFileWriterError.invalidInput("appendRawLine: not a single JSON object line")
+        }
+
+        let data = Data((line + "\n").utf8)
+        fileHandle.write(data)
         fileHandle.synchronizeFile()
     }
     
