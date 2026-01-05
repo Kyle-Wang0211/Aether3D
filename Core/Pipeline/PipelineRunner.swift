@@ -8,6 +8,27 @@
 import Foundation
 import AVFoundation
 
+/// JSON 转义函数，防止文件名等破坏 JSON 格式
+private func jsonEscape(_ string: String) -> String {
+    var result = ""
+    for char in string {
+        switch char {
+        case "\\": result += "\\\\"
+        case "\"": result += "\\\""
+        case "\n": result += "\\n"
+        case "\r": result += "\\r"
+        case "\t": result += "\\t"
+        default:
+            if char.unicodeScalars.first!.value < 32 {
+                result += String(format: "\\u%04x", char.unicodeScalars.first!.value)
+            } else {
+                result.append(char)
+            }
+        }
+    }
+    return result
+}
+
 final class PipelineRunner {
     private let remoteClient: RemoteB1Client
     
@@ -34,6 +55,16 @@ final class PipelineRunner {
                 return .fail(reason: .inputInvalid, elapsedMs: elapsed)
             }
             
+            #if canImport(AVFoundation)
+            // 审计：generate_start
+            let videoPath = jsonEscape(videoURL.path)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_start",
+                detailsJson: "{\"videoPath\":\"\(videoPath)\"}"
+            ))
+            #endif
+            
             let artifact: ArtifactRef = try await Timeout.withTimeout(seconds: 180) {
                 // Upload video
                 let assetId = try await self.remoteClient.upload(videoURL: videoURL)
@@ -51,23 +82,77 @@ final class PipelineRunner {
             }
             
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            // 审计：generate_success
+            let artifactPath = jsonEscape(artifact.localPath.path)
+            let formatStr = jsonEscape(artifact.format == .splat ? "splat" : "splatPly")
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_success",
+                detailsJson: "{\"artifactPath\":\"\(artifactPath)\",\"format\":\"\(formatStr)\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
             return .success(artifact: artifact, elapsedMs: elapsed)
             
         } catch is TimeoutError {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            // 审计：generate_fail (timeout)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"timeout\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
             return .fail(reason: .timeout, elapsedMs: elapsed)
             
         } catch let error as FailReason {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            // 审计：generate_fail (FailReason)
+            let reasonStr = jsonEscape(error.rawValue)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"\(reasonStr)\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
             return .fail(reason: error, elapsedMs: elapsed)
             
         } catch let error as RemoteB1ClientError {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
             let reason = mapRemoteB1ClientError(error)
+            
+            #if canImport(AVFoundation)
+            // 审计：generate_fail (RemoteB1ClientError)
+            let reasonStr = jsonEscape(reason.rawValue)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"\(reasonStr)\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
             return .fail(reason: reason, elapsedMs: elapsed)
             
         } catch {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            // 审计：generate_fail (unknown)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"unknown_error\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
             return .fail(reason: .unknownError, elapsedMs: elapsed)
         }
     }
