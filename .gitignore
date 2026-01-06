@@ -29,3 +29,6 @@ build/
 
 # Python venv
 server/.venv/
+
+# macOS duplicate filename suffix
+* 2.*
