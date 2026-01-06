@@ -26,3 +26,9 @@ build/
 # SwiftPM
 .build/
 .swiftpm/
+
+# Python venv
+server/.venv/
+
+# macOS Finder duplicate file suffix: " 2"
+*\ 2.*

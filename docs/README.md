@@ -1,29 +1,35 @@
-# Documentation Index (Source of Truth)
+## Source of Truth (SSOT)
 
-## Authoritative Specifications (SSOT)
+The following documents are the ONLY authoritative sources of truth for this repository.
+No authority may be inferred from file names, directory names, versions, or legacy markers.
 
-These documents are the ONLY Source of Truth (SSOT).
+### Global SSOT Documents
 
-### Root Documents
-- [WHITEBOX.md](WHITEBOX.md)
-- [ACCEPTANCE.md](ACCEPTANCE.md)
-- [WORKFLOW.md](WORKFLOW.md)
-- [ROLLBACK.md](ROLLBACK.md)
+- docs/WHITEBOX.md
+- docs/ACCEPTANCE.md
+- docs/WORKFLOW.md
+- docs/ROLLBACK.md
 
 ### Constitution Documents
-Within `docs/constitution/`, only files referenced by [docs/constitution/INDEX.md](constitution/INDEX.md) are authoritative.
 
-## SSOT Boundary
+The directory docs/constitution/ is an active working directory.
+HOWEVER, files inside it are NOT automatically authoritative.
 
-- `docs/WHITEBOX.md`, `docs/ACCEPTANCE.md`, `docs/WORKFLOW.md`, `docs/ROLLBACK.md` are SSOT.
-- `docs/constitution/` is an active directory, but NOT all files inside are automatically SSOT.
-- Only the constitution files explicitly referenced by `docs/constitution/INDEX.md` are considered authoritative.
+Only documents explicitly listed in:
+- docs/constitution/INDEX.md
 
-## Do Not Infer SSOT By Filenames
+are considered authoritative constitutional specifications.
 
-Do NOT infer SSOT from file names (e.g., " 2", "legacy", version strings). SSOT is explicit only. If multiple similar docs exist, treat `_archive` as non-authoritative and follow the SSOT list above.
+### Non-Inference Rule (Critical)
 
-## Archived Documents
+Authority MUST NOT be inferred from:
+- File name patterns (e.g. "legacy", "copy", " 2", version strings)
+- Directory placement
+- Historical usage
 
-All content under `docs/_archive/` is historical and NOT authoritative. Do NOT use archived documents as input for implementation or reasoning.
+SSOT is explicit only.
 
+### Archive Notice
+
+All content under docs/_archive/ is historical and NOT authoritative.
+Archived documents exist only for reference and audit purposes.
