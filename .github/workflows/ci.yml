@@ -57,3 +57,25 @@ jobs:
           fi
 
           echo "✅ Guardrails check passed (no code/project file changes)."
+
+  test-and-lint:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "5.9.2"
+
+      - name: Print Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
