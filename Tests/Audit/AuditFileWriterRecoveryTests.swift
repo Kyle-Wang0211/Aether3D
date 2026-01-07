@@ -25,7 +25,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     
     func test_emptyFileRecovery() throws {
         autoreleasepool {
-            let fileURL = tempDir.appendingPathComponent("empty.ndjson")
+            let fileURL = self.tempDir.appendingPathComponent("empty.ndjson")
             FileManager.default.createFile(atPath: fileURL.path, contents: nil)
             
             let writer = try? AuditFileWriter(url: fileURL)
@@ -46,7 +46,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     
     func test_validLinesRecovery() throws {
         autoreleasepool {
-            let fileURL = tempDir.appendingPathComponent("valid.ndjson")
+            let fileURL = self.tempDir.appendingPathComponent("valid.ndjson")
             
             // 创建包含有效 JSON 行的文件
             let validEntry1 = AuditEntry(timestamp: Date(), eventType: "event1")
@@ -76,7 +76,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     
     func test_truncateCorruptedTail() throws {
         autoreleasepool {
-            let fileURL = tempDir.appendingPathComponent("corrupted.ndjson")
+            let fileURL = self.tempDir.appendingPathComponent("corrupted.ndjson")
             
             // 创建包含有效行和损坏尾部的文件
             let validEntry = AuditEntry(timestamp: Date(), eventType: "valid")
@@ -110,7 +110,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     
     func test_nonUTF8FileHandling() throws {
         autoreleasepool {
-            let fileURL = tempDir.appendingPathComponent("nonutf8.ndjson")
+            let fileURL = self.tempDir.appendingPathComponent("nonutf8.ndjson")
             
             // 创建包含非 UTF-8 数据的文件
             let invalidUTF8: [UInt8] = [0xFF, 0xFE, 0xFD, 0xFC]
@@ -133,7 +133,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     
     func test_skipRecoveryThrowsError() {
         autoreleasepool {
-            let fileURL = tempDir.appendingPathComponent("skip.ndjson")
+            let fileURL = self.tempDir.appendingPathComponent("skip.ndjson")
             FileManager.default.createFile(atPath: fileURL.path, contents: nil)
             
             do {
