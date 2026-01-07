@@ -41,6 +41,179 @@ final class PipelineRunner {
     
     // MARK: - New Generate API (Day 2)
     
+    func runGenerate(request: BuildRequest, outputRoot: URL) async -> GenerateResult {
+        let startTime = Date()
+        
+        do {
+            let videoURL: URL
+            switch request.source {
+            case .video(let asset):
+                #if canImport(AVFoundation)
+                guard let urlAsset = asset as? AVURLAsset else {
+                    let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+                    return .fail(reason: .inputInvalid, elapsedMs: elapsed)
+                }
+                videoURL = urlAsset.url
+                #else
+                let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+                return .fail(reason: .inputInvalid, elapsedMs: elapsed)
+                #endif
+            case .file(let url):
+                videoURL = url
+            }
+            
+            #if canImport(AVFoundation)
+            let videoPath = jsonEscape(videoURL.path)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_start",
+                detailsJson: "{\"videoPath\":\"\(videoPath)\"}"
+            ))
+            #endif
+            
+            let stagingId = UUID().uuidString
+            let stagingDir = outputRoot.appendingPathComponent(".staging-\(stagingId)")
+            
+            defer {
+                try? FileManager.default.removeItem(at: stagingDir)
+            }
+            
+            print("[Whitebox] outputRoot=\(outputRoot.path)")
+            print("[Whitebox] stagingDir=\(stagingDir.path)")
+            try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+            
+            let artifactsDir = stagingDir.appendingPathComponent("artifacts")
+            try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
+            
+            let (plyData, _) = try await Timeout.withTimeout(seconds: 180) {
+                let assetId = try await self.remoteClient.upload(videoURL: videoURL)
+                let jobId = try await self.remoteClient.startJob(assetId: assetId)
+                let (splatData, format) = try await self.pollAndDownload(jobId: jobId)
+                return (splatData, format)
+            }
+            
+            let plyPath = artifactsDir.appendingPathComponent("model.ply")
+            try plyData.write(to: plyPath, options: .atomic)
+            print("[Whitebox] wrote ply at \(plyPath.path) bytes=\(plyData.count)")
+            
+            let files = try computeFileDescriptors(in: stagingDir)
+            print("[Whitebox] files discovered: \(files.map { $0.path })")
+            
+            let policyHash = getCurrentPolicyHash()
+            
+            let artifactHash = computeArtifactHash(
+                policyHash: policyHash,
+                schemaVersion: 1,
+                files: files
+            )
+            
+            let manifest = WhiteboxArtifactManifest(
+                schemaVersion: 1,
+                artifactId: String(artifactHash.prefix(8)),
+                policyHash: policyHash,
+                artifactHash: artifactHash,
+                files: files
+            )
+            
+            try validateManifest(manifest)
+            
+            let manifestData = CanonicalEncoder.encode(manifest)
+            let manifestURL = stagingDir.appendingPathComponent("manifest.json")
+            try manifestData.write(to: manifestURL)
+            print("[Whitebox] wrote manifest at \(manifestURL.path) bytes=\(manifestData.count)")
+            
+            try validatePackage(at: stagingDir, manifest: manifest)
+            print("[Whitebox] validatePackage OK")
+            
+            let artifactIdJson = jsonEscape(manifest.artifactId)
+            let artifactHashJson = jsonEscape(manifest.artifactHash)
+            let policyHashJson = jsonEscape(manifest.policyHash)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "artifact.produced",
+                detailsJson: "{\"artifactId\":\"\(artifactIdJson)\",\"artifactHash\":\"\(artifactHashJson)\",\"policyHash\":\"\(policyHashJson)\"}"
+            ))
+            
+            let finalDir = outputRoot.appendingPathComponent(manifest.artifactId)
+            
+            if FileManager.default.fileExists(atPath: finalDir.path) {
+                try FileManager.default.removeItem(at: finalDir)
+            }
+            
+            try FileManager.default.moveItem(at: stagingDir, to: finalDir)
+            print("[Whitebox] moved to finalDir=\(finalDir.path)")
+            
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            let artifactPath = jsonEscape(finalDir.path)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_success",
+                detailsJson: "{\"artifactPath\":\"\(artifactPath)\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
+            return .success(artifact: ArtifactRef(localPath: finalDir, format: .splatPly), elapsedMs: elapsed)
+            
+        } catch is TimeoutError {
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"timeout\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
+            return .fail(reason: .timeout, elapsedMs: elapsed)
+            
+        } catch let error as FailReason {
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            let reasonStr = jsonEscape(error.rawValue)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"\(reasonStr)\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
+            return .fail(reason: error, elapsedMs: elapsed)
+            
+        } catch let error as RemoteB1ClientError {
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            let reason = mapRemoteB1ClientError(error)
+            
+            #if canImport(AVFoundation)
+            let reasonStr = jsonEscape(reason.rawValue)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"\(reasonStr)\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
+            return .fail(reason: reason, elapsedMs: elapsed)
+            
+        } catch {
+            print("[Whitebox] generate failed with error: \(error)")
+            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
+            
+            #if canImport(AVFoundation)
+            PlainAuditLog.shared.append(AuditEntry(
+                timestamp: WallClock.now(),
+                eventType: "generate_fail",
+                detailsJson: "{\"reason\":\"unknown_error\",\"elapsedMs\":\(elapsed)}"
+            ))
+            #endif
+            
+            return .fail(reason: .unknownError, elapsedMs: elapsed)
+        }
+    }
+    
     func runGenerate(request: BuildRequest) async -> GenerateResult {
         #if canImport(AVFoundation)
         let startTime = Date()
@@ -220,5 +393,40 @@ final class PipelineRunner {
         case .networkError, .invalidResponse, .jobFailed:
             return .apiError
         }
+    }
+    
+    private func computeFileDescriptors(in root: URL) throws -> [WhiteboxFileDescriptor] {
+        let fm = FileManager.default
+        let artifactsDir = root.appendingPathComponent("artifacts")
+        var files: [WhiteboxFileDescriptor] = []
+        
+        guard let enumerator = fm.enumerator(
+            at: artifactsDir,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else {
+            return []
+        }
+        
+        let rootStd = root.resolvingSymlinksInPath()
+        while let url = enumerator.nextObject() as? URL {
+            let rv = try url.resourceValues(forKeys: [.isRegularFileKey])
+            if rv.isRegularFile == true {
+                let data = try Data(contentsOf: url)
+                let hash = _hexLowercase(_SHA256.hash(data: data))
+                let urlStd = url.resolvingSymlinksInPath()
+                var relPath = urlStd.path.replacingOccurrences(of: rootStd.path + "/", with: "")
+                if relPath.hasPrefix("/") {
+                    relPath.removeFirst()
+                }
+                files.append(WhiteboxFileDescriptor(
+                    bytes: data.count,
+                    path: relPath,
+                    sha256: hash
+                ))
+            }
+        }
+        
+        return files.sorted { $0.path < $1.path }
     }
 }

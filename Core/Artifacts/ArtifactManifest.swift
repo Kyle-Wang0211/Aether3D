@@ -995,3 +995,300 @@ public struct ArtifactManifest: Codable, Sendable {
     }
 }
 
+// MARK: - Whitebox Artifact Manifest (PR#13)
+
+public struct WhiteboxFileDescriptor: Codable, Equatable, Sendable {
+    public let bytes: Int
+    public let path: String
+    public let sha256: String
+    
+    public init(bytes: Int, path: String, sha256: String) {
+        self.bytes = bytes
+        self.path = path
+        self.sha256 = sha256
+    }
+}
+
+public struct WhiteboxArtifactManifest: Codable, Equatable, Sendable {
+    public let schemaVersion: Int
+    public let artifactId: String
+    public let policyHash: String
+    public let artifactHash: String
+    public let files: [WhiteboxFileDescriptor]
+    
+    public init(
+        schemaVersion: Int,
+        artifactId: String,
+        policyHash: String,
+        artifactHash: String,
+        files: [WhiteboxFileDescriptor]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.artifactId = artifactId
+        self.policyHash = policyHash
+        self.artifactHash = artifactHash
+        self.files = files
+    }
+}
+
+// MARK: - PolicyHash Bridge (PR#13)
+
+public func getCurrentPolicyHash() -> String {
+    return GOLDEN_POLICY_HASH
+}
+
+// MARK: - Artifact Hash Computation (PR#13)
+
+public func computeArtifactHash(
+    policyHash: String,
+    schemaVersion: Int,
+    files: [WhiteboxFileDescriptor]
+) -> String {
+    var data = Data()
+    
+    data.append("A3D_ARTIFACT_V1\n".data(using: .utf8)!)
+    data.append((policyHash + "\n").data(using: .utf8)!)
+    data.append("\(schemaVersion)\n".data(using: .utf8)!)
+    data.append("\(files.count)\n".data(using: .utf8)!)
+    
+    for file in files.sorted(by: { $0.path < $1.path }) {
+        data.append((file.path + "\n").data(using: .utf8)!)
+        data.append((file.sha256 + "\n").data(using: .utf8)!)
+    }
+    
+    let hash = _SHA256.hash(data: data)
+    return _hexLowercase(hash)
+}
+
+// MARK: - Canonical Encoder (PR#13)
+
+public struct CanonicalEncoder {
+    public static func encode(_ manifest: WhiteboxArtifactManifest) -> Data {
+        var json = "{"
+        
+        json += "\"artifactHash\":\"\(escape(manifest.artifactHash))\","
+        json += "\"artifactId\":\"\(escape(manifest.artifactId))\","
+        json += "\"files\":["
+        
+        let sorted = manifest.files.sorted { $0.path < $1.path }
+        for (i, file) in sorted.enumerated() {
+            if i > 0 { json += "," }
+            json += "{\"bytes\":\(file.bytes),"
+            json += "\"path\":\"\(escape(file.path))\","
+            json += "\"sha256\":\"\(escape(file.sha256))\"}"
+        }
+        
+        json += "],"
+        json += "\"policyHash\":\"\(escape(manifest.policyHash))\","
+        json += "\"schemaVersion\":\(manifest.schemaVersion)"
+        json += "}\n"
+        
+        return json.data(using: .utf8)!
+    }
+    
+    private static func escape(_ s: String) -> String {
+        var r = ""
+        for c in s {
+            switch c {
+            case "\"": r += "\\\""
+            case "\\": r += "\\\\"
+            case "\n": r += "\\n"
+            case "\r": r += "\\r"
+            case "\t": r += "\\t"
+            default:
+                if let ascii = c.asciiValue, ascii < 32 {
+                    let hexChars: [Character] = ["0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"]
+                    r += "\\u"
+                    r.append(hexChars[Int((ascii >> 12) & 0x0F)])
+                    r.append(hexChars[Int((ascii >> 8) & 0x0F)])
+                    r.append(hexChars[Int((ascii >> 4) & 0x0F)])
+                    r.append(hexChars[Int(ascii & 0x0F)])
+                } else {
+                    r.append(c)
+                }
+            }
+        }
+        return r
+    }
+}
+
+// MARK: - Validation Errors (PR#13)
+
+public enum WhiteboxArtifactError: Error, Equatable {
+    case missingManifest
+    case invalidSchemaVersion(Int)
+    case invalidArtifactId(expected: String, actual: String)
+    case invalidHash(field: String, value: String, reason: String)
+    case invalidPath(String, reason: String)
+    case missingFile(String)
+    case sizeMismatch(path: String, expected: Int, actual: Int)
+    case hashMismatch(path: String, expected: String, actual: String)
+    case unreferencedFile(String)
+    case symlinkNotAllowed(String)
+    case hiddenFileFound(String)
+    case duplicatePath(String)
+    case filesNotSorted
+    case filesEmpty
+}
+
+// MARK: - Validation Functions (PR#13)
+
+private func validateHex64(_ value: String, field: String) throws {
+    guard value.count == 64 else {
+        throw WhiteboxArtifactError.invalidHash(field: field, value: value, reason: "length != 64")
+    }
+    guard value.allSatisfy({ $0.isHexDigit }) else {
+        throw WhiteboxArtifactError.invalidHash(field: field, value: value, reason: "non-hex character")
+    }
+    guard value == value.lowercased() else {
+        throw WhiteboxArtifactError.invalidHash(field: field, value: value, reason: "not lowercase")
+    }
+}
+
+private func findDuplicate(_ paths: [String]) -> String? {
+    var seen = Set<String>()
+    for path in paths {
+        if seen.contains(path) {
+            return path
+        }
+        seen.insert(path)
+    }
+    return nil
+}
+
+public func validateManifest(_ m: WhiteboxArtifactManifest) throws {
+    guard m.schemaVersion == 1 else {
+        throw WhiteboxArtifactError.invalidSchemaVersion(m.schemaVersion)
+    }
+    
+    let expectedId = String(m.artifactHash.prefix(8))
+    guard m.artifactId == expectedId, m.artifactId.count == 8 else {
+        throw WhiteboxArtifactError.invalidArtifactId(expected: expectedId, actual: m.artifactId)
+    }
+    
+    try validateHex64(m.policyHash, field: "policyHash")
+    try validateHex64(m.artifactHash, field: "artifactHash")
+    
+    guard !m.files.isEmpty else {
+        throw WhiteboxArtifactError.filesEmpty
+    }
+    
+    let paths = m.files.map { $0.path }
+    guard paths == paths.sorted() else {
+        throw WhiteboxArtifactError.filesNotSorted
+    }
+    
+    if let dup = findDuplicate(paths) {
+        throw WhiteboxArtifactError.duplicatePath(dup)
+    }
+    
+    for file in m.files {
+        guard file.path.hasPrefix("artifacts/") else {
+            throw WhiteboxArtifactError.invalidPath(file.path, reason: "must start with artifacts/")
+        }
+        guard !file.path.contains("..") else {
+            throw WhiteboxArtifactError.invalidPath(file.path, reason: "contains ..")
+        }
+        guard !file.path.contains("\\") else {
+            throw WhiteboxArtifactError.invalidPath(file.path, reason: "contains backslash")
+        }
+        guard file.path.allSatisfy({ ($0.asciiValue ?? 0) >= 32 }) else {
+            throw WhiteboxArtifactError.invalidPath(file.path, reason: "contains control character")
+        }
+        guard !file.path.contains("//"), !file.path.hasSuffix("/") else {
+            throw WhiteboxArtifactError.invalidPath(file.path, reason: "invalid path format")
+        }
+        guard file.bytes > 0 else {
+            throw WhiteboxArtifactError.sizeMismatch(path: file.path, expected: 1, actual: file.bytes)
+        }
+        try validateHex64(file.sha256, field: "sha256 of \(file.path)")
+    }
+}
+
+private func relativePath(_ url: URL, to root: URL) -> String {
+    let rootStd = root.resolvingSymlinksInPath()
+    let urlStd = url.resolvingSymlinksInPath()
+    var rel = urlStd.path.replacingOccurrences(of: rootStd.path + "/", with: "")
+    if rel.hasPrefix("/") {
+        rel.removeFirst()
+    }
+    return rel
+}
+
+public func validatePackage(at root: URL, manifest: WhiteboxArtifactManifest) throws {
+    let fm = FileManager.default
+    
+    let manifestURL = root.appendingPathComponent("manifest.json")
+    guard fm.fileExists(atPath: manifestURL.path) else {
+        throw WhiteboxArtifactError.missingManifest
+    }
+    
+    var allFiles: [String] = []
+    guard let enumerator = fm.enumerator(
+        at: root,
+        includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+        options: []
+    ) else {
+        throw WhiteboxArtifactError.missingManifest
+    }
+    
+    while let url = enumerator.nextObject() as? URL {
+        let rv = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        
+        if rv.isSymbolicLink == true {
+            let rel = relativePath(url, to: root)
+            throw WhiteboxArtifactError.symlinkNotAllowed(rel)
+        }
+        
+        if rv.isRegularFile == true {
+            let rel = relativePath(url, to: root)
+            let name = url.lastPathComponent
+            
+            if name.hasPrefix(".") || name.hasPrefix("._") {
+                throw WhiteboxArtifactError.hiddenFileFound(rel)
+            }
+            if name == "__MACOSX" || name == ".DS_Store" || name == "Thumbs.db" {
+                throw WhiteboxArtifactError.hiddenFileFound(rel)
+            }
+            
+            allFiles.append(rel)
+        }
+    }
+    allFiles.sort()
+    
+    for file in manifest.files {
+        let fileURL = root.appendingPathComponent(file.path)
+        
+        guard fm.fileExists(atPath: fileURL.path) else {
+            throw WhiteboxArtifactError.missingFile(file.path)
+        }
+        
+        let attrs = try fm.attributesOfItem(atPath: fileURL.path)
+        let actualSize = attrs[.size] as! Int
+        guard actualSize == file.bytes else {
+            throw WhiteboxArtifactError.sizeMismatch(path: file.path, expected: file.bytes, actual: actualSize)
+        }
+        
+        let data = try Data(contentsOf: fileURL)
+        let actualHash = _hexLowercase(_SHA256.hash(data: data))
+        guard actualHash == file.sha256 else {
+            throw WhiteboxArtifactError.hashMismatch(path: file.path, expected: file.sha256, actual: actualHash)
+        }
+    }
+    
+    let referenced = Set(manifest.files.map { $0.path }).union(["manifest.json"])
+    for file in allFiles {
+        guard referenced.contains(file) else {
+            throw WhiteboxArtifactError.unreferencedFile(file)
+        }
+    }
+    
+    let rootItems = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+    for item in rootItems {
+        let name = item.lastPathComponent
+        guard name == "manifest.json" || name == "artifacts" else {
+            throw WhiteboxArtifactError.unreferencedFile(name)
+        }
+    }
+}
+

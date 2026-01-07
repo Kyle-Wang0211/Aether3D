@@ -20,6 +20,7 @@ struct VideoAsset {
 struct BuildRequest {
     enum Source {
         case video(asset: VideoAsset)
+        case file(url: URL)
         // Phase 1-2a 只支持 video，照片留到 1-2b / 1-3
     }
 
