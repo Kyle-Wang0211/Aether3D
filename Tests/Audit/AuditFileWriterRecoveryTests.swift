@@ -9,6 +9,19 @@ import XCTest
 @testable import Aether3DCore
 import Foundation
 
+#if canImport(ObjectiveC)
+import ObjectiveC
+#endif
+
+/// Cross-platform autoreleasepool helper
+func withAutoreleasepool<T>(_ body: () throws -> T) rethrows -> T {
+    #if canImport(ObjectiveC)
+    return try autoreleasepool(invoking: body)
+    #else
+    return try body()
+    #endif
+}
+
 final class AuditFileWriterRecoveryTests: XCTestCase {
     private var tempDir: URL!
     
@@ -24,7 +37,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_emptyFileRecovery() throws {
-        autoreleasepool {
+        try withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("empty.ndjson")
             FileManager.default.createFile(atPath: fileURL.path, contents: nil)
             
@@ -45,7 +58,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_validLinesRecovery() throws {
-        autoreleasepool {
+        try withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("valid.ndjson")
             
             // 创建包含有效 JSON 行的文件
@@ -75,7 +88,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_truncateCorruptedTail() throws {
-        autoreleasepool {
+        try withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("corrupted.ndjson")
             
             // 创建包含有效行和损坏尾部的文件
@@ -109,7 +122,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_nonUTF8FileHandling() throws {
-        autoreleasepool {
+        try withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("nonutf8.ndjson")
             
             // 创建包含非 UTF-8 数据的文件
@@ -132,18 +145,18 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_skipRecoveryThrowsError() {
-        autoreleasepool {
-            let fileURL = self.tempDir.appendingPathComponent("skip.ndjson")
-            FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-            
-            do {
+        do {
+            try withAutoreleasepool {
+                let fileURL = self.tempDir.appendingPathComponent("skip.ndjson")
+                FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+                
                 _ = try AuditFileWriter(url: fileURL, skipRecovery: true)
                 XCTFail("Expected skipRecoveryNotSupported error")
-            } catch AuditFileWriterError.skipRecoveryNotSupported {
-                // 预期错误
-            } catch {
-                XCTFail("Unexpected error: \(error)")
             }
+        } catch AuditFileWriterError.skipRecoveryNotSupported {
+            // 预期错误
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
     }
 }
