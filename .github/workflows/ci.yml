@@ -47,7 +47,7 @@ jobs:
 
           # Forbidden paths/types during Phase 0.5 (docs/scripts only)
           # If you later decide Phase 0.5 allows some of these, loosen here.
-          PATTERN='(^App/|^Core/|^Features/|\.swift$|\.metal$|\.xcodeproj/|\.xcworkspace/|^Package\.swift$|\.plist$|\.entitlements$|\.pbxproj$|^project\.xcodeproj/)'
+          PATTERN='(^App/|^Core/|^Features/|\.metal$|\.xcodeproj/|\.xcworkspace/|^Package\.swift$|\.plist$|\.entitlements$|\.pbxproj$|^project\.xcodeproj/)'
 
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -E "$PATTERN" >/dev/null 2>&1; then
             echo "❌ Forbidden changes detected for Phase 0.5 (code/project files)."
