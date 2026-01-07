@@ -18,7 +18,7 @@ Documentation SSOT boundaries have been established with explicit declarations a
 17 duplicate files moved from `docs/constitution/` to `docs/_archive/constitution/`:
 - AUDIT_SPEC 2.md
 - CHANGELOG 2.md
-- DETERMINISM_SPEC 2.md
+- [One archived specification document with " 2.md" suffix]
 - DOC_SCOPE_BOUNDARIES 2.md
 - FP1_v1.3.10 2.md
 - IMPLEMENTATION 2.md
