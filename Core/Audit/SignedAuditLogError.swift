@@ -43,7 +43,9 @@ enum SigningKeyStoreError: Error {
     case invalidSeedLength(expected: Int, actual: Int)
     case invalidKeychainData(String)
     #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
-    case keychainStatus(OSStatus)   // Apple-only
+    case keychainStatus(OSStatus)
+    #else
+    case keychainStatus(Int32)  // Cross-platform fallback: OSStatus is Int32 on Apple
     #endif
 }
 

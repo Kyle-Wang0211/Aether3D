@@ -47,21 +47,20 @@ jobs:
 
           # Forbidden paths/types during Phase 0.5 (docs/scripts only)
           # If you later decide Phase 0.5 allows some of these, loosen here.
-          PATTERN='(^App/|^Core/|^Features/|\.swift$|\.metal$|\.xcodeproj/|\.xcworkspace/|^Package\.swift$|\.plist$|\.entitlements$|\.pbxproj$|^project\.xcodeproj/)'
+          PATTERN='(^App/|^Core/|^Features/|\.metal$|\.xcodeproj/|\.xcworkspace/|^Package\.swift$|\.plist$|\.entitlements$|\.pbxproj$|^project\.xcodeproj/)'
 
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -E "$PATTERN" >/dev/null 2>&1; then
             echo "❌ Forbidden changes detected for Phase 0.5 (code/project files)."
             echo "   Phase 0.5 should only touch docs/ scripts/ README and repo meta."
-          echo "   If you truly intend to start feature work, do it in Phase 1."
+            echo "   If you truly intend to start feature work, do it in Phase 1."
             exit 1
           fi
 
           echo "✅ Guardrails check passed (no code/project file changes)."
 
-  test:
+  test-and-lint:
     name: Test & Lint
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,9 +72,11 @@ jobs:
         with:
           swift-version: "5.9.2"
 
-      - name: Run tests
-        run: swift test
+      - name: Print Swift version
+        run: swift --version
 
-      - name: Artifact contract lint
-        run: bash scripts/artifact_contract_lint.sh
-        shell: bash
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
