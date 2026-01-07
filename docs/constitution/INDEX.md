@@ -29,5 +29,7 @@ README.md is NOT a specification document.
 - [MANUAL_CHECKS.md](MANUAL_CHECKS.md) - Manual Check Procedures
 - [NO_RULES_OUTSIDE_CONSTITUTION.md](NO_RULES_OUTSIDE_CONSTITUTION.md) - Rules Boundary
 - [DOC_SCOPE_BOUNDARIES.md](DOC_SCOPE_BOUNDARIES.md) - Document Scope Boundaries
+- [GATES_POLICY.md](GATES_POLICY.md) - Gate Policy
+- [GOVERNANCE_SPEC.md](GOVERNANCE_SPEC.md) - Governance Specification
 - [CHANGELOG.md](CHANGELOG.md) - Constitution Changelog
 
