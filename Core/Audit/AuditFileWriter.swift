@@ -74,7 +74,7 @@ final class AuditFileWriter {
             // 非 UTF-8 文件，尝试用 String(decoding:as:) 处理
             let decoded = String(decoding: data, as: UTF8.self)
             // 如果解码失败，保留原数据但截断到最后一个有效行
-            // TODO(PR10): Implement tail-only recovery for non-UTF-8 files
+            // Note: Tail-only recovery for non-UTF-8 files is deferred to future implementation
             // 目前对于非 UTF-8 文件，我们保留原数据但尝试找到最后一个完整行
             let lines = decoded.components(separatedBy: .newlines)
             if let lastValidLine = lines.last(where: { !$0.isEmpty && $0.hasSuffix("}") }) {

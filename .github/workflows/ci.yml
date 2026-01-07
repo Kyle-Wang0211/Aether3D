@@ -58,20 +58,39 @@ jobs:
 
           echo "✅ Guardrails check passed (no code/project file changes)."
 
+ feature/pr10
+  test-and-lint:
+    name: Test & Lint
+    runs-on: ubuntu-22.04
+
   test:
     name: Test & Lint
     runs-on: ubuntu-latest
+ main
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+ feature/pr10
+
         with:
           fetch-depth: 0
+ main
 
       - name: Setup Swift
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: "5.9.2"
+
+ feature/pr10
+      - name: Print Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
 
       - name: Run tests
         run: swift test
@@ -79,3 +98,4 @@ jobs:
       - name: Artifact contract lint
         run: bash scripts/artifact_contract_lint.sh
         shell: bash
+ main
