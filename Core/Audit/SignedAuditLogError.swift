@@ -7,6 +7,10 @@
 
 import Foundation
 
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+import Security
+#endif
+
 /// Errors for signed audit log operations.
 enum SignedAuditLogError: Error {
     // Encode/Decode
@@ -38,6 +42,10 @@ enum SigningKeyStoreError: Error {
     case signingFailed
     case invalidSeedLength(expected: Int, actual: Int)
     case invalidKeychainData(String)
-    case keychainStatus(OSStatus)   // Apple-only usage allowed under #if
+    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+    case keychainStatus(OSStatus)
+    #else
+    case keychainStatus(Int32)  // Cross-platform fallback: OSStatus is Int32 on Apple
+    #endif
 }
 
