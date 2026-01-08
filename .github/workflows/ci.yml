@@ -33,12 +33,21 @@ jobs:
           bash scripts/preflight.sh
 
       - name: Guardrails (Phase 0.5 forbids code/project changes)
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
         run: |
           set -euo pipefail
 
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          BRANCH_NAME="${{ github.head_ref || github.ref_name }}"
+
+          if [[ "$BRANCH_NAME" == phase0* ]] || [[ "$BRANCH_NAME" == phase0.5* ]]; then
+            echo "🔒 Guardrails enabled for Phase 0/0.5 branch: $BRANCH_NAME"
+          else
+            echo "ℹ️ Not a Phase 0/0.5 branch ($BRANCH_NAME). Skipping guardrails (Phase 1+ allows code changes)."
+            exit 0
+          fi
+
+          BASE_SHA="${{ github.event.pull_request.base.sha || github.event.before }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
 
           echo "Base: $BASE_SHA"
           echo "Head: $HEAD_SHA"
