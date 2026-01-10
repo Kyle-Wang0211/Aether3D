@@ -46,14 +46,15 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
             
             let entry = AuditEntry(
                 timestamp: Date(),
-                eventType: "test"
+                eventType: "test"  // Legacy field, now encodes as "legacyEventType" in JSON
             )
             try? writer?.append(entry)
             
             // 验证文件内容
             let content = try? String(contentsOf: fileURL, encoding: .utf8)
             XCTAssertNotNil(content)
-            XCTAssertTrue(content?.contains("\"eventType\":\"test\"") ?? false)
+            // With PR#8.5 CodingKeys, legacy eventType encodes as "legacyEventType"
+            XCTAssertTrue(content?.contains("\"legacyEventType\":\"test\"") ?? false)
         }
     }
     
