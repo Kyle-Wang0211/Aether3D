@@ -26,10 +26,13 @@ final class SamplingConstantsTests: XCTestCase {
         XCTAssertEqual(SamplingConstants.maxFrameCount, 1800)
     }
     
+ pr/1-system-layer
+
     func testMaxUploadSizeBytes() {
         XCTAssertEqual(SamplingConstants.maxUploadSizeBytes, 1_161_527_296)
     }
     
+ main
     func testJpegQuality() {
         XCTAssertEqual(SamplingConstants.jpegQuality, 0.85, accuracy: 0.001)
     }
@@ -39,7 +42,11 @@ final class SamplingConstantsTests: XCTestCase {
     }
     
     func testAllSpecsCount() {
+ pr/1-system-layer
+        XCTAssertEqual(SamplingConstants.allSpecs.count, 6)
+
         XCTAssertEqual(SamplingConstants.allSpecs.count, 7)
+ main
     }
 }
 

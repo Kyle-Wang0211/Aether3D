@@ -6,7 +6,10 @@
 //
 
 import Foundation
+ pr/1-system-layer
+
 import CoreGraphics
+ main
 
 /// Single entry point for SSOT system.
 /// Provides unified access to all constants, thresholds, and error codes.
@@ -84,11 +87,16 @@ public enum SSOT {
     /// Maximum frame count
     public static var maxFrameCount: Int { SamplingConstants.maxFrameCount }
     
+ pr/1-system-layer
+    /// JPEG quality (0.0-1.0)
+    public static var jpegQuality: Double { SamplingConstants.jpegQuality }
+
     /// Maximum upload size (bytes)
     public static var maxUploadSizeBytes: Int64 { SamplingConstants.maxUploadSizeBytes }
     
     /// JPEG quality (0.0-1.0)
     public static var jpegQuality: CGFloat { SamplingConstants.jpegQuality }
+ main
     
     /// Maximum image long edge (pixels)
     public static var maxImageLongEdge: Int { SamplingConstants.maxImageLongEdge }
@@ -130,7 +138,11 @@ public enum SSOT {
     // MARK: - Coverage Visualization Constants
     
     /// S0 border width (pixels)
+ pr/1-system-layer
+    public static var s0BorderWidthPx: Double { CoverageVisualizationConstants.s0BorderWidthPx }
+
     public static var s0BorderWidthPx: CGFloat { CoverageVisualizationConstants.s0BorderWidthPx }
+ main
     
     /// S4 minimum theta span (degrees)
     public static var s4MinThetaSpanDeg: Double { CoverageVisualizationConstants.s4MinThetaSpanDeg }
