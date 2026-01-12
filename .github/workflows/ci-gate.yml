@@ -1,0 +1,20 @@
+name: CI Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Run CI checks
+        run: |
+          chmod +x scripts/ci/*.sh
+          bash scripts/ci/run_all.sh
+

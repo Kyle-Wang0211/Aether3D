@@ -24,7 +24,13 @@ let package = Package(
     .testTarget(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
-      path: "Tests"
+      path: "Tests",
+      exclude: ["Constants"]
+    ),
+    .testTarget(
+      name: "ConstantsTests",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/Constants"
     )
   ]
 )
