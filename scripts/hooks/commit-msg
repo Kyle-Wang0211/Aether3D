@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MSG_FILE="$1"
+MSG="$(cat "$MSG_FILE")"
+
+# Check header format
+if ! echo "$MSG" | head -n 1 | grep -Eq '^(feat|fix|refactor|test|docs|chore)\([a-z0-9_-]+\): .{1,72}$'; then
+  echo "ERROR: Invalid commit header."
+  echo "Expected: <type>(<scope>): <subject>"
+  exit 1
+fi
+
+# Check SSOT-Change footer
+if ! echo "$MSG" | grep -Eq '^SSOT-Change: (yes|no)'; then
+  echo "ERROR: Missing footer: SSOT-Change: yes|no"
+  exit 1
+fi
+
