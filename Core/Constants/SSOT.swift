@@ -83,9 +83,6 @@ public enum SSOT {
     /// Maximum frame count
     public static var maxFrameCount: Int { SamplingConstants.maxFrameCount }
     
-    /// Maximum upload size (bytes)
-    public static var maxUploadSizeBytes: Int64 { SamplingConstants.maxUploadSizeBytes }
-    
     /// JPEG quality (0.0-1.0)
     public static var jpegQuality: Double { SamplingConstants.jpegQuality }
     
