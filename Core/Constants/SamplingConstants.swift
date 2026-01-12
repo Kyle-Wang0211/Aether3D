@@ -6,6 +6,10 @@
 //
 
 import Foundation
+ pr/1-system-layer
+
+import CoreGraphics
+ main
 
 /// Video sampling and frame selection constants.
 public enum SamplingConstants {
@@ -25,9 +29,19 @@ public enum SamplingConstants {
     /// - 15分钟 × 2fps = 1800帧
     public static let maxFrameCount: Int = 1800
     
+ pr/1-system-layer
     /// JPEG 质量
     /// - 永不降低
     public static let jpegQuality: Double = 0.85
+
+    /// 上传包大小上限（字节）
+    /// - 1.08GB，永不降低质量
+    public static let maxUploadSizeBytes: Int64 = 1_161_527_296
+    
+    /// JPEG 质量
+    /// - 永不降低
+    public static let jpegQuality: CGFloat = 0.85
+ main
     
     /// 分辨率长边（像素）
     /// - 永不降低
@@ -101,6 +115,19 @@ public enum SamplingConstants {
         documentation: "15分钟×2fps，控制云端处理时间"
     )
     
+ pr/1-system-layer
+
+    /// Specification for maxUploadSizeBytes
+    /// Note: Int64 value converted to Int for SystemConstantSpec
+    public static let maxUploadSizeBytesSpec = SystemConstantSpec(
+        ssotId: "SamplingConstants.maxUploadSizeBytes",
+        name: "Maximum Upload Size",
+        unit: .bytes,
+        value: Int(maxUploadSizeBytes),
+        documentation: "1.08GB，1800帧×600KB最大估算"
+    )
+    
+ main
     /// Specification for jpegQuality
     public static let jpegQualitySpec = ThresholdSpec(
         ssotId: "SamplingConstants.jpegQuality",
@@ -109,7 +136,11 @@ public enum SamplingConstants {
         category: .quality,
         min: 0.0,
         max: 1.0,
+ pr/1-system-layer
         defaultValue: jpegQuality,
+
+        defaultValue: Double(jpegQuality),
+ main
         onExceed: .warn,
         onUnderflow: .reject,
         documentation: "固定85%质量，永不降低"
@@ -130,6 +161,10 @@ public enum SamplingConstants {
         .threshold(maxVideoDurationSecondsSpec),
         .minLimit(minFrameCountSpec),
         .systemConstant(maxFrameCountSpec),
+ pr/1-system-layer
+
+        .systemConstant(maxUploadSizeBytesSpec),
+ main
         .threshold(jpegQualitySpec),
         .systemConstant(maxImageLongEdgeSpec)
     ]
