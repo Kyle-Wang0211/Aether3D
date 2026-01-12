@@ -100,6 +100,13 @@
 | SamplingConstants.maxVideoDurationSeconds | 900 | seconds | quality | 60.0 | 1800.0 | 900 | reject | warn | 15分钟上限，平衡质量与处理时间 |
 | SamplingConstants.minFrameCount | 30 | frames | - | - | - | - | - | reject | 3DGS重建最低帧数要求 |
 | SamplingConstants.maxFrameCount | 1800 | frames | - | - | - | - | - | - | 15分钟×2fps，控制云端处理时间 |
+ pr/1-system-layer
+
+ pr/1-system-layer
+
+| SamplingConstants.maxUploadSizeBytes | 1161527296 | bytes | - | - | - | - | - | - | 1.08GB，1800帧×600KB最大估算 |
+ main
+ main
 | SamplingConstants.jpegQuality | 0.85 | ratio | quality | 0.0 | 1.0 | 0.85 | warn | reject | 固定85%质量，永不降低 |
 | SamplingConstants.maxImageLongEdge | 1920 | pixels | - | - | - | - | - | - | 1080p长边，永不降低 |
 <!-- SSOT:SAMPLING_CONSTANTS:END -->
