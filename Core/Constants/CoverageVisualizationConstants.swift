@@ -8,7 +8,11 @@
 import Foundation
  pr/1-system-layer
 
+
+ pr/1-system-layer
+
 import CoreGraphics
+ main
  main
 
 /// Coverage visualization constants (black-gray-white-native color states).
@@ -27,7 +31,11 @@ public enum CoverageVisualizationConstants {
  pr/1-system-layer
     public static let s0BorderWidthPx: Double = 1.0
 
+ pr/1-system-layer
+    public static let s0BorderWidthPx: Double = 1.0
+
     public static let s0BorderWidthPx: CGFloat = 1.0
+ main
  main
     
     /// S1: 弱证据 - 深灰色 RGB
@@ -102,7 +110,11 @@ public enum CoverageVisualizationConstants {
  pr/1-system-layer
         defaultValue: s0BorderWidthPx,
 
+ pr/1-system-layer
+        defaultValue: s0BorderWidthPx,
+
         defaultValue: Double(s0BorderWidthPx),
+ main
  main
         onExceed: .warn,
         onUnderflow: .reject,

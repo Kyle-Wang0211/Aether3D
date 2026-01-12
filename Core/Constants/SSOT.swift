@@ -8,7 +8,10 @@
 import Foundation
  pr/1-system-layer
 
+ pr/1-system-layer
+
 import CoreGraphics
+ main
  main
 
 /// Single entry point for SSOT system.
@@ -91,11 +94,16 @@ public enum SSOT {
     /// JPEG quality (0.0-1.0)
     public static var jpegQuality: Double { SamplingConstants.jpegQuality }
 
+ pr/1-system-layer
+    /// JPEG quality (0.0-1.0)
+    public static var jpegQuality: Double { SamplingConstants.jpegQuality }
+
     /// Maximum upload size (bytes)
     public static var maxUploadSizeBytes: Int64 { SamplingConstants.maxUploadSizeBytes }
     
     /// JPEG quality (0.0-1.0)
     public static var jpegQuality: CGFloat { SamplingConstants.jpegQuality }
+ main
  main
     
     /// Maximum image long edge (pixels)
@@ -141,7 +149,11 @@ public enum SSOT {
  pr/1-system-layer
     public static var s0BorderWidthPx: Double { CoverageVisualizationConstants.s0BorderWidthPx }
 
+ pr/1-system-layer
+    public static var s0BorderWidthPx: Double { CoverageVisualizationConstants.s0BorderWidthPx }
+
     public static var s0BorderWidthPx: CGFloat { CoverageVisualizationConstants.s0BorderWidthPx }
+ main
  main
     
     /// S4 minimum theta span (degrees)
