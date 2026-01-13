@@ -377,8 +377,8 @@ public enum IdempotencyManager {
             return "\"\(escapeJSONString(string))\""
             
         case let number as NSNumber:
-            // 保持整数/浮点数区分
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+            // 保持整数/浮点数区分（便携式实现，不依赖CoreFoundation）
+            if number.isBool {
                 return number.boolValue ? "true" : "false"
             } else if number.isInteger {
                 return "\(number.intValue)"
@@ -437,16 +437,29 @@ public enum IdempotencyManager {
 // MARK: - NSNumber Extension
 
 private extension NSNumber {
+    /// 检查是否为布尔值（便携式实现，不依赖CoreFoundation）
+    var isBool: Bool {
+        // objCType for BOOL is "c" (char) on Darwin
+        // On Linux, we check if it's exactly 0 or 1
+        let objCTypeStr = String(cString: objCType)
+        if objCTypeStr == "c" {
+            // Could be BOOL (char), check if value is 0 or 1
+            return intValue == 0 || intValue == 1
+        }
+        // For other types, check if it represents exactly 0 or 1
+        return (doubleValue == 0.0 || doubleValue == 1.0) && 
+               (doubleValue.rounded() == doubleValue)
+    }
+    
+    /// 检查是否为整数（便携式实现，不依赖CoreFoundation）
     var isInteger: Bool {
-        let type = CFNumberGetType(self as CFNumber)
-        switch type {
-        case .sInt8Type, .sInt16Type, .sInt32Type, .sInt64Type,
-             .charType, .shortType, .intType, .longType, .longLongType,
-             .cfIndexType, .nsIntegerType:
-            return true
-        default:
+        // Check if it's a whole number and fits in Int range
+        let doubleVal = doubleValue
+        guard doubleVal.rounded() == doubleVal else {
             return false
         }
+        // Check if it fits in Int range
+        return doubleVal >= Double(Int.min) && doubleVal <= Double(Int.max)
     }
 }
 
