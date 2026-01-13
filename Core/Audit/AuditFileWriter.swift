@@ -39,7 +39,7 @@ final class AuditFileWriter {
         
         // 如果文件不存在，创建空文件
         if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+            _ = FileManager.default.createFile(atPath: url.path, contents: nil)
         }
         
         // 使用 forUpdating 模式，保证 append-only
