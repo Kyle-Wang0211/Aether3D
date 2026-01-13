@@ -1,10 +1,17 @@
-// Swift Testing smoke test to ensure CI never discovers 0 tests
-// This prevents Swift Testing from returning exit code 1 on empty discovery
+import XCTest
 
+final class SwiftTestingSmokeTests: XCTestCase {
+    func test_smoke_xctest_discovery() {
+        XCTAssertTrue(true)
+    }
+}
+
+#if canImport(Testing)
 import Testing
 
 @Test("Smoke: Swift Testing discovery")
-func smoke_swift_testing_discovery() {
+func smoke_swift_testing_discovery() async throws {
     #expect(true)
 }
+#endif
 

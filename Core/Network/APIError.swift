@@ -23,15 +23,16 @@ public enum HTTPStatusCode: Int, CaseIterable, Codable {
     case internalServerError = 500
     
     public var isSuccess: Bool {
-        return rawValue >= 200 && rawValue < 300
+        return rawValue >= APIContractConstants.httpSuccessCodeStart && rawValue < APIContractConstants.httpSuccessCodeEnd
     }
 }
 
-/// HTTP状态码常量
+/// HTTP状态码常量（已迁移到APIContractConstants，保留此枚举以保持向后兼容）
+@available(*, deprecated, message: "Use APIContractConstants instead")
 public enum HTTPStatusCodeConstants {
-    public static let SUCCESS_CODE_COUNT = 3
-    public static let ERROR_CODE_COUNT = 7
-    public static let TOTAL_CODE_COUNT = 10  // 3 + 7
+    public static let SUCCESS_CODE_COUNT = APIContractConstants.SUCCESS_CODE_COUNT
+    public static let ERROR_CODE_COUNT = APIContractConstants.ERROR_CODE_COUNT
+    public static let TOTAL_CODE_COUNT = APIContractConstants.HTTP_CODE_COUNT
 }
 
 // MARK: - Business Error Codes (Closed Set · 7 Codes)

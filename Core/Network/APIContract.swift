@@ -342,11 +342,12 @@ public struct HealthResponse: Codable, Equatable {
 public enum IdempotencyManager {
     /// 生成幂等键（推荐方式）
     public static func generateKey(bundleHash: String, captureSessionId: String) -> String {
-        let timestamp = Int(Date().timeIntervalSince1970 / 60) * 60  // 截断到分钟
+        let secondsPerMinute = TimeInterval(APIContractConstants.secondsPerMinute)
+        let timestamp = Int(Date().timeIntervalSince1970 / secondsPerMinute) * APIContractConstants.secondsPerMinute  // 截断到分钟
         let input = "\(bundleHash)\(captureSessionId)\(timestamp)"
         let data = Data(input.utf8)
         let hash = SHA256.hash(data: data)
-        return hash.compactMap { String(format: "%02x", $0) }.joined()
+        return hash.compactMap { String(format: APIContractConstants.hexByteFormat, $0) }.joined()
     }
     
     /// 计算payload的canonical JSON hash（PATCH-7：与Python完全一致）
@@ -354,7 +355,7 @@ public enum IdempotencyManager {
         let canonical = canonicalizeJSON(payload)
         let data = Data(canonical.utf8)
         let hash = SHA256.hash(data: data)
-        return hash.compactMap { String(format: "%02x", $0) }.joined()
+        return hash.compactMap { String(format: APIContractConstants.hexByteFormat, $0) }.joined()
     }
     
     /// Canonical JSON编码（递归排序keys，匹配Python json.dumps行为）
@@ -365,33 +366,33 @@ public enum IdempotencyManager {
             let pairs = sortedKeys.map { key in
                 let escapedKey = escapeJSONString(key)
                 let valueStr = canonicalizeJSON(dict[key]!)
-                return "\"\(escapedKey)\":\(valueStr)"
+                return "\(APIContractConstants.jsonQuote)\(escapedKey)\(APIContractConstants.jsonQuote)\(APIContractConstants.jsonKeyValueSeparator)\(valueStr)"
             }
-            return "{\(pairs.joined(separator: ","))}"
+            return "\(APIContractConstants.jsonObjectOpen)\(pairs.joined(separator: APIContractConstants.jsonElementSeparator))\(APIContractConstants.jsonObjectClose)"
             
         case let array as [Any]:
             let elements = array.map { canonicalizeJSON($0) }
-            return "[\(elements.joined(separator: ","))]"
+            return "\(APIContractConstants.jsonArrayOpen)\(elements.joined(separator: APIContractConstants.jsonElementSeparator))\(APIContractConstants.jsonArrayClose)"
             
         case let string as String:
-            return "\"\(escapeJSONString(string))\""
+            return "\(APIContractConstants.jsonQuote)\(escapeJSONString(string))\(APIContractConstants.jsonQuote)"
             
         case let number as NSNumber:
             // 保持整数/浮点数区分（便携式实现，不依赖CoreFoundation）
             if number.isBool {
-                return number.boolValue ? "true" : "false"
+                return number.boolValue ? APIContractConstants.jsonTrue : APIContractConstants.jsonFalse
             } else if number.isInteger {
                 return "\(number.intValue)"
             } else {
                 // 浮点数：确保格式稳定
-                return String(format: "%.15g", number.doubleValue)
+                return String(format: APIContractConstants.floatFormat, number.doubleValue)
             }
             
         case let bool as Bool:
-            return bool ? "true" : "false"
+            return bool ? APIContractConstants.jsonTrue : APIContractConstants.jsonFalse
             
         case is NSNull:
-            return "null"
+            return APIContractConstants.jsonNull
             
         default:
             // 其他类型转为字符串
@@ -406,24 +407,24 @@ public enum IdempotencyManager {
         
         for char in string.unicodeScalars {
             switch char.value {
-            case 0x22:  // "
-                result += "\\\""
-            case 0x5C:  // \
+            case APIContractConstants.unicodeDoubleQuote:  // "
+                result += APIContractConstants.jsonEscapedQuote
+            case APIContractConstants.unicodeBackslash:  // \
                 result += "\\\\"
-            case 0x08:  // \b
+            case APIContractConstants.unicodeBackspace:  // \b
                 result += "\\b"
-            case 0x0C:  // \f
+            case APIContractConstants.unicodeFormFeed:  // \f
                 result += "\\f"
-            case 0x0A:  // \n
+            case APIContractConstants.unicodeNewline:  // \n
                 result += "\\n"
-            case 0x0D:  // \r
+            case APIContractConstants.unicodeCarriageReturn:  // \r
                 result += "\\r"
-            case 0x09:  // \t
+            case APIContractConstants.unicodeTab:  // \t
                 result += "\\t"
             default:
-                if char.value < 0x20 {
+                if char.value < APIContractConstants.unicodeControlThreshold {
                     // 控制字符：\u00XX
-                    result += String(format: "\\u%04X", char.value)
+                    result += String(format: APIContractConstants.unicodeEscapeFormat, char.value)
                 } else {
                     result.append(Character(char))
                 }
@@ -442,12 +443,12 @@ private extension NSNumber {
         // objCType for BOOL is "c" (char) on Darwin
         // On Linux, we check if it's exactly 0 or 1
         let objCTypeStr = String(cString: objCType)
-        if objCTypeStr == "c" {
+        if objCTypeStr == APIContractConstants.objCTypeChar {
             // Could be BOOL (char), check if value is 0 or 1
-            return intValue == 0 || intValue == 1
+            return intValue == APIContractConstants.booleanFalseValue || intValue == APIContractConstants.booleanTrueValue
         }
         // For other types, check if it represents exactly 0 or 1
-        return (doubleValue == 0.0 || doubleValue == 1.0) && 
+        return (doubleValue == APIContractConstants.booleanFalseDouble || doubleValue == APIContractConstants.booleanTrueDouble) && 
                (doubleValue.rounded() == doubleValue)
     }
     
