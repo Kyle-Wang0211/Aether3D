@@ -637,6 +637,66 @@ final class CaptureStaticScanTests: XCTestCase {
         }
     }
     
+    // MARK: - Crash Primitives Ban (Rule G)
+    // Rule: App/Capture and Tests/CaptureTests must not use crash primitives
+    // Allowlist: EMPTY (closed set empty) - no crash primitives allowed in PR4 scope
+    
+    func test_captureBansCrashPrimitives() {
+        // Scan App/Capture and Tests/CaptureTests
+        let scanDirs = [
+            ("App/Capture", "App/Capture"),
+            ("Tests/CaptureTests", "Tests/CaptureTests")
+        ]
+        
+        // Closed set allowlist: EMPTY (no exceptions)
+        let forbiddenPatterns = [
+            "fatalError(",
+            "preconditionFailure(",
+            "assertionFailure(",
+            "precondition(",
+            "assert(",
+            "dispatchPrecondition("
+        ]
+        
+        for (dirName, relativePath) in scanDirs {
+            guard let scanDir = RepoRootLocator.resolvePath(relativePath) else {
+                XCTFail("Could not resolve \(relativePath) directory")
+                continue
+            }
+            
+            let fileManager = FileManager.default
+            guard let enumerator = fileManager.enumerator(at: scanDir, includingPropertiesForKeys: nil) else {
+                XCTFail("Could not enumerate \(relativePath) directory")
+                continue
+            }
+            
+            for case let fileURL as URL in enumerator {
+                guard fileURL.pathExtension == "swift" else { continue }
+                
+                guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+                    continue
+                }
+                
+                let fileRelativePath = fileURL.path.replacingOccurrences(of: scanDir.path + "/", with: "")
+                let lines = content.components(separatedBy: .newlines)
+                
+                for (index, line) in lines.enumerated() {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    // Skip comments
+                    if trimmed.hasPrefix("//") {
+                        continue
+                    }
+                    
+                    for pattern in forbiddenPatterns {
+                        if line.contains(pattern) {
+                            XCTFail("[PR4][SCAN] banned_crash_primitive file=\(relativePath)/\(fileRelativePath) match=\(pattern) at line \(index + 1): \(trimmed)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     // MARK: - asyncAfter Ban Scan (Phase A - Rule C)
     // Rule: Fail if ".asyncAfter(" appears in App/Capture/*.swift
     // Allowlist: NONE (closed set empty)

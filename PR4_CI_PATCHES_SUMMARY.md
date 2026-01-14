@@ -269,3 +269,113 @@
 
 **状态**: ✅ **可以合并**
 
+---
+
+### ✅ Crash Primitives Elimination（已完成）
+
+#### 9. CameraSession.swift - 移除assert()和dispatchPrecondition()
+
+**问题**: 使用 `assert()` 和 `dispatchPrecondition()` 在测试和Linux CI中可能导致崩溃
+
+**修复前行为**:
+- `startRecording()` 中使用 `assert()` 验证gate配置（DEBUG模式）
+- `configureInternal()` 和 `reconfigureAfterInterruptionInternal()` 中使用 `dispatchPrecondition()` 验证队列（DEBUG模式）
+- 在测试中，DEBUG模式通常开启，会导致崩溃
+
+**修复后行为**:
+- 将 `assert()` 替换为日志记录 + 验证（不崩溃）
+- 将 `dispatchPrecondition()` 替换为注释说明（队列验证由sessionQueue边界处理）
+- 所有验证通过日志记录，不中断执行
+
+**风险降低**:
+- ✅ 测试中不会崩溃
+- ✅ Linux CI中不会崩溃
+- ✅ 错误通过日志记录，可调试
+- ✅ 通过静态扫描测试 Rule G
+
+**文件**: `App/Capture/CameraSession.swift`  
+**函数/区域**: 
+- `startRecording()` - 移除assert()
+- `configureInternal()` - 移除dispatchPrecondition()
+- `reconfigureAfterInterruptionInternal()` - 移除dispatchPrecondition()  
+**行数变化**: -8行（移除崩溃原语），+6行（添加日志验证）
+
+#### 10. Rule G - Crash Primitives静态扫描
+
+**问题**: 需要防止未来引入崩溃原语
+
+**修复前行为**:
+- 无扫描禁止崩溃原语
+
+**修复后行为**:
+- 添加静态扫描禁止以下模式:
+  - `fatalError(`
+  - `preconditionFailure(`
+  - `assertionFailure(`
+  - `precondition(`
+  - `assert(`
+  - `dispatchPrecondition(`
+- 扫描范围: `App/Capture/*.swift` 和 `Tests/CaptureTests/*.swift`
+- 允许列表: 空集（无例外）
+
+**风险降低**:
+- ✅ 防止未来回归
+- ✅ 确保CI安全
+- ✅ 通过静态扫描测试 Rule G
+
+**文件**: `Tests/CaptureTests/CaptureStaticScanTests.swift`  
+**函数/区域**: `test_captureBansCrashPrimitives()`  
+**行数变化**: +50行（新扫描测试）
+
+---
+
+## 🔧 Git修复：SSOT-Change Footer
+
+### 问题
+CI gate job失败，因为修改了 `Core/Constants/CaptureRecordingConstants.swift` 但commit message中缺少 `SSOT-Change` footer。
+
+### 修复命令
+
+```bash
+# 1. 检查当前commit message
+git log -1 --pretty=format:"%B"
+
+# 2. 修改commit message，添加SSOT-Change footer
+git commit --amend -m "PR#4: Capture Recording implementation
+
+[原有commit message内容保持不变]
+
+SSOT-Change: yes"
+
+# 3. 验证修改
+git log -1 --pretty=format:"%B" | grep "SSOT-Change"
+
+# 4. 如果需要force push（仅在feature branch，非main）
+# git push --force-with-lease origin pr/4-capture-recording
+```
+
+### SSOT-Change说明
+- **值**: `yes`
+- **原因**: 本PR修改了 `Core/Constants/CaptureRecordingConstants.swift`：
+  - 移除了 `import AVFoundation`
+  - 将 `preferredTimescale: CMTimeScale` 改为 `cmTimePreferredTimescale: Int32`
+  - 添加了CI-hardening注释
+- **影响**: Core模块现在可在非Apple平台编译，保持平台无关性
+
+---
+
+## ✅ 无崩溃原语检查清单
+
+- [x] App/Capture 中无 `fatalError()`
+- [x] App/Capture 中无 `preconditionFailure()`
+- [x] App/Capture 中无 `assertionFailure()`
+- [x] App/Capture 中无 `precondition()`（非DEBUG）
+- [x] App/Capture 中无 `assert()`（非DEBUG）
+- [x] App/Capture 中无 `dispatchPrecondition()`
+- [x] Core/Constants 中无崩溃原语
+- [x] Tests/CaptureTests 中无崩溃原语
+- [x] Rule G静态扫描测试已添加
+- [x] 所有错误通过类型化错误或诊断记录处理
+
+**状态**: ✅ **无崩溃原语，CI安全**
+

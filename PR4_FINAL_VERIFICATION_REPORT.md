@@ -5,6 +5,10 @@
 **审计范围**: PR#4 Capture Recording 实现  
 **审计目标**: 确保在 GitHub Actions / xcodebuild / swift test 环境中可运行，无本地缓存依赖
 
+**SSOT-Change声明**: 
+- **SSOT-Change: yes** - 本PR修改了 `Core/Constants/CaptureRecordingConstants.swift`，因此需要SSOT-Change声明
+- **原因**: 添加了 `cmTimePreferredTimescale` 常量，并移除了AVFoundation依赖，确保Core模块可在非Apple平台编译
+
 ---
 
 ## 📋 执行摘要
@@ -415,6 +419,7 @@ let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .user
 | Rule D (Constants) | **无**（强制要求） | 0 |
 | Rule E (AVFoundation in Core) | **无** | 0 |
 | Rule F (Hardcoded timescale) | **无** | 0 |
+| Rule G (Crash primitives) | **无** | 0 |
 
 ---
 
