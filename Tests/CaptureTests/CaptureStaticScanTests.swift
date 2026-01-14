@@ -532,6 +532,111 @@ final class CaptureStaticScanTests: XCTestCase {
         }
     }
     
+    // MARK: - Core Portability Guard (Rule E)
+    // Rule: Core/Constants must not import AVFoundation or use AVFoundation types
+    // Allowlist: EMPTY (closed set empty) - Core must never use AVFoundation
+    
+    func test_coreMustNotImportAVFoundation() {
+        // Scan ONLY Core/Constants/*.swift files
+        guard let coreConstantsDir = RepoRootLocator.resolvePath("Core/Constants") else {
+            XCTFail("Could not resolve Core/Constants directory")
+            return
+        }
+        
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(at: coreConstantsDir, includingPropertiesForKeys: nil) else {
+            XCTFail("Could not enumerate Core/Constants directory")
+            return
+        }
+        
+        // Closed set allowlist: EMPTY (no exceptions)
+        let forbiddenPatterns = [
+            "import AVFoundation",
+            "CMTime",
+            "AVCapture",
+            "canImport(AVFoundation)",
+            "#if canImport(AVFoundation)",
+            "#if os(iOS)",
+            "#if os(macOS)"
+        ]
+        
+        for case let fileURL as URL in enumerator {
+            guard fileURL.pathExtension == "swift" else { continue }
+            
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+                continue
+            }
+            
+            let relativePath = fileURL.path.replacingOccurrences(of: coreConstantsDir.path + "/", with: "")
+            let lines = content.components(separatedBy: .newlines)
+            
+            for (index, line) in lines.enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                // Skip comments
+                if trimmed.hasPrefix("//") {
+                    continue
+                }
+                
+                for pattern in forbiddenPatterns {
+                    if line.contains(pattern) {
+                        XCTFail("[PR4][SCAN] banned_avfoundation_in_core file=Core/Constants/\(relativePath) match=\(pattern) at line \(index + 1): \(trimmed)")
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - CMTime PreferredTimescale Hardcoding Ban (Rule F)
+    // Rule: App/Capture must not hardcode preferredTimescale: 600
+    // Allowlist: EMPTY (closed set empty) - must use CaptureRecordingConstants.cmTimePreferredTimescale
+    
+    func test_captureBansHardcodedPreferredTimescale() {
+        // Enumerate all Swift files under App/Capture/ recursively
+        guard let captureDir = RepoRootLocator.resolvePath("App/Capture") else {
+            XCTFail("Could not resolve App/Capture directory")
+            return
+        }
+        
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(at: captureDir, includingPropertiesForKeys: nil) else {
+            XCTFail("Could not enumerate App/Capture directory")
+            return
+        }
+        
+        // Closed set allowlist: EMPTY (no exceptions)
+        let forbiddenPatterns = [
+            "preferredTimescale: 600",
+            "preferredTimescale:600",
+            "preferredTimescale = 600",
+            "preferredTimescale=600"
+        ]
+        
+        for case let fileURL as URL in enumerator {
+            guard fileURL.pathExtension == "swift" else { continue }
+            
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+                continue
+            }
+            
+            let relativePath = fileURL.path.replacingOccurrences(of: captureDir.path + "/", with: "")
+            let lines = content.components(separatedBy: .newlines)
+            
+            for (index, line) in lines.enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                // Skip comments
+                if trimmed.hasPrefix("//") {
+                    continue
+                }
+                
+                for pattern in forbiddenPatterns {
+                    if line.contains(pattern) {
+                        XCTFail("[PR4][SCAN] banned_hardcoded_timescale file=\(relativePath) match=\(pattern) at line \(index + 1): \(trimmed)")
+                    }
+                }
+            }
+        }
+    }
+    
     // MARK: - asyncAfter Ban Scan (Phase A - Rule C)
     // Rule: Fail if ".asyncAfter(" appears in App/Capture/*.swift
     // Allowlist: NONE (closed set empty)

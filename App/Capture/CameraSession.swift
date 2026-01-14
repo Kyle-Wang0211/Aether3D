@@ -18,6 +18,12 @@ private struct DefaultClockProvider: ClockProvider {
     func now() -> Date { Date() }
 }
 
+// CI-HARDENED: CMTime conversion helper (AVFoundation stays in App/Capture, not Core)
+// Single source of truth: uses CaptureRecordingConstants.cmTimePreferredTimescale
+private func cmTime(seconds: TimeInterval) -> CMTime {
+    CMTime(seconds: seconds, preferredTimescale: CaptureRecordingConstants.cmTimePreferredTimescale)
+}
+
 protocol CameraSessionProtocol: AnyObject {
     var captureSession: AVCaptureSession { get }
     var selectedConfig: SelectedCaptureConfig? { get }
@@ -338,10 +344,7 @@ final class CameraSession: CameraSessionProtocol {
             guard let self = self, let output = self.movieOutput else { return }
             
             // Set gates IMMEDIATELY before recording - this is the SINGLE SOURCE OF TRUTH
-            output.maxRecordedDuration = CMTime(
-                seconds: CaptureRecordingConstants.maxDurationSeconds,
-                preferredTimescale: CaptureRecordingConstants.preferredTimescale
-            )
+            output.maxRecordedDuration = cmTime(seconds: CaptureRecordingConstants.maxDurationSeconds)
             output.maxRecordedFileSize = CaptureRecordingConstants.maxBytes
             
             // Verify gates are set (DEBUG assertion + production log)

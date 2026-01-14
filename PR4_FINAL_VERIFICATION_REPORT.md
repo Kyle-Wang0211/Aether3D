@@ -376,6 +376,33 @@ let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .user
 - **允许列表（封闭集合）**: 无（强制要求）
 - **失败示例**: `[PR4][SCAN] missing_constants_ref file=RecordingController.swift token=CaptureRecordingConstants.maxDurationSeconds`
 
+#### Rule E: "Core portability guard: no AVFoundation in Core/Constants" 扫描
+- **目的**: 确保Core模块可在非Apple平台编译（Linux CI兼容性）
+- **范围**: 仅扫描 `Core/Constants/*.swift` 文件
+- **失败条件**: 发现以下任一模式:
+  - `import AVFoundation`
+  - `CMTime`（AVFoundation类型）
+  - `AVCapture`（AVFoundation类型前缀）
+  - `canImport(AVFoundation)`（条件导入逃逸）
+  - `#if canImport(AVFoundation)`（条件编译逃逸）
+  - `#if os(iOS)`（平台特定编译逃逸）
+  - `#if os(macOS)`（平台特定编译逃逸）
+- **允许列表（封闭集合）**: **空集**（无例外）
+- **失败示例**: `[PR4][SCAN] banned_avfoundation_in_core file=Core/Constants/CaptureRecordingConstants.swift match=import AVFoundation at line 9`
+- **修复要求**: 所有AVFoundation类型必须移到App/Capture，Core仅使用Foundation类型（TimeInterval, Int32, Int64等）。禁止使用条件导入或平台特定编译作为逃逸方式。
+
+#### Rule F: "CMTime preferredTimescale hardcoding ban" 扫描
+- **目的**: 确保CMTime的preferredTimescale值来自单一来源（CaptureRecordingConstants），禁止硬编码
+- **范围**: 扫描所有 `App/Capture/*.swift` 文件（递归）
+- **失败条件**: 发现以下任一模式:
+  - `preferredTimescale: 600`
+  - `preferredTimescale:600`
+  - `preferredTimescale = 600`
+  - `preferredTimescale=600`
+- **允许列表（封闭集合）**: **空集**（无例外）
+- **失败示例**: `[PR4][SCAN] banned_hardcoded_timescale file=CameraSession.swift match=preferredTimescale: 600 at line 23`
+- **修复要求**: 必须使用 `CaptureRecordingConstants.cmTimePreferredTimescale`，禁止硬编码600
+
 ### 允许列表表格（封闭集合）
 
 | 规则 | 允许的文件/模式 | 封闭集合大小 |
@@ -386,6 +413,8 @@ let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .user
 | Rule B (Timer.scheduledTimer) | 文件名包含 `DefaultTimerScheduler` | 1 |
 | Rule C (asyncAfter) | **无** | 0 |
 | Rule D (Constants) | **无**（强制要求） | 0 |
+| Rule E (AVFoundation in Core) | **无** | 0 |
+| Rule F (Hardcoded timescale) | **无** | 0 |
 
 ---
 

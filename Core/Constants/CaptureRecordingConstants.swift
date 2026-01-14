@@ -6,14 +6,17 @@
 //
 
 import Foundation
-import AVFoundation
+
+// CI-HARDENED: Core must compile on non-Apple platforms. No AVFoundation imports allowed.
 
 struct CaptureRecordingConstants {
     // === Duration ===
     static let minDurationSeconds: TimeInterval = 2
     static let maxDurationSeconds: TimeInterval = 900
     static let durationTolerance: TimeInterval = 0.25
-    static let preferredTimescale: CMTimeScale = 600
+    // CMTime timescale for AVFoundation conversion (used in App/Capture only)
+    // Single source of truth - must be referenced, never hardcoded as 600
+    static let cmTimePreferredTimescale: Int32 = 600
     
     // === Size ===
     static let maxBytes: Int64 = 2 * 1024 * 1024 * 1024 * 1024  // 2 TiB
