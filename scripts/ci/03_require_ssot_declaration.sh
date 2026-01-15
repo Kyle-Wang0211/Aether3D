@@ -40,7 +40,12 @@ while IFS= read -r f; do
   [[ "$needs_yes" -eq 1 ]] && break
 done <<< "$changed"
 
-msg="$(git log -1 --pretty=%B 2>/dev/null || echo "")"
+TARGET_COMMIT="HEAD"
+if git rev-parse -q --verify HEAD^2 >/dev/null 2>&1; then
+  TARGET_COMMIT="$(git rev-parse HEAD^2)"
+fi
+
+msg="$(git log -1 --pretty=%B "$TARGET_COMMIT" 2>/dev/null || echo "")"
 
 has_footer=0
 if printf "%s\n" "$msg" | grep -Eq '^SSOT-Change: (yes|no)$'; then
