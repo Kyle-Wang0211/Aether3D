@@ -9,24 +9,24 @@ import Foundation
 
 // CI-HARDENED: Core must compile on non-Apple platforms. No AVFoundation imports allowed.
 
-struct CaptureRecordingConstants {
+public struct CaptureRecordingConstants {
     // === Duration ===
-    static let minDurationSeconds: TimeInterval = 2
-    static let maxDurationSeconds: TimeInterval = 900
-    static let durationTolerance: TimeInterval = 0.25
+    public static let minDurationSeconds: TimeInterval = 2
+    public static let maxDurationSeconds: TimeInterval = 900
+    public static let durationTolerance: TimeInterval = 0.25
     // CMTime timescale for AVFoundation conversion (used in App/Capture only)
     // Single source of truth - must be referenced, never hardcoded as 600
-    static let cmTimePreferredTimescale: Int32 = 600
+    public static let cmTimePreferredTimescale: Int32 = 600
     
     // === Size ===
-    static let maxBytes: Int64 = 2 * 1024 * 1024 * 1024 * 1024  // 2 TiB
+    public static let maxBytes: Int64 = 2 * 1024 * 1024 * 1024 * 1024  // 2 TiB
     
     // === Polling ===
-    static let fileSizePollStartDelaySeconds: TimeInterval = 1.0
-    static let fileSizePollMaxWaitSeconds: TimeInterval = 5.0
-    static let fileSizePollIntervalLargeFile: TimeInterval = 0.5  // >= 100MB
-    static let fileSizePollIntervalSmallFile: TimeInterval = 1.0  // < 100MB
-    static let fileSizeLargeThresholdBytes: Int64 = 100 * 1024 * 1024
+    public static let fileSizePollStartDelaySeconds: TimeInterval = 1.0
+    public static let fileSizePollMaxWaitSeconds: TimeInterval = 5.0
+    public static let fileSizePollIntervalLargeFile: TimeInterval = 0.5  // >= 100MB
+    public static let fileSizePollIntervalSmallFile: TimeInterval = 1.0  // < 100MB
+    public static let fileSizeLargeThresholdBytes: Int64 = 100 * 1024 * 1024
     
     // === Thermal ===
     static let thermalWeightSerious: Int = 2  // weight >= this triggers stop/refuse
@@ -68,7 +68,7 @@ struct CaptureRecordingConstants {
         return bitrateEstimates[key] != nil ? key : "default"
     }
     
-    static func estimatedBitrate(tier: ResolutionTier, fps: Double) -> Int64 {
+    public static func estimatedBitrate(tier: ResolutionTier, fps: Double) -> Int64 {
         let key = bitrateKey(tier: tier, fps: fps)
         return bitrateEstimates[key] ?? bitrateEstimates["default"]!
     }

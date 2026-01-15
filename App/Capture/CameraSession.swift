@@ -9,15 +9,6 @@ import Foundation
 import AVFoundation
 import os.log
 
-// CI-HARDENED: ClockProvider for deterministic time (no Date() in production code)
-private protocol ClockProvider {
-    func now() -> Date
-}
-
-private struct DefaultClockProvider: ClockProvider {
-    func now() -> Date { Date() }
-}
-
 // CI-HARDENED: CMTime conversion helper (AVFoundation stays in App/Capture, not Core)
 // Single source of truth: uses CaptureRecordingConstants.cmTimePreferredTimescale
 private func cmTime(seconds: TimeInterval) -> CMTime {

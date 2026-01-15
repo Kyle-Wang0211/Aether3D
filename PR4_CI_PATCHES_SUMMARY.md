@@ -379,3 +379,180 @@ git log -1 --pretty=format:"%B" | grep "SSOT-Change"
 
 **状态**: ✅ **无崩溃原语，CI安全**
 
+---
+
+### ✅ Duplicate Files Elimination（已完成）
+
+#### 11. 删除重复文件（"* 2.swift"）
+
+**问题**: Finder创建的重复文件导致类型重复声明和编译错误
+
+**修复前行为**:
+- `Core/Network/APIError 2.swift` - 与 `APIError.swift` 重复（旧版本，使用硬编码值）
+- `Core/Network/APIContract 2.swift` - 与 `APIContract.swift` 重复（旧版本，使用硬编码值）
+- `Core/Network/APIEndpoints 2.swift` - 与 `APIEndpoints.swift` 完全相同
+- 导致编译错误：类型重复声明、模糊类型查找
+
+**修复后行为**:
+- 删除所有 `* 2.swift` 重复文件
+- 保留规范文件（无数字后缀）
+- 所有类型现在有唯一定义
+
+**风险降低**:
+- ✅ 消除类型重复声明错误
+- ✅ 消除模糊类型查找错误
+- ✅ 通过静态扫描测试 Rule H
+
+**文件**: 
+- `Core/Network/APIError 2.swift`（已删除）
+- `Core/Network/APIContract 2.swift`（已删除）
+- `Core/Network/APIEndpoints 2.swift`（已删除）
+
+#### 12. Rule H - Duplicate Filename静态扫描
+
+**问题**: 需要防止未来引入重复文件
+
+**修复前行为**:
+- 无扫描禁止重复文件名
+
+**修复后行为**:
+- 添加静态扫描禁止以下模式:
+  - ` 2.swift`, ` 3.swift`, ..., ` 9.swift` 后缀
+  - ` * [0-9].swift` 模式（正则表达式）
+- 使用 `git ls-files` 扫描所有tracked文件
+- 允许列表: 空集（无例外）
+
+**风险降低**:
+- ✅ 防止未来回归
+- ✅ 在CI中自动检测
+- ✅ 通过静态扫描测试 Rule H
+
+**文件**: `Tests/CaptureTests/CaptureStaticScanTests.swift`  
+**函数/区域**: `test_repoBansDuplicateFilenames()`  
+**行数变化**: +50行（新扫描测试）
+
+---
+
+## ✅ Codable/Equatable验证
+
+- [x] `JobListItem` 已声明 `Codable, Equatable`（合成实现）
+- [x] `ListJobsResponse` 已声明 `Codable, Equatable`（包含 `[JobListItem]`）
+- [x] `TimelineEvent` 已声明 `Codable, Equatable`（合成实现）
+- [x] `GetTimelineResponse` 已声明 `Codable, Equatable`（包含 `[TimelineEvent]`）
+- [x] 所有类型使用合成Codable/Equatable（无手动init(from:)）
+- [x] JSON keys保持稳定（使用CodingKeys）
+
+**状态**: ✅ **Codable/Equatable正常，无编译错误**
+
+---
+
+### ✅ Local Gate Enhancement（已完成）
+
+#### 13. scripts/local_gate.sh - 添加依赖检查和--quick模式
+
+**问题**: 本地验证需要快速模式，且需要确保所有依赖可用
+
+**修复前行为**:
+- 无依赖检查，可能失败时错误消息不清晰
+- 无快速模式，每次都需要完整构建
+
+**修复后行为**:
+- 添加依赖检查（swift, git, grep）- fail-fast with actionable messages
+- 添加 `--quick` 模式：跳过完整构建，仅运行关键检查
+- 默认模式（无参数）：完整验证包括构建
+- 清晰的输出格式（section headers, PASS/FAIL markers）
+
+**风险降低**:
+- ✅ 快速本地验证（--quick模式）
+- ✅ 清晰的错误消息和安装提示
+- ✅ Linux CI友好（零依赖保证）
+
+**文件**: `scripts/local_gate.sh`  
+**行数变化**: +80行（依赖检查、--quick模式、输出格式化）
+
+#### 14. scripts/ci/02_prohibit_fatal_patterns.sh - 统一规范脚本，移除ripgrep依赖
+
+**问题**: 存在重复脚本，且可能依赖ripgrep（rg）
+
+**修复前行为**:
+- 存在 `02_prohibit_fatal_patterns.sh` 和 `forbid_fatal_patterns.sh` 重复
+- 旧脚本仅扫描 `Core/Constants/`
+
+**修复后行为**:
+- 统一到规范脚本 `02_prohibit_fatal_patterns.sh`
+- 仅使用默认工具（grep，无ripgrep）
+- 扫描 `App/Capture`（测试由Swift测试规则验证）
+- Allowlist（封闭集合）: DefaultClockProvider文件允许Date()，DefaultTimerScheduler文件允许Timer.scheduledTimer
+- 改进的错误消息和文件路径输出
+- 删除重复脚本 `forbid_fatal_patterns.sh`
+
+**风险降低**:
+- ✅ 零依赖（不需要brew/ripgrep）
+- ✅ Linux CI友好
+- ✅ 单一来源（无重复脚本）
+- ✅ 测试验证分离（shell扫描生产代码，Swift测试验证测试代码）
+
+**文件**: `scripts/ci/02_prohibit_fatal_patterns.sh`（重写）  
+**行数变化**: 完全重写，约80行
+
+#### 15. Rule H增强 - 更健壮的数字后缀检测
+
+**问题**: Rule H仅检查2-9，需要支持所有数字后缀，并处理git缺失情况
+
+**修复前行为**:
+- 仅检查 ` 2.swift` 到 ` 9.swift`
+- 使用 `git ls-files`（换行分隔，可能不安全处理空格）
+- Git缺失时错误消息不够清晰
+
+**修复后行为**:
+- 使用 `git ls-files -z`（NUL分隔，安全处理空格）
+- 使用正则表达式 `.* [0-9]+\.swift$` 匹配所有数字后缀（2, 10, 123等）
+- Git缺失时fail-fast with clear message
+- 尝试多个git路径（Linux CI兼容）
+
+**风险降低**:
+- ✅ 捕获所有数字后缀变体
+- ✅ 安全处理文件名中的空格
+- ✅ Git缺失时清晰错误消息
+
+**文件**: `Tests/CaptureTests/CaptureStaticScanTests.swift`  
+**函数/区域**: `test_repoBansDuplicateFilenames()`  
+**行数变化**: +30行（git路径检测、NUL分隔解析、正则表达式）
+
+---
+
+## 🚪 本地门控使用说明
+
+### 快速模式
+
+```bash
+./scripts/local_gate.sh --quick
+```
+
+**执行时间**: ~10-30秒（取决于测试速度）  
+**包含**: 禁止模式扫描、SSOT检查、静态扫描测试  
+**跳过**: 完整构建
+
+### 完整模式
+
+```bash
+./scripts/local_gate.sh
+```
+
+**执行时间**: ~1-3分钟（取决于构建速度）  
+**包含**: 所有快速模式检查 + 完整构建
+
+### 零依赖保证
+
+- ✅ 不需要brew
+- ✅ 不需要ripgrep
+- ✅ 仅使用默认工具：swift, git, grep
+- ✅ Linux CI友好
+
+### 依赖要求
+
+脚本会自动检查并提示：
+- `swift` - Xcode Command Line Tools
+- `git` - Xcode Command Line Tools
+- `grep` - 系统默认工具
+

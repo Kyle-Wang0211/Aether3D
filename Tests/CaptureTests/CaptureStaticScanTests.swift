@@ -55,9 +55,9 @@ final class CaptureStaticScanTests: XCTestCase {
             }
             
             // Check forbidden tokens
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -113,9 +113,9 @@ final class CaptureStaticScanTests: XCTestCase {
                 continue
             }
             
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -146,9 +146,9 @@ final class CaptureStaticScanTests: XCTestCase {
                 continue
             }
             
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -177,9 +177,9 @@ final class CaptureStaticScanTests: XCTestCase {
                 continue
             }
             
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -199,12 +199,12 @@ final class CaptureStaticScanTests: XCTestCase {
                 continue
             }
             
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             for (index, line) in lines.enumerated() {
                 if line.contains("os_log(") {
                     // Check if same line contains [PR4] prefix
                     if !line.contains("[PR4]") {
-                        XCTFail("os_log call missing [PR4] prefix in \(filePath) at line \(index + 1): \(line.trimmingCharacters(in: .whitespaces))")
+                        XCTFail("os_log call missing [PR4] prefix in \(filePath) at line \(index + 1): \(line.trimmingCharacters(in: CharacterSet.whitespaces))")
                     }
                 }
             }
@@ -233,9 +233,9 @@ final class CaptureStaticScanTests: XCTestCase {
             "1024 * 1024"
         ]
         
-        let lines = content.components(separatedBy: .newlines)
+        let lines = content.components(separatedBy: CharacterSet.newlines)
         for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
             // Skip comments
             if trimmed.hasPrefix("//") {
                 continue
@@ -293,8 +293,8 @@ final class CaptureStaticScanTests: XCTestCase {
             return
         }
         
-        // Closed set allowlist: files ending with "DefaultClockProvider"
-        let allowedFiles = ["DefaultClockProvider"]
+        // Closed set allowlist: exact path only
+        let allowedExactPaths = ["App/Capture/ClockProvider.swift"]
         
         for case let fileURL as URL in enumerator {
             guard fileURL.pathExtension == "swift" else { continue }
@@ -303,14 +303,18 @@ final class CaptureStaticScanTests: XCTestCase {
                 continue
             }
             
-            let relativePath = fileURL.path.replacingOccurrences(of: captureDir.path + "/", with: "")
-            let fileName = fileURL.lastPathComponent
-            let isAllowed = allowedFiles.contains { fileName.contains($0) }
+            // Get exact relative path from repo root
+            guard let repoRoot = RepoRootLocator.findRepoRoot() else {
+                XCTFail("Could not find repo root")
+                return
+            }
+            let relativePath = fileURL.path.replacingOccurrences(of: repoRoot.path + "/", with: "")
+            let isAllowed = allowedExactPaths.contains(relativePath)
             
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -331,12 +335,9 @@ final class CaptureStaticScanTests: XCTestCase {
                         }
                     }
                     
-                    // Check allowlist: only DefaultClockProvider files allowed
+                    // Check allowlist: only exact path allowed
                     if isAllowed {
-                        // Verify it's actually in DefaultClockProvider struct
-                        if line.contains("DefaultClockProvider") || line.contains("struct DefaultClockProvider") {
-                            continue
-                        }
+                        continue
                     }
                     
                     XCTFail("[PR4][SCAN] banned_date_ctor file=\(relativePath) match=Date() at line \(index + 1): \(trimmed)")
@@ -424,10 +425,10 @@ final class CaptureStaticScanTests: XCTestCase {
             }
             
             let relativePath = fileURL.path.replacingOccurrences(of: captureDir.path + "/", with: "")
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -476,8 +477,8 @@ final class CaptureStaticScanTests: XCTestCase {
             ".scheduledTimer("
         ]
         
-        // Closed set allowlist: files containing "DefaultTimerScheduler"
-        let allowedFiles = ["DefaultTimerScheduler"]
+        // Closed set allowlist: exact path only
+        let allowedExactPaths = ["App/Capture/TimerScheduler.swift"]
         
         for case let fileURL as URL in enumerator {
             guard fileURL.pathExtension == "swift" else { continue }
@@ -486,26 +487,30 @@ final class CaptureStaticScanTests: XCTestCase {
                 continue
             }
             
-            let relativePath = fileURL.path.replacingOccurrences(of: captureDir.path + "/", with: "")
-            let fileName = fileURL.lastPathComponent
-            let isAllowed = allowedFiles.contains { fileName.contains($0) || content.contains("struct \($0)") }
+            // Get exact relative path from repo root
+            guard let repoRoot = RepoRootLocator.findRepoRoot() else {
+                XCTFail("Could not find repo root")
+                return
+            }
+            let relativePath = fileURL.path.replacingOccurrences(of: repoRoot.path + "/", with: "")
+            let isAllowed = allowedExactPaths.contains(relativePath)
             
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             
             // Check for banned patterns
             for pattern in bannedPatterns {
                 if content.contains(pattern) {
                     // Find the line containing the pattern
                     for (index, line) in lines.enumerated() {
-                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                         // Skip comments
                         if trimmed.hasPrefix("//") {
                             continue
                         }
                         
                         if line.contains(pattern) {
-                            // Check allowlist: only DefaultTimerScheduler files allowed
-                            if isAllowed && (line.contains("DefaultTimerScheduler") || line.contains("struct DefaultTimerScheduler")) {
+                            // Check allowlist: only exact path allowed
+                            if isAllowed {
                                 continue
                             }
                             
@@ -523,7 +528,7 @@ final class CaptureStaticScanTests: XCTestCase {
                     for (index, line) in lines.enumerated() {
                         if line.contains("Timer") {
                             if index < lines.count - 1 && lines[index + 1].contains(".scheduledTimer") {
-                                XCTFail("[PR4][SCAN] banned_timer_scheduledTimer file=\(relativePath) match=Timer\\n.scheduledTimer at line \(index + 1): \(line.trimmingCharacters(in: .whitespaces))")
+                                XCTFail("[PR4][SCAN] banned_timer_scheduledTimer file=\(relativePath) match=Timer\\n.scheduledTimer at line \(index + 1): \(line.trimmingCharacters(in: CharacterSet.whitespaces))")
                             }
                         }
                     }
@@ -568,10 +573,10 @@ final class CaptureStaticScanTests: XCTestCase {
             }
             
             let relativePath = fileURL.path.replacingOccurrences(of: coreConstantsDir.path + "/", with: "")
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -619,10 +624,10 @@ final class CaptureStaticScanTests: XCTestCase {
             }
             
             let relativePath = fileURL.path.replacingOccurrences(of: captureDir.path + "/", with: "")
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             
             for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
                     continue
@@ -642,10 +647,9 @@ final class CaptureStaticScanTests: XCTestCase {
     // Allowlist: EMPTY (closed set empty) - no crash primitives allowed in PR4 scope
     
     func test_captureBansCrashPrimitives() {
-        // Scan App/Capture and Tests/CaptureTests
+        // Scan ONLY App/Capture (production code) - do NOT scan Tests/ to avoid self-trigger
         let scanDirs = [
-            ("App/Capture", "App/Capture"),
-            ("Tests/CaptureTests", "Tests/CaptureTests")
+            ("App/Capture", "App/Capture")
         ]
         
         // Closed set allowlist: EMPTY (no exceptions)
@@ -678,10 +682,10 @@ final class CaptureStaticScanTests: XCTestCase {
                 }
                 
                 let fileRelativePath = fileURL.path.replacingOccurrences(of: scanDir.path + "/", with: "")
-                let lines = content.components(separatedBy: .newlines)
+                let lines = content.components(separatedBy: CharacterSet.newlines)
                 
                 for (index, line) in lines.enumerated() {
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                     // Skip comments
                     if trimmed.hasPrefix("//") {
                         continue
@@ -694,6 +698,158 @@ final class CaptureStaticScanTests: XCTestCase {
                     }
                 }
             }
+        }
+    }
+    
+    // MARK: - Duplicate Filename Ban (Rule H)
+    // Rule: Repository must not contain duplicate files with " 2.swift" or " * [0-9].swift" suffix
+    // Allowlist: EMPTY (closed set empty) - no duplicate files allowed
+    
+    func test_repoBansDuplicateFilenames() {
+        // CI-HARDENED: Use git ls-files -z for safe handling of filenames with spaces.
+        // Closed-world: git is required for this test (fail-fast if missing).
+        // ANTI-HANG: Filter to *.swift only, read pipes AFTER process exits, truncate output to 1MB max.
+        // Rule H / Duplicate filename ban: Ban tracked Swift files ending with numeric suffix (e.g. "Foo 2.swift", "Bar10.swift").
+        
+        let process = Process()
+        // Try common git paths (Linux CI compatible)
+        let gitPaths = ["/usr/bin/git", "/usr/local/bin/git", "git"]
+        var gitPath: String?
+        
+        for path in gitPaths {
+            if path == "git" {
+                // Try to find git in PATH
+                let whichProcess = Process()
+                whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+                whichProcess.arguments = ["git"]
+                let whichPipe = Pipe()
+                whichProcess.standardOutput = whichPipe
+                if (try? whichProcess.run()) != nil {
+                    whichProcess.waitUntilExit()
+                    if whichProcess.terminationStatus == 0 {
+                        let data = whichPipe.fileHandleForReading.readDataToEndOfFile()
+                        if let pathStr = String(data: data, encoding: .utf8)?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines),
+                           !pathStr.isEmpty {
+                            gitPath = pathStr
+                            break
+                        }
+                    }
+                }
+            } else {
+                if FileManager.default.fileExists(atPath: path) {
+                    gitPath = path
+                    break
+                }
+            }
+        }
+        
+        guard let git = gitPath else {
+            XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: git is required. Run inside a git repo / ensure CI provides git.")
+            return
+        }
+        
+        process.executableURL = URL(fileURLWithPath: git)
+        // Closed set: Filter to Swift files only, -- prevents path from being treated as flag
+        process.arguments = ["ls-files", "-z", "--", "*.swift"]
+        
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        
+        guard (try? process.run()) != nil else {
+            XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: Could not run git ls-files. Ensure git is available and you are in a git repository.")
+            return
+        }
+        
+        // ANTI-HANG: Timeout watchdog (5 seconds)
+        let timeoutSeconds: TimeInterval = 5.0
+        let timeoutTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInitiated))
+        var wasTimeout = false
+        let timeoutLock = NSLock()
+        
+        timeoutTimer.schedule(deadline: .now() + timeoutSeconds, repeating: .never)
+        timeoutTimer.setEventHandler {
+            timeoutLock.lock()
+            defer { timeoutLock.unlock() }
+            if process.isRunning {
+                wasTimeout = true
+                process.terminate()
+            }
+        }
+        timeoutTimer.resume()
+        
+        // ANTI-HANG: Wait for process to exit BEFORE reading pipes (prevents deadlock)
+        process.waitUntilExit()
+        
+        timeoutLock.lock()
+        let timedOut = wasTimeout
+        timeoutLock.unlock()
+        timeoutTimer.cancel()
+        
+        // ANTI-HANG: Close write ends of pipes after process exits, then read
+        stdoutPipe.fileHandleForWriting.closeFile()
+        stderrPipe.fileHandleForWriting.closeFile()
+        
+        // Check for timeout termination
+        if timedOut {
+            XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: git ls-files timed out after \(timeoutSeconds)s. Process terminated. Ensure repository is not too large or git is responsive.")
+            return
+        }
+        
+        guard process.terminationStatus == 0 else {
+            // Read stderr with 8KB limit for error reporting
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrLimit = min(stderrData.count, 8192)
+            let stderrTruncated = stderrData.prefix(stderrLimit)
+            let stderrStr = String(data: stderrTruncated, encoding: .utf8) ?? "<could not decode stderr>"
+            let truncatedNote = stderrData.count > 8192 ? " (truncated to 8KB)" : ""
+            XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: git ls-files failed with status \(process.terminationStatus)\(truncatedNote). stderr: \(stderrStr)")
+            return
+        }
+        
+        // ANTI-HANG: Read output AFTER process exits and pipes closed, with 1MB limit to prevent memory explosion
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let maxOutputSize = 1024 * 1024  // 1MB limit
+        let truncatedData = stdoutData.count > maxOutputSize ? stdoutData.prefix(maxOutputSize) : stdoutData
+        
+        guard !truncatedData.isEmpty else {
+            XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: git ls-files returned empty output")
+            return
+        }
+        
+        if stdoutData.count > maxOutputSize {
+            XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: git ls-files output exceeded 1MB limit (got \(stdoutData.count) bytes). Repository may be too large for this test.")
+            return
+        }
+        
+        // Parse NUL-separated output (closed set: only Swift files)
+        let files = truncatedData.split(separator: 0).compactMap { String(data: Data($0), encoding: .utf8) }.filter { !$0.isEmpty }
+        
+        // Closed set allowlist: EMPTY (no exceptions)
+        // Ban pattern: any Swift file basename ending with one or more digits + ".swift"
+        // Regex: .*[0-9]+\.swift$ (matches "Foo 2.swift", "Foo2.swift", but NOT "Foo2Bar.swift")
+        do {
+            let regex = try NSRegularExpression(pattern: ".*[0-9]+\\.swift$", options: [])
+            
+            var violations: [String] = []
+            for file in files {
+                // Extract basename for pattern matching (closed set: only check filename, not path)
+                let basename = (file as NSString).lastPathComponent
+                let range = NSRange(basename.startIndex..., in: basename)
+                if regex.firstMatch(in: basename, options: [], range: range) != nil {
+                    violations.append(file)
+                }
+            }
+            
+            if !violations.isEmpty {
+                // Output control: only show first 20 violations
+                let violationList = violations.prefix(20).joined(separator: ", ")
+                let moreCount = violations.count > 20 ? " (+\(violations.count - 20) more)" : ""
+                XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: violation_count=\(violations.count). Files matching *[0-9]+.swift pattern: \(violationList)\(moreCount). Delete these duplicate files and merge any unique changes into the canonical files (without the number suffix).")
+            }
+        } catch {
+            XCTFail("[PR4][SCAN] Rule H / Duplicate filename ban: Failed to compile regex pattern: \(error)")
         }
     }
     
@@ -725,12 +881,12 @@ final class CaptureStaticScanTests: XCTestCase {
             }
             
             let relativePath = fileURL.path.replacingOccurrences(of: captureDir.path + "/", with: "")
-            let lines = content.components(separatedBy: .newlines)
+            let lines = content.components(separatedBy: CharacterSet.newlines)
             
             // Check for .asyncAfter(
             if content.contains(".asyncAfter(") {
                 for (index, line) in lines.enumerated() {
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                     // Skip comments
                     if trimmed.hasPrefix("//") {
                         continue

@@ -10,6 +10,7 @@
 
 import XCTest
 import Foundation
+import Aether3DCore
 
 final class CorePortabilitySmokeTests: XCTestCase {
     
@@ -32,10 +33,11 @@ final class CorePortabilitySmokeTests: XCTestCase {
         XCTAssertGreaterThan(timescale, 0, "timescale must be positive")
         
         // Test bitrate estimation (deterministic function)
-        // Note: ResolutionTier is defined in App/Capture/CaptureMetadata.swift
-        // For this smoke test, we only verify Core constants are accessible
-        // The bitrate functions require ResolutionTier which is in App/Capture, so we skip that here
-        // The key verification is that Core/Constants compiles without AVFoundation
+        // ResolutionTier is now defined in Core/Constants/ResolutionTier.swift
+        // Verify we can call bitrate functions with Core types
+        let tier = ResolutionTier.t1080p
+        let bitrate = CaptureRecordingConstants.estimatedBitrate(tier: tier, fps: 30.0)
+        XCTAssertGreaterThan(bitrate, 0, "estimatedBitrate must return positive value")
         
         // Test polling constants
         let pollSmall = CaptureRecordingConstants.fileSizePollIntervalSmallFile

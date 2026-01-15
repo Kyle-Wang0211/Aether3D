@@ -76,13 +76,8 @@ enum DurationSource: String, Codable {
     case wallclock
 }
 
-enum ResolutionTier: String, Codable {
-    case t8K = "8K"
-    case t4K = "4K"
-    case t1080p = "1080p"
-    case t720p = "720p"
-    case lower = "lower"
-}
+// ResolutionTier is now defined in Core/Constants/ResolutionTier.swift
+// Import via Aether3DCore module (or Foundation if in same module)
 
 enum WarningCode: String, Codable {
     // Device/Thermal Warnings

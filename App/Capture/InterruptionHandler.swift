@@ -12,29 +12,6 @@ import UIKit
 // CI-HARDENED: This file must not use DispatchQueue.main.asyncAfter.
 // All timer operations must use injected TimerScheduler for determinism.
 
-// CI-HARDENED: TimerScheduler protocol for deterministic timers (no asyncAfter in production code)
-private protocol TimerScheduler {
-    @discardableResult
-    func schedule(after: TimeInterval, _ block: @escaping () -> Void) -> Cancellable
-}
-
-private protocol Cancellable {
-    func cancel()
-}
-
-private struct DefaultTimerScheduler: TimerScheduler {
-    @discardableResult
-    func schedule(after: TimeInterval, _ block: @escaping () -> Void) -> Cancellable {
-        let timer = Timer.scheduledTimer(withTimeInterval: after, repeats: false) { _ in block() }
-        return TimerCancellable(timer: timer)
-    }
-}
-
-private struct TimerCancellable: Cancellable {
-    let timer: Timer
-    func cancel() { timer.invalidate() }
-}
-
 final class InterruptionHandler {
     private let session: AVCaptureSession
     private let onInterruptionBegan: (InterruptionReasonCode) -> Void

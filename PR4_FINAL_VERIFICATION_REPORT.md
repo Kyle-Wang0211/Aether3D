@@ -9,6 +9,11 @@
 - **SSOT-Change: yes** - 本PR修改了 `Core/Constants/CaptureRecordingConstants.swift`，因此需要SSOT-Change声明
 - **原因**: 添加了 `cmTimePreferredTimescale` 常量，并移除了AVFoundation依赖，确保Core模块可在非Apple平台编译
 
+**重复文件修复**:
+- **根因**: Finder创建的重复文件（"* 2.swift"）导致类型重复声明和编译错误
+- **修复**: 删除所有重复文件（`APIError 2.swift`, `APIContract 2.swift`, `APIEndpoints 2.swift`）
+- **防护**: 添加Rule H静态扫描防止未来回归
+
 ---
 
 ## 📋 执行摘要
@@ -420,6 +425,7 @@ let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .user
 | Rule E (AVFoundation in Core) | **无** | 0 |
 | Rule F (Hardcoded timescale) | **无** | 0 |
 | Rule G (Crash primitives) | **无** | 0 |
+| Rule H (Duplicate filenames) | **无** | 0 |
 
 ---
 
@@ -482,4 +488,70 @@ xcodebuild test -scheme <scheme-name> -only-testing:CaptureTests/CaptureStaticSc
 - 文件名和行号
 - 违规模式
 - 失败消息格式：`[PR4][SCAN] <rule_name> file=<path> match=<pattern> at line <n>`
+
+---
+
+## 🚪 本地门控（Local Gate）
+
+### 快速模式（--quick）
+
+用于快速本地验证，跳过完整构建：
+
+```bash
+./scripts/local_gate.sh --quick
+```
+
+**执行内容**:
+1. `02_prohibit_fatal_patterns.sh` - 禁止模式扫描
+2. `03_require_ssot_declaration.sh` - SSOT声明检查
+3. `swift test --filter CaptureStaticScanTests` - 静态扫描测试
+
+**零依赖保证**: 不需要brew或ripgrep，仅使用默认工具（grep, git, swift）
+
+### 完整模式（默认）
+
+用于完整CI验证：
+
+```bash
+./scripts/local_gate.sh
+```
+
+**执行内容**:
+1. `02_prohibit_fatal_patterns.sh` - 禁止模式扫描
+2. `03_require_ssot_declaration.sh` - SSOT声明检查
+3. `swift test --filter CaptureStaticScanTests` - 静态扫描测试
+4. `swift build` - 完整构建
+
+### 依赖检查
+
+脚本会自动检查以下命令是否存在：
+- `swift` - Swift工具链
+- `git` - Git版本控制
+- `grep` - 文本搜索（默认工具）
+
+如果缺少任何依赖，脚本会：
+- 显示清晰的错误消息
+- 提供安装提示
+- 以退出码1退出（fail-fast）
+
+### 02_prohibit_fatal_patterns.sh 扫描策略
+
+**策略**: 仅扫描 `App/Capture`，测试由Swift测试规则验证
+
+**实现**:
+- 扫描范围：仅 `App/Capture/**/*.swift`
+- 不扫描 `Tests/CaptureTests`（由 `swift test --filter CaptureStaticScanTests` 验证）
+- Allowlist（封闭集合）:
+  - `DefaultClockProvider` 文件允许 `Date()`
+  - `DefaultTimerScheduler` 文件允许 `Timer.scheduledTimer`
+
+**安全性**: 
+- 封闭集合：仅扫描生产代码目录
+- 测试验证分离：测试文件由Swift单元测试验证
+- 最小allowlist：仅允许特定实现文件中的特定模式
+
+**为什么安全**:
+- 扫描范围明确（仅App/Capture）
+- 测试验证由Swift测试规则处理，避免shell脚本复杂性
+- Allowlist基于文件名匹配，确定性高
 

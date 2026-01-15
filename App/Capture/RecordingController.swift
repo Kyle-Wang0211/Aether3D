@@ -33,18 +33,9 @@ private protocol FileManagerProvider {
     func freeDiskBytes(for url: URL) -> UInt64?
 }
 
-private protocol ClockProvider {
-    func now() -> Date
-}
-
-private protocol TimerScheduler {
-    @discardableResult
-    func schedule(after: TimeInterval, _ block: @escaping () -> Void) -> Cancellable
-}
-
-private protocol Cancellable {
-    func cancel()
-}
+// ClockProvider and TimerScheduler protocols are defined in dedicated files:
+// - App/Capture/ClockProvider.swift
+// - App/Capture/TimerScheduler.swift
 
 private protocol BundleInfoProvider {
     var appVersion: String { get }
@@ -87,22 +78,9 @@ private struct DefaultFileManagerProvider: FileManagerProvider {
     }
 }
 
-private struct DefaultClockProvider: ClockProvider {
-    func now() -> Date { Date() }
-}
-
-private struct DefaultTimerScheduler: TimerScheduler {
-    @discardableResult
-    func schedule(after: TimeInterval, _ block: @escaping () -> Void) -> Cancellable {
-        let timer = Timer.scheduledTimer(withTimeInterval: after, repeats: false) { _ in block() }
-        return TimerCancellable(timer: timer)
-    }
-}
-
-private struct TimerCancellable: Cancellable {
-    let timer: Timer
-    func cancel() { timer.invalidate() }
-}
+// DefaultClockProvider and DefaultTimerScheduler are defined in dedicated files:
+// - App/Capture/ClockProvider.swift
+// - App/Capture/TimerScheduler.swift
 
 private struct DefaultBundleInfoProvider: BundleInfoProvider {
     var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown" }
@@ -139,6 +117,7 @@ final class RecordingController: NSObject {
     private var currentOrientation: AVCaptureVideoOrientation = .portrait
     private var sizePollToken: Cancellable?
     private var processingFinishEpoch: Int?
+    private let workerQueue = DispatchQueue(label: "app.capture.recordingcontroller.worker", qos: .userInitiated)
     
     var onFinish: ((Result<CaptureMetadata, RecordingError>) -> Void)?
     var onStateChange: ((String) -> Void)?
@@ -464,7 +443,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
             self.processingFinishEpoch = snapshotEpoch
             
             // === PHASE 1: Background - gather file info ===
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            workerQueue.async { [weak self] in
                 guard let self = self else { return }
                 
                 let budgetStart = self.clock.now()
@@ -585,7 +564,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
             if let duration = effectiveDuration,
                duration < (CaptureRecordingConstants.minDurationSeconds - CaptureRecordingConstants.durationTolerance) {
                 // tooShort: delete tmp file
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                workerQueue.async { [weak self] in
                     guard let self = self else { return }
                     do {
                         try self.fileManager.removeItem(at: outputFileURL)
@@ -621,7 +600,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
             }
             
             // Route to Phase 3
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            workerQueue.async { [weak self] in
                 self?.executePhase3(
                     tmpURL: outputFileURL,
                     finalURL: finalURL,
