@@ -23,9 +23,10 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Setup Swift
-        uses: swift-actions/setup-swift@v1
+        uses: swift-actions/setup-swift@v2
         with:
           swift-version: ${{ matrix.swift-version }}
+          skip-verify-signature: ${{ matrix.os == 'ubuntu-22.04' }}
       
       - name: Platform Diagnostics
         run: |
@@ -37,59 +38,71 @@ jobs:
       
       - name: Platform Drift Guard
         run: |
+          set -euo pipefail
           echo "=== Checking for unconditional Apple framework imports ==="
-          set +e
-          # List of Apple-only frameworks that must be conditionally imported
-          APPLE_FRAMEWORKS="CoreMotion|CoreGraphics|UIKit|AppKit|AVFoundation|CoreLocation|Metal|ARKit|SceneKit|RealityKit"
           
-          # Check for unconditional imports of Apple frameworks
-          # Pattern: find lines with "import <Framework>" that are NOT inside #if canImport blocks
-          UNGUARDED_IMPORTS=$(find Core/Quality/ -name "*.swift" -exec awk -v frameworks="$APPLE_FRAMEWORKS" '
-            BEGIN {
-              split(frameworks, fwArray, "|")
+          # List of Apple-only frameworks that must be conditionally imported
+          # Use heredoc to avoid quoting issues
+          cat > /tmp/drift_guard.awk <<'AWK_EOF'
+          BEGIN {
+            frameworks[1] = "CoreMotion"
+            frameworks[2] = "CoreGraphics"
+            frameworks[3] = "UIKit"
+            frameworks[4] = "AppKit"
+            frameworks[5] = "AVFoundation"
+            frameworks[6] = "CoreLocation"
+            frameworks[7] = "Metal"
+            frameworks[8] = "ARKit"
+            frameworks[9] = "SceneKit"
+            frameworks[10] = "RealityKit"
+            frameworks[11] = "Accelerate"
+            numFrameworks = 11
+            found = 0
+          }
+          /^[[:space:]]*#if canImport\(/ {
+            guarded = 1
+            for (i = 1; i <= numFrameworks; i++) {
+              if (index($0, frameworks[i]) > 0) {
+                guardedFramework = frameworks[i]
+                break
+              }
             }
-            /^[[:space:]]*#if canImport\(/ { 
-              guarded=1
-              # Check if this canImport matches any Apple framework
-              for (i in fwArray) {
-                if ($0 ~ fwArray[i]) {
-                  guardedFramework=fwArray[i]
+            next
+          }
+          /^[[:space:]]*#endif/ {
+            guarded = 0
+            guardedFramework = ""
+            next
+          }
+          /^[[:space:]]*import[[:space:]]+/ {
+            for (i = 1; i <= numFrameworks; i++) {
+              if (match($0, "^[[:space:]]*import[[:space:]]+" frameworks[i] "[^a-zA-Z]")) {
+                if (!guarded || guardedFramework != frameworks[i]) {
+                  print FILENAME ":" NR ":" $0
+                  found = 1
                   break
                 }
               }
-              next
             }
-            /^[[:space:]]*#endif/ { 
-              guarded=0
-              guardedFramework=""
-              next
-            }
-            {
-              # Check if this line imports any Apple framework
-              for (i in fwArray) {
-                if ($0 ~ "^[[:space:]]*import " fwArray[i] "[^a-zA-Z]") {
-                  if (!guarded || guardedFramework != fwArray[i]) {
-                    print FILENAME":"NR":"$0
-                    break
-                  }
-                }
-              }
-              # Reset guarded state if we're not in a multi-line conditional block
-              if (!/^[[:space:]]*#/) {
-                guarded=0
-                guardedFramework=""
-              }
-            }
-          ' {} \; || true)
+          }
+          END {
+            exit found ? 1 : 0
+          }
+          AWK_EOF
           
-          if [ -n "$UNGUARDED_IMPORTS" ]; then
+          # Run the guard check
+          set +e
+          UNGUARDED_IMPORTS=$(find Core/Quality/ -name "*.swift" -type f -exec awk -f /tmp/drift_guard.awk {} + 2>&1)
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ] || [ -n "$UNGUARDED_IMPORTS" ]; then
             echo "FAIL: Found unconditional Apple framework imports (must be guarded with #if canImport(<Framework>)):"
             echo "$UNGUARDED_IMPORTS"
             exit 1
           fi
           
-          echo "✅ Platform drift guard passed (checked: $APPLE_FRAMEWORKS)"
-          set -e
+          echo "✅ Platform drift guard passed (checked: CoreMotion, CoreGraphics, UIKit, AppKit, AVFoundation, CoreLocation, Metal, ARKit, SceneKit, RealityKit, Accelerate)"
       
       - name: Build (All Platforms)
         env:
@@ -219,6 +232,25 @@ jobs:
             fi
           else
             echo "✅ PoseSnapshotTests passed"
+          fi
+          
+          # BrightnessAnalyzerPlatformTests: cross-platform brightness (required)
+          echo "Running BrightnessAnalyzerPlatformTests..."
+          set +e
+          BRIGHTNESS_TEST_OUTPUT=$(swift test --filter BrightnessAnalyzerPlatformTests 2>&1)
+          BRIGHTNESS_TEST_EXIT=$?
+          set -e
+          if [ $BRIGHTNESS_TEST_EXIT -ne 0 ]; then
+            if echo "$BRIGHTNESS_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: BrightnessAnalyzerPlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: BrightnessAnalyzerPlatformTests failed"
+              echo "$BRIGHTNESS_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ BrightnessAnalyzerPlatformTests passed"
           fi
           
           echo "=== All platform-safe tests completed ==="

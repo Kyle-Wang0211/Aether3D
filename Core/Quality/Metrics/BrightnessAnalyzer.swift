@@ -4,10 +4,13 @@
 //
 //  PR#5 Quality Pre-check - Milestone 2
 //  BrightnessAnalyzer - brightness analysis with three-tier degradation
+//  Cross-platform: uses Accelerate on Apple platforms, pure Swift fallback on Linux
 //
 
 import Foundation
+#if canImport(Accelerate)
 import Accelerate
+#endif
 
 /// BrightnessResult - result of brightness analysis
 public struct BrightnessResult: Codable {
