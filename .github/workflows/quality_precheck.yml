@@ -12,10 +12,12 @@ jobs:
   quality-gates:
     strategy:
       matrix:
-        os: [macos-14, ubuntu-latest]
+        os: [macos-14, ubuntu-22.04]
         swift-version: ["5.9"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
+    # Note: ubuntu-22.04 is pinned because setup-swift@v1 does not support ubuntu-24.04
+    # This prevents silent breakage when ubuntu-latest updates to an unsupported version
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,40 +39,56 @@ jobs:
         run: |
           echo "=== Checking for unconditional Apple framework imports ==="
           set +e
-          # Check for unconditional CoreMotion imports (must be guarded with #if canImport)
-          # Pattern: find lines with "import CoreMotion" that are NOT preceded by "#if canImport(CoreMotion)" on the previous line
-          # Use awk to check context: if line contains "import CoreMotion" and previous line doesn't contain "#if canImport(CoreMotion)", flag it
-          UNGUARDED_IMPORTS=$(find Core/Quality/ -name "*.swift" -exec awk '
-            /^[[:space:]]*#if canImport\(CoreMotion\)/ { guarded=1; next }
-            /^[[:space:]]*#endif/ { guarded=0; next }
-            /^[[:space:]]*import CoreMotion/ {
-              if (!guarded) {
-                print FILENAME":"NR":"$0
+          # List of Apple-only frameworks that must be conditionally imported
+          APPLE_FRAMEWORKS="CoreMotion|CoreGraphics|UIKit|AppKit|AVFoundation|CoreLocation|Metal|ARKit|SceneKit|RealityKit"
+          
+          # Check for unconditional imports of Apple frameworks
+          # Pattern: find lines with "import <Framework>" that are NOT inside #if canImport blocks
+          UNGUARDED_IMPORTS=$(find Core/Quality/ -name "*.swift" -exec awk -v frameworks="$APPLE_FRAMEWORKS" '
+            BEGIN {
+              split(frameworks, fwArray, "|")
+            }
+            /^[[:space:]]*#if canImport\(/ { 
+              guarded=1
+              # Check if this canImport matches any Apple framework
+              for (i in fwArray) {
+                if ($0 ~ fwArray[i]) {
+                  guardedFramework=fwArray[i]
+                  break
+                }
+              }
+              next
+            }
+            /^[[:space:]]*#endif/ { 
+              guarded=0
+              guardedFramework=""
+              next
+            }
+            {
+              # Check if this line imports any Apple framework
+              for (i in fwArray) {
+                if ($0 ~ "^[[:space:]]*import " fwArray[i] "[^a-zA-Z]") {
+                  if (!guarded || guardedFramework != fwArray[i]) {
+                    print FILENAME":"NR":"$0
+                    break
+                  }
+                }
+              }
+              # Reset guarded state if we're not in a multi-line conditional block
+              if (!/^[[:space:]]*#/) {
+                guarded=0
+                guardedFramework=""
               }
             }
-            { guarded=0 }
           ' {} \; || true)
+          
           if [ -n "$UNGUARDED_IMPORTS" ]; then
-            echo "FAIL: Found unconditional CoreMotion imports (must be guarded with #if canImport(CoreMotion)):"
+            echo "FAIL: Found unconditional Apple framework imports (must be guarded with #if canImport(<Framework>)):"
             echo "$UNGUARDED_IMPORTS"
             exit 1
           fi
-          # Check for other Apple-only frameworks that might be imported unconditionally
-          UNGUARDED_APPLE=$(find Core/Quality/ -name "*.swift" -exec awk '
-            /^[[:space:]]*#if canImport\(/ { guarded=1; next }
-            /^[[:space:]]*#endif/ { guarded=0; next }
-            /^[[:space:]]*import (UIKit|AppKit|AVFoundation|CoreLocation)/ {
-              if (!guarded) {
-                print FILENAME":"NR":"$0
-              }
-            }
-            { guarded=0 }
-          ' {} \; || true)
-          if [ -n "$UNGUARDED_APPLE" ]; then
-            echo "WARNING: Found unconditional Apple framework imports (may be acceptable):"
-            echo "$UNGUARDED_APPLE"
-          fi
-          echo "✅ Platform drift guard passed"
+          
+          echo "✅ Platform drift guard passed (checked: $APPLE_FRAMEWORKS)"
           set -e
       
       - name: Build (All Platforms)
@@ -95,19 +113,113 @@ jobs:
           bash ./scripts/quality_gate.sh
       
       - name: Run Platform-Safe Tests (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         env:
-          LC_ALL: C
-          LANG: C
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
         run: |
           set -x
           cd "$(git rev-parse --show-toplevel)"
+          chmod +x scripts/*.sh scripts/hooks/* || true
+          
           # List all tests to verify compilation
+          echo "=== Listing available tests ==="
           swift test --list-tests || echo "Test listing failed (may be acceptable)"
-          # Run tests that don't require Apple frameworks
-          # WhiteCommitTests should be platform-agnostic (SQLite-based)
-          swift test --filter WhiteCommitTests || echo "WhiteCommitTests failed (check logs)"
-          # Run fixture and determinism tests (should be platform-agnostic)
-          swift test --filter QualityPreCheckFixtures || echo "Fixture tests failed (check logs)"
-          swift test --filter QualityPreCheckDeterminism || echo "Determinism tests failed (check logs)"
+          
+          # Run platform-safe tests (explicit filters, no discovery dependency)
+          echo "=== Running platform-safe tests ==="
+          
+          # WhiteCommitTests: platform-agnostic (SQLite-based)
+          echo "Running WhiteCommitTests..."
+          set +e
+          WHITE_TEST_OUTPUT=$(swift test --filter WhiteCommitTests 2>&1)
+          WHITE_TEST_EXIT=$?
+          set -e
+          if [ $WHITE_TEST_EXIT -ne 0 ]; then
+            if echo "$WHITE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: WhiteCommitTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: WhiteCommitTests failed"
+              echo "$WHITE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          fi
+          echo "✅ WhiteCommitTests passed"
+          
+          # Fixture tests: platform-agnostic (JSON parsing)
+          echo "Running QualityPreCheckFixtures..."
+          set +e
+          FIXTURE_TEST_OUTPUT=$(swift test --filter QualityPreCheckFixtures 2>&1)
+          FIXTURE_TEST_EXIT=$?
+          set -e
+          if [ $FIXTURE_TEST_EXIT -ne 0 ]; then
+            if echo "$FIXTURE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "⚠️  QualityPreCheckFixtures matched 0 tests (acceptable if fixtures tested elsewhere)"
+            else
+              echo "FAIL: QualityPreCheckFixtures failed"
+              echo "$FIXTURE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ QualityPreCheckFixtures passed"
+          fi
+          
+          # Determinism tests: platform-agnostic (math/encoding)
+          echo "Running QualityPreCheckDeterminism..."
+          set +e
+          DETERMINISM_TEST_OUTPUT=$(swift test --filter QualityPreCheckDeterminism 2>&1)
+          DETERMINISM_TEST_EXIT=$?
+          set -e
+          if [ $DETERMINISM_TEST_EXIT -ne 0 ]; then
+            if echo "$DETERMINISM_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "⚠️  QualityPreCheckDeterminism matched 0 tests (acceptable if tested elsewhere)"
+            else
+              echo "FAIL: QualityPreCheckDeterminism failed"
+              echo "$DETERMINISM_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ QualityPreCheckDeterminism passed"
+          fi
+          
+          # DeterministicTriangulatorPlatformTests: cross-platform geometry
+          echo "Running DeterministicTriangulatorPlatformTests..."
+          set +e
+          TRIANG_TEST_OUTPUT=$(swift test --filter DeterministicTriangulatorPlatformTests 2>&1)
+          TRIANG_TEST_EXIT=$?
+          set -e
+          if [ $TRIANG_TEST_EXIT -ne 0 ]; then
+            if echo "$TRIANG_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: DeterministicTriangulatorPlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: DeterministicTriangulatorPlatformTests failed"
+              echo "$TRIANG_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ DeterministicTriangulatorPlatformTests passed"
+          fi
+          
+          # PoseSnapshotTests: cross-platform pose
+          echo "Running PoseSnapshotTests..."
+          set +e
+          POSE_TEST_OUTPUT=$(swift test --filter PoseSnapshotTests 2>&1)
+          POSE_TEST_EXIT=$?
+          set -e
+          if [ $POSE_TEST_EXIT -ne 0 ]; then
+            if echo "$POSE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "⚠️  PoseSnapshotTests matched 0 tests (acceptable if tested elsewhere)"
+            else
+              echo "FAIL: PoseSnapshotTests failed"
+              echo "$POSE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ PoseSnapshotTests passed"
+          fi
+          
+          echo "=== All platform-safe tests completed ==="
 

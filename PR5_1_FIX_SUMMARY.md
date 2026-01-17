@@ -314,7 +314,107 @@ grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if c
 
 ## Status Summary
 
-**Progress**: All SQLite constraint issues resolved (18/18 tests passing), CI-only failures fixed, cross-platform compilation enabled  
+**Progress**: All SQLite constraint issues resolved (18/18 tests passing), CI-only failures fixed, cross-platform compilation enabled, Linux hardening complete  
 **Blockers**: None  
 **Next**: Monitor CI for stability, ensure all gates pass consistently on both macOS and Linux
+
+---
+
+## CI Linux Hardening: CoreGraphics + Ubuntu Pin (2025-01-18)
+
+### Problem
+- CI failures on Linux runners:
+  1. `error: no such module 'CoreGraphics'` in `DeterministicTriangulator.swift`
+  2. `swift-actions/setup-swift@v1` does not support Ubuntu 24.04 (`ubuntu-latest`)
+  3. Cascading failures: Preflight/Test&Lint/Gate jobs failing due to Linux compilation errors
+
+### Root Cause
+- `DeterministicTriangulator.swift` unconditionally imported `CoreGraphics` (Apple-only framework)
+- `ubuntu-latest` updated to 24.04, which is not supported by `setup-swift@v1`
+- Linux CI jobs attempted to build code with Apple-only dependencies
+
+### Fixes Applied
+
+#### 1. Cross-Platform DeterministicTriangulator ✅
+- **Updated `Core/Quality/Geometry/DeterministicTriangulator.swift`**:
+  - Removed unconditional `import CoreGraphics`
+  - Introduced `QPoint` struct (cross-platform point type using `Double`)
+  - Changed all `CGPoint` → `QPoint`, `CGFloat` → `Double`
+  - Added conditional bridging: `#if canImport(CoreGraphics)` convenience methods for Apple platforms
+  - API remains stable: `triangulateQuad` works on all platforms with `QPoint`, optional `CGPoint` overload on Apple
+
+#### 2. Platform-Safe Tests ✅
+- **Created `Tests/QualityPreCheck/DeterministicTriangulatorPlatformTests.swift`**:
+  - 6 tests validating cross-platform compilation and deterministic behavior
+  - Tests QPoint initialization, equality, triangulation determinism, sorting
+  - Platform-specific tests: CGPoint bridging on Apple, Linux compilation test on Linux
+
+#### 3. Ubuntu Runner Pin ✅
+- **Updated `.github/workflows/quality_precheck.yml`**:
+  - Changed `ubuntu-latest` → `ubuntu-22.04` (explicit pin)
+  - Added comment explaining why: `setup-swift@v1` does not support Ubuntu 24.04
+  - Prevents silent breakage when `ubuntu-latest` updates
+
+- **Updated `.github/workflows/ci.yml`**:
+  - Changed `preflight` job: `ubuntu-latest` → `ubuntu-22.04`
+  - Updated `test-and-lint` job: runs platform-safe tests only on Linux
+  - Added platform diagnostics: `uname -a`, `/etc/os-release`, `swift --version`
+
+#### 4. Platform-Safe Test Execution ✅
+- **Linux CI now runs explicit filters**:
+  - `WhiteCommitTests` (required, SQLite-based)
+  - `QualityPreCheckFixtures` (optional, JSON parsing)
+  - `QualityPreCheckDeterminism` (optional, math/encoding)
+  - `DeterministicTriangulatorPlatformTests` (required, cross-platform geometry)
+  - `PoseSnapshotTests` (optional, cross-platform pose)
+- **macOS CI unchanged**: Still runs full `quality_gate.sh` with all tests
+
+#### 5. Enhanced Platform Drift Guard ✅
+- **Updated `.github/workflows/quality_precheck.yml`**:
+  - Extended to detect unconditional imports of: `CoreMotion`, `CoreGraphics`, `UIKit`, `AppKit`, `AVFoundation`, `CoreLocation`, `Metal`, `ARKit`, `SceneKit`, `RealityKit`
+  - Uses `awk` to check context: imports must be inside `#if canImport(...)` blocks
+  - Fails CI with clear file+line messages if unconditional imports found
+
+#### 6. CI Environment Hardening ✅
+- **Added deterministic environment variables**:
+  - `LC_ALL=en_US.UTF-8`, `LANG=en_US.UTF-8`, `TZ=UTC` (Linux)
+  - `chmod +x scripts/*.sh scripts/hooks/* || true` (ensure scripts executable)
+  - Platform diagnostics printed in all CI jobs
+
+### Verification
+- ✅ macOS: `swift package clean && ./scripts/quality_gate.sh` → All gates pass
+- ✅ macOS: `swift build` → Compiles successfully
+- ✅ macOS: `swift test --filter DeterministicTriangulatorPlatformTests` → 6 tests pass
+- ✅ Linux: Package compiles without CoreGraphics (verified via CI matrix)
+- ✅ Platform drift guard: Detects unconditional imports correctly
+
+### Files Modified
+- `Core/Quality/Geometry/DeterministicTriangulator.swift` (QPoint, conditional CoreGraphics)
+- `Tests/QualityPreCheck/DeterministicTriangulatorPlatformTests.swift` (new, cross-platform tests)
+- `.github/workflows/quality_precheck.yml` (ubuntu-22.04 pin, platform-safe tests, enhanced drift guard)
+- `.github/workflows/ci.yml` (ubuntu-22.04 pin, platform-safe tests)
+- `PR5_1_FIX_SUMMARY.md` (this section)
+
+### How to Reproduce CI Locally
+
+**On macOS:**
+```bash
+swift package clean
+./scripts/quality_gate.sh
+```
+
+**On Linux (or Docker):**
+```bash
+# Install Swift toolchain
+swift package clean
+swift build
+swift test --filter WhiteCommitTests
+swift test --filter DeterministicTriangulatorPlatformTests
+```
+
+**Check for platform drift:**
+```bash
+# Should find no unconditional imports
+find Core/Quality/ -name "*.swift" -exec awk '/^[[:space:]]*#if canImport\(/ { guarded=1 } /^[[:space:]]*#endif/ { guarded=0 } /^[[:space:]]*import (CoreMotion|CoreGraphics|UIKit|AppKit)/ { if (!guarded) print FILENAME":"NR":"$0 }' {} \;
+```
 
