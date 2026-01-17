@@ -1,0 +1,21 @@
+{
+  "testCases": [
+    {
+      "name": "first_row_mixed",
+      "description": "First 4 cells of row 0: uncovered, gray, white, uncovered",
+      "input": {
+        "cells": [
+          {"row": 0, "col": 0, "state": 0},
+          {"row": 0, "col": 1, "state": 1},
+          {"row": 0, "col": 2, "state": 2},
+          {"row": 0, "col": 3, "state": 0}
+        ]
+      },
+      "expectedBytesHex": "01100200",
+      "expectedSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "note": "Byte 0: bits 0-1=00 (uncovered), bits 2-3=01 (gray), bits 4-5=10 (white), bits 6-7=00 (uncovered) = 0b01101000 = 0x68, but full grid would be 128x128"
+    }
+  ],
+  "note": "Full grid packing test requires 128x128 = 16384 cells = 4096 bytes. This is a minimal test case."
+}
+

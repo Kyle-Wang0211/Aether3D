@@ -25,7 +25,12 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants"]
+      exclude: ["Constants", "Audit/COVERAGE_GAPS_ANALYSIS.md"],
+      resources: [
+        .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
+        .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
+        .process("QualityPreCheck/Fixtures/CanonicalJSONFloatFixture.json")
+      ]
     ),
     .testTarget(
       name: "ConstantsTests",
