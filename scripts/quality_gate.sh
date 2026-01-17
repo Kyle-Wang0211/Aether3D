@@ -12,6 +12,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 echo "=== PR#5 Quality Pre-check Gates ==="
+echo ""
+echo "=== Platform Diagnostics ==="
+echo "Platform: $(uname -a)"
+echo "Swift version:"
+swift --version || echo "WARNING: swift --version failed"
+echo "Package root: $PROJECT_ROOT"
+echo "=============================="
+echo ""
 
 # Gate 0: Check for placeholder tests (must be first)
 echo "[0/5] Checking for placeholder tests..."
@@ -48,6 +56,15 @@ TEST_EXIT_CODE=$?
 set -e  # Re-enable strict mode
 
 if [ $TEST_EXIT_CODE -ne 0 ]; then
+    # Check if failure is due to 0 matching tests (hard failure for Gate 1)
+    if echo "$TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+        echo "FAIL: Gate 1 (WhiteCommitTests) matched 0 tests - this is a hard failure"
+        echo "  This indicates misconfiguration or test suite not found"
+        echo "  Output:"
+        echo "$TEST_OUTPUT" | tail -50
+        exit 1
+    fi
+    
     echo "FAIL: Tests failed (exit code: $TEST_EXIT_CODE)"
     echo ""
     echo "=== Last 120 lines of test output ==="
@@ -65,6 +82,9 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
     echo ""
     echo "=== SQLite Constraint Errors ==="
     echo "$TEST_OUTPUT" | grep -E "SQLITE_CONSTRAINT|CHECK constraint failed|UNIQUE constraint failed|no such table" -A 2 -B 2 || echo "  (No SQLite constraint errors found in output)"
+    echo ""
+    echo "=== Compilation Errors ==="
+    echo "$TEST_OUTPUT" | grep -E "error:|warning:" | head -20 || echo "  (No compilation errors found in output)"
     exit 1
 fi
 

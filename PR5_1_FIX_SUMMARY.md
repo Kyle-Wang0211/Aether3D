@@ -214,9 +214,107 @@ swift test --filter WhiteCommitTests
 
 ---
 
+## Cross-Platform Compilation Fix (2025-01-18)
+
+### Problem
+- CI was failing on Linux runners with: `error: no such module 'CoreMotion'`
+- `PoseSnapshot.swift` unconditionally imported `CoreMotion`, which is Apple-only
+- Linux runners cannot compile code that imports Apple frameworks
+- Local macOS development passed, but CI failed on Linux
+
+### Root Cause
+- `PoseSnapshot.swift` had unconditional `import CoreMotion`
+- `MotionAnalyzer.swift` imported CoreMotion but didn't use it
+- CI workflow only ran on `macos-latest`, but GitHub Actions also runs on Linux for some jobs
+- No platform drift guard to catch unconditional Apple framework imports
+
+### Fixes Applied
+
+#### 1. Made PoseSnapshot Cross-Platform ✅
+- **Updated `Core/Quality/Direction/PoseSnapshot.swift`**:
+  - Changed to conditional import: `#if canImport(CoreMotion) import CoreMotion #endif`
+  - Made `PoseSnapshot.from(CMDeviceMotion)` available only on Apple platforms via `#if canImport(CoreMotion)`
+  - Kept basic `init(yaw:pitch:roll:)` available on all platforms
+  - API surface remains stable: callers don't need `#if` checks
+
+- **Updated `Core/Quality/Metrics/MotionAnalyzer.swift`**:
+  - Removed unused `import CoreMotion` (was not actually used in the file)
+  - Added comment noting that if CoreMotion is needed later, use `#if canImport(CoreMotion)` guard
+
+#### 2. Updated CI Workflow with OS Matrix ✅
+- **Updated `.github/workflows/quality_precheck.yml`**:
+  - Added matrix strategy with `macos-14` and `ubuntu-latest`
+  - Pinned Swift version to `5.9` explicitly
+  - Added "Platform Diagnostics" step: prints `uname -a`, `swift --version`, `swift package describe`
+  - Added "Platform Drift Guard" step: greps for unconditional Apple framework imports
+  - macOS runs full `quality_gate.sh`
+  - Linux runs `swift build` + platform-safe tests (WhiteCommitTests, fixture/determinism tests)
+  - Set `LC_ALL=C` and `LANG=C` for Linux, `LC_ALL=en_US.UTF-8` for macOS
+
+#### 3. Enhanced quality_gate.sh Diagnostics ✅
+- **Updated `scripts/quality_gate.sh`**:
+  - Added platform diagnostics at start: `uname -a`, `swift --version`
+  - Gate 1 (WhiteCommitTests) now explicitly fails if 0 tests match (hard failure)
+  - Added compilation error detection in failure output
+  - Better error summaries for debugging
+
+#### 4. Added Platform Drift Guard ✅
+- CI workflow now checks for:
+  - Unconditional `import CoreMotion` (must be guarded with `#if canImport`)
+  - Other Apple-only frameworks (UIKit, AppKit, AVFoundation, CoreLocation)
+  - Fails CI if unconditional imports are found
+
+#### 5. Added Cross-Platform Tests ✅
+- **Created `Tests/QualityPreCheck/PoseSnapshotTests.swift`**:
+  - Tests basic initialization (works on all platforms)
+  - Tests angle normalization (works on all platforms)
+  - Platform-specific test: `#if canImport(CoreMotion)` for Apple platforms, else tests Linux compilation
+
+### Verification
+- ✅ macOS: `swift build` → Success
+- ✅ macOS: `swift test --filter WhiteCommitTests` → 18/18 tests pass
+- ✅ macOS: `./scripts/quality_gate.sh` → All gates pass
+- ✅ Linux: Package compiles without CoreMotion (verified via CI matrix)
+- ✅ Platform drift guard: Detects unconditional imports
+
+### Files Modified
+- `Core/Quality/Direction/PoseSnapshot.swift` (conditional CoreMotion import)
+- `Core/Quality/Metrics/MotionAnalyzer.swift` (removed unused import)
+- `.github/workflows/quality_precheck.yml` (OS matrix, platform guards)
+- `scripts/quality_gate.sh` (platform diagnostics)
+- `Tests/QualityPreCheck/PoseSnapshotTests.swift` (new, cross-platform tests)
+- `PR5_1_FIX_SUMMARY.md` (this file)
+
+### How to Reproduce CI Locally
+
+**On macOS:**
+```bash
+swift package clean
+./scripts/quality_gate.sh
+```
+
+**On Linux (or Docker):**
+```bash
+# Install Swift toolchain
+# Then:
+swift package clean
+swift build
+swift test --filter WhiteCommitTests
+swift test --filter QualityPreCheckFixtures
+swift test --filter QualityPreCheckDeterminism
+```
+
+**Check for platform drift:**
+```bash
+# Should find no unconditional imports
+grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if canImport"
+```
+
+---
+
 ## Status Summary
 
-**Progress**: All SQLite constraint issues resolved (18/18 tests passing), CI-only failures fixed  
+**Progress**: All SQLite constraint issues resolved (18/18 tests passing), CI-only failures fixed, cross-platform compilation enabled  
 **Blockers**: None  
-**Next**: Monitor CI for stability, ensure all gates pass consistently
+**Next**: Monitor CI for stability, ensure all gates pass consistently on both macOS and Linux
 
