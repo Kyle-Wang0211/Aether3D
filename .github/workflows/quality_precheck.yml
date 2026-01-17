@@ -56,7 +56,8 @@ jobs:
             frameworks[9] = "SceneKit"
             frameworks[10] = "RealityKit"
             frameworks[11] = "Accelerate"
-            numFrameworks = 11
+            frameworks[12] = "CryptoKit"
+            numFrameworks = 12
             found = 0
           }
           /^[[:space:]]*#if canImport\(/ {
@@ -102,7 +103,7 @@ jobs:
             exit 1
           fi
           
-          echo "✅ Platform drift guard passed (checked: CoreMotion, CoreGraphics, UIKit, AppKit, AVFoundation, CoreLocation, Metal, ARKit, SceneKit, RealityKit, Accelerate)"
+          echo "✅ Platform drift guard passed (checked: CoreMotion, CoreGraphics, UIKit, AppKit, AVFoundation, CoreLocation, Metal, ARKit, SceneKit, RealityKit, Accelerate, CryptoKit)"
       
       - name: Build (All Platforms)
         env:
@@ -251,6 +252,25 @@ jobs:
             fi
           else
             echo "✅ BrightnessAnalyzerPlatformTests passed"
+          fi
+          
+          # SHA256UtilityPlatformTests: cross-platform SHA-256 hashing (required)
+          echo "Running SHA256UtilityPlatformTests..."
+          set +e
+          SHA256_TEST_OUTPUT=$(swift test --filter SHA256UtilityPlatformTests 2>&1)
+          SHA256_TEST_EXIT=$?
+          set -e
+          if [ $SHA256_TEST_EXIT -ne 0 ]; then
+            if echo "$SHA256_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: SHA256UtilityPlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: SHA256UtilityPlatformTests failed"
+              echo "$SHA256_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ SHA256UtilityPlatformTests passed"
           fi
           
           echo "=== All platform-safe tests completed ==="
