@@ -21,7 +21,12 @@ jobs:
           swift-version: "5.9"
       
       - name: Run Quality Gates
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
         run: |
-          chmod +x scripts/quality_gate.sh
-          ./scripts/quality_gate.sh
+          set -x
+          chmod +x scripts/*.sh scripts/hooks/pre-push scripts/install_hooks.sh || true
+          cd "$(git rev-parse --show-toplevel)"
+          bash ./scripts/quality_gate.sh
 
