@@ -28,6 +28,12 @@ jobs:
           swift-version: ${{ matrix.swift-version }}
           skip-verify-signature: ${{ matrix.os == 'ubuntu-22.04' }}
       
+      - name: Install system deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+      
       - name: Platform Diagnostics
         run: |
           echo "=== Platform Information ==="
@@ -57,7 +63,8 @@ jobs:
             frameworks[10] = "RealityKit"
             frameworks[11] = "Accelerate"
             frameworks[12] = "CryptoKit"
-            numFrameworks = 12
+            frameworks[13] = "SQLite3"
+            numFrameworks = 13
             found = 0
           }
           /^[[:space:]]*#if canImport\(/ {
@@ -103,7 +110,7 @@ jobs:
             exit 1
           fi
           
-          echo "✅ Platform drift guard passed (checked: CoreMotion, CoreGraphics, UIKit, AppKit, AVFoundation, CoreLocation, Metal, ARKit, SceneKit, RealityKit, Accelerate, CryptoKit)"
+          echo "✅ Platform drift guard passed (checked: CoreMotion, CoreGraphics, UIKit, AppKit, AVFoundation, CoreLocation, Metal, ARKit, SceneKit, RealityKit, Accelerate, CryptoKit, SQLite3)"
       
       - name: Build (All Platforms)
         env:
@@ -271,6 +278,25 @@ jobs:
             fi
           else
             echo "✅ SHA256UtilityPlatformTests passed"
+          fi
+          
+          # SQLitePlatformTests: cross-platform SQLite linkage (required)
+          echo "Running SQLitePlatformTests..."
+          set +e
+          SQLITE_TEST_OUTPUT=$(swift test --filter SQLitePlatformTests 2>&1)
+          SQLITE_TEST_EXIT=$?
+          set -e
+          if [ $SQLITE_TEST_EXIT -ne 0 ]; then
+            if echo "$SQLITE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: SQLitePlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: SQLitePlatformTests failed"
+              echo "$SQLITE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ SQLitePlatformTests passed"
           fi
           
           echo "=== All platform-safe tests completed ==="

@@ -7,7 +7,7 @@
 //
 
 import Foundation
-import SQLite3
+import CSQLite
 
 /// QualityDatabase - SQLite database wrapper for quality commits
 /// Uses system SQLite3 C API (not Swift wrappers) per PATCH E1

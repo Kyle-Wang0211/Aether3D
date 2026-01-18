@@ -84,6 +84,12 @@ jobs:
           swift-version: "5.9.2"
           skip-verify-signature: true
 
+      - name: Install system deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
       - name: Platform Diagnostics
         run: |
           echo "=== Platform Information ==="
@@ -125,6 +131,23 @@ jobs:
           
           echo "Running PoseSnapshotTests..."
           swift test --filter PoseSnapshotTests || echo "PoseSnapshot tests failed (check logs)"
+          
+          echo "Running SQLitePlatformTests..."
+          set +e
+          SQLITE_TEST_OUTPUT=$(swift test --filter SQLitePlatformTests 2>&1)
+          SQLITE_TEST_EXIT=$?
+          set -e
+          if [ $SQLITE_TEST_EXIT -ne 0 ]; then
+            if echo "$SQLITE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: SQLitePlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: SQLitePlatformTests failed"
+              echo "$SQLITE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          fi
+          echo "✅ SQLitePlatformTests passed"
           
           set -e
           echo "Platform-safe tests completed"

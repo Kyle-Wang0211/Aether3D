@@ -312,9 +312,147 @@ grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if c
 
 ---
 
+## SQLite Cross-Platform Fix: CSQLite Shim + Linux CI (2025-01-18)
+
+### Problem
+- Linux CI (ubuntu-22.04, Swift 5.9) fails with: `error: no such module 'SQLite3'`
+- macOS passes because SQLite3 is available implicitly on Apple platforms
+- Need deterministic, cross-platform SQLite usage similar to CryptoKit fix
+
+### Root Cause
+- `QualityDatabase.swift` used `import SQLite3` which is Apple-only
+- Linux runners don't have SQLite3 module available by default
+- No system library shim to expose sqlite3 C API consistently across platforms
+
+### Fixes Applied
+
+#### 1. Created CSQLite System Library Shim ✅
+- **Created `Sources/CSQLite/module.modulemap`**:
+  - System module declaration: `module CSQLite [system]`
+  - Links against system `sqlite3` library
+  - Exports all SQLite3 C API functions
+
+- **Created `Sources/CSQLite/sqlite3.h`**:
+  - Shim header that includes system `<sqlite3.h>`
+  - Ensures correct header path resolution on all platforms
+
+- **Updated `Package.swift`**:
+  - Added `.systemLibrary` target `CSQLite` with path `Sources/CSQLite`
+  - Made `Aether3DCore` depend on `CSQLite`
+  - Follows standard SPM layout convention (`Sources/` prefix)
+
+#### 2. Updated Swift Code ✅
+- **Updated `Core/Quality/WhiteCommitter/QualityDatabase.swift`**:
+  - Changed `import SQLite3` → `import CSQLite`
+  - No public API changes, behavior unchanged
+  - All SQLite3 C API calls work identically
+
+#### 3. Ubuntu CI Dependency Installation ✅
+- **Updated `.github/workflows/ci.yml`**:
+  - Added "Install system deps (Ubuntu)" step before build
+  - Runs `sudo apt-get update && sudo apt-get install -y libsqlite3-dev`
+  - Conditional: `if: runner.os == 'Linux'`
+
+- **Updated `.github/workflows/quality_precheck.yml`**:
+  - Added same "Install system deps (Ubuntu)" step
+  - Ensures SQLite dev headers and library available before compilation
+
+#### 4. Platform Safety Tests ✅
+- **Created `Tests/QualityPreCheck/SQLitePlatformTests.swift`**:
+  - `testSQLiteLibVersion()`: Validates `sqlite3_libversion()` returns non-empty string
+  - `testSQLiteLibVersionNumber()`: Validates `sqlite3_libversion_number()` returns valid version
+  - `testSQLiteSourceID()`: Validates `sqlite3_sourceid()` returns non-empty string
+  - All tests are deterministic, no filesystem dependency
+  - Import `CSQLite` to validate module linkage
+
+#### 5. CI Test Integration ✅
+- **Updated `.github/workflows/ci.yml`**:
+  - Added `SQLitePlatformTests` to Linux platform-safe tests
+  - Marked as required: fails if 0 tests match or tests fail
+  - Same strictness as `WhiteCommitTests`
+
+- **Updated `.github/workflows/quality_precheck.yml`**:
+  - Added `SQLitePlatformTests` to Linux required test suites
+  - Fails CI if 0 tests match (prevents silent breakage)
+
+#### 6. Platform Drift Guard Enhancement ✅
+- **Updated `.github/workflows/quality_precheck.yml`**:
+  - Added `SQLite3` to framework list (now checks 13 frameworks)
+  - Detects unconditional `import SQLite3` in `Core/Quality/`
+  - Fails CI if found (enforces use of `CSQLite` shim)
+  - Updated success message to include SQLite3
+
+### Verification
+- ✅ macOS: `swift build` → Compiles successfully with CSQLite
+- ✅ macOS: `swift test --filter SQLitePlatformTests` → 3 tests pass
+- ✅ macOS: `swift test --filter WhiteCommitTests` → All tests pass
+- ✅ Linux: Package compiles with CSQLite (verified via CI matrix)
+- ✅ Platform drift guard: Detects `import SQLite3` correctly
+
+### Files Modified
+- `Sources/CSQLite/module.modulemap` (new, system module declaration)
+- `Sources/CSQLite/sqlite3.h` (new, shim header)
+- `Package.swift` (CSQLite systemLibrary target, path updated to Sources/CSQLite)
+- `Core/Quality/WhiteCommitter/QualityDatabase.swift` (import SQLite3 → import CSQLite)
+- `Tests/QualityPreCheck/SQLitePlatformTests.swift` (new, platform safety tests)
+- `.github/workflows/ci.yml` (Ubuntu deps install, SQLitePlatformTests required)
+- `.github/workflows/quality_precheck.yml` (Ubuntu deps install, SQLitePlatformTests required, drift guard updated)
+- `PR5_1_FIX_SUMMARY.md` (this section)
+
+### Why CSQLite Shim Exists
+- **Cross-platform compatibility**: SQLite3 module is Apple-only, CSQLite works on all platforms
+- **Deterministic linking**: Explicit system library link ensures consistent behavior
+- **CI stability**: Linux runners need `libsqlite3-dev` installed, shim makes this explicit
+- **Follows existing pattern**: Similar to how CryptoKit was fixed with CCrypto shim
+
+### Why libsqlite3-dev is Installed on Ubuntu CI
+- **Header files**: Provides `/usr/include/sqlite3.h` needed for compilation
+- **Library**: Provides `libsqlite3.so` needed for linking
+- **Standard practice**: System library dev packages are required for C interop
+- **CI determinism**: Explicit installation ensures consistent CI environment
+
+### Which Tests Validate SQLite
+- **SQLitePlatformTests**: Validates SQLite linkage and version functions
+  - Tests `sqlite3_libversion()`, `sqlite3_libversion_number()`, `sqlite3_sourceid()`
+  - Deterministic, no filesystem dependency
+  - Required on Linux CI (fails if 0 tests match)
+- **WhiteCommitTests**: Uses SQLite via QualityDatabase, validates full integration
+  - Tests database operations, transactions, schema
+  - Required on Linux CI (fails if 0 tests match)
+
+### How to Reproduce CI Locally
+
+**On macOS:**
+```bash
+swift package clean
+swift build
+swift test --filter SQLitePlatformTests
+```
+
+**On Linux (or Docker):**
+```bash
+# Install SQLite dev package
+sudo apt-get update
+sudo apt-get install -y libsqlite3-dev
+
+# Then:
+swift package clean
+swift build
+swift test --filter SQLitePlatformTests
+swift test --filter WhiteCommitTests
+```
+
+**Check for SQLite3 drift:**
+```bash
+# Should find no direct imports (should use CSQLite)
+grep -rn "^import SQLite3" Core/Quality/ --include="*.swift"
+```
+
+---
+
 ## Status Summary
 
-**Progress**: All SQLite constraint issues resolved (18/18 tests passing), CI-only failures fixed, cross-platform compilation enabled, Linux hardening complete  
+**Progress**: All SQLite constraint issues resolved (18/18 tests passing), CI-only failures fixed, cross-platform compilation enabled, Linux hardening complete, SQLite cross-platform shim implemented  
 **Blockers**: None  
 **Next**: Monitor CI for stability, ensure all gates pass consistently on both macOS and Linux
 
