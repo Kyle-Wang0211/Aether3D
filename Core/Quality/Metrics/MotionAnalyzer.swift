@@ -7,7 +7,8 @@
 //
 
 import Foundation
-import CoreMotion
+// Note: CoreMotion import removed as it's not currently used in this file
+// If CoreMotion functionality is added later, use #if canImport(CoreMotion) guard
 
 /// MotionResult - result of motion analysis
 public struct MotionResult: Codable {
