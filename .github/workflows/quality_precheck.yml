@@ -123,6 +123,12 @@ jobs:
           swift package clean
           swift build
       
+      - name: Check Build Warnings
+        run: |
+          set -x
+          cd "$(git rev-parse --show-toplevel)"
+          bash scripts/check_build_warnings.sh
+      
       - name: Run Quality Gates (macOS only)
         if: matrix.os == 'macos-14'
         env:

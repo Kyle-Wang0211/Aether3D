@@ -106,6 +106,10 @@ jobs:
         run: |
           chmod +x scripts/*.sh scripts/hooks/* || true
           swift build
+      
+      - name: Check Build Warnings
+        run: |
+          bash scripts/check_build_warnings.sh
 
       - name: Run Platform-Safe Tests
         env:

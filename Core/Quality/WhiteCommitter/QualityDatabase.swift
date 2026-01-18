@@ -197,7 +197,6 @@ public class QualityDatabase {
         
         if result != SQLITE_OK {
             // PR5.1: Enhanced error reporting with extended codes and SQL operation context
-            let errorMessage = errorMsg != nil ? String(cString: errorMsg!) : nil
             sqlite3_free(errorMsg)
             // Extract SQL operation tag from statement (first word)
             let sqlOperation = sql.components(separatedBy: .whitespaces).first?.uppercased()
@@ -261,7 +260,7 @@ public class QualityDatabase {
     /// PR5.1: Supports both atomic counter table allocation (preferred) and MAX() fallback (backward compat)
     /// Must be called within BEGIN IMMEDIATE transaction to ensure exclusive write lock
     func getNextSessionSeq(sessionId: String) throws -> Int {
-        guard let db = db else {
+        guard db != nil else {
             throw CommitError.databaseIOError(extendedCode: nil, sqlOperation: nil)
         }
         
@@ -654,7 +653,6 @@ public class QualityDatabase {
         let result = sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION", nil, nil, &errorMsg)
         
         if result != SQLITE_OK {
-            let errorMessage = errorMsg != nil ? String(cString: errorMsg!) : nil
             sqlite3_free(errorMsg)
             
             // PR5.1: BUSY/LOCKED errors indicate another transaction is holding the lock
@@ -688,7 +686,6 @@ public class QualityDatabase {
         let result = sqlite3_exec(db, "COMMIT", nil, nil, &errorMsg)
         
         if result != SQLITE_OK {
-            let errorMessage = errorMsg != nil ? String(cString: errorMsg!) : nil
             sqlite3_free(errorMsg)
             throw mapSQLiteError(result, sqlOperation: "COMMIT")
         }
