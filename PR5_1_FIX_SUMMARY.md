@@ -338,6 +338,8 @@ grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if c
 
 - **Updated `Package.swift`**:
   - Added `.systemLibrary` target `CSQLite` with path `Sources/CSQLite`
+  - Added `pkgConfig: "sqlite3"` for pkg-config discovery
+  - Added `providers: [.apt(["libsqlite3-dev"]), .brew(["sqlite"])]` for automatic dependency hints
   - Made `Aether3DCore` depend on `CSQLite`
   - Follows standard SPM layout convention (`Sources/` prefix)
 
@@ -350,12 +352,14 @@ grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if c
 #### 3. Ubuntu CI Dependency Installation ✅
 - **Updated `.github/workflows/ci.yml`**:
   - Added "Install system deps (Ubuntu)" step before build
-  - Runs `sudo apt-get update && sudo apt-get install -y libsqlite3-dev`
+  - Runs `sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config`
   - Conditional: `if: runner.os == 'Linux'`
+  - pkg-config required for SPM systemLibrary pkgConfig discovery
 
 - **Updated `.github/workflows/quality_precheck.yml`**:
   - Added same "Install system deps (Ubuntu)" step
-  - Ensures SQLite dev headers and library available before compilation
+  - Installs `libsqlite3-dev pkg-config` before compilation
+  - Ensures SQLite dev headers, library, and pkg-config available
 
 #### 4. Platform Safety Tests ✅
 - **Created `Tests/QualityPreCheck/SQLitePlatformTests.swift`**:
@@ -389,14 +393,20 @@ grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if c
 - ✅ Linux: Package compiles with CSQLite (verified via CI matrix)
 - ✅ Platform drift guard: Detects `import SQLite3` correctly
 
+#### 7. Fixed Compiler Warnings ✅
+- **Updated `Core/Quality/WhiteCommitter/QualityDatabase.swift`**:
+  - Fixed "value was never used" warning in `rollbackTransaction()`
+  - Changed `let result = sqlite3_exec(...)` to `_ = sqlite3_exec(...)`
+  - No behavior change, only eliminates compiler warning
+
 ### Files Modified
 - `Sources/CSQLite/module.modulemap` (new, system module declaration)
 - `Sources/CSQLite/sqlite3.h` (new, shim header)
-- `Package.swift` (CSQLite systemLibrary target, path updated to Sources/CSQLite)
-- `Core/Quality/WhiteCommitter/QualityDatabase.swift` (import SQLite3 → import CSQLite)
+- `Package.swift` (CSQLite systemLibrary target with pkgConfig and providers)
+- `Core/Quality/WhiteCommitter/QualityDatabase.swift` (import SQLite3 → import CSQLite, fixed unused variable warning)
 - `Tests/QualityPreCheck/SQLitePlatformTests.swift` (new, platform safety tests)
-- `.github/workflows/ci.yml` (Ubuntu deps install, SQLitePlatformTests required)
-- `.github/workflows/quality_precheck.yml` (Ubuntu deps install, SQLitePlatformTests required, drift guard updated)
+- `.github/workflows/ci.yml` (Ubuntu deps install with pkg-config, SQLitePlatformTests required)
+- `.github/workflows/quality_precheck.yml` (Ubuntu deps install with pkg-config, SQLitePlatformTests required, drift guard updated)
 - `PR5_1_FIX_SUMMARY.md` (this section)
 
 ### Why CSQLite Shim Exists
@@ -427,25 +437,28 @@ grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if c
 swift package clean
 swift build
 swift test --filter SQLitePlatformTests
+./scripts/quality_gate.sh
 ```
 
 **On Linux (or Docker):**
 ```bash
-# Install SQLite dev package
+# Install SQLite dev package and pkg-config
 sudo apt-get update
-sudo apt-get install -y libsqlite3-dev
+sudo apt-get install -y libsqlite3-dev pkg-config
 
 # Then:
 swift package clean
 swift build
 swift test --filter SQLitePlatformTests
 swift test --filter WhiteCommitTests
+./scripts/quality_gate.sh
 ```
 
 **Check for SQLite3 drift:**
 ```bash
 # Should find no direct imports (should use CSQLite)
-grep -rn "^import SQLite3" Core/Quality/ --include="*.swift"
+grep -RIn '^import SQLite3' . --exclude-dir=.build --exclude-dir=.git
+# Should return 0 results
 ```
 
 ---

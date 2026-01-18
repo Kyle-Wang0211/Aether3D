@@ -16,7 +16,9 @@ let package = Package(
   targets: [
     .systemLibrary(
       name: "CSQLite",
-      path: "Sources/CSQLite"
+      path: "Sources/CSQLite",
+      pkgConfig: "sqlite3",
+      providers: [.apt(["libsqlite3-dev"]), .brew(["sqlite"])]
     ),
     .target(
       name: "Aether3DCore",

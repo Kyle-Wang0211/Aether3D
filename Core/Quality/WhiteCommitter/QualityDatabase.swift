@@ -710,7 +710,7 @@ public class QualityDatabase {
         // PR5.1: Rollback the transaction
         // Use try? to ignore errors (transaction might already be rolled back by SQLite)
         var errorMsg: UnsafeMutablePointer<CChar>?
-        let result = sqlite3_exec(db, "ROLLBACK", nil, nil, &errorMsg)
+        _ = sqlite3_exec(db, "ROLLBACK", nil, nil, &errorMsg)
         sqlite3_free(errorMsg)
         // Ignore errors - rollback is best-effort cleanup
     }
