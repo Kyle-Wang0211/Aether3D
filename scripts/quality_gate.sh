@@ -12,6 +12,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 echo "=== PR#5 Quality Pre-check Gates ==="
+echo ""
+echo "=== Platform Diagnostics ==="
+echo "Platform: $(uname -a)"
+echo "Swift version:"
+swift --version || echo "WARNING: swift --version failed"
+echo "Package root: $PROJECT_ROOT"
+echo "=============================="
+echo ""
 
 # Gate 0: Check for placeholder tests (must be first)
 echo "[0/5] Checking for placeholder tests..."
@@ -48,6 +56,15 @@ TEST_EXIT_CODE=$?
 set -e  # Re-enable strict mode
 
 if [ $TEST_EXIT_CODE -ne 0 ]; then
+    # Check if failure is due to 0 matching tests (hard failure for Gate 1)
+    if echo "$TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+        echo "FAIL: Gate 1 (WhiteCommitTests) matched 0 tests - this is a hard failure"
+        echo "  This indicates misconfiguration or test suite not found"
+        echo "  Output:"
+        echo "$TEST_OUTPUT" | tail -50
+        exit 1
+    fi
+    
     echo "FAIL: Tests failed (exit code: $TEST_EXIT_CODE)"
     echo ""
     echo "=== Last 120 lines of test output ==="
@@ -65,6 +82,9 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
     echo ""
     echo "=== SQLite Constraint Errors ==="
     echo "$TEST_OUTPUT" | grep -E "SQLITE_CONSTRAINT|CHECK constraint failed|UNIQUE constraint failed|no such table" -A 2 -B 2 || echo "  (No SQLite constraint errors found in output)"
+    echo ""
+    echo "=== Compilation Errors ==="
+    echo "$TEST_OUTPUT" | grep -E "error:|warning:" | head -20 || echo "  (No compilation errors found in output)"
     exit 1
 fi
 
@@ -102,18 +122,50 @@ fi
 
 # Gate 4: Fixture verification (if tests exist)
 echo "[4/5] Verifying golden fixtures..."
-if swift test --filter QualityPreCheckFixtures 2>&1; then
-    echo "  Fixture tests passed"
+echo "  Command: swift test --filter QualityPreCheckFixtures"
+set +e  # Temporarily disable strict mode to capture output and exit code
+FIXTURE_TEST_OUTPUT=$(swift test --filter QualityPreCheckFixtures 2>&1)
+FIXTURE_TEST_EXIT_CODE=$?
+set -e  # Re-enable strict mode
+
+# Check if the failure is due to "No matching test cases" (0 matches)
+if [ $FIXTURE_TEST_EXIT_CODE -ne 0 ]; then
+    if echo "$FIXTURE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+        echo "  ⚠️  SKIP (PASS): No QualityPreCheckFixtures tests found (filter returned 0 matches)"
+        echo "    This is acceptable if fixtures are tested in the main test suite"
+    else
+        echo "FAIL: Fixture tests failed"
+        echo "$FIXTURE_TEST_OUTPUT" | tail -50
+        exit 1
+    fi
 else
-    echo "WARNING: Fixture tests not found or failed (may be acceptable if fixtures are tested in main test suite)"
+    # Extract test count from output
+    FIXTURE_TEST_COUNT=$(echo "$FIXTURE_TEST_OUTPUT" | grep -E "Executed.*test" | tail -1 | grep -oE "[0-9]+ test" | grep -oE "[0-9]+" || echo "unknown")
+    echo "  ✅ Fixture tests passed ($FIXTURE_TEST_COUNT tests executed)"
 fi
 
 # Gate 5: Determinism verification (if tests exist)
 echo "[5/5] Verifying determinism contracts..."
-if swift test --filter QualityPreCheckDeterminism 2>&1; then
-    echo "  Determinism tests passed"
+echo "  Command: swift test --filter QualityPreCheckDeterminism"
+set +e  # Temporarily disable strict mode to capture output and exit code
+DETERMINISM_TEST_OUTPUT=$(swift test --filter QualityPreCheckDeterminism 2>&1)
+DETERMINISM_TEST_EXIT_CODE=$?
+set -e  # Re-enable strict mode
+
+# Check if the failure is due to "No matching test cases" (0 matches)
+if [ $DETERMINISM_TEST_EXIT_CODE -ne 0 ]; then
+    if echo "$DETERMINISM_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+        echo "  ⚠️  SKIP (PASS): No QualityPreCheckDeterminism tests found (filter returned 0 matches)"
+        echo "    This is acceptable if determinism is tested in the main test suite"
+    else
+        echo "FAIL: Determinism tests failed"
+        echo "$DETERMINISM_TEST_OUTPUT" | tail -50
+        exit 1
+    fi
 else
-    echo "WARNING: Determinism tests not found (may be acceptable if tested in main test suite)"
+    # Extract test count from output
+    DETERMINISM_TEST_COUNT=$(echo "$DETERMINISM_TEST_OUTPUT" | grep -E "Executed.*test" | tail -1 | grep -oE "[0-9]+ test" | grep -oE "[0-9]+" || echo "unknown")
+    echo "  ✅ Determinism tests passed ($DETERMINISM_TEST_COUNT tests executed)"
 fi
 
 echo ""
@@ -122,8 +174,16 @@ echo "  Gate 0: Placeholder Check - ✅ PASS"
 echo "  Gate 1: Tests - ✅ PASS"
 echo "  Gate 2: Lint - ✅ PASS"
 echo "  Gate 3: Fixtures - ✅ PASS"
-echo "  Gate 4: Fixture Tests - ⚠️  N/A (tested in main suite)"
-echo "  Gate 5: Determinism Tests - ⚠️  N/A (tested in main suite)"
+if [ $FIXTURE_TEST_EXIT_CODE -eq 0 ]; then
+    echo "  Gate 4: Fixture Tests - ✅ PASS"
+else
+    echo "  Gate 4: Fixture Tests - ⚠️  SKIP (no matching tests)"
+fi
+if [ $DETERMINISM_TEST_EXIT_CODE -eq 0 ]; then
+    echo "  Gate 5: Determinism Tests - ✅ PASS"
+else
+    echo "  Gate 5: Determinism Tests - ⚠️  SKIP (no matching tests)"
+fi
 echo ""
 echo "=== All gates passed ==="
 exit 0

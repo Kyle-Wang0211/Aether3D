@@ -11,6 +11,8 @@ import Foundation
 
 #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
 import Darwin
+#elseif os(Linux)
+import Glibc
 #endif
 
 /// MonotonicClock - monotonic time source for decision windows
@@ -25,11 +27,16 @@ public struct MonotonicClock {
         let time = mach_continuous_time()
         // Convert from nanoseconds to milliseconds
         return Int64(time / 1_000_000)
-        #else
-        // Use clock_gettime(CLOCK_MONOTONIC) on other platforms
-        var ts = timespec()
+        #elseif os(Linux)
+        // Use clock_gettime(CLOCK_MONOTONIC) on Linux
+        // Linux requires explicit initialization of timespec
+        var ts = timespec(tv_sec: 0, tv_nsec: 0)
         clock_gettime(CLOCK_MONOTONIC, &ts)
         return Int64(ts.tv_sec) * 1000 + Int64(ts.tv_nsec) / 1_000_000
+        #else
+        // Fallback for other platforms (should not be used in production)
+        let now = Date().timeIntervalSince1970
+        return Int64(now * 1000)
         #endif
     }
     
@@ -39,22 +46,4 @@ public struct MonotonicClock {
     }
 }
 
-#if !os(macOS) && !os(iOS) && !os(tvOS) && !os(watchOS)
-// For non-Apple platforms, use a simple implementation
-// Note: This should be replaced with actual clock_gettime for production
-private struct timespec {
-    var tv_sec: Int
-    var tv_nsec: Int
-}
-
-private let CLOCK_MONOTONIC: Int32 = 1
-
-private func clock_gettime(_ clock: Int32, _ timespec: UnsafeMutablePointer<timespec>) -> Int32 {
-    // Fallback implementation - should use actual clock_gettime
-    let now = Date().timeIntervalSince1970
-    timespec.pointee.tv_sec = Int(now)
-    timespec.pointee.tv_nsec = Int((now - Double(Int(now))) * 1_000_000_000)
-    return 0
-}
-#endif
 

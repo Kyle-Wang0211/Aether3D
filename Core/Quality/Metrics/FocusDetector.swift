@@ -18,16 +18,33 @@ public enum FocusStatus: String, Codable {
 
 /// FocusDetector - focus status detection
 public class FocusDetector {
-    // H2: Independent state
-    public init() {}
+    /// StatusProvider - injectable function to provide focus status and confidence
+    /// Allows testing without camera/hardware dependencies
+    public typealias StatusProvider = (_ qualityLevel: QualityLevel) -> (status: FocusStatus, confidence: Double)
+    
+    private let statusProvider: StatusProvider
+    
+    /// Default status provider - returns unknown status deterministically
+    /// Hardware-free implementation for testing and placeholder behavior
+    public static func defaultStatusProvider(qualityLevel: QualityLevel) -> (status: FocusStatus, confidence: Double) {
+        return (.unknown, 0.0)
+    }
+    
+    /// Initialize FocusDetector with optional status provider
+    /// - Parameter statusProvider: Function that returns focus status and confidence for a given quality level
+    ///   Defaults to defaultStatusProvider which returns (.unknown, 0.0)
+    public init(statusProvider: @escaping StatusProvider = FocusDetector.defaultStatusProvider) {
+        self.statusProvider = statusProvider
+    }
     
     /// Detect focus status for given quality level
     /// Combines Laplacian + Motion
     /// 250ms window judgment
     public func detect(qualityLevel: QualityLevel) -> MetricResult? {
-        // Placeholder implementation
-        let status = FocusStatus.sharp  // Placeholder
-        let confidence = 0.9  // Placeholder
+        // Get status and confidence from provider (non-constant)
+        let providerResult = statusProvider(qualityLevel)
+        let status = providerResult.status
+        var confidence = providerResult.confidence
         
         // Map status to value
         let value: Double
@@ -38,12 +55,16 @@ public class FocusDetector {
         case .unknown: value = 0.0
         }
         
+        // Defensive clamping: ensure values are in [0,1] range
+        let clampedValue = min(1.0, max(0.0, value))
+        confidence = min(1.0, max(0.0, confidence))
+        
         // H1: NaN/Inf check
-        if value.isNaN || value.isInfinite {
+        if clampedValue.isNaN || clampedValue.isInfinite || confidence.isNaN || confidence.isInfinite {
             return MetricResult(value: 0.0, confidence: 0.0)
         }
         
-        return MetricResult(value: value, confidence: confidence)
+        return MetricResult(value: clampedValue, confidence: confidence)
     }
 }
 

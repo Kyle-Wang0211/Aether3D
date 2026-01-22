@@ -9,6 +9,9 @@
 //
 
 import Foundation
+#if canImport(CoreFoundation)
+import CoreFoundation
+#endif
 
 /// CanonicalJSON - canonical JSON encoder for audit records
 /// H1: All floats use fixed 6 decimal format, no exceptions
@@ -101,6 +104,8 @@ public struct CanonicalJSON {
             return "\"\(escapeString(str))\""
             
         case let num as NSNumber:
+            #if canImport(CoreFoundation)
+            // On Apple platforms, use CoreFoundation to detect boolean
             if CFGetTypeID(num) == CFBooleanGetTypeID() {
                 return num.boolValue ? "true" : "false"
             } else {
@@ -112,6 +117,18 @@ public struct CanonicalJSON {
                     return "\(num.intValue)"
                 }
             }
+            #else
+            // On Linux, NSNumber boolean detection via objCType
+            let objCType = String(cString: num.objCType)
+            if objCType == "c" || objCType == "B" {
+                // 'c' is char (used for Bool in some contexts), 'B' is Bool
+                return num.boolValue ? "true" : "false"
+            } else if objCType.contains("f") || objCType.contains("d") {
+                return try formatFloat(num.doubleValue)
+            } else {
+                return "\(num.intValue)"
+            }
+            #endif
             
         case let double as Double:
             return try formatFloat(double)

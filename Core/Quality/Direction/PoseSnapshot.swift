@@ -3,18 +3,26 @@
 //  Aether3D
 //
 //  PR#5 Quality Pre-check - Milestone 4
-//  PoseSnapshot - pose extraction from CMDeviceMotion
+//  PoseSnapshot - pose extraction from CMDeviceMotion (Apple platforms) or manual values (cross-platform)
 //
 
 import Foundation
+#if canImport(CoreMotion)
 import CoreMotion
+#endif
 
 /// PoseSnapshot - pose snapshot from device motion
+/// Cross-platform: compiles on Linux (without CoreMotion) and Apple platforms (with CoreMotion)
 public struct PoseSnapshot {
     public let yaw: Double
     public let pitch: Double
     public let roll: Double
     
+    /// Initialize with explicit yaw/pitch/roll values (available on all platforms)
+    /// - Parameters:
+    ///   - yaw: Yaw angle in degrees
+    ///   - pitch: Pitch angle in degrees
+    ///   - roll: Roll angle in degrees
     public init(yaw: Double, pitch: Double, roll: Double) {
         // Normalize angles (handle -1° and 359° case)
         self.yaw = PoseSnapshot.normalizeAngle(yaw)
@@ -22,7 +30,10 @@ public struct PoseSnapshot {
         self.roll = PoseSnapshot.normalizeAngle(roll)
     }
     
-    /// Create from CMDeviceMotion
+    #if canImport(CoreMotion)
+    /// Create from CMDeviceMotion (Apple platforms only)
+    /// - Parameter motion: CMDeviceMotion instance from CoreMotion framework
+    /// - Returns: PoseSnapshot with normalized angles
     public static func from(_ motion: CMDeviceMotion) -> PoseSnapshot {
         // Extract yaw/pitch/roll from motion.attitude
         let attitude = motion.attitude
@@ -32,6 +43,7 @@ public struct PoseSnapshot {
         
         return PoseSnapshot(yaw: yaw, pitch: pitch, roll: roll)
     }
+    #endif
     
     /// Normalize angle to [-180, 180] range
     private static func normalizeAngle(_ angle: Double) -> Double {
