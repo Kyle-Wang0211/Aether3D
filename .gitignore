@@ -27,7 +27,15 @@ build/
 .build/
 .swiftpm/
 
+ fix/pr1-system-adjust
 # python venv
 server/.venv/
 .venv/
 venv/
+
+# Python venv
+server/.venv/
+
+# macOS Finder duplicate file suffix: " 2"
+*\ 2.*
+ main

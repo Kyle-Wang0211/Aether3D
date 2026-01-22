@@ -1,3 +1,7 @@
+> ARCHIVED — DO NOT USE AS SOURCE OF TRUTH.
+> This document is historical and may be inconsistent with current specifications.
+> Refer to docs/WHITEBOX.md and docs/ACCEPTANCE.md for the authoritative version.
+
 # Aether3D Phases Definition
 
 本文件定义 Aether3D 项目的 **阶段划分（Phase）**、**边界规则**、**进入条件** 与 **验收标准**。  

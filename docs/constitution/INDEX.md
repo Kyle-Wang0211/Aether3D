@@ -21,6 +21,7 @@ README.md is NOT a specification document.
 - [IMPLEMENTATION.md](IMPLEMENTATION.md) - Implementation Mapping
 - [SEMVER.md](SEMVER.md) - Semantic Versioning
 - [AUDIT_SPEC.md](AUDIT_SPEC.md) - Audit Specification
+- [AUDIT_TRACE_CONTRACT.md](AUDIT_TRACE_CONTRACT.md) - Audit Trace Contract (PR#8.5)
 - [DETERMINISM_SPEC.md](DETERMINISM_SPEC.md) - Determinism Specification
 - [RFC_PROCESS.md](RFC_PROCESS.md) - RFC Process
 - [RFC_TEMPLATE.md](RFC_TEMPLATE.md) - RFC Template
@@ -29,5 +30,7 @@ README.md is NOT a specification document.
 - [MANUAL_CHECKS.md](MANUAL_CHECKS.md) - Manual Check Procedures
 - [NO_RULES_OUTSIDE_CONSTITUTION.md](NO_RULES_OUTSIDE_CONSTITUTION.md) - Rules Boundary
 - [DOC_SCOPE_BOUNDARIES.md](DOC_SCOPE_BOUNDARIES.md) - Document Scope Boundaries
+- [GATES_POLICY.md](GATES_POLICY.md) - Gate Policy
+- [GOVERNANCE_SPEC.md](GOVERNANCE_SPEC.md) - Governance Specification
 - [CHANGELOG.md](CHANGELOG.md) - Constitution Changelog
 

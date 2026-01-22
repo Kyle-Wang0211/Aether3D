@@ -1,6 +1,10 @@
 import XCTest
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 @testable import Aether3DCore
 
 final class PolicyHashGateTests: XCTestCase {

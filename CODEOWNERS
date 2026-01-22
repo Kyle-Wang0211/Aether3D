@@ -1,0 +1,17 @@
+# Aether3D Governance - Code Owners
+# Enforcement layer (not documentation)
+# Order matters: later rules override earlier rules
+
+# Core enforcement surface
+/Core/** @kaidongwang
+/docs/constitution/** @kaidongwang
+/docs/rfcs/** @kaidongwang
+/.github/workflows/** @kaidongwang
+/scripts/** @kaidongwang
+
+# Test enforcement surface (if exists)
+/Tests/Gates/** @kaidongwang
+
+# Default owner
+* @kaidongwang
+
