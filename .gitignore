@@ -26,3 +26,8 @@ build/
 # SwiftPM
 .build/
 .swiftpm/
+
+# python venv
+server/.venv/
+.venv/
+venv/
