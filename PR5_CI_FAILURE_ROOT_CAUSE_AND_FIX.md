@@ -93,13 +93,18 @@ $ swift test --filter WhiteCommitTests
 
 **Result**: ✅ Package compiles and platform-safe tests pass
 
-### Platform Drift Guard
+### Platform Drift Guard (Informational Check)
 ```bash
 $ grep -rn "^import CoreMotion" Core/Quality/ --include="*.swift" | grep -v "#if canImport"
-# No output = no unconditional imports found
+# Note: This grep check is informational only.
+# Conditional imports inside #if canImport blocks will still be matched by grep.
+# The authoritative validation is Linux swift build success.
 ```
 
-**Result**: ✅ No unconditional imports detected
+**Validation Rule**: 
+- ✅ **Informational**: grep output helps identify potential issues
+- ✅ **Authoritative**: Linux `swift build` success confirms platform isolation is correct
+- ✅ **Result**: Linux build succeeds, confirming no unconditional imports reach Linux compilation paths
 
 ---
 
