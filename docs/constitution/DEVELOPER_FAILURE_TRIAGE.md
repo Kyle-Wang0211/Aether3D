@@ -85,18 +85,40 @@ Prevention: CryptoShimConsistencyTests validates cross-platform determinism
 ```
 ❌ Ubuntu Gate 2 crashes immediately with signal 4 (SIGILL), 0 tests run
 Root cause: Crypto asm illegal instruction - BoringSSL/OpenSSL CPU feature detection fails on CI CPUs
+  OR environment variable not propagated to swift test process
 Symptoms:
   - Test binary exits immediately with unexpected signal code 4
   - Register dump shown
   - "Test run started ... 0 tests ... then crash"
-Fix:
-  1. Ensure OPENSSL_ia32cap=:0 is set in ubuntu test job env (forces software fallback)
-  2. Verify in workflow YAML: env: OPENSSL_ia32cap: ":0" for ubuntu-22.04 matrix.os
-  3. Confirm by rerunning: swift test -c debug --filter CryptoShimConsistencyTests
+  - May happen before swift test command executes (toolchain init) or during test discovery
+Fix (MUST apply all three):
+  1. Set OPENSSL_ia32cap at JOB level in workflow YAML:
+     env:
+       OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
+  2. Export OPENSSL_ia32cap via GITHUB_ENV early in job (before any build/test):
+     echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
+  3. Add guardrail verification step that fails if OPENSSL_ia32cap is not ":0":
+     if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
+       echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
+       exit 1
+     fi
+  4. Verify canary test passes: swift test -c debug --filter CryptoShimConsistencyTests
 Prevention: 
-  - Gate Linux Preflight includes crypto shim sanity check
-  - Workflow sets OPENSSL_ia32cap=:0 for ubuntu test steps
-  - Guardrail catches SIGILL early before full Gate 2 suite
+  - Gate Linux Preflight includes crypto shim canary check (catches SIGILL early)
+  - Workflow sets OPENSSL_ia32cap=:0 at job level AND exports via GITHUB_ENV
+  - Guardrail verification steps fail fast if env not set correctly
+  - Canary test runs before full Gate 2 suite to localize failure
+
+How to verify locally (if running on Linux or Docker):
+  export OPENSSL_ia32cap=:0
+  swift test -c debug --filter CryptoShimConsistencyTests
+  # Should pass without SIGILL
+
+If SIGILL persists after fix:
+  - Check env propagation: print OPENSSL_ia32cap in step before swift test
+  - Verify GITHUB_ENV export happened: check step logs
+  - Check if wrapper scripts sanitize/clear env (preserve OPENSSL_ia32cap)
+  - Add diagnostics: uname -a, lscpu, env | grep OPENSSL
 ```
 
 **How to verify locally:**

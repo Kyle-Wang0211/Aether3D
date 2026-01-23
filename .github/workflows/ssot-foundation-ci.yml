@@ -67,6 +67,10 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    # Linux-only: Disable crypto CPU feature detection to prevent SIGILL on CI CPUs
+    # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path
+    env:
+      OPENSSL_ia32cap: ":0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,33 +101,48 @@ jobs:
           chmod +x scripts/ci/preflight_ssot_foundation.sh
           bash scripts/ci/preflight_ssot_foundation.sh
       
-      - name: Crypto Shim Sanity Check (Linux)
-        env:
-          # Disable crypto CPU feature detection to prevent SIGILL
-          # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path
-          OPENSSL_ia32cap: ":0"
+      - name: Export OPENSSL_ia32cap to GITHUB_ENV (Linux Preflight)
         run: |
-          echo "🔍 Linux Crypto Shim Sanity Check"
-          echo "Swift: $(swift --version | head -1)"
-          echo "CPU: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || echo 'unknown')"
-          echo "OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+          echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
+          echo "✅ Exported OPENSSL_ia32cap=:0 to GITHUB_ENV for all subsequent steps"
+      
+      - name: Crypto Shim Sanity Check (Linux) — Canary
+        run: |
+          echo "🔍 Linux Crypto Shim Sanity Check (Canary)"
+          echo "This canary test catches SIGILL early before full Gate 2 suite runs"
+          echo ""
+          echo "Environment diagnostics:"
+          echo "  uname -a: $(uname -a)"
+          echo "  Swift: $(swift --version | head -1)"
+          echo "  CPU: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || echo 'unknown')"
+          echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+          echo ""
+          echo "Environment variables (crypto-related):"
+          env | sort | grep -E "(OPENSSL_ia32cap|ia32cap|CRYPTO|SWIFT)" || echo "  (none found)"
           # Guardrail: Ensure OPENSSL_ia32cap is set
-          if [ -z "${OPENSSL_ia32cap:-}" ]; then
+          if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
             echo ""
-            echo "❌ OPENSSL_ia32cap not set"
-            echo "This will cause SIGILL crashes. Set OPENSSL_ia32cap=:0 in env"
+            echo "::error::OPENSSL_ia32cap must be ':0' on Linux Preflight to prevent SIGILL"
+            echo "Current value: '${OPENSSL_ia32cap:-not set}'"
+            echo "This will cause SIGILL crashes. Fix: Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
             exit 1
           fi
           echo ""
-          echo "Testing CryptoShimConsistencyTests (single test to catch SIGILL early)..."
+          echo "✅ OPENSSL_ia32cap guardrail passed"
+          echo ""
+          echo "Testing CryptoShimConsistencyTests (canary test to catch SIGILL early)..."
+          echo "Exact invocation: swift test -c debug --filter CryptoShimConsistencyTests"
+          echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap}"
+          echo ""
           swift test -c debug --filter CryptoShimConsistencyTests || {
             echo ""
-            echo "❌ Crypto shim test failed or crashed"
-            echo "If SIGILL (signal 4): Ensure OPENSSL_ia32cap=:0 is set in ubuntu test jobs"
+            echo "::error::Crypto shim canary test failed or crashed"
+            echo "If SIGILL (signal 4): Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
             echo "This prevents crypto asm illegal instruction crashes on CI CPUs"
+            echo "Root cause: crypto backend CPU feature detection mismatch OR env not propagated"
             exit 1
           }
-          echo "✅ Crypto shim sanity check passed"
+          echo "✅ Crypto shim canary check passed (no SIGILL detected)"
       
       - name: Linux Preflight Complete
         run: |
@@ -248,6 +267,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Linux-only: Disable crypto CPU feature detection to prevent SIGILL on CI CPUs
+    # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path; Linux-only.
+    # Setting OPENSSL_ia32cap=:0 at job level ensures it's inherited by all steps and child processes
+    env:
+      OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
     
     strategy:
       fail-fast: false
@@ -313,6 +337,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev pkg-config
       
+      - name: Export OPENSSL_ia32cap to GITHUB_ENV (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
+          echo "✅ Exported OPENSSL_ia32cap=:0 to GITHUB_ENV for all subsequent steps"
+      
+      - name: Verify OPENSSL_ia32cap Guardrail (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          echo "🔍 Verifying OPENSSL_ia32cap is set to prevent SIGILL..."
+          if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
+            echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
+            echo "Current value: '${OPENSSL_ia32cap:-not set}'"
+            echo "Fix: Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
+            exit 1
+          fi
+          echo "✅ OPENSSL_ia32cap=${OPENSSL_ia32cap} (correct)"
+      
       - name: Build (${{ matrix.build_config }})
         env:
           CONFIGURATION: ${{ matrix.build_config }}
@@ -328,27 +370,29 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
-          # Linux-only: Disable crypto CPU feature detection to prevent SIGILL on CI CPUs
-          # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path; Linux-only.
-          # BoringSSL/OpenSSL may trigger illegal instructions if CPU flags are mis-detected
-          # Setting OPENSSL_ia32cap=:0 forces software fallback paths (safe, deterministic)
-          OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
         run: |
           echo "🔒 Gate 2: Determinism & Trust Gate (Deep, Blocking)"
           echo "OS: ${{ matrix.os }}, Config: ${{ matrix.build_config }}"
           if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
             echo ""
             echo "Linux diagnostics:"
+            echo "  uname -a: $(uname -a)"
             echo "  Swift: $(swift --version | head -1)"
             echo "  CPU: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || echo 'unknown')"
             echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+            echo ""
+            echo "Environment variables (crypto-related):"
+            env | sort | grep -E "(OPENSSL_ia32cap|ia32cap|CRYPTO|SWIFT)" || echo "  (none found)"
             # Guardrail: Ensure OPENSSL_ia32cap is set for ubuntu to prevent SIGILL
-            if [ -z "${OPENSSL_ia32cap:-}" ]; then
+            if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
               echo ""
-              echo "❌ OPENSSL_ia32cap not set for ubuntu-22.04"
-              echo "This will cause SIGILL crashes. Set OPENSSL_ia32cap=:0 in env for ubuntu test jobs"
+              echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
+              echo "Current value: '${OPENSSL_ia32cap:-not set}'"
+              echo "This will cause SIGILL crashes. Fix: Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
               exit 1
             fi
+            echo ""
+            echo "✅ OPENSSL_ia32cap guardrail passed"
           fi
           echo ""
           echo "Testing:"
@@ -361,6 +405,12 @@ jobs:
           echo "  - Reason compatibility (U1, U16)"
           echo "  - Minimum explanation set (D2)"
           echo ""
+          if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
+            echo "Exact swift test invocation:"
+            echo "  swift test -c ${{ matrix.build_config }} --filter [Gate 2 test suites]"
+            echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap}"
+            echo ""
+          fi
           
           swift test -c ${{ matrix.build_config }} \
             --filter ColorMatrixIntegrityTests \
