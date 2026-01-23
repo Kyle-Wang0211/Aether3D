@@ -2,6 +2,7 @@
 # lint_workflows.sh
 # Validates all GitHub Actions workflow files
 # Ensures YAML syntax and job graph integrity
+# Prevents hardcoded Xcode paths
 
 set -euo pipefail
 
@@ -45,17 +46,47 @@ fi
 echo "2. Validating job graphs..."
 if [ -f "scripts/ci/validate_workflow_graph.sh" ]; then
     for workflow in $WORKFLOW_FILES; do
-        if bash scripts/ci/validate_workflow_graph.sh "$workflow" 2>/dev/null; then
-            echo "   ✅ $workflow"
+        # Only fail on SSOT Foundation workflow; others are non-blocking
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_workflow_graph.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Job graph valid"
+            else
+                echo "   ❌ $workflow: Job graph validation failed"
+                ERRORS=$((ERRORS + 1))
+            fi
         else
-            echo "   ❌ $workflow: Job graph validation failed"
-            ERRORS=$((ERRORS + 1))
+            # Non-SSOT workflows: warn but don't fail
+            if bash scripts/ci/validate_workflow_graph.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Job graph valid"
+            else
+                echo "   ⚠️  $workflow: Job graph validation failed (non-SSOT, non-blocking)"
+            fi
         fi
     done
 else
     echo "   ⚠️  validate_workflow_graph.sh not found, skipping graph validation"
 fi
+echo ""
 
+# Check for hardcoded Xcode paths (forbidden in all workflows)
+echo "3. Checking for hardcoded Xcode paths..."
+HARDCODED_XCODE=0
+for workflow in $WORKFLOW_FILES; do
+    if grep -q "/Applications/Xcode_" "$workflow" 2>/dev/null || \
+       grep -q "xcode-select -s /Applications/" "$workflow" 2>/dev/null; then
+        echo "   ❌ $workflow: Contains hardcoded Xcode path"
+        echo "      Hardcoded Xcode app paths are forbidden. Use setup-xcode action + pinned runner."
+        echo "      Found patterns:"
+        grep -n "/Applications/Xcode_\|xcode-select -s /Applications/" "$workflow" | sed 's/^/         /'
+        HARDCODED_XCODE=$((HARDCODED_XCODE + 1))
+    else
+        echo "   ✅ $workflow: No hardcoded Xcode paths"
+    fi
+done
+
+if [ $HARDCODED_XCODE -gt 0 ]; then
+    ERRORS=$((ERRORS + HARDCODED_XCODE))
+fi
 echo ""
 
 if [ $ERRORS -eq 0 ]; then

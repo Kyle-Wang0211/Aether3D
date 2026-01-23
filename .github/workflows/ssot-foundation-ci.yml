@@ -109,7 +109,7 @@ jobs:
   # Purpose: Stop illegal changes before humans rationalize them
   gate_1_constitutional:
     name: Gate 1 — Constitutional (Fast, Blocking)
-    runs-on: macos-latest
+    runs-on: macos-14  # Pin to macos-14 for stable Xcode availability
     needs: [gate_0_workflow_lint]
     timeout-minutes: 5
     permissions:
@@ -120,7 +120,7 @@ jobs:
       fail-fast: true  # Stop immediately on first failure
       matrix:
         build_config: [debug, release]
-        xcode_version: ['15.0', '15.4']  # Stable + Latest
+        xcode_version: ['15.4']  # Single stable version (15.0 not reliably available)
     
     steps:
       - name: Checkout
@@ -128,10 +128,33 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Setup Xcode ${{ matrix.xcode_version }}
+      - name: Enumerate Available Xcodes
         run: |
-          sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
-          xcodebuild -version
+          echo "🔍 Available Xcode installations:"
+          ls -1 /Applications | grep -E '^Xcode.*\.app$' || echo "  (none found)"
+          echo ""
+          echo "Current Xcode selection:"
+          xcode-select -p || echo "  (none selected)"
+          echo ""
+      
+      - name: Setup Xcode ${{ matrix.xcode_version }}
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ matrix.xcode_version }}
+      
+      - name: Validate Xcode Selection
+        run: |
+          chmod +x scripts/ci/validate_macos_xcode_selection.sh
+          bash scripts/ci/validate_macos_xcode_selection.sh ${{ matrix.xcode_version }} || {
+            echo ""
+            echo "❌ Xcode validation failed"
+            echo "Requested version: ${{ matrix.xcode_version }}"
+            echo "Available Xcodes:"
+            ls -1 /Applications | grep -E '^Xcode.*\.app$' || echo "  (none found)"
+            echo ""
+            echo "Fix: Update workflow matrix to match available Xcode versions on runner image"
+            exit 1
+          }
       
       - name: Setup Swift
         uses: swift-actions/setup-swift@v2
@@ -201,14 +224,46 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-22.04]
-        build_config: [debug, release]
+        include:
+          - os: macos-14
+            xcode_version: '15.4'
+            build_config: debug
+          - os: macos-14
+            xcode_version: '15.4'
+            build_config: release
+          - os: ubuntu-22.04
+            xcode_version: ''
+            build_config: debug
+          - os: ubuntu-22.04
+            xcode_version: ''
+            build_config: release
     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      
+      - name: Setup Xcode (macOS only)
+        if: matrix.os == 'macos-14'
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ matrix.xcode_version }}
+      
+      - name: Validate Xcode Selection (macOS only)
+        if: matrix.os == 'macos-14'
+        run: |
+          chmod +x scripts/ci/validate_macos_xcode_selection.sh
+          bash scripts/ci/validate_macos_xcode_selection.sh ${{ matrix.xcode_version }} || {
+            echo ""
+            echo "❌ Xcode validation failed"
+            echo "Requested version: ${{ matrix.xcode_version }}"
+            echo "Available Xcodes:"
+            ls -1 /Applications | grep -E '^Xcode.*\.app$' || echo "  (none found)"
+            echo ""
+            echo "Fix: Update workflow matrix to match available Xcode versions on runner image"
+            exit 1
+          }
       
       - name: Setup Swift
         uses: swift-actions/setup-swift@v2
@@ -219,7 +274,7 @@ jobs:
         run: |
           echo "🔍 Toolchain Versions:"
           swift --version
-          if [ "${{ matrix.os }}" == "macos-latest" ]; then
+          if [ "${{ matrix.os }}" == "macos-14" ]; then
             xcodebuild -version || echo "xcodebuild not available"
           fi
           echo ""
@@ -269,7 +324,10 @@ jobs:
             --filter ReasonCompatibilityTests \
             --filter MinimumExplanationSetTests \
             --filter CatalogUniquenessTests \
-            --filter ExplanationIntegrityTests || {
+            --filter ExplanationIntegrityTests \
+            --filter CatalogCrossReferenceTests \
+            --filter CatalogActionabilityRulesTests \
+            --filter DomainPrefixesClosureTests || {
             echo ""
             echo "❌ Gate 2 FAILED: Determinism, reproducibility, or user trust violated"
             echo "Invariant IDs: A2, A3, A4, A5, CE, CL2, E2, C1, B1, B2, D2, G1, U1, U16"

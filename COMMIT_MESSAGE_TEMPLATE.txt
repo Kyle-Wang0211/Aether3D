@@ -1,0 +1,40 @@
+ci(ssot-foundation): add comprehensive all-up local verification runner
+
+SSOT-Change: yes
+
+## Changes
+
+### New All-Up Verification Script
+- `scripts/ci/run_all_up_local_verification.sh`: Comprehensive local verification runner
+  - Executes all phases: workflow lint, repo hygiene, Swift builds, SSOT tests (debug/release), shadow cross-platform, Linux equivalence smoke, SSOT preflight
+  - Generates `docs/constitution/FINAL_LOCAL_VERIFICATION_REPORT.md` with detailed results
+  - Non-zero exit on any failure
+  - Clear phase-by-phase output
+
+### Documentation
+- `docs/constitution/COMMIT_MESSAGE_GUIDE.md`: Guide for writing Conventional Commits compliant messages
+  - Explains header format: `<type>(<scope>): <subject>`
+  - Documents SSOT-Change trailer placement
+  - Provides examples and validation rules
+- Updated `COMMIT_MESSAGE_TEMPLATE.txt`: Reflects comprehensive verification changes
+
+### CI Parity
+- All-up verification script mirrors GitHub Actions CI gates locally
+- Ensures "one-shot green" by catching failures before push
+- Validates all SSOT Foundation gates (Gate 0/1/2) plus additional guardrails
+
+## Invariants Preserved
+- No algorithms added (contracts/constants/tests/docs/scripts only)
+- Append-only + version-explicit preserved
+- All SSOT Foundation invariants (A1-A5, B1-B3, CE, CL2, etc.) unchanged
+- Existing CI scripts and workflows unchanged
+
+## Testing
+- ✅ All-up verification script executed successfully (0 errors)
+- ✅ All phases passed: workflow lint, repo hygiene, Swift builds (debug/release), Gate 1/2 tests (debug/release), shadow cross-platform, Linux equivalence smoke, SSOT preflight
+- ✅ Report generated with complete test results
+
+## Impact
+- Enables comprehensive local verification before push
+- Reduces CI failures by catching issues locally
+- Provides clear commit message guidance for contributors

@@ -13,6 +13,44 @@ This document explains what to do when SSOT Foundation tests fail. It categorize
 
 ## Failure Categories
 
+### Category 0: CI Infrastructure Failure (Workflow/Environment)
+
+**What it means:**
+- Xcode selection failed (`xcode-select: error: invalid developer directory`)
+- Workflow job graph invalid
+- Runner image mismatch
+
+**What fixes are allowed:**
+- ✅ Fix workflow YAML (use setup-xcode action, pin runner versions)
+- ✅ Update matrix to match available Xcode versions
+- ❌ **FORBIDDEN:** Hardcode `/Applications/Xcode_*.app` paths
+- ❌ **FORBIDDEN:** Use floating `macos-latest` without Xcode version validation
+
+**How to proceed:**
+1. Check CI logs for exact error message
+2. If Xcode path error: Remove hardcoded path, use `maxim-lobanov/setup-xcode@v1`
+3. If version mismatch: Update matrix to use available Xcode version
+4. Pin `runs-on` to specific macOS version (e.g., `macos-14`)
+
+**Example error:**
+```
+❌ xcode-select: error: invalid developer directory '/Applications/Xcode_15.0.app/Contents/Developer'
+Root cause: Runner image doesn't ship that Xcode version/path
+Fix: 
+  1. Remove hardcoded xcode-select command
+  2. Use maxim-lobanov/setup-xcode@v1 action
+  3. Pin runs-on to macos-14
+  4. Update matrix to use available Xcode version (e.g., 15.4)
+Prevention: lint_workflows.sh forbids hardcoded /Applications/Xcode paths
+```
+
+**Prevention:**
+- `scripts/ci/lint_workflows.sh` detects hardcoded Xcode paths
+- `scripts/ci/validate_macos_xcode_selection.sh` validates Xcode selection
+- Workflow uses `setup-xcode` action instead of manual `xcode-select`
+
+---
+
 ### Category 1: Constitutional Violation (Gate A Failure)
 
 **What it means:**
@@ -218,6 +256,10 @@ If you're unsure which category your failure falls into:
 ### Mistake 4: "Delete unused enum case"
 **Problem:** Append-only rule
 **Fix:** Mark as deprecated, never delete
+
+### Mistake 5: "Hardcode Xcode path in workflow"
+**Problem:** Runner images don't guarantee specific Xcode paths
+**Fix:** Use `maxim-lobanov/setup-xcode@v1` action + pin `runs-on` to specific macOS version
 
 ---
 
