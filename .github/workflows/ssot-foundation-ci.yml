@@ -327,7 +327,8 @@ jobs:
             --filter ExplanationIntegrityTests \
             --filter CatalogCrossReferenceTests \
             --filter CatalogActionabilityRulesTests \
-            --filter DomainPrefixesClosureTests || {
+            --filter DomainPrefixesClosureTests \
+            --filter CryptoShimConsistencyTests || {
             echo ""
             echo "❌ Gate 2 FAILED: Determinism, reproducibility, or user trust violated"
             echo "Invariant IDs: A2, A3, A4, A5, CE, CL2, E2, C1, B1, B2, D2, G1, U1, U16"

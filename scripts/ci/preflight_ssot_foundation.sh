@@ -14,6 +14,20 @@ echo "🔒 SSOT Foundation Preflight Checks"
 echo "===================================="
 echo ""
 
+# Toolchain version check
+echo "0. Toolchain Version Check..."
+SWIFT_VERSION=$(swift --version | head -1)
+echo "   Swift: $SWIFT_VERSION"
+# Warn if Swift version is outside expected range (6.0+)
+SWIFT_MAJOR=$(echo "$SWIFT_VERSION" | grep -oE "Swift version [0-9]+\.[0-9]+" | grep -oE "[0-9]+\.[0-9]+" | cut -d. -f1)
+if [ -n "$SWIFT_MAJOR" ] && [ "$SWIFT_MAJOR" -lt 6 ]; then
+    echo "   ⚠️  WARNING: Swift version < 6.0 may have compatibility issues"
+    echo "   Expected: Swift 6.0+ (CI uses Swift 6.0)"
+else
+    echo "   ✅ Swift version acceptable"
+fi
+echo ""
+
 # 1. Validate workflow graph
 echo "1. Validating workflow graph..."
 if bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml; then

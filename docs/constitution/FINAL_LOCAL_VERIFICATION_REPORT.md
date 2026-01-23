@@ -1,8 +1,8 @@
 # Final Local Verification Report
 
-**Date:** 2026-01-23 13:56:30 UTC
+**Date:** 2026-01-23 15:02:10 UTC
 **Branch:** pr1/ssot-foundation-v1_1
-**Duration:** 41s
+**Duration:** 48s
 **Status:** ✅ All checks passed
 
 ---
@@ -92,7 +92,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 
 ```
 	 Executed 36 tests, with 0 failures (0 unexpected) in 0.010 (0.012) seconds
-Test Suite 'Selected tests' passed at 2026-01-23 13:56:05.375.
+Test Suite 'Selected tests' passed at 2026-01-23 15:01:41.818.
 	 Executed 36 tests, with 0 failures (0 unexpected) in 0.010 (0.013) seconds
 ```
 
@@ -101,9 +101,9 @@ Test Suite 'Selected tests' passed at 2026-01-23 13:56:05.375.
 ## Gate 2 Test Results (Debug)
 
 ```
-	 Executed 52 tests, with 0 failures (0 unexpected) in 0.018 (0.020) seconds
-Test Suite 'Selected tests' passed at 2026-01-23 13:56:05.972.
 	 Executed 52 tests, with 0 failures (0 unexpected) in 0.018 (0.021) seconds
+Test Suite 'Selected tests' passed at 2026-01-23 15:01:42.401.
+	 Executed 52 tests, with 0 failures (0 unexpected) in 0.018 (0.022) seconds
 ```
 
 ---
@@ -111,9 +111,9 @@ Test Suite 'Selected tests' passed at 2026-01-23 13:56:05.972.
 ## Gate 1 Test Results (Release)
 
 ```
-	 Executed 36 tests, with 0 failures (0 unexpected) in 0.009 (0.011) seconds
-Test Suite 'Selected tests' passed at 2026-01-23 13:56:24.666.
-	 Executed 36 tests, with 0 failures (0 unexpected) in 0.009 (0.012) seconds
+	 Executed 36 tests, with 0 failures (0 unexpected) in 0.008 (0.010) seconds
+Test Suite 'Selected tests' passed at 2026-01-23 15:02:00.860.
+	 Executed 36 tests, with 0 failures (0 unexpected) in 0.008 (0.011) seconds
 ```
 
 ---
@@ -121,9 +121,9 @@ Test Suite 'Selected tests' passed at 2026-01-23 13:56:24.666.
 ## Gate 2 Test Results (Release)
 
 ```
-	 Executed 52 tests, with 0 failures (0 unexpected) in 0.017 (0.020) seconds
-Test Suite 'Selected tests' passed at 2026-01-23 13:56:25.291.
-	 Executed 52 tests, with 0 failures (0 unexpected) in 0.017 (0.020) seconds
+	 Executed 52 tests, with 0 failures (0 unexpected) in 0.042 (0.046) seconds
+Test Suite 'Selected tests' passed at 2026-01-23 15:02:01.632.
+	 Executed 52 tests, with 0 failures (0 unexpected) in 0.042 (0.049) seconds
 ```
 
 ---
@@ -131,6 +131,85 @@ Test Suite 'Selected tests' passed at 2026-01-23 13:56:25.291.
 ## Known Non-Blocking Issues
 
 See SHADOW_CROSSPLATFORM_REPORT.md for cross-platform consistency shadow suite results.
+
+---
+
+## New Guardrails & Tests Added
+
+### Guardrails
+1. **ban_apple_only_imports.sh**
+   - Detects Apple-only imports (CryptoKit, UIKit, AppKit, etc.) in Linux-compiled targets
+   - Allows conditional compilation guards (`#if canImport(...)`)
+   - Explicit allowlist for shim files
+   - Integrated into repo_hygiene.sh
+
+2. **validate_ssot_gate_test_selection.sh**
+   - Validates Gate 1 and Gate 2 use explicit test filters
+   - Prevents accidental full test suite execution
+   - Now includes CryptoShimConsistencyTests in Gate 2 validation
+
+3. **validate_macos_xcode_selection.sh**
+   - Validates Xcode selection and usability
+   - Prevents hardcoded Xcode paths
+
+### Tests
+1. **CryptoShimConsistencyTests.swift**
+   - 13 tests validating cross-platform SHA-256 consistency
+   - Uses known test vectors (RFC 6234 / NIST FIPS 180-2)
+   - Included in Gate 2 test selection
+
+---
+
+## Future Breakage Threat Model
+
+### What Could Break Next?
+
+1. **macOS Runner/Xcode Availability Drift**
+   - **Risk:** GitHub Actions runner images update, removing Xcode versions
+   - **Detection:** validate_macos_xcode_selection.sh fails in CI
+   - **Prevention:** Pinned to macos-14, uses setup-xcode action, validate step in workflow
+
+2. **Ubuntu Compilation Drift (Apple-Only Imports)**
+   - **Risk:** New code imports CryptoKit/UIKit/AppKit without conditional compilation
+   - **Detection:** ban_apple_only_imports.sh fails in repo_hygiene
+   - **Prevention:** Guardrail script integrated into CI, explicit allowlist for shim files
+
+3. **Dependency Supply Chain Drift (swift-crypto Versioning)**
+   - **Risk:** swift-crypto updates break compatibility or introduce vulnerabilities
+   - **Detection:** Build failures or test failures in Linux jobs
+   - **Prevention:** Conservative semver range (from: "3.0.0"), documented dependency reason
+
+4. **Test Selection Drift (Accidentally Running Full Suite)**
+   - **Risk:** CI workflow accidentally runs entire test suite instead of SSOT gates
+   - **Detection:** validate_ssot_gate_test_selection.sh fails
+   - **Prevention:** Explicit test filters in workflow, validation script in Gate 0
+
+5. **Golden Vector Precision Drift**
+   - **Risk:** Implementation changes cause golden vector mismatches
+   - **Detection:** GoldenVectorsRoundTripTests fail
+   - **Prevention:** Golden vector governance policy, breaking change documentation required
+
+6. **Doc/Index Link Rot**
+   - **Risk:** Documentation links break, INDEX.md references become stale
+   - **Detection:** check_markdown_links.sh fails
+   - **Prevention:** Link checker integrated into repo_hygiene
+
+### How We Detect It Early
+
+- **Pre-commit:** Local all-up verification script (run_all_up_local_verification.sh)
+- **Gate 0:** Workflow lint, job graph validation, test selection validation
+- **Gate 1:** Fast constitutional checks (enum order, catalog schema, encoding)
+- **Gate 2:** Deep determinism checks (cross-platform consistency, crypto shim)
+- **Linux Preflight:** Repository hygiene, Apple-only import checks, path independence
+
+### What Guardrail Prevents Silent Regression
+
+- **Workflow validation:** lint_workflows.sh detects hardcoded paths, invalid job graphs
+- **Test selection validation:** validate_ssot_gate_test_selection.sh ensures explicit filters
+- **Import guardrails:** ban_apple_only_imports.sh prevents Apple-only imports in Linux targets
+- **Cross-platform tests:** CryptoShimConsistencyTests ensures crypto output consistency
+- **Golden vector tests:** GoldenVectorsRoundTripTests detect encoding/quantization drift
+- **Documentation checks:** audit_docs_markers.sh and check_markdown_links.sh prevent doc rot
 
 ---
 
@@ -148,4 +227,4 @@ git commit -t COMMIT_MESSAGE_TEMPLATE.txt
 
 ---
 
-**Report Generated:** 2026-01-23 13:56:31 UTC
+**Report Generated:** 2026-01-23 15:05:00 UTC

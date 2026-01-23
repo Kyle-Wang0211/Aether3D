@@ -243,11 +243,14 @@ echo ""
 
 # Phase 6: Linux Equivalence Smoke
 echo "📋 Phase 6: Linux Equivalence Smoke (No Docker)"
-if bash scripts/ci/linux_equivalence_smoke_no_docker.sh >/dev/null 2>&1; then
+LINUX_OUTPUT=$(bash scripts/ci/linux_equivalence_smoke_no_docker.sh 2>&1)
+LINUX_EXIT=$?
+if [ $LINUX_EXIT -eq 0 ]; then
     echo "   ✅ PASSED"
     LINUX_STATUS="✅ PASSED"
 else
-    echo "   ❌ FAILED"
+    echo "   ❌ FAILED (exit code: $LINUX_EXIT)"
+    echo "$LINUX_OUTPUT" | tail -5
     ERRORS=$((ERRORS + 1))
     LINUX_STATUS="❌ FAILED"
 fi

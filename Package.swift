@@ -11,6 +11,8 @@ let package = Package(
     .library(name: "Aether3DCore", targets: ["Aether3DCore"])
   ],
   dependencies: [
+    // swift-crypto: Required for Linux compatibility (replaces Apple-only CryptoKit)
+    // Used by ConstantsTests target for cross-platform SHA-256 hashing
     .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
   ],
   targets: [
@@ -41,7 +43,10 @@ let package = Package(
     ),
     .testTarget(
       name: "ConstantsTests",
-      dependencies: ["Aether3DCore"],
+      dependencies: [
+        "Aether3DCore",
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
       path: "Tests/Constants"
     )
   ]

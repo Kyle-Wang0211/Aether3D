@@ -8,7 +8,6 @@
 //
 
 import XCTest
-import CryptoKit
 @testable import Aether3DCore
 
 /// Tests for enum frozen order hash validation (B3).
@@ -36,8 +35,7 @@ final class EnumFrozenOrderTests: XCTestCase {
         let joined = caseStrings.joined(separator: "\n")
         
         let data = Data(joined.utf8)
-        let hash = SHA256.hash(data: data)
-        return hash.compactMap { String(format: "%02x", $0) }.joined()
+        return CryptoShim.sha256Hex(data)
     }
     
     // MARK: - EdgeCaseType Tests

@@ -19,20 +19,27 @@ This document explains what to do when SSOT Foundation tests fail. It categorize
 - Xcode selection failed (`xcode-select: error: invalid developer directory`)
 - Workflow job graph invalid
 - Runner image mismatch
+- Ubuntu compilation failure: `no such module 'CryptoKit'`
 
 **What fixes are allowed:**
 - ✅ Fix workflow YAML (use setup-xcode action, pin runner versions)
 - ✅ Update matrix to match available Xcode versions
+- ✅ Use cross-platform crypto shim (`CryptoShim`) instead of direct `CryptoKit` imports
+- ✅ Add `swift-crypto` dependency to test targets that need SHA-256 on Linux
 - ❌ **FORBIDDEN:** Hardcode `/Applications/Xcode_*.app` paths
 - ❌ **FORBIDDEN:** Use floating `macos-latest` without Xcode version validation
+- ❌ **FORBIDDEN:** Import `CryptoKit` directly in Linux-compiled code without conditional compilation
 
 **How to proceed:**
 1. Check CI logs for exact error message
 2. If Xcode path error: Remove hardcoded path, use `maxim-lobanov/setup-xcode@v1`
 3. If version mismatch: Update matrix to use available Xcode version
 4. Pin `runs-on` to specific macOS version (e.g., `macos-14`)
+5. If Ubuntu CryptoKit error: Replace direct `import CryptoKit` with `CryptoShim` usage
 
-**Example error:**
+**Example errors:**
+
+**Xcode Selection:**
 ```
 ❌ xcode-select: error: invalid developer directory '/Applications/Xcode_15.0.app/Contents/Developer'
 Root cause: Runner image doesn't ship that Xcode version/path
@@ -44,10 +51,55 @@ Fix:
 Prevention: lint_workflows.sh forbids hardcoded /Applications/Xcode paths
 ```
 
+**Ubuntu CryptoKit:**
+```
+❌ error: no such module 'CryptoKit'
+Root cause: CryptoKit is Apple-only; Linux builds fail when tests import it directly
+File: Tests/Constants/EnumFrozenOrderTests.swift:11: import CryptoKit
+Fix:
+  1. Replace direct CryptoKit import with CryptoShim usage
+  2. Use CryptoShim.sha256Hex(data) instead of SHA256.hash(data: data)
+  3. Ensure Package.swift adds Crypto product dependency to ConstantsTests target
+  4. Verify ban_apple_only_imports.sh passes
+Prevention: ban_apple_only_imports.sh detects forbidden imports in Linux-compiled targets
+
+How to verify locally:
+  rg -n "import CryptoKit" . | grep -v "#if canImport\|CryptoShim\|SHA256Utility"
+  rg -n "import Crypto" . | grep -v "#if canImport\|CryptoShim\|SHA256Utility"
+  bash scripts/ci/ban_apple_only_imports.sh
+```
+
+**SHA-256 Output Mismatch Across Platforms:**
+```
+❌ CryptoShimConsistencyTests failure: SHA-256 output differs between macOS and Linux
+Root cause: Byte ordering, hex formatting, or platform-specific crypto implementation drift
+Fix:
+  1. Run CryptoShimConsistencyTests locally on both platforms (if possible)
+  2. Check CryptoShim.swift conversion logic (byte array ordering, hex format)
+  3. Ensure both CryptoKit and swift-crypto Crypto produce identical byte arrays
+  4. Verify hex encoding is consistently lowercase
+Prevention: CryptoShimConsistencyTests validates cross-platform determinism
+```
+
+**How to verify locally:**
+```bash
+# Check for forbidden imports
+bash scripts/ci/ban_apple_only_imports.sh
+
+# Verify Linux compilation (if Docker available)
+bash scripts/ci/run_linux_spm_matrix.sh
+
+# Or run Linux equivalence smoke (no Docker)
+bash scripts/ci/linux_equivalence_smoke_no_docker.sh
+```
+
 **Prevention:**
 - `scripts/ci/lint_workflows.sh` detects hardcoded Xcode paths
 - `scripts/ci/validate_macos_xcode_selection.sh` validates Xcode selection
+- `scripts/ci/ban_apple_only_imports.sh` detects Apple-only imports in Linux-compiled targets
+- `scripts/ci/repo_hygiene.sh` includes Apple-only import check
 - Workflow uses `setup-xcode` action instead of manual `xcode-select`
+- All test code uses `CryptoShim` for cross-platform SHA-256 hashing
 
 ---
 

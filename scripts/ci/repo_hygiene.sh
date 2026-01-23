@@ -163,6 +163,18 @@ fi
 
 echo ""
 
+# 6. Check for Apple-only imports in Linux-compiled targets
+echo "6. Checking for Apple-only imports in Linux-compiled targets..."
+if bash scripts/ci/ban_apple_only_imports.sh >/dev/null 2>&1; then
+    echo "   ✅ No forbidden Apple-only imports found"
+else
+    echo "   ❌ Found Apple-only imports without conditional compilation guards"
+    bash scripts/ci/ban_apple_only_imports.sh || true
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo ""
+
 # Summary
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All hygiene checks passed"
