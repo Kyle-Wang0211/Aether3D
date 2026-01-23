@@ -314,6 +314,8 @@ All SSOT Foundation gates and validation checks were executed locally.
 | 3.1 | Swift Package Resolve | ✅ PASSED |
 | 3.2 | Swift Build (Debug) | ✅ PASSED |
 | 3.3 | Swift Build (Release) | ✅ PASSED |
+| 4.0 | Crypto Shim Canary (Debug) | ${GATE_CRYPTO_DEBUG_STATUS:-⚠️  SKIPPED} |
+| 4.0 | Crypto Shim Canary (Release) | ${GATE_CRYPTO_RELEASE_STATUS:-⚠️  SKIPPED} |
 | 4.1 | Gate 1 Tests (Debug) | $GATE1_DEBUG_STATUS |
 | 4.2 | Gate 2 Tests (Debug) | $GATE2_DEBUG_STATUS |
 | 4.3 | Gate 1 Tests (Release) | $GATE1_RELEASE_STATUS |

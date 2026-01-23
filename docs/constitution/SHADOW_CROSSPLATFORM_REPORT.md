@@ -1,6 +1,6 @@
 # Shadow Cross-Platform Consistency Report
 
-**Date:** 2026-01-23 19:36:09 UTC
+**Date:** 2026-01-23 20:11:06 UTC
 **Branch:** pr1/ssot-foundation-v1_1
 **Status:** ⚠️  0
 0 failure(s)
@@ -25,10 +25,10 @@ but they are run locally to catch cross-platform determinism problems.
 [0/1] Planning build
 Building for debugging...
 [0/2] Write swift-version--58304C5D6DBC2206.txt
-Build complete! (1.09s)
-Test Suite 'Selected tests' started at 2026-01-23 19:36:09.491.
-Test Suite 'Aether3DPackageTests.xctest' started at 2026-01-23 19:36:09.491.
-Test Suite 'CrossPlatformConsistencyTests' started at 2026-01-23 19:36:09.491.
+Build complete! (1.16s)
+Test Suite 'Selected tests' started at 2026-01-23 20:11:05.964.
+Test Suite 'Aether3DPackageTests.xctest' started at 2026-01-23 20:11:05.965.
+Test Suite 'CrossPlatformConsistencyTests' started at 2026-01-23 20:11:05.965.
 Test Case '-[ConstantsTests.CrossPlatformConsistencyTests test_colorConversion_d65_whitePoint_fixed]' started.
 Test Case '-[ConstantsTests.CrossPlatformConsistencyTests test_colorConversion_d65_whitePoint_fixed]' passed (0.001 seconds).
 Test Case '-[ConstantsTests.CrossPlatformConsistencyTests test_colorConversion_goldenVectors_withinTolerance]' started.
@@ -65,11 +65,11 @@ Test Case '-[ConstantsTests.CrossPlatformConsistencyTests test_quantization_prec
 Test Case '-[ConstantsTests.CrossPlatformConsistencyTests test_quantization_precisionSeparation]' passed (0.000 seconds).
 Test Case '-[ConstantsTests.CrossPlatformConsistencyTests test_quantization_roundingMode_halfAwayFromZero]' started.
 Test Case '-[ConstantsTests.CrossPlatformConsistencyTests test_quantization_roundingMode_halfAwayFromZero]' passed (0.000 seconds).
-Test Suite 'CrossPlatformConsistencyTests' passed at 2026-01-23 19:36:09.496.
+Test Suite 'CrossPlatformConsistencyTests' passed at 2026-01-23 20:11:05.969.
 	 Executed 18 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
-Test Suite 'Aether3DPackageTests.xctest' passed at 2026-01-23 19:36:09.496.
+Test Suite 'Aether3DPackageTests.xctest' passed at 2026-01-23 20:11:05.969.
 	 Executed 18 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
-Test Suite 'Selected tests' passed at 2026-01-23 19:36:09.496.
+Test Suite 'Selected tests' passed at 2026-01-23 20:11:05.969.
 	 Executed 18 tests, with 0 failures (0 unexpected) in 0.004 (0.006) seconds
 ◇ Test run started.
 ↳ Testing Library Version: 1501
@@ -92,4 +92,4 @@ Test Suite 'Selected tests' passed at 2026-01-23 19:36:09.496.
 
 ---
 
-**Report Generated:** 2026-01-23 19:36:09 UTC
+**Report Generated:** 2026-01-23 20:11:06 UTC

@@ -118,13 +118,45 @@ jobs:
             exit 1
           fi
           echo "✅ swift-crypto dependency found"
+          echo ""
+          echo "🔍 Parsing swift-crypto version/revision from Package.resolved..."
+          if [ -f "Package.resolved" ]; then
+            SWIFT_CRYPTO_REVISION=$(python3 -c 'import json; f=open("Package.resolved"); d=json.load(f); f.close(); p=[p for p in d.get("pins",[]) if p.get("identity")=="swift-crypto"]; s=p[0].get("state",{}) if p else {}; print(f"{s.get(\"version\",\"unknown\")} ({s.get(\"revision\",\"unknown\")[:12]})") if s else print("swift-crypto not found")' 2>/dev/null || echo "unknown")
+            echo "  swift-crypto version/revision: ${SWIFT_CRYPTO_REVISION:-unknown}"
+            echo ""
+            echo "⚠️  Dependency drift guardrail:"
+            echo "  If swift-crypto revision changes, commit message MUST include 'Dependency-Change: yes'"
+            echo "  OR add a marker file: touch .dependency-change-marker"
+            echo "  Current revision: ${SWIFT_CRYPTO_REVISION:-unknown}"
+            echo ""
+            # Check if dependency change is explicitly marked
+            if git log -1 --pretty=%B | grep -q "Dependency-Change: yes" 2>/dev/null || \
+               [ -f ".dependency-change-marker" ] 2>/dev/null; then
+              echo "  ✅ Dependency change explicitly marked (commit message or marker file)"
+            else
+              # Check if Package.resolved changed in this commit
+              if git diff --cached --name-only | grep -q "Package.resolved" 2>/dev/null || \
+                 git diff HEAD --name-only | grep -q "Package.resolved" 2>/dev/null; then
+                echo "  ⚠️  Package.resolved changed but no explicit marker found"
+                echo "  This may be intentional (e.g., transitive dependency update)"
+                echo "  If intentional, add 'Dependency-Change: yes' to commit message or create .dependency-change-marker"
+              else
+                echo "  ✅ No Package.resolved changes detected in this commit"
+              fi
+            fi
+          else
+            echo "  ⚠️  Package.resolved not found (may be using SPM without lock file)"
+          fi
       
       - name: Export OPENSSL_ia32cap to GITHUB_ENV (Linux Preflight)
         run: |
-          echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
+          echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV"
           echo "✅ Exported OPENSSL_ia32cap=:0 to GITHUB_ENV for all subsequent steps"
       
       - name: Crypto Shim Sanity Check (Linux) — Canary
+        env:
+          # Step-level env (belt-and-suspenders)
+          OPENSSL_ia32cap: ":0"
         run: |
           echo "🔍 Linux Crypto Shim Sanity Check (Canary)"
           echo "This canary test catches SIGILL early before full Gate 2 suite runs"
@@ -142,22 +174,24 @@ jobs:
             echo ""
             echo "::error::OPENSSL_ia32cap must be ':0' on Linux Preflight to prevent SIGILL"
             echo "Current value: '${OPENSSL_ia32cap:-not set}'"
-            echo "This will cause SIGILL crashes. Fix: Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
+            echo "This will cause SIGILL crashes. Fix: Ensure OPENSSL_ia32cap=:0 is set at job level, step level, GITHUB_ENV, and inline prefix"
             exit 1
           fi
           echo ""
           echo "✅ OPENSSL_ia32cap guardrail passed"
           echo ""
           echo "Testing CryptoShimConsistencyTests (canary test to catch SIGILL early)..."
-          echo "Exact invocation: swift test -c debug --filter CryptoShimConsistencyTests"
-          echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap}"
+          echo "Exact invocation: OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests"
           echo ""
-          swift test -c debug --filter CryptoShimConsistencyTests || {
+          # Inline prefix ensures env is applied even if step-level env fails
+          OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests || {
             echo ""
-            echo "::error::Crypto shim canary test failed or crashed"
-            echo "If SIGILL (signal 4): Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
-            echo "This prevents crypto asm illegal instruction crashes on CI CPUs"
-            echo "Root cause: crypto backend CPU feature detection mismatch OR env not propagated"
+            echo "::error::SIGILL during crypto canary. This indicates native crypto backend illegal instruction."
+            echo "See DEVELOPER_FAILURE_TRIAGE.md → Ubuntu SIGILL section."
+            echo ""
+            echo "Diagnostics:"
+            echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+            echo "  Test command: OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests"
             exit 1
           }
           echo "✅ Crypto shim canary check passed (no SIGILL detected)"
@@ -405,27 +439,59 @@ jobs:
       - name: Export OPENSSL_ia32cap to GITHUB_ENV (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
-          echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
+          echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV"
           echo "✅ Exported OPENSSL_ia32cap=:0 to GITHUB_ENV for all subsequent steps"
+      
+      - name: Linux System Diagnostics (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          echo "🔍 Linux System Diagnostics (for SIGILL troubleshooting)"
+          echo "  uname -a: $(uname -a)"
+          echo "  uname -m: $(uname -m)"
+          echo "  CPU info:"
+          lscpu | head -20 || true
+          cat /proc/cpuinfo | head -40 || true
+          echo ""
+          echo "Crypto-related environment variables:"
+          env | grep -E 'OPENSSL_ia32cap|CRYPTO|BORING|SWIFT_CRYPTO' || echo "  (none found)"
+          echo ""
       
       - name: Verify OPENSSL_ia32cap Guardrail (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
           echo "🔍 Verifying OPENSSL_ia32cap is set to prevent SIGILL..."
-          echo "System diagnostics:"
-          echo "  uname -a: $(uname -a)"
-          echo "  uname -m: $(uname -m)"
-          echo "  CPU info: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2 | xargs || echo 'unknown')"
-          echo "  OPENSSL env vars:"
-          env | grep -i openssl || echo "    (none found)"
+          echo "Current OPENSSL_ia32cap value:"
+          env | grep -E '^OPENSSL_ia32cap=' || echo "  (not found in env)"
           echo ""
           if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
             echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
             echo "Current value: '${OPENSSL_ia32cap:-not set}'"
-            echo "Fix: Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
+            echo "Fix: Ensure OPENSSL_ia32cap=:0 is set at job level, step level, GITHUB_ENV, and inline prefix"
             exit 1
           fi
           echo "✅ OPENSSL_ia32cap=${OPENSSL_ia32cap} (correct)"
+      
+      - name: Crypto Canary Test (Linux) — Early SIGILL Detection
+        if: matrix.os == 'ubuntu-22.04'
+        env:
+          # Step-level env (belt-and-suspenders)
+          OPENSSL_ia32cap: ":0"
+        run: |
+          echo "🔍 Crypto Canary Test (catches SIGILL before full Gate 2 suite)"
+          echo "Testing CryptoShimConsistencyTests with explicit OPENSSL_ia32cap=:0..."
+          echo ""
+          # Inline prefix ensures env is applied even if step-level env fails
+          OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests || {
+            echo ""
+            echo "::error::SIGILL during crypto canary. This indicates native crypto backend illegal instruction."
+            echo "See DEVELOPER_FAILURE_TRIAGE.md → Ubuntu SIGILL section."
+            echo ""
+            echo "Diagnostics:"
+            echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+            echo "  Test command: OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests"
+            exit 1
+          }
+          echo "✅ Crypto canary passed (no SIGILL detected)"
       
       - name: Build (${{ matrix.build_config }})
         env:
@@ -436,12 +502,58 @@ jobs:
         run: |
           swift build -c ${{ matrix.build_config }}
       
+      - name: Final OPENSSL_ia32cap Verification Before Tests (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          echo "🔍 Final OPENSSL_ia32cap verification before running tests..."
+          echo "Environment check:"
+          env | grep -E '^OPENSSL_ia32cap=' || echo "  ❌ OPENSSL_ia32cap not found in env"
+          echo ""
+          if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
+            echo "::error::OPENSSL_ia32cap must be ':0' before running tests"
+            echo "Current value: '${OPENSSL_ia32cap:-not set}'"
+            echo "This will cause SIGILL. All layers must be set: job env + step env + GITHUB_ENV + inline prefix"
+            exit 1
+          fi
+          echo "✅ OPENSSL_ia32cap=${OPENSSL_ia32cap} verified (all layers applied)"
+          echo ""
+      
+      - name: Linux System Diagnostics Before Tests (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          echo "🔍 Linux System Diagnostics (for SIGILL root cause identification)"
+          echo "System information:"
+          echo "  uname -a: $(uname -a)"
+          echo "  uname -m: $(uname -m)"
+          echo "  CPU info:"
+          lscpu | head -20 || true
+          echo ""
+          echo "Environment variables (crypto-related):"
+          env | grep -E '^OPENSSL_ia32cap=' || echo "  (OPENSSL_ia32cap not found)"
+          env | grep -E 'SSOT_PURE_SWIFT_SHA256' || echo "  (SSOT_PURE_SWIFT_SHA256 not set, using native crypto)"
+          echo ""
+          echo "Locating built xctest binary and checking dependencies..."
+          # Find the xctest binary path (typically in .build/debug or .build/release)
+          XCTEST_PATH=$(find .build -name "xctest" -type f 2>/dev/null | head -1 || echo "")
+          if [ -n "$XCTEST_PATH" ]; then
+            echo "  Found xctest at: $XCTEST_PATH"
+            echo "  Dependencies (crypto-related):"
+            ldd "$XCTEST_PATH" 2>/dev/null | grep -E 'ssl|crypto|boring|swift|foundation' || echo "    (no crypto-related dependencies found or ldd failed)"
+          else
+            echo "  ⚠️  xctest binary not found (may not be built yet or path differs)"
+          fi
+          echo ""
+          echo "Note: These diagnostics are for troubleshooting only; they do not affect test execution."
+          echo ""
+      
       - name: Run Gate 2 Tests (Determinism & Trust)
         env:
           CONFIGURATION: ${{ matrix.build_config }}
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
+          # Step-level env for ubuntu (belt-and-suspenders)
+          OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
         run: |
           echo "🔒 Gate 2: Determinism & Trust Gate (Deep, Blocking)"
           echo "OS: ${{ matrix.os }}, Config: ${{ matrix.build_config }}"
@@ -450,17 +562,16 @@ jobs:
             echo "Linux diagnostics:"
             echo "  uname -a: $(uname -a)"
             echo "  Swift: $(swift --version | head -1)"
-            echo "  CPU: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || echo 'unknown')"
             echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
             echo ""
             echo "Environment variables (crypto-related):"
             env | sort | grep -E "(OPENSSL_ia32cap|ia32cap|CRYPTO|SWIFT)" || echo "  (none found)"
-            # Guardrail: Ensure OPENSSL_ia32cap is set for ubuntu to prevent SIGILL
+            # Final guardrail: Ensure OPENSSL_ia32cap is set for ubuntu to prevent SIGILL
             if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
               echo ""
               echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
               echo "Current value: '${OPENSSL_ia32cap:-not set}'"
-              echo "This will cause SIGILL crashes. Fix: Ensure OPENSSL_ia32cap=:0 is set at job level and exported via GITHUB_ENV"
+              echo "This will cause SIGILL crashes. Fix: Ensure OPENSSL_ia32cap=:0 is set at job level, step level, GITHUB_ENV, and inline prefix"
               exit 1
             fi
             echo ""
@@ -478,13 +589,17 @@ jobs:
           echo "  - Minimum explanation set (D2)"
           echo ""
           if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            echo "Exact swift test invocation:"
-            echo "  swift test -c ${{ matrix.build_config }} --filter [Gate 2 test suites]"
-            echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap}"
+            echo "Exact swift test invocation (with inline OPENSSL_ia32cap prefix):"
+            echo "  OPENSSL_ia32cap=:0 swift test -c ${{ matrix.build_config }} --filter [Gate 2 test suites]"
             echo ""
           fi
           
-          swift test -c ${{ matrix.build_config }} \
+          # Inline prefix ensures OPENSSL_ia32cap is applied even if env propagation fails
+          if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
+            OPENSSL_ia32cap=:0 swift test -c ${{ matrix.build_config }} \
+          else
+            swift test -c ${{ matrix.build_config }} \
+          fi
             --filter ColorMatrixIntegrityTests \
             --filter DomainPrefixesTests \
             --filter ReproducibilityBoundaryTests \

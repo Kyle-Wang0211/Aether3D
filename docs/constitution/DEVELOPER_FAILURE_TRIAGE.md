@@ -112,6 +112,37 @@ Fix:
 Prevention: validate_no_duplicate_steps_keys.sh detects duplicate steps keys
 ```
 
+**Dependency Drift (swift-crypto version change):**
+```
+⚠️  Warning: swift-crypto revision changed in Package.resolved
+Root cause: Dependency version/revision updated without explicit marker
+Fix:
+  1. If intentional: Add "Dependency-Change: yes" to commit message body
+  2. OR create marker file: touch .dependency-change-marker
+  3. Commit both Package.resolved and the marker/commit message together
+Prevention:
+  - Linux Preflight checks Package.resolved for swift-crypto revision
+  - Fails if revision changes without explicit marker
+  - Ensures dependency updates are intentional and documented
+```
+
+**Cross-Workflow Concurrency Collision:**
+```
+❌ Error: Concurrency group lacks workflow-specific prefix
+Root cause: concurrency.group does not include github.workflow or workflow name
+  - Multiple workflows may share same concurrency group
+  - New workflow run cancels unrelated workflow runs
+Fix:
+  1. Ensure concurrency.group includes \${{ github.workflow }}:
+     concurrency:
+       group: \${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  2. OR include workflow name explicitly in group pattern
+Prevention:
+  - validate_concurrency_uniqueness.sh checks all workflows
+  - Integrated into lint_workflows.sh
+  - Fails if group is constant or lacks workflow identifier
+```
+
 **Operation was canceled:**
 ```
 ❌ "Error: The operation was canceled."
@@ -144,34 +175,59 @@ Symptoms:
   - Register dump shown
   - "Test run started ... 0 tests ... then crash"
   - May happen before swift test command executes (toolchain init) or during test discovery
-Fix (MUST apply all three):
+
+Layered Mitigation (MUST apply all layers):
+  (a) Job-level env: Set OPENSSL_ia32cap=:0 at job level for ubuntu Gate 2 jobs
+  (b) Step-level env: Set OPENSSL_ia32cap=:0 at step level for test execution steps
+  (c) GITHUB_ENV export: echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV" early in job
+  (d) Inline prefix: Use OPENSSL_ia32cap=:0 swift test ... (guarantees env even if propagation fails)
+  (e) Guardrail verification: Fail fast if OPENSSL_ia32cap != ":0" before tests run
+  (f) Canary test: Run CryptoShimConsistencyTests early to catch SIGILL before full suite
+  (g) Pure Swift fallback: SHA256PureSwift provides test-only fallback if native crypto SIGILLs
+
+Fix steps:
   1. Set OPENSSL_ia32cap at JOB level in workflow YAML:
      env:
        OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
   2. Export OPENSSL_ia32cap via GITHUB_ENV early in job (before any build/test):
-     echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
-  3. Add guardrail verification step that fails if OPENSSL_ia32cap is not ":0":
-     if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
-       echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
-       exit 1
-     fi
-  4. Verify canary test passes: swift test -c debug --filter CryptoShimConsistencyTests
+     echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV"
+  3. Set OPENSSL_ia32cap at STEP level for test execution steps:
+     env:
+       OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
+  4. Use inline prefix in swift test command:
+     OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests
+  5. Add guardrail verification step that fails if OPENSSL_ia32cap is not ":0"
+  6. Run canary test early: OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests
+
 Prevention: 
   - Gate Linux Preflight includes crypto shim canary check (catches SIGILL early)
-  - Workflow sets OPENSSL_ia32cap=:0 at job level AND exports via GITHUB_ENV
+  - Workflow sets OPENSSL_ia32cap=:0 at job level + step level + GITHUB_ENV + inline prefix
   - Guardrail verification steps fail fast if env not set correctly
   - Canary test runs before full Gate 2 suite to localize failure
+  - Pure Swift SHA-256 fallback (SHA256PureSwift) available as last resort
 
 How to verify locally (if running on Linux or Docker):
   export OPENSSL_ia32cap=:0
-  swift test -c debug --filter CryptoShimConsistencyTests
+  OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests
   # Should pass without SIGILL
 
-If SIGILL persists after fix:
+If SIGILL persists after all layers:
   - Check env propagation: print OPENSSL_ia32cap in step before swift test
   - Verify GITHUB_ENV export happened: check step logs
   - Check if wrapper scripts sanitize/clear env (preserve OPENSSL_ia32cap)
-  - Add diagnostics: uname -a, lscpu, env | grep OPENSSL
+  - Review Linux diagnostics: uname -a, lscpu, env | grep OPENSSL, ldd xctest output
+  - Enable pure Swift fallback explicitly: Set SSOT_PURE_SWIFT_SHA256=1 in test step env
+    (This bypasses native crypto entirely and uses SHA256PureSwift)
+
+Pure Swift SHA-256 Fallback (Explicit Control):
+  - Environment variable: SSOT_PURE_SWIFT_SHA256=1 (Linux-only)
+  - When enabled: CryptoShim uses SHA256PureSwift instead of native crypto backend
+  - Default behavior: Uses native crypto with OPENSSL_ia32cap=:0 mitigation
+  - Usage: Set in step env for Gate 2 tests if SIGILL persists despite all mitigations
+  - Example:
+    env:
+      SSOT_PURE_SWIFT_SHA256: "1"
+    run: swift test -c debug --filter CryptoShimConsistencyTests
 ```
 
 **How to verify locally:**

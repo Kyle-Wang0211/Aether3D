@@ -125,6 +125,22 @@ else
 fi
 echo ""
 
+# Check concurrency uniqueness (prevent cross-workflow cancellation)
+echo "6. Validating concurrency uniqueness..."
+if [ -f "scripts/ci/validate_concurrency_uniqueness.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if bash scripts/ci/validate_concurrency_uniqueness.sh "$workflow" 2>/dev/null; then
+            echo "   ✅ $workflow: Concurrency groups are workflow-specific"
+        else
+            echo "   ❌ $workflow: Concurrency uniqueness validation failed"
+            ERRORS=$((ERRORS + 1))
+        fi
+    done
+else
+    echo "   ⚠️  validate_concurrency_uniqueness.sh not found, skipping"
+fi
+echo ""
+
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All workflow files valid"
     exit 0
