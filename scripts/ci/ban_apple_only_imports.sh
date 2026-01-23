@@ -9,6 +9,7 @@ REPO_ROOT="${1:-$(git rev-parse --show-toplevel)}"
 cd "$REPO_ROOT" || exit 1
 
 ERRORS=0
+VIOLATIONS=()
 FORBIDDEN_IMPORTS=(
     "import CryptoKit"
     "import Crypto"
@@ -101,7 +102,8 @@ for dir in "${SCAN_DIRS[@]}"; do
                 fi
                 
                 if [ "$has_guard" = false ]; then
-                    FOUND_VIOLATIONS+=("$file:$line_num:${forbidden}")
+                    VIOLATIONS+=("$file:$line_num:${forbidden}")
+                    ERRORS=$((ERRORS + 1))
                 fi
             fi
         done
