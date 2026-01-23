@@ -1,8 +1,13 @@
 name: SSOT Foundation CI (Guardian Layer)
 
-# Prevent concurrent runs on same ref
+# Prevent concurrent runs on same ref, but isolate per workflow to prevent cross-workflow cancellation
+# For PRs: use PR number for better isolation; for push: use ref
+# SINGLE SOURCE OF TRUTH: SSOT_CONCURRENCY_GROUP prevents drift between concurrency.group and diagnostics
+env:
+  SSOT_CONCURRENCY_GROUP: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ env.SSOT_CONCURRENCY_GROUP }}
   cancel-in-progress: true
 
 on:
@@ -101,6 +106,18 @@ jobs:
           chmod +x scripts/ci/preflight_ssot_foundation.sh
           bash scripts/ci/preflight_ssot_foundation.sh
       
+      - name: Dependency Drift Guardrail (swift-crypto)
+        run: |
+          echo "🔍 Checking swift-crypto dependency (required for CryptoShim on Linux)..."
+          if ! swift package describe 2>/dev/null | grep -q "swift-crypto\|Crypto"; then
+            echo "::error::swift-crypto dependency missing; CryptoShim requires it on Linux."
+            echo "Restore Package.swift dependency for ConstantsTests target."
+            echo "Package description output:"
+            swift package describe 2>&1 | head -20 || echo "  (package describe failed)"
+            exit 1
+          fi
+          echo "✅ swift-crypto dependency found"
+      
       - name: Export OPENSSL_ia32cap to GITHUB_ENV (Linux Preflight)
         run: |
           echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
@@ -170,6 +187,22 @@ jobs:
         xcode_version: ['15.4']  # Single stable version (15.0 not reliably available)
     
     steps:
+      - name: Concurrency Diagnostics
+        run: |
+          echo "::notice::Concurrency diagnostics for Gate 1"
+          echo "event_name: ${{ github.event_name }}"
+          echo "actor: ${{ github.actor }}"
+          echo "workflow: ${{ github.workflow }}"
+          echo "run_id: ${{ github.run_id }}"
+          echo "run_attempt: ${{ github.run_attempt }}"
+          echo "ref: ${{ github.ref }}"
+          echo "head_ref: ${{ github.head_ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
+          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+          echo ""
+      
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -255,6 +288,21 @@ jobs:
           
           echo ""
           echo "✅ Gate 1 PASSED: Constitutional invariants intact"
+      
+      - name: Cancellation Notice
+        if: ${{ cancelled() }}
+        run: |
+          echo "::notice::JOB CANCELED (not a test failure). Likely superseded by a newer run due to concurrency cancel-in-progress."
+          echo "event_name: ${{ github.event_name }}"
+          echo "workflow: ${{ github.workflow }}"
+          echo "run_id: ${{ github.run_id }}"
+          echo "run_attempt: ${{ github.run_attempt }}"
+          echo "ref: ${{ github.ref }}"
+          echo "head_ref: ${{ github.head_ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
+          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
   
   # Gate 2 — Determinism & Trust Gate (Deep, Blocking)
   # Runs only if Gate 1 passes
@@ -272,6 +320,23 @@ jobs:
     # Setting OPENSSL_ia32cap=:0 at job level ensures it's inherited by all steps and child processes
     env:
       OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
+    
+    steps:
+      - name: Concurrency Diagnostics
+        run: |
+          echo "::notice::Concurrency diagnostics for Gate 2"
+          echo "event_name: ${{ github.event_name }}"
+          echo "actor: ${{ github.actor }}"
+          echo "workflow: ${{ github.workflow }}"
+          echo "run_id: ${{ github.run_id }}"
+          echo "run_attempt: ${{ github.run_attempt }}"
+          echo "ref: ${{ github.ref }}"
+          echo "head_ref: ${{ github.head_ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
+          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+          echo ""
     
     strategy:
       fail-fast: false
@@ -347,6 +412,13 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: |
           echo "🔍 Verifying OPENSSL_ia32cap is set to prevent SIGILL..."
+          echo "System diagnostics:"
+          echo "  uname -a: $(uname -a)"
+          echo "  uname -m: $(uname -m)"
+          echo "  CPU info: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2 | xargs || echo 'unknown')"
+          echo "  OPENSSL env vars:"
+          env | grep -i openssl || echo "    (none found)"
+          echo ""
           if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
             echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
             echo "Current value: '${OPENSSL_ia32cap:-not set}'"
@@ -436,6 +508,21 @@ jobs:
           
           echo ""
           echo "✅ Gate 2 PASSED: Determinism, reproducibility, and user trust intact"
+      
+      - name: Cancellation Notice
+        if: ${{ cancelled() }}
+        run: |
+          echo "::notice::JOB CANCELED (not a test failure). Likely superseded by a newer run due to concurrency cancel-in-progress."
+          echo "event_name: ${{ github.event_name }}"
+          echo "workflow: ${{ github.workflow }}"
+          echo "run_id: ${{ github.run_id }}"
+          echo "run_attempt: ${{ github.run_attempt }}"
+          echo "ref: ${{ github.ref }}"
+          echo "head_ref: ${{ github.head_ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
+          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
   
   # Golden Vector Change Detection
   # Fails if golden vectors are modified without proper documentation
