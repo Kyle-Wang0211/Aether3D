@@ -2,13 +2,14 @@ name: SSOT Foundation CI (Guardian Layer)
 
 # Prevent concurrent runs on same ref, but isolate per workflow to prevent cross-workflow cancellation
 # For PRs: use PR number for better isolation; for push: use ref
-# SINGLE SOURCE OF TRUTH: SSOT_CONCURRENCY_GROUP prevents drift between concurrency.group and diagnostics
+# Concurrency group uses ONLY github.* contexts (compile-time evaluation)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Runtime env for diagnostics only (mirrors concurrency group value)
 env:
   SSOT_CONCURRENCY_GROUP: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-
-concurrency:
-  group: ${{ env.SSOT_CONCURRENCY_GROUP }}
-  cancel-in-progress: true
 
 on:
   pull_request:
@@ -321,23 +322,6 @@ jobs:
     env:
       OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
     
-    steps:
-      - name: Concurrency Diagnostics
-        run: |
-          echo "::notice::Concurrency diagnostics for Gate 2"
-          echo "event_name: ${{ github.event_name }}"
-          echo "actor: ${{ github.actor }}"
-          echo "workflow: ${{ github.workflow }}"
-          echo "run_id: ${{ github.run_id }}"
-          echo "run_attempt: ${{ github.run_attempt }}"
-          echo "ref: ${{ github.ref }}"
-          echo "head_ref: ${{ github.head_ref }}"
-          echo "sha: ${{ github.sha }}"
-          echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
-          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
-          echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
-          echo ""
-    
     strategy:
       fail-fast: false
       matrix:
@@ -356,6 +340,22 @@ jobs:
             build_config: release
     
     steps:
+      - name: Concurrency Diagnostics
+        run: |
+          echo "::notice::Concurrency diagnostics for Gate 2"
+          echo "event_name: ${{ github.event_name }}"
+          echo "actor: ${{ github.actor }}"
+          echo "workflow: ${{ github.workflow }}"
+          echo "run_id: ${{ github.run_id }}"
+          echo "run_attempt: ${{ github.run_attempt }}"
+          echo "ref: ${{ github.ref }}"
+          echo "head_ref: ${{ github.head_ref }}"
+          echo "sha: ${{ github.sha }}"
+          echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
+          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+          echo ""
+      
       - name: Checkout
         uses: actions/checkout@v4
         with:

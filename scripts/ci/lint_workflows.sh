@@ -89,6 +89,42 @@ if [ $HARDCODED_XCODE -gt 0 ]; then
 fi
 echo ""
 
+# Check concurrency contexts (compile-time safety)
+echo "4. Validating concurrency contexts..."
+if [ -f "scripts/ci/validate_concurrency_contexts.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_concurrency_contexts.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Concurrency contexts valid"
+            else
+                echo "   ❌ $workflow: Concurrency context validation failed"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done
+else
+    echo "   ⚠️  validate_concurrency_contexts.sh not found, skipping"
+fi
+echo ""
+
+# Check for duplicate steps keys
+echo "5. Validating no duplicate 'steps:' keys..."
+if [ -f "scripts/ci/validate_no_duplicate_steps_keys.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_no_duplicate_steps_keys.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: No duplicate 'steps:' keys"
+            else
+                echo "   ❌ $workflow: Duplicate 'steps:' keys found"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done
+else
+    echo "   ⚠️  validate_no_duplicate_steps_keys.sh not found, skipping"
+fi
+echo ""
+
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All workflow files valid"
     exit 0

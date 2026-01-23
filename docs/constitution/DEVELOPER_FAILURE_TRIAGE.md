@@ -15,6 +15,8 @@ This document explains what to do when SSOT Foundation tests fail. It categorize
 
 ### Category 0: CI Infrastructure Failure (Workflow/Environment)
 
+**CI Semantic Failures (GitHub Actions YAML/Expression Errors):**
+
 **What it means:**
 - Xcode selection failed (`xcode-select: error: invalid developer directory`)
 - Workflow job graph invalid
@@ -79,6 +81,57 @@ Fix:
   3. Ensure both CryptoKit and swift-crypto Crypto produce identical byte arrays
   4. Verify hex encoding is consistently lowercase
 Prevention: CryptoShimConsistencyTests validates cross-platform determinism
+```
+
+**CI Semantic Failures:**
+
+**Unrecognized named-value: 'env' (in concurrency.group):**
+```
+❌ Error: Unrecognized named-value: 'env'. Located at position X within expression: ${{ env.SSOT_CONCURRENCY_GROUP }}
+Root cause: concurrency.group is evaluated at compile-time and cannot reference runtime contexts like env.*
+Fix:
+  1. Change concurrency.group to use ONLY github.* contexts:
+     concurrency:
+       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  2. Keep SSOT_CONCURRENCY_GROUP as runtime env for diagnostics only:
+     env:
+       SSOT_CONCURRENCY_GROUP: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  3. Run: bash scripts/ci/validate_concurrency_contexts.sh
+Prevention: validate_concurrency_contexts.sh detects env.* in concurrency.group
+```
+
+**Duplicate YAML keys ('steps' is already defined):**
+```
+❌ Error: 'steps' is already defined
+Root cause: YAML key duplication - a job has multiple 'steps:' keys
+Fix:
+  1. Locate the duplicate 'steps:' keys in the job (check workflow file)
+  2. Merge all steps into a single 'steps:' key
+  3. Ensure steps are ordered correctly (diagnostics first, then checkout, then build/test)
+  4. Run: bash scripts/ci/validate_no_duplicate_steps_keys.sh
+Prevention: validate_no_duplicate_steps_keys.sh detects duplicate steps keys
+```
+
+**Operation was canceled:**
+```
+❌ "Error: The operation was canceled."
+Root cause: Job was cancelled by GitHub Actions due to concurrency cancel-in-progress
+  - New push to same PR cancels old run (expected behavior)
+  - Cross-workflow cancellation if concurrency groups collide (unexpected)
+Symptoms:
+  - Job shows "canceled" status, not "failed"
+  - No test failures or assertion errors
+  - May happen mid-execution
+Diagnosis:
+  1. Check "Concurrency Diagnostics" step output in job logs
+  2. Verify concurrency.group value matches expected pattern
+  3. Check if another run with same group started (check run_id, run_attempt)
+  4. Review cancellation notice step output (if job reached that step)
+Fix:
+  - If cancellation was expected (new push): no action needed, new run will execute
+  - If cancellation was unexpected: verify concurrency.group is unique per workflow
+  - Ensure concurrency.group uses: github.workflow + PR number or ref
+Prevention: Concurrency diagnostics step logs group value; cancellation notice clarifies it's not a test failure
 ```
 
 **Ubuntu Gate 2 SIGILL Crash (Signal 4):**
