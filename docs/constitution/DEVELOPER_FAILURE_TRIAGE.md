@@ -81,6 +81,24 @@ Fix:
 Prevention: CryptoShimConsistencyTests validates cross-platform determinism
 ```
 
+**Ubuntu Gate 2 SIGILL Crash (Signal 4):**
+```
+❌ Ubuntu Gate 2 crashes immediately with signal 4 (SIGILL), 0 tests run
+Root cause: Crypto asm illegal instruction - BoringSSL/OpenSSL CPU feature detection fails on CI CPUs
+Symptoms:
+  - Test binary exits immediately with unexpected signal code 4
+  - Register dump shown
+  - "Test run started ... 0 tests ... then crash"
+Fix:
+  1. Ensure OPENSSL_ia32cap=:0 is set in ubuntu test job env (forces software fallback)
+  2. Verify in workflow YAML: env: OPENSSL_ia32cap: ":0" for ubuntu-22.04 matrix.os
+  3. Confirm by rerunning: swift test -c debug --filter CryptoShimConsistencyTests
+Prevention: 
+  - Gate Linux Preflight includes crypto shim sanity check
+  - Workflow sets OPENSSL_ia32cap=:0 for ubuntu test steps
+  - Guardrail catches SIGILL early before full Gate 2 suite
+```
+
 **How to verify locally:**
 ```bash
 # Check for forbidden imports

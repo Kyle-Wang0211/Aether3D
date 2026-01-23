@@ -280,6 +280,8 @@ cat > "$REPORT_FILE" << EOF
 **Duration:** ${DURATION}s
 **Status:** $([ $ERRORS -eq 0 ] && echo "✅ All checks passed" || echo "❌ $ERRORS check(s) failed")
 
+**Note:** This report is regenerated on each verification run. Timestamps and durations may vary.
+
 ---
 
 ## Toolchain Versions
@@ -366,7 +368,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 ## Gate 1 Test Results (Debug)
 
 \`\`\`
-$(echo "$GATE1_DEBUG_OUTPUT" | grep -E "Executed.*tests|Test Suite.*passed" | tail -3)
+$(echo "$GATE1_DEBUG_OUTPUT" | grep -E "Executed.*tests.*with 0 failures" | tail -1)
 \`\`\`
 
 ---
@@ -374,7 +376,7 @@ $(echo "$GATE1_DEBUG_OUTPUT" | grep -E "Executed.*tests|Test Suite.*passed" | ta
 ## Gate 2 Test Results (Debug)
 
 \`\`\`
-$(echo "$GATE2_DEBUG_OUTPUT" | grep -E "Executed.*tests|Test Suite.*passed" | tail -3)
+$(echo "$GATE2_DEBUG_OUTPUT" | grep -E "Executed.*tests.*with 0 failures" | tail -1)
 \`\`\`
 
 ---
@@ -382,7 +384,7 @@ $(echo "$GATE2_DEBUG_OUTPUT" | grep -E "Executed.*tests|Test Suite.*passed" | ta
 ## Gate 1 Test Results (Release)
 
 \`\`\`
-$(echo "$GATE1_RELEASE_OUTPUT" | grep -E "Executed.*tests|Test Suite.*passed" | tail -3)
+$(echo "$GATE1_RELEASE_OUTPUT" | grep -E "Executed.*tests.*with 0 failures" | tail -1)
 \`\`\`
 
 ---
@@ -390,7 +392,7 @@ $(echo "$GATE1_RELEASE_OUTPUT" | grep -E "Executed.*tests|Test Suite.*passed" | 
 ## Gate 2 Test Results (Release)
 
 \`\`\`
-$(echo "$GATE2_RELEASE_OUTPUT" | grep -E "Executed.*tests|Test Suite.*passed" | tail -3)
+$(echo "$GATE2_RELEASE_OUTPUT" | grep -E "Executed.*tests.*with 0 failures" | tail -1)
 \`\`\`
 
 ---
@@ -424,6 +426,7 @@ fi)
 ---
 
 **Report Generated:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Note:** Report timestamps reflect verification run time. Test execution times may vary.
 EOF
 
 # Summary

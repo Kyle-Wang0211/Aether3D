@@ -97,6 +97,34 @@ jobs:
           chmod +x scripts/ci/preflight_ssot_foundation.sh
           bash scripts/ci/preflight_ssot_foundation.sh
       
+      - name: Crypto Shim Sanity Check (Linux)
+        env:
+          # Disable crypto CPU feature detection to prevent SIGILL
+          # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path
+          OPENSSL_ia32cap: ":0"
+        run: |
+          echo "🔍 Linux Crypto Shim Sanity Check"
+          echo "Swift: $(swift --version | head -1)"
+          echo "CPU: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || echo 'unknown')"
+          echo "OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+          # Guardrail: Ensure OPENSSL_ia32cap is set
+          if [ -z "${OPENSSL_ia32cap:-}" ]; then
+            echo ""
+            echo "❌ OPENSSL_ia32cap not set"
+            echo "This will cause SIGILL crashes. Set OPENSSL_ia32cap=:0 in env"
+            exit 1
+          fi
+          echo ""
+          echo "Testing CryptoShimConsistencyTests (single test to catch SIGILL early)..."
+          swift test -c debug --filter CryptoShimConsistencyTests || {
+            echo ""
+            echo "❌ Crypto shim test failed or crashed"
+            echo "If SIGILL (signal 4): Ensure OPENSSL_ia32cap=:0 is set in ubuntu test jobs"
+            echo "This prevents crypto asm illegal instruction crashes on CI CPUs"
+            exit 1
+          }
+          echo "✅ Crypto shim sanity check passed"
+      
       - name: Linux Preflight Complete
         run: |
           echo ""
@@ -300,9 +328,28 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
+          # Linux-only: Disable crypto CPU feature detection to prevent SIGILL on CI CPUs
+          # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path; Linux-only.
+          # BoringSSL/OpenSSL may trigger illegal instructions if CPU flags are mis-detected
+          # Setting OPENSSL_ia32cap=:0 forces software fallback paths (safe, deterministic)
+          OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
         run: |
           echo "🔒 Gate 2: Determinism & Trust Gate (Deep, Blocking)"
           echo "OS: ${{ matrix.os }}, Config: ${{ matrix.build_config }}"
+          if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
+            echo ""
+            echo "Linux diagnostics:"
+            echo "  Swift: $(swift --version | head -1)"
+            echo "  CPU: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs || echo 'unknown')"
+            echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+            # Guardrail: Ensure OPENSSL_ia32cap is set for ubuntu to prevent SIGILL
+            if [ -z "${OPENSSL_ia32cap:-}" ]; then
+              echo ""
+              echo "❌ OPENSSL_ia32cap not set for ubuntu-22.04"
+              echo "This will cause SIGILL crashes. Set OPENSSL_ia32cap=:0 in env for ubuntu test jobs"
+              exit 1
+            fi
+          fi
           echo ""
           echo "Testing:"
           echo "  - Cross-platform consistency (A2, A3, A4, A5, CE, CL2)"
