@@ -46,6 +46,81 @@ jobs:
         with:
           fetch-depth: 0
       
+      - name: Event Context Parity Check
+        run: |
+          set -euo pipefail
+          echo "🔒 Gate 0: Event Context Parity Check"
+          echo "Validating GitHub Actions context consistency"
+          echo ""
+          
+          EVENT_NAME="${{ github.event_name }}"
+          REF="${{ github.ref }}"
+          SHA="${{ github.sha }}"
+          WORKFLOW="${{ github.workflow }}"
+          ACTOR="${{ github.actor }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          
+          echo "Context snapshot:"
+          echo "  event_name: ${EVENT_NAME}"
+          echo "  ref: ${REF}"
+          echo "  sha: ${SHA}"
+          echo "  workflow: ${WORKFLOW}"
+          echo "  actor: ${ACTOR}"
+          echo "  pr_number: ${PR_NUMBER:-N/A}"
+          echo ""
+          
+          # Validate event context consistency
+          ERRORS=0
+          
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ -z "${PR_NUMBER}" ] || [ "${PR_NUMBER}" = "null" ]; then
+              echo "❌ pull_request event but PR number is missing or null"
+              ERRORS=$((ERRORS + 1))
+            fi
+            if [ -z "${REF}" ] || [ "${REF}" = "refs/heads/main" ]; then
+              echo "⚠️  pull_request event: ref should be PR ref, not main branch"
+            fi
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ -n "${PR_NUMBER}" ] && [ "${PR_NUMBER}" != "null" ]; then
+              echo "❌ push event but PR number is set (${PR_NUMBER}) - context mismatch"
+              ERRORS=$((ERRORS + 1))
+            fi
+            if [ -z "${REF}" ]; then
+              echo "❌ push event but ref is empty"
+              ERRORS=$((ERRORS + 1))
+            fi
+          else
+            echo "⚠️  Unexpected event type: ${EVENT_NAME}"
+          fi
+          
+          # Validate required fields
+          if [ -z "${SHA}" ]; then
+            echo "❌ SHA is empty"
+            ERRORS=$((ERRORS + 1))
+          fi
+          
+          if [ -z "${WORKFLOW}" ]; then
+            echo "❌ Workflow name is empty"
+            ERRORS=$((ERRORS + 1))
+          fi
+          
+          # Validate concurrency group computation
+          CONCURRENCY_GROUP="${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+          if [ -z "${CONCURRENCY_GROUP}" ] || [ "${CONCURRENCY_GROUP}" = "-" ]; then
+            echo "❌ Concurrency group evaluates to empty or invalid: '${CONCURRENCY_GROUP}'"
+            ERRORS=$((ERRORS + 1))
+          fi
+          
+          if [ $ERRORS -gt 0 ]; then
+            echo ""
+            echo "❌ Gate 0 FAILED: Event context validation failed ($ERRORS error(s))"
+            echo "This indicates a GitHub Actions context mismatch that will cause merge-time failures"
+            exit 1
+          fi
+          
+          echo "✅ Event context validation passed"
+          echo ""
+      
       - name: Validate Workflow Graph
         run: |
           set -euo pipefail
@@ -83,6 +158,39 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      
+      - name: Runner & Toolchain Snapshot (Diagnostics)
+        run: |
+          set -euo pipefail
+          echo "🔍 Runner & Toolchain Snapshot (Diagnostics Only)"
+          echo "This step provides environment diagnostics for drift analysis"
+          echo ""
+          
+          echo "=== OS Information ==="
+          uname -a
+          if [ "$(uname)" = "Darwin" ]; then
+            sw_vers || echo "  (sw_vers not available)"
+          elif [ -f /etc/os-release ]; then
+            cat /etc/os-release | grep -E "^(NAME|VERSION|ID)=" || echo "  (os-release parsing failed)"
+          fi
+          echo ""
+          
+          echo "=== Architecture ==="
+          uname -m
+          if command -v lscpu >/dev/null 2>&1; then
+            echo ""
+            lscpu | grep -E "^(Architecture|Model name|CPU\(s\)):" || echo "  (lscpu parsing failed)"
+          fi
+          echo ""
+          
+          echo "=== Toolchain Versions ==="
+          swift --version || echo "  ❌ swift not available"
+          if [ "$(uname)" = "Darwin" ]; then
+            xcodebuild -version 2>/dev/null || echo "  ⚠️  xcodebuild not available"
+          fi
+          echo ""
+          
+          echo "✅ Diagnostics complete (non-blocking)"
       
       - name: Repository Hygiene
         run: |
@@ -343,7 +451,13 @@ jobs:
         if: ${{ cancelled() }}
         run: |
           set -euo pipefail
-          echo "::notice::JOB CANCELED (not a test failure). Likely superseded by a newer run due to concurrency cancel-in-progress."
+          echo "::notice::JOB CANCELED (not a test failure)"
+          echo ""
+          echo "=== Cancellation Classification ==="
+          echo "Status: CANCELLED (superseded by newer run)"
+          echo "Classification: Concurrency cancellation (not a test failure)"
+          echo ""
+          echo "=== Context ==="
           echo "event_name: ${{ github.event_name }}"
           echo "workflow: ${{ github.workflow }}"
           echo "run_id: ${{ github.run_id }}"
@@ -352,8 +466,15 @@ jobs:
           echo "head_ref: ${{ github.head_ref }}"
           echo "sha: ${{ github.sha }}"
           echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
-          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo ""
+          echo "=== Concurrency ==="
           echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo ""
+          echo "=== Note ==="
+          echo "This job was cancelled because a newer run started with the same concurrency group."
+          echo "This is expected behavior and does NOT indicate a test failure."
+          echo "To see test results, check the newer run (run_id: check GitHub Actions UI)"
   
   # Gate 2 — Determinism & Trust Gate (Deep, Blocking)
   # Runs only if Gate 1 passes
@@ -622,17 +743,31 @@ jobs:
             echo ""
           fi
           
-          # Build filter arguments
-          FILTERS="--filter ColorMatrixIntegrityTests --filter DomainPrefixesTests --filter ReproducibilityBoundaryTests --filter BreakingSurfaceTests --filter ExplanationCatalogCoverageTests --filter ReasonCompatibilityTests --filter MinimumExplanationSetTests --filter CatalogUniquenessTests --filter ExplanationIntegrityTests --filter CatalogCrossReferenceTests --filter CatalogActionabilityRulesTests --filter DomainPrefixesClosureTests --filter CryptoShimConsistencyTests"
+          # Build filter arguments as array (keeps literal --filter tokens visible to grep-based validators)
+          FILTERS=(
+            --filter ColorMatrixIntegrityTests
+            --filter DomainPrefixesTests
+            --filter ReproducibilityBoundaryTests
+            --filter BreakingSurfaceTests
+            --filter ExplanationCatalogCoverageTests
+            --filter ReasonCompatibilityTests
+            --filter MinimumExplanationSetTests
+            --filter CatalogUniquenessTests
+            --filter ExplanationIntegrityTests
+            --filter CatalogCrossReferenceTests
+            --filter CatalogActionabilityRulesTests
+            --filter DomainPrefixesClosureTests
+            --filter CryptoShimConsistencyTests
+          )
           
           # Inline prefix ensures OPENSSL_ia32cap is applied even if env propagation fails
           TEST_FAILED=0
           if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            if ! OPENSSL_ia32cap=:0 swift test -c "${{ matrix.build_config }}" ${FILTERS}; then
+            if ! OPENSSL_ia32cap=:0 swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}"; then
               TEST_FAILED=1
             fi
           else
-            if ! swift test -c "${{ matrix.build_config }}" ${FILTERS}; then
+            if ! swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}"; then
               TEST_FAILED=1
             fi
           fi
@@ -653,7 +788,13 @@ jobs:
         if: ${{ cancelled() }}
         run: |
           set -euo pipefail
-          echo "::notice::JOB CANCELED (not a test failure). Likely superseded by a newer run due to concurrency cancel-in-progress."
+          echo "::notice::JOB CANCELED (not a test failure)"
+          echo ""
+          echo "=== Cancellation Classification ==="
+          echo "Status: CANCELLED (superseded by newer run)"
+          echo "Classification: Concurrency cancellation (not a test failure)"
+          echo ""
+          echo "=== Context ==="
           echo "event_name: ${{ github.event_name }}"
           echo "workflow: ${{ github.workflow }}"
           echo "run_id: ${{ github.run_id }}"
@@ -662,8 +803,15 @@ jobs:
           echo "head_ref: ${{ github.head_ref }}"
           echo "sha: ${{ github.sha }}"
           echo "pr_number: ${{ github.event.pull_request.number || 'N/A (not a PR)' }}"
-          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo ""
+          echo "=== Concurrency ==="
           echo "concurrency.group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+          echo "SSOT_CONCURRENCY_GROUP: ${{ env.SSOT_CONCURRENCY_GROUP }}"
+          echo ""
+          echo "=== Note ==="
+          echo "This job was cancelled because a newer run started with the same concurrency group."
+          echo "This is expected behavior and does NOT indicate a test failure."
+          echo "To see test results, check the newer run (run_id: check GitHub Actions UI)"
   
   # Golden Vector Change Detection
   # Fails if golden vectors are modified without proper documentation

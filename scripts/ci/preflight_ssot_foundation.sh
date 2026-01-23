@@ -61,6 +61,46 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
+# 1.4. Workflow parity check (push vs PR)
+echo "1.4. Validating workflow parity (push vs PR)..."
+if python3 <<PYTHON_EOF
+import yaml
+import sys
+
+try:
+    with open('.github/workflows/ssot-foundation-ci.yml', 'r') as f:
+        workflow = yaml.safe_load(f)
+    
+    # Check concurrency group computation
+    concurrency_group = workflow.get('concurrency', {}).get('group', '')
+    if not concurrency_group or concurrency_group == '-':
+        print("   ❌ Concurrency group evaluates to empty or invalid")
+        sys.exit(1)
+    
+    # Check that required env vars exist
+    env_vars = workflow.get('env', {})
+    if 'SSOT_CONCURRENCY_GROUP' not in env_vars:
+        print("   ❌ SSOT_CONCURRENCY_GROUP missing from workflow env")
+        sys.exit(1)
+    
+    # Verify concurrency group uses only github.* contexts
+    if 'env.' in concurrency_group or 'secrets.' in concurrency_group:
+        print("   ❌ Concurrency group uses runtime contexts (must use only github.*)")
+        sys.exit(1)
+    
+    print("   ✅ Workflow parity check passed")
+    sys.exit(0)
+except Exception as e:
+    print(f"   ❌ Parity check failed: {e}")
+    sys.exit(1)
+PYTHON_EOF
+then
+    echo "   ✅ Workflow parity valid"
+else
+    echo "   ❌ Workflow parity check failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
 echo ""
 
 # 2. Audit documentation markers

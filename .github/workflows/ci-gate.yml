@@ -16,6 +16,7 @@ jobs:
       
       - name: Run CI checks
         run: |
+          set -euo pipefail
           chmod +x scripts/ci/*.sh
           bash scripts/ci/run_all.sh
 
