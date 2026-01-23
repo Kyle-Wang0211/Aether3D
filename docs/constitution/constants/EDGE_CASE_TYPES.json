@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1",
+  "entries": [
+    {
+      "code": "EDGE_EMPTY_GEOMETRY",
+      "rawValue": "EMPTY_GEOMETRY",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "A_total = 0",
+      "enforcement": "reject",
+      "recoveryPath": "reshoot"
+    },
+    {
+      "code": "EDGE_DEGENERATE_TRIANGLES",
+      "rawValue": "DEGENERATE_TRIANGLES",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "退化三角形超限",
+      "enforcement": "warn",
+      "recoveryPath": "reduce_resolution"
+    },
+    {
+      "code": "EDGE_COORDINATE_OUT_OF_RANGE",
+      "rawValue": "COORDINATE_OUT_OF_RANGE",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "坐标超出 [-1000m, 1000m]",
+      "enforcement": "reject",
+      "recoveryPath": "reshoot"
+    },
+    {
+      "code": "EDGE_NAN_OR_INF_DETECTED",
+      "rawValue": "NAN_OR_INF_DETECTED",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "检测到 NaN/Inf",
+      "enforcement": "reject",
+      "recoveryPath": "reshoot"
+    },
+    {
+      "code": "EDGE_NO_L2_ELIGIBLE",
+      "rawValue": "NO_L2_ELIGIBLE",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "无任何 L2 合格 patch",
+      "enforcement": "warn",
+      "recoveryPath": "reshoot"
+    },
+    {
+      "code": "EDGE_PIZ_NOT_APPLICABLE",
+      "rawValue": "PIZ_NOT_APPLICABLE",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "PIZ 计算不适用",
+      "enforcement": "info",
+      "recoveryPath": "none"
+    },
+    {
+      "code": "EDGE_ALL_PATCHES_OCCLUDED",
+      "rawValue": "ALL_PATCHES_OCCLUDED",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "所有 patch 被遮挡",
+      "enforcement": "reject",
+      "recoveryPath": "reshoot"
+    },
+    {
+      "code": "EDGE_SESSION_TIME_GAP",
+      "rawValue": "SESSION_TIME_GAP",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "超时触发新 session",
+      "enforcement": "info",
+      "recoveryPath": "none"
+    },
+    {
+      "code": "EDGE_SESSION_APP_BACKGROUND",
+      "rawValue": "SESSION_APP_BACKGROUND",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "后台触发新 session",
+      "enforcement": "info",
+      "recoveryPath": "none"
+    },
+    {
+      "code": "EDGE_ANCHOR_FRAME_INVALID",
+      "rawValue": "ANCHOR_FRAME_INVALID",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "锚点帧不合格",
+      "enforcement": "warn",
+      "recoveryPath": "reshoot"
+    },
+    {
+      "code": "EDGE_MESH_VALIDATION_FAILED",
+      "rawValue": "MESH_VALIDATION_FAILED",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "Mesh 输入验证失败",
+      "enforcement": "reject",
+      "recoveryPath": "reshoot"
+    },
+    {
+      "code": "EDGE_FRAME_COUNT_OUT_OF_RANGE",
+      "rawValue": "FRAME_COUNT_OUT_OF_RANGE",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "帧数超限",
+      "enforcement": "reject",
+      "recoveryPath": "reduce_duration"
+    },
+    {
+      "code": "EDGE_SYNTHETIC_DATA_SUSPECTED",
+      "rawValue": "SYNTHETIC_DATA_SUSPECTED",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "疑似合成数据",
+      "enforcement": "warn",
+      "recoveryPath": "contact_support"
+    },
+    {
+      "code": "EDGE_TIMESTAMP_ANOMALY",
+      "rawValue": "TIMESTAMP_ANOMALY",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "时间戳异常",
+      "enforcement": "warn",
+      "recoveryPath": "update_app"
+    },
+    {
+      "code": "EDGE_NEGATIVE_INPUT",
+      "rawValue": "NEGATIVE_INPUT",
+      "category": "edge_case",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "负数输入（面积/计数不应为负）",
+      "enforcement": "warn",
+      "recoveryPath": "reshoot"
+    }
+  ]
+}

@@ -1,0 +1,358 @@
+name: SSOT Foundation CI (Guardian Layer)
+
+# Prevent concurrent runs on same ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - 'docs/constitution/**'
+      - 'Core/Constants/**'
+      - 'Tests/Constants/**'
+      - '.github/workflows/ssot-foundation-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/constitution/**'
+      - 'Core/Constants/**'
+      - 'Tests/Constants/**'
+      - '.github/workflows/ssot-foundation-ci.yml'
+
+# CI Philosophy: CI is the constitutional court of SSOT.
+# CI must block silent drift, accidental identity changes, explanation inconsistencies, and "green by editing goldens".
+# CI is allowed to be strict. CI is not allowed to be vague.
+
+jobs:
+  # Gate 0 — Workflow Lint (Fastest, Blocks Everything)
+  # Validates workflow job graph before any other jobs run
+  # Prevents "unknown job" errors from silently recurring
+  gate_0_workflow_lint:
+    name: Gate 0 — Workflow Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Validate Workflow Graph
+        run: |
+          echo "🔒 Gate 0: Workflow Graph Validation"
+          echo "Validating job graph to prevent 'unknown job' errors"
+          echo ""
+          
+          chmod +x scripts/ci/validate_workflow_graph.sh
+          bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml || {
+            echo ""
+            echo "❌ Gate 0 FAILED: Workflow job graph is invalid"
+            echo "Fix job ID mismatches in 'needs:' references before proceeding"
+            exit 1
+          }
+          
+          echo ""
+          echo "✅ Gate 0 PASSED: Workflow job graph is valid"
+  
+  # Gate Linux Preflight (Ubuntu, Fast, Non-Blocking)
+  # Catches 80% of Linux failures early without requiring Swift build
+  # Runs in parallel with Gate 1 to minimize CI time
+  gate_linux_preflight_only:
+    name: Gate Linux Preflight (Ubuntu, Fast)
+    runs-on: ubuntu-22.04
+    needs: [gate_0_workflow_lint]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Repository Hygiene
+        run: |
+          echo "🔒 Linux Preflight: Repository Hygiene"
+          chmod +x scripts/ci/repo_hygiene.sh
+          bash scripts/ci/repo_hygiene.sh
+      
+      - name: Validate Workflow Graph
+        run: |
+          echo "🔒 Linux Preflight: Workflow Graph Validation"
+          chmod +x scripts/ci/validate_workflow_graph.sh
+          bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml
+      
+      - name: Validate SSOT Gate Test Selection
+        run: |
+          echo "🔒 Linux Preflight: Test Selection Validation"
+          chmod +x scripts/ci/validate_ssot_gate_test_selection.sh
+          bash scripts/ci/validate_ssot_gate_test_selection.sh
+      
+      - name: SSOT Preflight
+        run: |
+          echo "🔒 Linux Preflight: SSOT Preflight"
+          chmod +x scripts/ci/preflight_ssot_foundation.sh
+          bash scripts/ci/preflight_ssot_foundation.sh
+      
+      - name: Linux Preflight Complete
+        run: |
+          echo ""
+          echo "✅ Linux Preflight PASSED: Repository hygiene and workflow validation complete"
+  
+  # Gate 1 — Constitutional Gate (Fast, Blocking)
+  # Runs on every PR, must finish fast
+  # Any failure blocks merge immediately
+  # No retries, no soft warnings
+  # Purpose: Stop illegal changes before humans rationalize them
+  gate_1_constitutional:
+    name: Gate 1 — Constitutional (Fast, Blocking)
+    runs-on: macos-latest
+    needs: [gate_0_workflow_lint]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    
+    strategy:
+      fail-fast: true  # Stop immediately on first failure
+      matrix:
+        build_config: [debug, release]
+        xcode_version: ['15.0', '15.4']  # Stable + Latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Xcode ${{ matrix.xcode_version }}
+        run: |
+          sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
+          xcodebuild -version
+      
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      
+      - name: Toolchain Sanity Check
+        run: |
+          echo "🔍 Toolchain Versions:"
+          swift --version
+          xcodebuild -version
+          echo ""
+      
+      - name: Build (${{ matrix.build_config }})
+        env:
+          CONFIGURATION: ${{ matrix.build_config }}
+        run: |
+          swift build -c ${{ matrix.build_config }}
+      
+      - name: Run Gate 1 Tests (Constitutional)
+        env:
+          CONFIGURATION: ${{ matrix.build_config }}
+          XCODE_VERSION: ${{ matrix.xcode_version }}
+        run: |
+          echo "🔒 Gate 1: Constitutional Gate (Fast, Blocking)"
+          echo "Build Config: ${{ matrix.build_config }}"
+          echo "Xcode Version: ${{ matrix.xcode_version }}"
+          echo ""
+          echo "Testing:"
+          echo "  - Enum frozen order (B3)"
+          echo "  - Catalog schema (B1, D2)"
+          echo "  - Documentation sync (B1, B2)"
+          echo "  - Encoding golden vectors (A2)"
+          echo "  - Quantization golden vectors (A3, A4)"
+          echo ""
+          
+          swift test -c ${{ matrix.build_config }} \
+            --filter EnumFrozenOrderTests \
+            --filter CatalogSchemaTests \
+            --filter DocumentationSyncTests \
+            --filter DeterministicEncodingContractTests \
+            --filter DeterministicQuantizationContractTests \
+            --filter GoldenVectorsRoundTripTests || {
+            echo ""
+            echo "❌ Gate 1 FAILED: Constitutional invariants violated"
+            echo "Invariant IDs: B3, B1, D2, A2, A3, A4"
+            echo "This blocks all merges. No retries allowed."
+            echo "See docs/constitution/FAILURE_TRIAGE_MAP.md for repair guidance."
+            exit 1
+          }
+          
+          echo ""
+          echo "✅ Gate 1 PASSED: Constitutional invariants intact"
+  
+  # Gate 2 — Determinism & Trust Gate (Deep, Blocking)
+  # Runs only if Gate 1 passes
+  # Enforces long-term reproducibility, auditability, and user trust
+  gate_2_determinism_trust:
+    name: Gate 2 — Determinism & Trust (Deep, Blocking)
+    runs-on: ${{ matrix.os }}
+    needs: [gate_1_constitutional, gate_linux_preflight_only]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04]
+        build_config: [debug, release]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      
+      - name: Toolchain Sanity Check
+        run: |
+          echo "🔍 Toolchain Versions:"
+          swift --version
+          if [ "${{ matrix.os }}" == "macos-latest" ]; then
+            xcodebuild -version || echo "xcodebuild not available"
+          fi
+          echo ""
+      
+      - name: Install system deps (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
+      
+      - name: Build (${{ matrix.build_config }})
+        env:
+          CONFIGURATION: ${{ matrix.build_config }}
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          swift build -c ${{ matrix.build_config }}
+      
+      - name: Run Gate 2 Tests (Determinism & Trust)
+        env:
+          CONFIGURATION: ${{ matrix.build_config }}
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          echo "🔒 Gate 2: Determinism & Trust Gate (Deep, Blocking)"
+          echo "OS: ${{ matrix.os }}, Config: ${{ matrix.build_config }}"
+          echo ""
+          echo "Testing:"
+          echo "  - Cross-platform consistency (A2, A3, A4, A5, CE, CL2)"
+          echo "  - Color matrix integrity (CE)"
+          echo "  - Domain prefixes (G1)"
+          echo "  - Reproducibility boundary (E2)"
+          echo "  - Breaking surface (C1)"
+          echo "  - Explanation catalog coverage (B1, B2, D2)"
+          echo "  - Reason compatibility (U1, U16)"
+          echo "  - Minimum explanation set (D2)"
+          echo ""
+          
+          swift test -c ${{ matrix.build_config }} \
+            --filter ColorMatrixIntegrityTests \
+            --filter DomainPrefixesTests \
+            --filter ReproducibilityBoundaryTests \
+            --filter BreakingSurfaceTests \
+            --filter ExplanationCatalogCoverageTests \
+            --filter ReasonCompatibilityTests \
+            --filter MinimumExplanationSetTests \
+            --filter CatalogUniquenessTests \
+            --filter ExplanationIntegrityTests || {
+            echo ""
+            echo "❌ Gate 2 FAILED: Determinism, reproducibility, or user trust violated"
+            echo "Invariant IDs: A2, A3, A4, A5, CE, CL2, E2, C1, B1, B2, D2, G1, U1, U16"
+            echo "This indicates cross-platform drift, breaking change violation, or explanation integrity issue."
+            echo "See docs/constitution/FAILURE_TRIAGE_MAP.md for repair guidance."
+            exit 1
+          }
+          
+          echo ""
+          echo "✅ Gate 2 PASSED: Determinism, reproducibility, and user trust intact"
+  
+  # Golden Vector Change Detection
+  # Fails if golden vectors are modified without proper documentation
+  golden_vector_governance:
+    name: Golden Vector Governance Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check Golden Vector Changes
+        run: |
+          echo "🔒 Golden Vector Governance Check"
+          echo "Any change to golden vectors must be accompanied by breaking change documentation"
+          echo ""
+          
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          GOLDEN_FILES=(
+            "docs/constitution/constants/GOLDEN_VECTORS_ENCODING.json"
+            "docs/constitution/constants/GOLDEN_VECTORS_QUANTIZATION.json"
+            "docs/constitution/constants/GOLDEN_VECTORS_COLOR.json"
+          )
+          
+          GOLDEN_CHANGED=false
+          for file in "${GOLDEN_FILES[@]}"; do
+            if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -q "^$file$"; then
+              echo "⚠️  Golden vector changed: $file"
+              GOLDEN_CHANGED=true
+            fi
+          done
+          
+          if [ "$GOLDEN_CHANGED" = true ]; then
+            echo ""
+            echo "Golden vectors are constitutional artifacts. Changes require:"
+            echo "  1. Update to BREAKING_CHANGE_SURFACE.json OR"
+            echo "  2. Update to MIGRATION_GUIDE.md OR"
+            echo "  3. contractVersion bump"
+            echo ""
+            
+            # Check if breaking change documentation exists
+            BREAKING_CHANGED=false
+            MIGRATION_CHANGED=false
+            CONTRACT_VERSION_CHANGED=false
+            
+            if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -q "BREAKING_CHANGE_SURFACE.json"; then
+              BREAKING_CHANGED=true
+            fi
+            
+            if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -q "MIGRATION_GUIDE.md"; then
+              MIGRATION_CHANGED=true
+            fi
+            
+            if git diff "$BASE_SHA" "$HEAD_SHA" -- Core/Constants/FoundationVersioning.swift | grep -q "CONTRACT_VERSION"; then
+              CONTRACT_VERSION_CHANGED=true
+            fi
+            
+            if [ "$BREAKING_CHANGED" = false ] && [ "$MIGRATION_CHANGED" = false ] && [ "$CONTRACT_VERSION_CHANGED" = false ]; then
+              echo "❌ FAIL: Golden vectors changed without breaking change documentation"
+              echo "   Please update BREAKING_CHANGE_SURFACE.json, MIGRATION_GUIDE.md, or bump contractVersion"
+              exit 1
+            else
+              echo "✅ Golden vector change properly documented"
+            fi
+          else
+            echo "✅ No golden vector changes detected"
+          fi
