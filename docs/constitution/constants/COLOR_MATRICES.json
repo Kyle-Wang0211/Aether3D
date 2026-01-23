@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1",
+  "whitePoint": "D65",
+  "sRGBToXYZ": {
+    "matrix": [
+      [0.4124564, 0.3575761, 0.1804375],
+      [0.2126729, 0.7151522, 0.0721750],
+      [0.0193339, 0.1191920, 0.9503041]
+    ],
+    "description": "sRGB to XYZ conversion matrix (D65 white point)"
+  },
+  "xyzToLab": {
+    "referenceWhite": {
+      "Xn": 0.95047,
+      "Yn": 1.00000,
+      "Zn": 1.08883
+    },
+    "delta": 0.20689655172413793,
+    "description": "XYZ to Lab conversion parameters (D65 white point)",
+    "fFunction": {
+      "threshold": 0.008856451679035631,
+      "formula": "f(t) = t^(1/3) if t > delta^3 else t/(3*delta^2) + 4/29"
+    }
+  },
+  "note": "These matrices are IMMUTABLE. Any change requires new schemaVersion and new asset class. System/OS color APIs are forbidden."
+}
