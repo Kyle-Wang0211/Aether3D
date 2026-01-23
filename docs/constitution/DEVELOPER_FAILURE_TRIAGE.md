@@ -112,6 +112,51 @@ Fix:
 Prevention: validate_no_duplicate_steps_keys.sh detects duplicate steps keys
 ```
 
+**Bash syntax error in workflow run blocks (unexpected end of file):**
+```
+❌ Error: syntax error: unexpected end of file
+  from /home/runner/work/_temp/<id>.sh line N
+Root cause: Shell script syntax error in a workflow `run: |` block
+  - Missing closing quote (`"`, `'`)
+  - Missing `fi` for `if ...; then`
+  - Missing `done` for loops
+  - Malformed heredoc (`<<EOF` without matching `EOF`)
+  - Stray backslash line continuation at end of file
+  - Unbalanced parentheses or braces in bash
+Symptoms:
+  - CI fails immediately with shell parse error
+  - Error points to temporary script file (not workflow YAML)
+  - Not a test failure; script never executes
+Fix:
+  1. Locate the offending step in workflow YAML (check step name from error)
+  2. Inspect the entire `run: |` block for unclosed structures
+  3. Common issues:
+     - `if` without matching `fi`
+     - `while`/`for` without matching `done`
+     - Unclosed quotes (check for `"` or `'` pairs)
+     - Line continuation `\` at end of file or before `fi`/`done`
+  4. Run: bash scripts/ci/validate_workflow_bash_syntax.sh <workflow_file>
+  5. Fix syntax error and re-run validation
+Prevention:
+  - validate_workflow_bash_syntax.sh checks all `run:` blocks before CI runs
+  - Integrated into lint_workflows.sh and preflight_ssot_foundation.sh
+  - Runs automatically in CI preflight (Gate 0 and Linux Preflight)
+  - Catches syntax errors before they reach GitHub Actions runners
+  - FAILS if `set -euo pipefail` is missing (hard requirement for all run blocks)
+
+How to run locally:
+  bash scripts/ci/validate_workflow_bash_syntax.sh .github/workflows/ssot-foundation-ci.yml
+
+Best practices for workflow run blocks:
+  - Always start with `set -euo pipefail` for safety (REQUIRED)
+  - Use structured control flow (if/else/fi, not || { ... })
+  - Avoid line continuations (\) mixed with conditionals
+  - Consolidate complex arguments into variables (e.g., FILTERS="--filter ...")
+  - Ensure every `if` has a matching `fi` on its own line
+  - Ensure every loop has a matching `done`
+  - Close all quotes properly
+```
+
 **Dependency Drift (swift-crypto version change):**
 ```
 ⚠️  Warning: swift-crypto revision changed in Package.resolved

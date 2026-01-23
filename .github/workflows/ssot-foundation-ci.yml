@@ -48,6 +48,7 @@ jobs:
       
       - name: Validate Workflow Graph
         run: |
+          set -euo pipefail
           echo "🔒 Gate 0: Workflow Graph Validation"
           echo "Validating job graph to prevent 'unknown job' errors"
           echo ""
@@ -85,30 +86,35 @@ jobs:
       
       - name: Repository Hygiene
         run: |
+          set -euo pipefail
           echo "🔒 Linux Preflight: Repository Hygiene"
           chmod +x scripts/ci/repo_hygiene.sh
           bash scripts/ci/repo_hygiene.sh
       
       - name: Validate Workflow Graph
         run: |
+          set -euo pipefail
           echo "🔒 Linux Preflight: Workflow Graph Validation"
           chmod +x scripts/ci/validate_workflow_graph.sh
           bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml
       
       - name: Validate SSOT Gate Test Selection
         run: |
+          set -euo pipefail
           echo "🔒 Linux Preflight: Test Selection Validation"
           chmod +x scripts/ci/validate_ssot_gate_test_selection.sh
           bash scripts/ci/validate_ssot_gate_test_selection.sh
       
       - name: SSOT Preflight
         run: |
+          set -euo pipefail
           echo "🔒 Linux Preflight: SSOT Preflight"
           chmod +x scripts/ci/preflight_ssot_foundation.sh
           bash scripts/ci/preflight_ssot_foundation.sh
       
       - name: Dependency Drift Guardrail (swift-crypto)
         run: |
+          set -euo pipefail
           echo "🔍 Checking swift-crypto dependency (required for CryptoShim on Linux)..."
           if ! swift package describe 2>/dev/null | grep -q "swift-crypto\|Crypto"; then
             echo "::error::swift-crypto dependency missing; CryptoShim requires it on Linux."
@@ -150,6 +156,7 @@ jobs:
       
       - name: Export OPENSSL_ia32cap to GITHUB_ENV (Linux Preflight)
         run: |
+          set -euo pipefail
           echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV"
           echo "✅ Exported OPENSSL_ia32cap=:0 to GITHUB_ENV for all subsequent steps"
       
@@ -158,6 +165,7 @@ jobs:
           # Step-level env (belt-and-suspenders)
           OPENSSL_ia32cap: ":0"
         run: |
+          set -euo pipefail
           echo "🔍 Linux Crypto Shim Sanity Check (Canary)"
           echo "This canary test catches SIGILL early before full Gate 2 suite runs"
           echo ""
@@ -198,6 +206,7 @@ jobs:
       
       - name: Linux Preflight Complete
         run: |
+          set -euo pipefail
           echo ""
           echo "✅ Linux Preflight PASSED: Repository hygiene and workflow validation complete"
   
@@ -224,6 +233,7 @@ jobs:
     steps:
       - name: Concurrency Diagnostics
         run: |
+          set -euo pipefail
           echo "::notice::Concurrency diagnostics for Gate 1"
           echo "event_name: ${{ github.event_name }}"
           echo "actor: ${{ github.actor }}"
@@ -245,6 +255,7 @@ jobs:
       
       - name: Enumerate Available Xcodes
         run: |
+          set -euo pipefail
           echo "🔍 Available Xcode installations:"
           ls -1 /Applications | grep -E '^Xcode.*\.app$' || echo "  (none found)"
           echo ""
@@ -259,6 +270,7 @@ jobs:
       
       - name: Validate Xcode Selection
         run: |
+          set -euo pipefail
           chmod +x scripts/ci/validate_macos_xcode_selection.sh
           bash scripts/ci/validate_macos_xcode_selection.sh ${{ matrix.xcode_version }} || {
             echo ""
@@ -278,6 +290,7 @@ jobs:
       
       - name: Toolchain Sanity Check
         run: |
+          set -euo pipefail
           echo "🔍 Toolchain Versions:"
           swift --version
           xcodebuild -version
@@ -287,6 +300,7 @@ jobs:
         env:
           CONFIGURATION: ${{ matrix.build_config }}
         run: |
+          set -euo pipefail
           swift build -c ${{ matrix.build_config }}
       
       - name: Run Gate 1 Tests (Constitutional)
@@ -294,6 +308,7 @@ jobs:
           CONFIGURATION: ${{ matrix.build_config }}
           XCODE_VERSION: ${{ matrix.xcode_version }}
         run: |
+          set -euo pipefail
           echo "🔒 Gate 1: Constitutional Gate (Fast, Blocking)"
           echo "Build Config: ${{ matrix.build_config }}"
           echo "Xcode Version: ${{ matrix.xcode_version }}"
@@ -327,6 +342,7 @@ jobs:
       - name: Cancellation Notice
         if: ${{ cancelled() }}
         run: |
+          set -euo pipefail
           echo "::notice::JOB CANCELED (not a test failure). Likely superseded by a newer run due to concurrency cancel-in-progress."
           echo "event_name: ${{ github.event_name }}"
           echo "workflow: ${{ github.workflow }}"
@@ -376,6 +392,7 @@ jobs:
     steps:
       - name: Concurrency Diagnostics
         run: |
+          set -euo pipefail
           echo "::notice::Concurrency diagnostics for Gate 2"
           echo "event_name: ${{ github.event_name }}"
           echo "actor: ${{ github.actor }}"
@@ -404,6 +421,7 @@ jobs:
       - name: Validate Xcode Selection (macOS only)
         if: matrix.os == 'macos-14'
         run: |
+          set -euo pipefail
           chmod +x scripts/ci/validate_macos_xcode_selection.sh
           bash scripts/ci/validate_macos_xcode_selection.sh ${{ matrix.xcode_version }} || {
             echo ""
@@ -423,6 +441,7 @@ jobs:
       
       - name: Toolchain Sanity Check
         run: |
+          set -euo pipefail
           echo "🔍 Toolchain Versions:"
           swift --version
           if [ "${{ matrix.os }}" == "macos-14" ]; then
@@ -433,18 +452,21 @@ jobs:
       - name: Install system deps (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev pkg-config
       
       - name: Export OPENSSL_ia32cap to GITHUB_ENV (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          set -euo pipefail
           echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV"
           echo "✅ Exported OPENSSL_ia32cap=:0 to GITHUB_ENV for all subsequent steps"
       
       - name: Linux System Diagnostics (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          set -euo pipefail
           echo "🔍 Linux System Diagnostics (for SIGILL troubleshooting)"
           echo "  uname -a: $(uname -a)"
           echo "  uname -m: $(uname -m)"
@@ -459,6 +481,7 @@ jobs:
       - name: Verify OPENSSL_ia32cap Guardrail (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          set -euo pipefail
           echo "🔍 Verifying OPENSSL_ia32cap is set to prevent SIGILL..."
           echo "Current OPENSSL_ia32cap value:"
           env | grep -E '^OPENSSL_ia32cap=' || echo "  (not found in env)"
@@ -477,6 +500,7 @@ jobs:
           # Step-level env (belt-and-suspenders)
           OPENSSL_ia32cap: ":0"
         run: |
+          set -euo pipefail
           echo "🔍 Crypto Canary Test (catches SIGILL before full Gate 2 suite)"
           echo "Testing CryptoShimConsistencyTests with explicit OPENSSL_ia32cap=:0..."
           echo ""
@@ -500,11 +524,13 @@ jobs:
           LANG: en_US.UTF-8
           TZ: UTC
         run: |
+          set -euo pipefail
           swift build -c ${{ matrix.build_config }}
       
       - name: Final OPENSSL_ia32cap Verification Before Tests (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          set -euo pipefail
           echo "🔍 Final OPENSSL_ia32cap verification before running tests..."
           echo "Environment check:"
           env | grep -E '^OPENSSL_ia32cap=' || echo "  ❌ OPENSSL_ia32cap not found in env"
@@ -521,6 +547,7 @@ jobs:
       - name: Linux System Diagnostics Before Tests (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          set -euo pipefail
           echo "🔍 Linux System Diagnostics (for SIGILL root cause identification)"
           echo "System information:"
           echo "  uname -a: $(uname -a)"
@@ -555,6 +582,7 @@ jobs:
           # Step-level env for ubuntu (belt-and-suspenders)
           OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
         run: |
+          set -euo pipefail
           echo "🔒 Gate 2: Determinism & Trust Gate (Deep, Blocking)"
           echo "OS: ${{ matrix.os }}, Config: ${{ matrix.build_config }}"
           if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
@@ -594,32 +622,29 @@ jobs:
             echo ""
           fi
           
+          # Build filter arguments
+          FILTERS="--filter ColorMatrixIntegrityTests --filter DomainPrefixesTests --filter ReproducibilityBoundaryTests --filter BreakingSurfaceTests --filter ExplanationCatalogCoverageTests --filter ReasonCompatibilityTests --filter MinimumExplanationSetTests --filter CatalogUniquenessTests --filter ExplanationIntegrityTests --filter CatalogCrossReferenceTests --filter CatalogActionabilityRulesTests --filter DomainPrefixesClosureTests --filter CryptoShimConsistencyTests"
+          
           # Inline prefix ensures OPENSSL_ia32cap is applied even if env propagation fails
+          TEST_FAILED=0
           if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            OPENSSL_ia32cap=:0 swift test -c ${{ matrix.build_config }} \
+            if ! OPENSSL_ia32cap=:0 swift test -c "${{ matrix.build_config }}" ${FILTERS}; then
+              TEST_FAILED=1
+            fi
           else
-            swift test -c ${{ matrix.build_config }} \
+            if ! swift test -c "${{ matrix.build_config }}" ${FILTERS}; then
+              TEST_FAILED=1
+            fi
           fi
-            --filter ColorMatrixIntegrityTests \
-            --filter DomainPrefixesTests \
-            --filter ReproducibilityBoundaryTests \
-            --filter BreakingSurfaceTests \
-            --filter ExplanationCatalogCoverageTests \
-            --filter ReasonCompatibilityTests \
-            --filter MinimumExplanationSetTests \
-            --filter CatalogUniquenessTests \
-            --filter ExplanationIntegrityTests \
-            --filter CatalogCrossReferenceTests \
-            --filter CatalogActionabilityRulesTests \
-            --filter DomainPrefixesClosureTests \
-            --filter CryptoShimConsistencyTests || {
+          
+          if [ $TEST_FAILED -eq 1 ]; then
             echo ""
             echo "❌ Gate 2 FAILED: Determinism, reproducibility, or user trust violated"
             echo "Invariant IDs: A2, A3, A4, A5, CE, CL2, E2, C1, B1, B2, D2, G1, U1, U16"
             echo "This indicates cross-platform drift, breaking change violation, or explanation integrity issue."
             echo "See docs/constitution/FAILURE_TRIAGE_MAP.md for repair guidance."
             exit 1
-          }
+          fi
           
           echo ""
           echo "✅ Gate 2 PASSED: Determinism, reproducibility, and user trust intact"
@@ -627,6 +652,7 @@ jobs:
       - name: Cancellation Notice
         if: ${{ cancelled() }}
         run: |
+          set -euo pipefail
           echo "::notice::JOB CANCELED (not a test failure). Likely superseded by a newer run due to concurrency cancel-in-progress."
           echo "event_name: ${{ github.event_name }}"
           echo "workflow: ${{ github.workflow }}"
@@ -658,6 +684,7 @@ jobs:
       
       - name: Check Golden Vector Changes
         run: |
+          set -euo pipefail
           echo "🔒 Golden Vector Governance Check"
           echo "Any change to golden vectors must be accompanied by breaking change documentation"
           echo ""

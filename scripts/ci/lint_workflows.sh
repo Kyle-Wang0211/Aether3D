@@ -141,6 +141,22 @@ else
 fi
 echo ""
 
+# Check bash syntax in run blocks (prevent shell syntax errors)
+echo "7. Validating bash syntax in run blocks..."
+if [ -f "scripts/ci/validate_workflow_bash_syntax.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if bash scripts/ci/validate_workflow_bash_syntax.sh "$workflow" 2>/dev/null; then
+            echo "   ✅ $workflow: Bash syntax valid"
+        else
+            echo "   ❌ $workflow: Bash syntax validation failed"
+            ERRORS=$((ERRORS + 1))
+        fi
+    done
+else
+    echo "   ⚠️  validate_workflow_bash_syntax.sh not found, skipping"
+fi
+echo ""
+
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All workflow files valid"
     exit 0

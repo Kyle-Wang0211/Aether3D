@@ -28,12 +28,36 @@ else
 fi
 echo ""
 
-# 1. Validate workflow graph
-echo "1. Validating workflow graph..."
+# 1. Validate workflow graph and structure
+echo "1. Validating workflow graph and structure..."
 if bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml; then
     echo "   ✅ Workflow graph valid"
 else
     echo "   ❌ Workflow graph invalid"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.1. Validate concurrency contexts
+if bash scripts/ci/validate_concurrency_contexts.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ Concurrency contexts valid"
+else
+    echo "   ❌ Concurrency context validation failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.2. Validate no duplicate steps keys
+if bash scripts/ci/validate_no_duplicate_steps_keys.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ No duplicate steps keys"
+else
+    echo "   ❌ Duplicate steps keys found"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.3. Validate bash syntax
+if bash scripts/ci/validate_workflow_bash_syntax.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ Bash syntax valid"
+else
+    echo "   ❌ Bash syntax validation failed"
     ERRORS=$((ERRORS + 1))
 fi
 
