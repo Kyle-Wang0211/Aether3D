@@ -175,6 +175,24 @@ else
 fi
 echo ""
 
+# Check Gate 2 Linux toolchain policy (closed-world assertion)
+echo "9. Validating Gate 2 Linux toolchain policy..."
+if [ -f "scripts/ci/validate_gate2_linux_toolchain_policy.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_gate2_linux_toolchain_policy.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Gate 2 Linux toolchain policy valid"
+            else
+                echo "   ❌ $workflow: Gate 2 Linux toolchain policy validation failed"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done
+else
+    echo "   ⚠️  validate_gate2_linux_toolchain_policy.sh not found, skipping"
+fi
+echo ""
+
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All workflow files valid"
     exit 0

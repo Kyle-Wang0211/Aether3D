@@ -366,6 +366,13 @@ jobs:
         with:
           fetch-depth: 0
       
+      - name: Setup Swift (Pinned Toolchain)
+        if: runner.os == 'Linux'
+        uses: swift-actions/setup-swift@v1
+        with:
+          swift-version: "6.0"
+          # Pin exact toolchain to prevent runner toolcache drift
+      
       - name: Enumerate Available Xcodes
         run: |
           set -euo pipefail
@@ -496,6 +503,7 @@ jobs:
     # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path; Linux-only.
     # Setting OPENSSL_ia32cap=:0 at job level ensures it's inherited by all steps and child processes
     # Setting SSOT_PURE_SWIFT_SHA256=1 forces pure Swift crypto backend (deterministic, no SIGILL risk)
+    # Setting GLIBC_TUNABLES disables CPU feature detection at process level (baseline lock for blocking Linux Gate 2)
     # Closed-world: Linux entries explicitly set SSOT_PURE_SWIFT_SHA256="1", macOS entries omit it (absence is intentional)
     strategy:
       fail-fast: false
@@ -514,16 +522,20 @@ jobs:
             build_config: debug
             SSOT_PURE_SWIFT_SHA256: "1"
             OPENSSL_ia32cap: ":0"
+            GLIBC_TUNABLES: "glibc.cpu.hwcaps=-x86-64-v3:-x86-64-v4"
           - os: ubuntu-22.04
             xcode_version: ''
             build_config: release
             SSOT_PURE_SWIFT_SHA256: "1"
             OPENSSL_ia32cap: ":0"
+            GLIBC_TUNABLES: "glibc.cpu.hwcaps=-x86-64-v3:-x86-64-v4"
     
     env:
       # Job-level env propagates matrix env to all steps (closed-world: Linux entries have explicit values, macOS entries inherit empty/unset)
       OPENSSL_ia32cap: ${{ matrix.OPENSSL_ia32cap || '' }}
       SSOT_PURE_SWIFT_SHA256: ${{ matrix.SSOT_PURE_SWIFT_SHA256 || '' }}
+      # GLIBC_TUNABLES: Process-wide CPU feature baseline lock (blocking Linux Gate 2 only)
+      GLIBC_TUNABLES: ${{ matrix.GLIBC_TUNABLES || '' }}
     
     steps:
       - name: Concurrency Diagnostics
@@ -761,9 +773,20 @@ jobs:
             echo "  Swift: $(swift --version | head -1)"
             echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
             echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set}"
+            echo "  GLIBC_TUNABLES=${GLIBC_TUNABLES:-not set}"
             echo ""
             echo "Environment variables (crypto-related):"
-            env | sort | grep -E "(OPENSSL_ia32cap|SSOT_PURE_SWIFT_SHA256|ia32cap|CRYPTO|SWIFT)" || echo "  (none found)"
+            env | sort | grep -E "(OPENSSL_ia32cap|SSOT_PURE_SWIFT_SHA256|GLIBC_TUNABLES|ia32cap|CRYPTO|SWIFT)" || echo "  (none found)"
+            # Guardrail: Ensure GLIBC_TUNABLES is set for blocking Linux Gate 2
+            if [ -z "${GLIBC_TUNABLES:-}" ] || [ "${GLIBC_TUNABLES}" != "glibc.cpu.hwcaps=-x86-64-v3:-x86-64-v4" ]; then
+              echo ""
+              echo "::error::GLIBC_TUNABLES must be 'glibc.cpu.hwcaps=-x86-64-v3:-x86-64-v4' on blocking Ubuntu Gate 2"
+              echo "Current value: '${GLIBC_TUNABLES:-not set}'"
+              echo "This ensures process-wide CPU feature baseline lock to prevent SIGILL"
+              exit 1
+            fi
+            echo ""
+            echo "✅ GLIBC_TUNABLES guardrail passed (process-wide CPU feature baseline lock enabled)"
             # Final guardrail: Ensure OPENSSL_ia32cap is set for ubuntu to prevent SIGILL
             if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
               echo ""
@@ -1017,13 +1040,14 @@ jobs:
       - name: Experimental Native Crypto Notice
         run: |
           set -euo pipefail
-          echo "🔬 EXPERIMENTAL: Linux Gate 2 with Native Crypto Backend"
+          echo "🔬 EXPERIMENTAL: Linux Gate 2 with Native Crypto Backend (GitHub-hosted drift telemetry)"
           echo "This is a non-blocking experimental lane for telemetry only."
-          echo "Main Gate 2 uses pure Swift backend (SSOT_PURE_SWIFT_SHA256=1) for stability."
+          echo "Main Gate 2 uses pure Swift backend (SSOT_PURE_SWIFT_SHA256=1) + GLIBC_TUNABLES + pinned toolchain for stability."
           echo ""
           echo "Environment:"
           echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set (experimental native crypto)}"
           echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+          echo "  GLIBC_TUNABLES=${GLIBC_TUNABLES:-not set (uses GitHub-hosted default for telemetry)}"
           echo ""
       
       - name: Setup Swift
