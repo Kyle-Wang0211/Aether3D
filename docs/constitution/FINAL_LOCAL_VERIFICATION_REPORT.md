@@ -1,8 +1,8 @@
 # Final Local Verification Report
 
-**Date:** 2026-01-24 15:09:17 UTC
+**Date:** 2026-01-24 16:16:17 UTC
 **Branch:** pr1/ssot-foundation-v1_1
-**Duration:** 56s
+**Duration:** 70s
 **Status:** ✅ All checks passed
 
 **Note:** This report is regenerated on each verification run. Timestamps and durations may vary.
@@ -95,7 +95,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 ## Gate 1 Test Results (Debug)
 
 ```
-	 Executed 36 tests, with 0 failures (0 unexpected) in 0.010 (0.013) seconds
+	 Executed 36 tests, with 0 failures (0 unexpected) in 0.013 (0.015) seconds
 ```
 
 ---
@@ -103,7 +103,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 ## Gate 2 Test Results (Debug)
 
 ```
-	 Executed 52 tests, with 0 failures (0 unexpected) in 0.019 (0.022) seconds
+	 Executed 52 tests, with 0 failures (0 unexpected) in 0.018 (0.021) seconds
 ```
 
 ---
@@ -119,7 +119,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 ## Gate 2 Test Results (Release)
 
 ```
-	 Executed 52 tests, with 0 failures (0 unexpected) in 0.017 (0.021) seconds
+	 Executed 52 tests, with 0 failures (0 unexpected) in 0.018 (0.022) seconds
 ```
 
 ---
@@ -144,5 +144,5 @@ git commit -t COMMIT_MESSAGE_TEMPLATE.txt
 
 ---
 
-**Report Generated:** 2026-01-24 15:09:18 UTC
+**Report Generated:** 2026-01-24 16:16:18 UTC
 **Note:** Report timestamps reflect verification run time. Test execution times may vary.

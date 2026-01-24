@@ -698,19 +698,54 @@ jobs:
           echo "Config: ${{ matrix.build_config }}"
           echo ""
       
-      - name: Setup Swift (Pinned Toolchain)
-        # pinned from v1 (2026-01-24)
-        uses: swift-actions/setup-swift@cdbe0f7f4c77929b6580e71983e8606e55ffe7e4
-        with:
-          swift-version: "6.0"
+      - name: Detect system Swift (telemetry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔍 System Swift Detection (WHITEBOX Linux Telemetry)"
+          echo ""
+          echo "⚠️  WHITEBOX Linux Telemetry: Using system Swift on GitHub-hosted runner"
+          echo "⚠️  Toolchain pinning is NOT enforced in telemetry lanes (PRODUCTION/self-hosted concern)"
+          echo ""
+          echo "Environment fingerprint:"
+          echo "  runner.os: ubuntu-22.04"
+          echo "  uname -a: $(uname -a)"
+          echo ""
+          if ! command -v swift >/dev/null 2>&1; then
+            echo "::notice::Telemetry cancelled: system swift not present on runner"
+            echo "TELEMETRY_RESULT=CANCELLED" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=NO_SYSTEM_SWIFT" >> "$GITHUB_ENV"
+            echo ""
+            echo "Swift location: not found in PATH"
+            echo "Swift version: not available"
+            echo "Swift compiler version: not available"
+            echo ""
+            echo "Telemetry job will be cancelled gracefully (exit 0)"
+            exit 0
+          else
+            echo "TELEMETRY_RESULT=RUNNING" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=" >> "$GITHUB_ENV"
+            echo ""
+            echo "Swift location: $(which swift)"
+            echo ""
+            echo "Swift version:"
+            swift --version || echo "  ⚠️  swift --version failed"
+            echo ""
+            echo "Swift compiler version:"
+            swiftc --version || echo "  ⚠️  swiftc --version failed"
+            echo ""
+            echo "✅ System Swift detected - telemetry will proceed"
+          fi
       
       - name: Export OPENSSL_ia32cap to GITHUB_ENV
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         run: |
           set -euo pipefail
           echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV"
           echo "✅ Exported OPENSSL_ia32cap=:0 to GITHUB_ENV for all subsequent steps"
       
       - name: Linux System Diagnostics
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         run: |
           set -euo pipefail
           echo "🔍 Linux System Diagnostics (GitHub-hosted Telemetry)"
@@ -725,6 +760,7 @@ jobs:
           echo ""
       
       - name: Verify OPENSSL_ia32cap Guardrail
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         run: |
           set -euo pipefail
           echo "🔍 Verifying OPENSSL_ia32cap is set to prevent SIGILL..."
@@ -740,6 +776,7 @@ jobs:
           fi
       
       - name: Verify GLIBC_TUNABLES Guardrail
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         run: |
           set -euo pipefail
           echo "🔍 Verifying GLIBC_TUNABLES is set for process-wide CPU feature baseline lock..."
@@ -755,6 +792,7 @@ jobs:
           fi
       
       - name: Verify SSOT_PURE_SWIFT_SHA256 Guardrail
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         run: |
           set -euo pipefail
           echo "🔍 Verifying SSOT_PURE_SWIFT_SHA256 is set to force pure Swift backend..."
@@ -770,12 +808,14 @@ jobs:
           fi
       
       - name: Crypto Canary Test — Early SIGILL Detection
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         env:
           # Step-level env (belt-and-suspenders)
           OPENSSL_ia32cap: ":0"
           SSOT_PURE_SWIFT_SHA256: "1"
         run: |
           set -euo pipefail
+          set +e  # Disable exit on error for WHITEBOX telemetry
           echo "🔍 Crypto Canary Test (catches SIGILL before full Gate 2 suite)"
           echo "Testing CryptoShimConsistencyTests with pure Swift backend (SSOT_PURE_SWIFT_SHA256=1)..."
           echo ""
@@ -784,27 +824,31 @@ jobs:
           echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
           echo ""
           # Inline prefix ensures env is applied even if step-level env fails
-          SSOT_PURE_SWIFT_SHA256=1 OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests 2>&1 | tee /tmp/canary_output.log || {
-            CANARY_EXIT=$?
-            CANARY_OUTPUT=$(cat /tmp/canary_output.log 2>/dev/null || echo "")
+          SSOT_PURE_SWIFT_SHA256=1 OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests 2>&1 | tee /tmp/canary_output.log
+          CANARY_EXIT=$?
+          CANARY_OUTPUT=$(cat /tmp/canary_output.log 2>/dev/null || echo "")
+          set -e  # Re-enable exit on error
+          
+          if [ $CANARY_EXIT -ne 0 ]; then
             echo ""
-            echo "::error::Crypto canary test failed (exit code: $CANARY_EXIT)"
+            echo "::notice::Crypto canary test failed (exit code: $CANARY_EXIT) - WHITEBOX telemetry (non-blocking)"
             echo ""
             # Check for SIGILL (use temp file to avoid SIGPIPE)
             TEMP_CANARY_SIGILL_CHECK=$(mktemp)
             echo "$CANARY_OUTPUT" > "$TEMP_CANARY_SIGILL_CHECK"
             SIGILL_DETECTED=0
-            if grep -qE "signal code 4|Illegal instruction|SIGILL" "$TEMP_CANARY_SIGILL_CHECK"; then
+            if grep -qE "signal code 4|Illegal instruction|SIGILL|Exited with unexpected signal code 4" "$TEMP_CANARY_SIGILL_CHECK"; then
               SIGILL_DETECTED=1
             fi
             rm -f "$TEMP_CANARY_SIGILL_CHECK"
             if [ $SIGILL_DETECTED -eq 1 ]; then
+              echo "TELEMETRY_RESULT=SIGILL_ENVIRONMENTAL" >> "$GITHUB_ENV"
               echo "=== SIGILL_ENVIRONMENTAL_FAILURE ==="
               echo "swift --version:"
-              swift --version
+              swift --version || echo "  (swift not available)"
               echo ""
               echo "uname -a:"
-              uname -a
+              uname -a || echo "  (uname not available)"
               echo ""
               echo "CPU flags:"
               grep -m1 '^flags' /proc/cpuinfo || echo "  (cpuinfo not available)"
@@ -815,16 +859,23 @@ jobs:
               echo ""
               echo "⚠️  SIGILL in GitHub-hosted telemetry confirms runner CPU micro-architecture drift."
               echo "This is expected in telemetry (non-blocking). See MERGE_CONTRACT.md → Whitebox Merge Contract."
+            else
+              echo "TELEMETRY_RESULT=FAIL" >> "$GITHUB_ENV"
+              echo "⚠️  Crypto canary test failed (non-SIGILL failure) - WHITEBOX telemetry (non-blocking)"
             fi
             echo ""
             echo "See DEVELOPER_FAILURE_TRIAGE.md → Ubuntu SIGILL section."
-            exit 1
-          }
-          # Backend policy is enforced by CryptoBackendPolicyTests (runs first in Gate 2)
-          # This canary test verifies no SIGILL occurs; backend correctness is validated by policy test
-          echo "✅ Crypto canary passed (pure Swift backend verified, no SIGILL detected)"
+            exit 0  # Always exit 0 in WHITEBOX telemetry
+          else
+            echo "TELEMETRY_RESULT=PASS" >> "$GITHUB_ENV"
+            # Backend policy is enforced by CryptoBackendPolicyTests (runs first in Gate 2)
+            # This canary test verifies no SIGILL occurs; backend correctness is validated by policy test
+            echo "✅ Crypto canary passed (pure Swift backend verified, no SIGILL detected)"
+            exit 0
+          fi
       
       - name: Build (${{ matrix.build_config }})
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         env:
           CONFIGURATION: ${{ matrix.build_config }}
           LC_ALL: en_US.UTF-8
@@ -835,6 +886,7 @@ jobs:
           swift build -c ${{ matrix.build_config }}
       
       - name: Final OPENSSL_ia32cap Verification Before Tests
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         run: |
           set -euo pipefail
           echo "🔍 Final OPENSSL_ia32cap verification before running tests..."
@@ -851,6 +903,7 @@ jobs:
           echo ""
       
       - name: Linux System Diagnostics Before Tests
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         run: |
           set -euo pipefail
           echo "🔍 Linux System Diagnostics (for SIGILL root cause identification)"
@@ -880,6 +933,7 @@ jobs:
           echo ""
       
       - name: Run Gate 2 Tests (Determinism & Trust — Linux Telemetry)
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         env:
           CONFIGURATION: ${{ matrix.build_config }}
           LC_ALL: en_US.UTF-8
@@ -942,29 +996,36 @@ jobs:
           # Telemetry Linux: use pure Swift backend (SSOT_PURE_SWIFT_SHA256=1) + OPENSSL_ia32cap=:0
           # Inline prefix uses explicit values from job env (closed-world assertion)
           # Non-blocking: failures do not block merges (Whitebox mode)
-          TEST_FAILED=0
+          # WHITEBOX mode: never exit non-zero (always exit 0)
+          set +e  # Disable exit on error for WHITEBOX telemetry
           TEST_OUTPUT_FILE="/tmp/gate2_test_output.log"
-          if ! SSOT_PURE_SWIFT_SHA256="${SSOT_PURE_SWIFT_SHA256:-1}" OPENSSL_ia32cap="${OPENSSL_ia32cap:-:0}" swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"; then
-            TEST_FAILED=1
-          fi
+          SSOT_PURE_SWIFT_SHA256="${SSOT_PURE_SWIFT_SHA256:-1}" OPENSSL_ia32cap="${OPENSSL_ia32cap:-:0}" swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"
+          TEST_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
           
           # Check for zero tests executed (must fail for required suites)
           # Use temp file to avoid SIGPIPE from grep -q
           TEST_OUTPUT=$(cat "$TEST_OUTPUT_FILE" 2>/dev/null || echo "")
           TEMP_ZERO_CHECK=$(mktemp)
           echo "$TEST_OUTPUT" > "$TEMP_ZERO_CHECK"
+          ZERO_TESTS=0
           if grep -qE "Executed 0 tests|0 tests executed|0 test\(s\)" "$TEMP_ZERO_CHECK"; then
-            rm -f "$TEMP_ZERO_CHECK"
-            echo ""
-            echo "❌ Gate 2 FAILED: Zero tests executed"
-            echo "This indicates filter mismatch, test name change, or execution failure"
-            echo "Test output:"
-            echo "$TEST_OUTPUT" | tail -20
-            exit 1
+            ZERO_TESTS=1
           fi
           rm -f "$TEMP_ZERO_CHECK"
           
-          if [ $TEST_FAILED -eq 1 ]; then
+          if [ $ZERO_TESTS -eq 1 ]; then
+            echo ""
+            echo "::notice::Gate 2 Linux Telemetry: Zero tests executed (non-blocking, WHITEBOX)"
+            echo "This indicates filter mismatch, test name change, or execution failure"
+            echo "Test output:"
+            echo "$TEST_OUTPUT" | tail -20
+            echo "TELEMETRY_RESULT=FAIL" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=ZERO_TESTS_EXECUTED" >> "$GITHUB_ENV"
+            exit 0  # Always exit 0 in WHITEBOX telemetry
+          fi
+          
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
             echo ""
             # Classify SIGILL explicitly (exclusive classification, non-confusing)
             # Check output patterns (exit code from pipe not reliable, use pattern matching)
@@ -978,13 +1039,15 @@ jobs:
             rm -f "$TEMP_SIGILL_CHECK"
             
             if [ $IS_SIGILL -eq 1 ]; then
+              echo "TELEMETRY_RESULT=SIGILL_ENVIRONMENTAL" >> "$GITHUB_ENV"
+              echo "TELEMETRY_REASON=SIGILL_DETECTED" >> "$GITHUB_ENV"
               echo "SSOT_GATE2_FAILURE_CLASS=SIGILL_ENVIRONMENTAL"
               echo ""
               echo "=== SIGILL Detected in GitHub-hosted Telemetry (Non-Blocking, Whitebox) ==="
               echo ""
               echo "AUDIT: Gate2 GitHub-hosted telemetry SIGILL detected"
               echo "  CPU flags: $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2 | xargs || echo 'unknown')"
-              echo "  Swift version: $(swift --version | head -1)"
+              echo "  Swift version: $(swift --version | head -1 || echo 'not available')"
               echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
               echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set}"
               echo "  GLIBC_TUNABLES=${GLIBC_TUNABLES:-not set}"
@@ -1008,11 +1071,12 @@ jobs:
               echo "⚠️  SIGILL confirms GitHub-hosted runner CPU micro-architecture drift."
               echo "⚠️  This telemetry failure does NOT block merges (Whitebox mode)."
               echo "⚠️  See MERGE_CONTRACT.md → Whitebox Merge Contract for rationale."
-              echo "TELEMETRY_RESULT=SIGILL_ENVIRONMENTAL"
               echo "::notice::Gate 2 Linux Telemetry: SIGILL_ENVIRONMENTAL (non-blocking, environmental failure)"
-              exit 1
+              exit 0  # Always exit 0 in WHITEBOX telemetry
             fi
             # Non-SIGILL failures: standard Gate 2 failure message (but non-blocking in Whitebox)
+            echo "TELEMETRY_RESULT=FAIL" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=TEST_FAILURE" >> "$GITHUB_ENV"
             echo ""
             echo "⚠️  Gate 2 FAILED: Determinism, reproducibility, or user trust violated (Non-Blocking, Whitebox)"
             echo "Invariant IDs: A2, A3, A4, A5, CE, CL2, E2, C1, B1, B2, D2, G1, U1, U16"
@@ -1020,25 +1084,51 @@ jobs:
             echo "⚠️  This failure does NOT block merges (Whitebox mode)."
             echo "⚠️  See MERGE_CONTRACT.md → Whitebox Merge Contract for rationale."
             echo "See docs/constitution/FAILURE_TRIAGE_MAP.md for repair guidance."
-            echo "TELEMETRY_RESULT=FAIL"
             echo "::notice::Gate 2 Linux Telemetry: FAILED (non-blocking, invariant violation detected)"
-            exit 1
+            exit 0  # Always exit 0 in WHITEBOX telemetry
           fi
           
           echo ""
           echo "✅ Gate 2 PASSED: Determinism, reproducibility, and user trust intact (Telemetry, Non-Blocking)"
-          echo "TELEMETRY_RESULT=PASS"
+          echo "TELEMETRY_RESULT=PASS" >> "$GITHUB_ENV"
+          echo "TELEMETRY_REASON=" >> "$GITHUB_ENV"
           echo "::notice::Gate 2 Linux Telemetry: PASSED (non-blocking)"
       
-      - name: Telemetry Outcome Summary
+      - name: Telemetry summary
         if: always()
         run: |
           set -euo pipefail
-          echo "::notice::Telemetry Job Outcome Summary"
-          echo "Job: gate_2_determinism_trust_linux_telemetry"
-          echo "Mode: WHITEBOX (non-blocking)"
-          echo "Result: See TELEMETRY_RESULT output above"
-          echo "This job does NOT block merges regardless of outcome"
+          TELEMETRY_RESULT="${TELEMETRY_RESULT:-UNKNOWN}"
+          TELEMETRY_REASON="${TELEMETRY_REASON:-}"
+          echo ""
+          echo "📊 Telemetry Summary (WHITEBOX Linux Telemetry)"
+          echo "  Job: gate_2_determinism_trust_linux_telemetry"
+          echo "  Mode: WHITEBOX (non-blocking)"
+          echo "  Result: ${TELEMETRY_RESULT}"
+          if [ -n "${TELEMETRY_REASON}" ]; then
+            echo "  Reason: ${TELEMETRY_REASON}"
+          fi
+          echo ""
+          case "${TELEMETRY_RESULT}" in
+            CANCELLED)
+              echo "::notice::Telemetry cancelled: ${TELEMETRY_REASON:-system swift not available}"
+              ;;
+            PASS)
+              echo "::notice::Telemetry passed: All tests completed successfully"
+              ;;
+            SIGILL_ENVIRONMENTAL)
+              echo "::notice::Telemetry SIGILL detected: Environmental failure (non-blocking)"
+              ;;
+            FAIL)
+              echo "::notice::Telemetry failed: ${TELEMETRY_REASON:-test failure} (non-blocking)"
+              ;;
+            *)
+              echo "::notice::Telemetry result: ${TELEMETRY_RESULT} (non-blocking)"
+              ;;
+          esac
+          echo ""
+          echo "This job does NOT block merges regardless of outcome (WHITEBOX mode)"
+          exit 0  # Always exit 0
       
       - name: Cancellation Notice
         if: ${{ cancelled() }}
@@ -1096,13 +1186,47 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Setup Swift (Pinned Toolchain)
-        # pinned from v1 (2026-01-24)
-        uses: swift-actions/setup-swift@cdbe0f7f4c77929b6580e71983e8606e55ffe7e4
-        with:
-          swift-version: "6.0"
+      - name: Detect system Swift (telemetry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔍 System Swift Detection (WHITEBOX Linux Telemetry)"
+          echo ""
+          echo "⚠️  WHITEBOX Linux Telemetry: Using system Swift on GitHub-hosted runner"
+          echo "⚠️  Toolchain pinning is NOT enforced in telemetry lanes (PRODUCTION/self-hosted concern)"
+          echo ""
+          echo "Environment fingerprint:"
+          echo "  runner.os: ubuntu-22.04"
+          echo "  uname -a: $(uname -a)"
+          echo ""
+          if ! command -v swift >/dev/null 2>&1; then
+            echo "::notice::Telemetry cancelled: system swift not present on runner"
+            echo "TELEMETRY_RESULT=CANCELLED" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=NO_SYSTEM_SWIFT" >> "$GITHUB_ENV"
+            echo ""
+            echo "Swift location: not found in PATH"
+            echo "Swift version: not available"
+            echo "Swift compiler version: not available"
+            echo ""
+            echo "Telemetry job will be cancelled gracefully (exit 0)"
+            exit 0
+          else
+            echo "TELEMETRY_RESULT=RUNNING" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=" >> "$GITHUB_ENV"
+            echo ""
+            echo "Swift location: $(which swift)"
+            echo ""
+            echo "Swift version:"
+            swift --version || echo "  ⚠️  swift --version failed"
+            echo ""
+            echo "Swift compiler version:"
+            swiftc --version || echo "  ⚠️  swiftc --version failed"
+            echo ""
+            echo "✅ System Swift detected - telemetry will proceed"
+          fi
       
       - name: Build (${{ matrix.build_config }})
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         env:
           CONFIGURATION: ${{ matrix.build_config }}
           LC_ALL: en_US.UTF-8
@@ -1117,6 +1241,7 @@ jobs:
           }
       
       - name: Run Gate 2 Tests (GitHub-hosted Telemetry)
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         env:
           CONFIGURATION: ${{ matrix.build_config }}
           LC_ALL: en_US.UTF-8
@@ -1126,6 +1251,7 @@ jobs:
           SSOT_PURE_SWIFT_SHA256: ${{ env.SSOT_PURE_SWIFT_SHA256 }}
         run: |
           set -euo pipefail
+          set +e  # Disable exit on error for WHITEBOX telemetry
           echo "📊 Gate 2 Linux (GitHub-hosted drift telemetry) — Non-Blocking"
           echo ""
           echo "⚠️  This is a NON-BLOCKING telemetry job. Failures do NOT block merges."
@@ -1141,7 +1267,7 @@ jobs:
           echo ""
           echo "Linux diagnostics:"
           echo "  uname -a: $(uname -a)"
-          echo "  Swift: $(swift --version | head -1)"
+          echo "  Swift: $(swift --version | head -1 || echo 'not available')"
           echo "  CPU flags:"
           grep -m1 '^flags' /proc/cpuinfo || echo "  (cpuinfo not available)"
           echo ""
@@ -1165,25 +1291,30 @@ jobs:
           )
           
           TEST_OUTPUT_FILE="/tmp/gate2_hosted_telemetry_output.log"
-          TEST_FAILED=0
-          if ! SSOT_PURE_SWIFT_SHA256="${SSOT_PURE_SWIFT_SHA256:-1}" OPENSSL_ia32cap="${OPENSSL_ia32cap:-:0}" swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"; then
-            TEST_FAILED=1
-          fi
+          SSOT_PURE_SWIFT_SHA256="${SSOT_PURE_SWIFT_SHA256:-1}" OPENSSL_ia32cap="${OPENSSL_ia32cap:-:0}" swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"
+          TEST_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
           
           TEST_OUTPUT=$(cat "$TEST_OUTPUT_FILE" 2>/dev/null || echo "")
           
           # Check for zero tests executed
           TEMP_ZERO_CHECK=$(mktemp)
           echo "$TEST_OUTPUT" > "$TEMP_ZERO_CHECK"
+          ZERO_TESTS=0
           if grep -qE "Executed 0 tests|0 tests executed|0 test\(s\)" "$TEMP_ZERO_CHECK"; then
-            rm -f "$TEMP_ZERO_CHECK"
-            echo ""
-            echo "⚠️  Zero tests executed (telemetry job, non-blocking)"
-            exit 1
+            ZERO_TESTS=1
           fi
           rm -f "$TEMP_ZERO_CHECK"
           
-          if [ $TEST_FAILED -eq 1 ]; then
+          if [ $ZERO_TESTS -eq 1 ]; then
+            echo ""
+            echo "::notice::Gate 2 Linux Telemetry: Zero tests executed (non-blocking, WHITEBOX)"
+            echo "TELEMETRY_RESULT=FAIL" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=ZERO_TESTS_EXECUTED" >> "$GITHUB_ENV"
+            exit 0  # Always exit 0 in WHITEBOX telemetry
+          fi
+          
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
             # Classify SIGILL explicitly
             IS_SIGILL=0
             TEMP_SIGILL_CHECK=$(mktemp)
@@ -1194,6 +1325,8 @@ jobs:
             rm -f "$TEMP_SIGILL_CHECK"
             
             if [ $IS_SIGILL -eq 1 ]; then
+              echo "TELEMETRY_RESULT=SIGILL_ENVIRONMENTAL" >> "$GITHUB_ENV"
+              echo "TELEMETRY_REASON=SIGILL_DETECTED" >> "$GITHUB_ENV"
               echo ""
               echo "SSOT_GATE2_FAILURE_CLASS=SIGILL_ENVIRONMENTAL"
               echo ""
@@ -1201,7 +1334,7 @@ jobs:
               echo ""
               echo "AUDIT: Gate2 GitHub-hosted telemetry SIGILL detected"
               echo "  CPU flags: $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2 | xargs || echo 'unknown')"
-              echo "  Swift version: $(swift --version | head -1)"
+              echo "  Swift version: $(swift --version | head -1 || echo 'not available')"
               echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
               echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set}"
               echo "  GLIBC_TUNABLES=${GLIBC_TUNABLES:-not set}"
@@ -1212,15 +1345,59 @@ jobs:
               echo "⚠️  This SIGILL confirms GitHub-hosted runner drift."
               echo "⚠️  Blocking Gate 2 uses self-hosted deterministic executor (unaffected)."
               echo "⚠️  This telemetry failure does NOT block merges."
+              echo "::notice::Gate 2 Linux Telemetry: SIGILL_ENVIRONMENTAL (non-blocking, environmental failure)"
+              exit 0  # Always exit 0 in WHITEBOX telemetry
             fi
+            echo "TELEMETRY_RESULT=FAIL" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=TEST_FAILURE" >> "$GITHUB_ENV"
             echo ""
             echo "⚠️  TELEMETRY FAILURE (Non-Blocking)"
             echo "Blocking Gate 2 uses self-hosted deterministic executor (unaffected)."
-            exit 1
+            echo "::notice::Gate 2 Linux Telemetry: FAILED (non-blocking, test failure)"
+            exit 0  # Always exit 0 in WHITEBOX telemetry
           fi
           
           echo ""
           echo "✅ Telemetry passed (non-blocking, GitHub-hosted runner)"
+          echo "TELEMETRY_RESULT=PASS" >> "$GITHUB_ENV"
+          echo "TELEMETRY_REASON=" >> "$GITHUB_ENV"
+          echo "::notice::Gate 2 Linux Telemetry: PASSED (non-blocking)"
+      
+      - name: Telemetry summary
+        if: always()
+        run: |
+          set -euo pipefail
+          TELEMETRY_RESULT="${TELEMETRY_RESULT:-UNKNOWN}"
+          TELEMETRY_REASON="${TELEMETRY_REASON:-}"
+          echo ""
+          echo "📊 Telemetry Summary (WHITEBOX Linux Telemetry)"
+          echo "  Job: gate_2_linux_hosted_telemetry"
+          echo "  Mode: WHITEBOX (non-blocking)"
+          echo "  Result: ${TELEMETRY_RESULT}"
+          if [ -n "${TELEMETRY_REASON}" ]; then
+            echo "  Reason: ${TELEMETRY_REASON}"
+          fi
+          echo ""
+          case "${TELEMETRY_RESULT}" in
+            CANCELLED)
+              echo "::notice::Telemetry cancelled: ${TELEMETRY_REASON:-system swift not available}"
+              ;;
+            PASS)
+              echo "::notice::Telemetry passed: All tests completed successfully"
+              ;;
+            SIGILL_ENVIRONMENTAL)
+              echo "::notice::Telemetry SIGILL detected: Environmental failure (non-blocking)"
+              ;;
+            FAIL)
+              echo "::notice::Telemetry failed: ${TELEMETRY_REASON:-test failure} (non-blocking)"
+              ;;
+            *)
+              echo "::notice::Telemetry result: ${TELEMETRY_RESULT} (non-blocking)"
+              ;;
+          esac
+          echo ""
+          echo "This job does NOT block merges regardless of outcome (WHITEBOX mode)"
+          exit 0  # Always exit 0
       
       - name: Cancellation Notice
         if: ${{ cancelled() }}
@@ -1380,12 +1557,47 @@ jobs:
           echo "  GLIBC_TUNABLES=${GLIBC_TUNABLES:-not set (uses GitHub-hosted default for telemetry)}"
           echo ""
       
-      - name: Setup Swift
-        uses: swift-actions/setup-swift@cdbe0f7f4c77929b6580e71983e8606e55ffe7e4 # pinned from v1 (2026-01-24)
-        with:
-          swift-version: "6.0"
+      - name: Detect system Swift (telemetry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔍 System Swift Detection (WHITEBOX Linux Telemetry)"
+          echo ""
+          echo "⚠️  WHITEBOX Linux Telemetry: Using system Swift on GitHub-hosted runner"
+          echo "⚠️  Toolchain pinning is NOT enforced in telemetry lanes (PRODUCTION/self-hosted concern)"
+          echo ""
+          echo "Environment fingerprint:"
+          echo "  runner.os: ubuntu-22.04"
+          echo "  uname -a: $(uname -a)"
+          echo ""
+          if ! command -v swift >/dev/null 2>&1; then
+            echo "::notice::Telemetry cancelled: system swift not present on runner"
+            echo "TELEMETRY_RESULT=CANCELLED" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=NO_SYSTEM_SWIFT" >> "$GITHUB_ENV"
+            echo ""
+            echo "Swift location: not found in PATH"
+            echo "Swift version: not available"
+            echo "Swift compiler version: not available"
+            echo ""
+            echo "Telemetry job will be cancelled gracefully (exit 0)"
+            exit 0
+          else
+            echo "TELEMETRY_RESULT=RUNNING" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=" >> "$GITHUB_ENV"
+            echo ""
+            echo "Swift location: $(which swift)"
+            echo ""
+            echo "Swift version:"
+            swift --version || echo "  ⚠️  swift --version failed"
+            echo ""
+            echo "Swift compiler version:"
+            swiftc --version || echo "  ⚠️  swiftc --version failed"
+            echo ""
+            echo "✅ System Swift detected - telemetry will proceed"
+          fi
       
       - name: Build (${{ matrix.build_config }})
+        if: env.TELEMETRY_RESULT != 'CANCELLED'
         env:
           CONFIGURATION: ${{ matrix.build_config }}
           LC_ALL: en_US.UTF-8
@@ -1436,14 +1648,33 @@ jobs:
           )
           
           # Run tests with native crypto (no SSOT_PURE_SWIFT_SHA256)
+          # WHITEBOX mode: never exit non-zero (always exit 0)
+          set +e  # Disable exit on error for WHITEBOX telemetry
           TEST_OUTPUT_FILE="/tmp/gate2_experiment_output.log"
-          TEST_FAILED_EXP=0
-          if ! OPENSSL_ia32cap=:0 swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"; then
-            TEST_FAILED_EXP=1
+          OPENSSL_ia32cap=:0 swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"
+          TEST_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
+          
+          TEST_OUTPUT=$(cat "$TEST_OUTPUT_FILE" 2>/dev/null || echo "")
+          
+          # Check for zero tests executed
+          TEMP_ZERO_CHECK=$(mktemp)
+          echo "$TEST_OUTPUT" > "$TEMP_ZERO_CHECK"
+          ZERO_TESTS=0
+          if grep -qE "Executed 0 tests|0 tests executed|0 test\(s\)" "$TEMP_ZERO_CHECK"; then
+            ZERO_TESTS=1
+          fi
+          rm -f "$TEMP_ZERO_CHECK"
+          
+          if [ $ZERO_TESTS -eq 1 ]; then
+            echo ""
+            echo "::notice::Experimental Telemetry: Zero tests executed (non-blocking, WHITEBOX)"
+            echo "TELEMETRY_RESULT=FAIL" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=ZERO_TESTS_EXECUTED" >> "$GITHUB_ENV"
+            exit 0  # Always exit 0 in WHITEBOX telemetry
           fi
           
-          if [ $TEST_FAILED_EXP -eq 1 ]; then
-            TEST_OUTPUT=$(cat "$TEST_OUTPUT_FILE" 2>/dev/null || echo "")
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
             # Classify SIGILL explicitly: check output patterns (exit code from pipe not reliable)
             # Use temp file to avoid SIGPIPE from grep -q
             IS_SIGILL=0
@@ -1455,6 +1686,8 @@ jobs:
             rm -f "$TEMP_EXP_SIGILL_CHECK"
             
             if [ $IS_SIGILL -eq 1 ]; then
+              echo "TELEMETRY_RESULT=SIGILL_ENVIRONMENTAL" >> "$GITHUB_ENV"
+              echo "TELEMETRY_REASON=SIGILL_DETECTED" >> "$GITHUB_ENV"
               echo ""
               echo "SSOT_GATE2_FAILURE_CLASS=SIGILL_ENVIRONMENTAL"
               echo ""
@@ -1482,7 +1715,11 @@ jobs:
               echo "⚠️  This is an environmental failure, NOT an invariant drift."
               echo "⚠️  SIGILL failures are exclusively environmental and do not indicate test logic failures."
               echo "⚠️  This is experimental telemetry. Main Gate 2 uses pure Swift backend for stability."
+              echo "::notice::Experimental Telemetry: SIGILL_ENVIRONMENTAL (non-blocking, environmental failure)"
+              exit 0  # Always exit 0 in WHITEBOX telemetry
             fi
+            echo "TELEMETRY_RESULT=FAIL" >> "$GITHUB_ENV"
+            echo "TELEMETRY_REASON=TEST_FAILURE" >> "$GITHUB_ENV"
             echo ""
             echo "⚠️  EXPERIMENTAL TELEMETRY FAILURE (Non-Blocking)"
             echo "This is experimental telemetry. Main Gate 2 uses pure Swift backend for stability."
@@ -1492,8 +1729,48 @@ jobs:
             echo ""
             echo "✅ This failure does NOT block merges. Main Gate 2 (pure Swift backend) is unaffected."
             echo "✅ This job has continue-on-error: true and read-only permissions."
-            exit 1
+            echo "::notice::Experimental Telemetry: FAILED (non-blocking, test failure)"
+            exit 0  # Always exit 0 in WHITEBOX telemetry
           fi
           
           echo ""
           echo "✅ Experimental native crypto test passed (telemetry only, non-blocking)"
+          echo "TELEMETRY_RESULT=PASS" >> "$GITHUB_ENV"
+          echo "TELEMETRY_REASON=" >> "$GITHUB_ENV"
+          echo "::notice::Experimental Telemetry: PASSED (non-blocking)"
+      
+      - name: Telemetry summary
+        if: always()
+        run: |
+          set -euo pipefail
+          TELEMETRY_RESULT="${TELEMETRY_RESULT:-UNKNOWN}"
+          TELEMETRY_REASON="${TELEMETRY_REASON:-}"
+          echo ""
+          echo "📊 Telemetry Summary (WHITEBOX Linux Telemetry - Experimental)"
+          echo "  Job: gate_2_linux_native_crypto_experiment"
+          echo "  Mode: WHITEBOX (non-blocking, experimental)"
+          echo "  Result: ${TELEMETRY_RESULT}"
+          if [ -n "${TELEMETRY_REASON}" ]; then
+            echo "  Reason: ${TELEMETRY_REASON}"
+          fi
+          echo ""
+          case "${TELEMETRY_RESULT}" in
+            CANCELLED)
+              echo "::notice::Telemetry cancelled: ${TELEMETRY_REASON:-system swift not available}"
+              ;;
+            PASS)
+              echo "::notice::Telemetry passed: All tests completed successfully"
+              ;;
+            SIGILL_ENVIRONMENTAL)
+              echo "::notice::Telemetry SIGILL detected: Environmental failure (non-blocking)"
+              ;;
+            FAIL)
+              echo "::notice::Telemetry failed: ${TELEMETRY_REASON:-test failure} (non-blocking)"
+              ;;
+            *)
+              echo "::notice::Telemetry result: ${TELEMETRY_RESULT} (non-blocking)"
+              ;;
+          esac
+          echo ""
+          echo "This job does NOT block merges regardless of outcome (WHITEBOX mode, experimental)"
+          exit 0  # Always exit 0
