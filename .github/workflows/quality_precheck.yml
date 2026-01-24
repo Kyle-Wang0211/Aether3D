@@ -34,11 +34,13 @@ jobs:
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev pkg-config
       
       - name: Platform Diagnostics
         run: |
+          set -euo pipefail
           echo "=== Platform Information ==="
           uname -a
           swift --version
@@ -120,6 +122,7 @@ jobs:
           LC_ALL: C
           LANG: C
         run: |
+          set -euo pipefail
           set -x
           chmod +x scripts/*.sh scripts/hooks/pre-push scripts/install_hooks.sh || true
           cd "$(git rev-parse --show-toplevel)"
@@ -128,6 +131,7 @@ jobs:
       
       - name: Check Build Warnings
         run: |
+          set -euo pipefail
           set -x
           cd "$(git rev-parse --show-toplevel)"
           bash scripts/check_build_warnings.sh
@@ -138,6 +142,7 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
         run: |
+          set -euo pipefail
           set -x
           cd "$(git rev-parse --show-toplevel)"
           bash ./scripts/quality_gate.sh
@@ -149,6 +154,7 @@ jobs:
           LANG: en_US.UTF-8
           TZ: UTC
         run: |
+          set -euo pipefail
           set -x
           cd "$(git rev-parse --show-toplevel)"
           chmod +x scripts/*.sh scripts/hooks/* || true

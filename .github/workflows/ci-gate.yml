@@ -7,7 +7,7 @@ on:
 
 jobs:
   gate:
-    runs-on: macos-latest
+    runs-on: macos-14  # Pinned to prevent runner drift (replaces legacy macos-latest)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -16,6 +16,7 @@ jobs:
       
       - name: Run CI checks
         run: |
+          set -euo pipefail
           chmod +x scripts/ci/*.sh
           bash scripts/ci/run_all.sh
 

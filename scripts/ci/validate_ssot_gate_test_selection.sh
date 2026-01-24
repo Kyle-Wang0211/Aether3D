@@ -21,9 +21,22 @@ ERRORS=0
 # Check Gate 1
 echo "Checking Gate 1 (Constitutional)..."
 GATE1_SECTION=$(sed -n '/Run Gate 1 Tests/,/echo.*Gate 1 PASSED/p' "$WORKFLOW_FILE")
-GATE1_FILTER_COUNT=$(echo "$GATE1_SECTION" | grep -c "\\--filter" || echo "0")
+# Count --filter tokens, but respect escape hatch
+GATE1_ESCAPE_HATCHES=$(echo "$GATE1_SECTION" | grep -c "ssot-guardrail: ignore-next-line" 2>/dev/null || echo "0")
+GATE1_FILTER_COUNT=$(echo "$GATE1_SECTION" | grep -c "\\--filter" 2>/dev/null || echo "0")
+# Ensure numeric values (handle empty strings)
+GATE1_ESCAPE_HATCHES=$(echo "${GATE1_ESCAPE_HATCHES:-0}" | tr -d '[:space:]')
+GATE1_FILTER_COUNT=$(echo "${GATE1_FILTER_COUNT:-0}" | tr -d '[:space:]')
+# Default to 0 if empty
+[ -z "$GATE1_ESCAPE_HATCHES" ] && GATE1_ESCAPE_HATCHES=0
+[ -z "$GATE1_FILTER_COUNT" ] && GATE1_FILTER_COUNT=0
+# Subtract escape hatches from count (each allows one --filter to be ignored)
+if [ "$GATE1_ESCAPE_HATCHES" -gt 0 ] 2>/dev/null; then
+    GATE1_FILTER_COUNT=$((GATE1_FILTER_COUNT - GATE1_ESCAPE_HATCHES))
+    echo "  ⚠️  Found $GATE1_ESCAPE_HATCHES escape hatch(es) in Gate 1 (audit: ensure intentional)"
+fi
 
-if [ "$GATE1_FILTER_COUNT" -ge 3 ]; then
+if [ "$GATE1_FILTER_COUNT" -ge 3 ] 2>/dev/null; then
     echo "  ✅ Gate 1 uses explicit --filter selectors ($GATE1_FILTER_COUNT filters)"
 else
     echo "  ❌ Gate 1 has insufficient filters (found $GATE1_FILTER_COUNT, need >= 3)"
@@ -66,6 +79,21 @@ if grep -q "swift test -c.*build_config.*$" "$WORKFLOW_FILE" | grep -v "\\--filt
     ERRORS=$((ERRORS + 1))
 fi
 
+# Report escape hatch usage
+GATE1_ESCAPE_HATCHES=$(echo "${GATE1_ESCAPE_HATCHES:-0}" | tr -d '[:space:]')
+GATE2_ESCAPE_HATCHES=$(echo "${GATE2_ESCAPE_HATCHES:-0}" | tr -d '[:space:]')
+[ -z "$GATE1_ESCAPE_HATCHES" ] && GATE1_ESCAPE_HATCHES=0
+[ -z "$GATE2_ESCAPE_HATCHES" ] && GATE2_ESCAPE_HATCHES=0
+TOTAL_ESCAPE_HATCHES=$((GATE1_ESCAPE_HATCHES + GATE2_ESCAPE_HATCHES))
+if [ "$TOTAL_ESCAPE_HATCHES" -gt 0 ] 2>/dev/null; then
+    echo ""
+    echo "Escape hatch audit:"
+    echo "  Total escape hatches found: $TOTAL_ESCAPE_HATCHES"
+    echo "  Format: # ssot-guardrail: ignore-next-line"
+    echo "  Scope: Single line only (one --filter per hatch)"
+    echo "  Note: All escape hatches are logged for auditability"
+fi
+
 echo ""
 
 if [ $ERRORS -eq 0 ]; then
@@ -76,5 +104,8 @@ else
     echo ""
     echo "Fix: Ensure all 'swift test' commands in Gate 1 and Gate 2 use --filter"
     echo "This prevents accidental execution of non-SSOT tests"
+    echo ""
+    echo "Escape hatch: Add '# ssot-guardrail: ignore-next-line' before a --filter line"
+    echo "to bypass validation for that specific line (single-line scope only)"
     exit 1
 fi

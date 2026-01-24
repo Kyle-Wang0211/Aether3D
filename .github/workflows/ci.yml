@@ -89,11 +89,13 @@ jobs:
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev pkg-config
 
       - name: Platform Diagnostics
         run: |
+          set -euo pipefail
           echo "=== Platform Information ==="
           uname -a
           cat /etc/os-release || echo "OS release info not available"
@@ -106,11 +108,13 @@ jobs:
           LANG: en_US.UTF-8
           TZ: UTC
         run: |
+          set -euo pipefail
           chmod +x scripts/*.sh scripts/hooks/* || true
           swift build
       
       - name: Check Build Warnings
         run: |
+          set -euo pipefail
           bash scripts/check_build_warnings.sh
 
       - name: Run Platform-Safe Tests
@@ -119,6 +123,7 @@ jobs:
           LANG: en_US.UTF-8
           TZ: UTC
         run: |
+          set -euo pipefail
           # Run only platform-safe tests (explicit filters)
           # These tests don't require Apple frameworks and work on Linux
           set +e

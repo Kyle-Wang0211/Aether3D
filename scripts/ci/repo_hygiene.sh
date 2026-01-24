@@ -175,6 +175,16 @@ fi
 
 echo ""
 
+# 7. Verify workflow includes OPENSSL_ia32cap for ubuntu Gate 2 jobs
+echo "7. Verifying OPENSSL_ia32cap guardrails in workflow..."
+if grep -q "OPENSSL_ia32cap.*ubuntu-22.04" .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ OPENSSL_ia32cap guardrails found in workflow"
+else
+    echo "   ⚠️  OPENSSL_ia32cap guardrails not found (may be acceptable if not using ubuntu jobs)"
+fi
+
+echo ""
+
 # Summary
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All hygiene checks passed"

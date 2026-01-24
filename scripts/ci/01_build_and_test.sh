@@ -42,13 +42,18 @@ SUCCESS_PATTERNS=(
 )
 
 # Check if output contains any success pattern
+# Note: grep -q exits early on match, causing SIGPIPE when used with pipefail.
+# Write temp file ONCE, then loop over patterns (efficient, avoids SIGPIPE).
 HAS_SUCCESS=0
+TEMP_PATTERN_FILE=$(mktemp)
+echo "$TEST_OUTPUT_CLEAN" > "$TEMP_PATTERN_FILE"
 for pattern in "${SUCCESS_PATTERNS[@]}"; do
-    if echo "$TEST_OUTPUT_CLEAN" | grep -qE "$pattern"; then
+    if grep -qE "$pattern" "$TEMP_PATTERN_FILE"; then
         HAS_SUCCESS=1
         break
     fi
 done
+rm -f "$TEMP_PATTERN_FILE"
 
 # Determine final exit code
 if [ $HAS_SUCCESS -eq 1 ]; then

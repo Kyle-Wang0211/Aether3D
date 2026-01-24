@@ -15,6 +15,8 @@ This document explains what to do when SSOT Foundation tests fail. It categorize
 
 ### Category 0: CI Infrastructure Failure (Workflow/Environment)
 
+**CI Semantic Failures (GitHub Actions YAML/Expression Errors):**
+
 **What it means:**
 - Xcode selection failed (`xcode-select: error: invalid developer directory`)
 - Workflow job graph invalid
@@ -81,6 +83,173 @@ Fix:
 Prevention: CryptoShimConsistencyTests validates cross-platform determinism
 ```
 
+**CI Semantic Failures:**
+
+**Unrecognized named-value: 'env' (in concurrency.group):**
+```
+❌ Error: Unrecognized named-value: 'env'. Located at position X within expression: ${{ env.SSOT_CONCURRENCY_GROUP }}
+Root cause: concurrency.group is evaluated at compile-time and cannot reference runtime contexts like env.*
+Fix:
+  1. Change concurrency.group to use ONLY github.* contexts:
+     concurrency:
+       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  2. Keep SSOT_CONCURRENCY_GROUP as runtime env for diagnostics only:
+     env:
+       SSOT_CONCURRENCY_GROUP: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  3. Run: bash scripts/ci/validate_concurrency_contexts.sh
+Prevention: validate_concurrency_contexts.sh detects env.* in concurrency.group
+
+**Guardrail wiring failure: validator exists but not invoked:**
+```
+❌ Guardrail wiring validation failed (SSOT blocking)
+❌ REQUIRED: validate_concurrency_uniqueness.sh not invoked in preflight_ssot_foundation.sh or workflow
+Root cause: Guardrail script exists but is not called by lint_workflows.sh or preflight_ssot_foundation.sh
+
+**Merge contract violation:**
+```
+❌ Merge contract validation failed (SSOT blocking)
+❌ Missing required jobs: gate_1_constitutional
+OR
+❌ Required jobs unreachable on pull_request: gate_2_determinism_trust (if: github.event_name == 'workflow_dispatch')
+Root cause: Merge contract (MERGE_CONTRACT.md) defines required merge-blocking jobs. If a required job is missing, renamed, or gated behind workflow_dispatch/schedule only, the contract is violated.
+Fix:
+  1. Ensure all required jobs exist: gate_0_workflow_lint, gate_linux_preflight_only, gate_1_constitutional, gate_2_determinism_trust, golden_vector_governance.
+  2. Ensure all required jobs are reachable on pull_request events (no if: conditions blocking pull_request).
+  3. Ensure experimental jobs (gate_2_linux_native_crypto_experiment) are NOT in the merge contract.
+Prevention: validate_merge_contract.sh enforces contract compliance. See docs/constitution/MERGE_CONTRACT.md for contract definition.
+
+**Unpinned actions in SSOT workflow:**
+```
+❌ Actions pinning validation failed (SSOT blocking)
+❌ Unpinned action (SSOT requires full SHA): gate_1_constitutional/Checkout: actions/checkout@v4
+Root cause: SSOT workflows require all actions to be pinned to full commit SHAs (40 hex characters) to prevent silent upstream drift. Tags like @v4 can change without notice.
+Fix:
+  1. Find the commit SHA for the action version you want to use.
+  2. Replace actions/checkout@v4 with actions/checkout@<full-40-char-sha>.
+  3. Example: actions/checkout@v4 → actions/checkout@abc123def4567890abcdef1234567890abcdef12
+Finding commit SHAs:
+  - Visit the action's repository (e.g., https://github.com/actions/checkout)
+  - Navigate to the tag/release (e.g., v4)
+  - Copy the full commit SHA from the commit history
+Prevention: validate_actions_pinning.sh enforces pinning for SSOT workflows (hard error) and warns for non-SSOT workflows.
+Fix:
+  1. Check scripts/ci/validate_guardrail_wiring.sh output for missing wiring
+  2. Add missing guardrail invocation to lint_workflows.sh or preflight_ssot_foundation.sh
+  3. Ensure guardrail is called with correct arguments
+  4. Re-run: bash scripts/ci/validate_guardrail_wiring.sh
+Prevention: validate_guardrail_wiring.sh ensures all required guardrails are invoked
+```
+
+**Duplicate YAML keys ('steps' is already defined):**
+```
+❌ Error: 'steps' is already defined
+Root cause: YAML key duplication - a job has multiple 'steps:' keys
+Fix:
+  1. Locate the duplicate 'steps:' keys in the job (check workflow file)
+  2. Merge all steps into a single 'steps:' key
+  3. Ensure steps are ordered correctly (diagnostics first, then checkout, then build/test)
+  4. Run: bash scripts/ci/validate_no_duplicate_steps_keys.sh
+Prevention: validate_no_duplicate_steps_keys.sh detects duplicate steps keys
+```
+
+**Bash syntax error in workflow run blocks (unexpected end of file):**
+```
+❌ Error: syntax error: unexpected end of file
+  from /home/runner/work/_temp/<id>.sh line N
+Root cause: Shell script syntax error in a workflow `run: |` block
+  - Missing closing quote (`"`, `'`)
+  - Missing `fi` for `if ...; then`
+  - Missing `done` for loops
+  - Malformed heredoc (`<<EOF` without matching `EOF`)
+  - Stray backslash line continuation at end of file
+  - Unbalanced parentheses or braces in bash
+Symptoms:
+  - CI fails immediately with shell parse error
+  - Error points to temporary script file (not workflow YAML)
+  - Not a test failure; script never executes
+Fix:
+  1. Locate the offending step in workflow YAML (check step name from error)
+  2. Inspect the entire `run: |` block for unclosed structures
+  3. Common issues:
+     - `if` without matching `fi`
+     - `while`/`for` without matching `done`
+     - Unclosed quotes (check for `"` or `'` pairs)
+     - Line continuation `\` at end of file or before `fi`/`done`
+  4. Run: bash scripts/ci/validate_workflow_bash_syntax.sh <workflow_file>
+  5. Fix syntax error and re-run validation
+Prevention:
+  - validate_workflow_bash_syntax.sh checks all `run:` blocks before CI runs
+  - Integrated into lint_workflows.sh and preflight_ssot_foundation.sh
+  - Runs automatically in CI preflight (Gate 0 and Linux Preflight)
+  - Catches syntax errors before they reach GitHub Actions runners
+  - FAILS if `set -euo pipefail` is missing (hard requirement for all run blocks)
+
+How to run locally:
+  bash scripts/ci/validate_workflow_bash_syntax.sh .github/workflows/ssot-foundation-ci.yml
+
+Best practices for workflow run blocks:
+  - Always start with `set -euo pipefail` for safety (REQUIRED)
+  - Use structured control flow (if/else/fi, not || { ... })
+  - Avoid line continuations (\) mixed with conditionals
+  - Consolidate complex arguments into variables (e.g., FILTERS="--filter ...")
+  - Ensure every `if` has a matching `fi` on its own line
+  - Ensure every loop has a matching `done`
+  - Close all quotes properly
+```
+
+**Dependency Drift (swift-crypto version change):**
+```
+⚠️  Warning: swift-crypto revision changed in Package.resolved
+Root cause: Dependency version/revision updated without explicit marker
+Fix:
+  1. If intentional: Add "Dependency-Change: yes" to commit message body
+  2. OR create marker file: touch .dependency-change-marker
+  3. Commit both Package.resolved and the marker/commit message together
+Prevention:
+  - Linux Preflight checks Package.resolved for swift-crypto revision
+  - Fails if revision changes without explicit marker
+  - Ensures dependency updates are intentional and documented
+```
+
+**Cross-Workflow Concurrency Collision:**
+```
+❌ Error: Concurrency group lacks workflow-specific prefix
+Root cause: concurrency.group does not include github.workflow or workflow name
+  - Multiple workflows may share same concurrency group
+  - New workflow run cancels unrelated workflow runs
+Fix:
+  1. Ensure concurrency.group includes \${{ github.workflow }}:
+     concurrency:
+       group: \${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  2. OR include workflow name explicitly in group pattern
+Prevention:
+  - validate_concurrency_uniqueness.sh checks all workflows
+  - Integrated into lint_workflows.sh
+  - Fails if group is constant or lacks workflow identifier
+```
+
+**Operation was canceled:**
+```
+❌ "Error: The operation was canceled."
+Root cause: Job was cancelled by GitHub Actions due to concurrency cancel-in-progress
+  - New push to same PR cancels old run (expected behavior)
+  - Cross-workflow cancellation if concurrency groups collide (unexpected)
+Symptoms:
+  - Job shows "canceled" status, not "failed"
+  - No test failures or assertion errors
+  - May happen mid-execution
+Diagnosis:
+  1. Check "Concurrency Diagnostics" step output in job logs
+  2. Verify concurrency.group value matches expected pattern
+  3. Check if another run with same group started (check run_id, run_attempt)
+  4. Review cancellation notice step output (if job reached that step)
+Fix:
+  - If cancellation was expected (new push): no action needed, new run will execute
+  - If cancellation was unexpected: verify concurrency.group is unique per workflow
+  - Ensure concurrency.group uses: github.workflow + PR number or ref
+Prevention: Concurrency diagnostics step logs group value; cancellation notice clarifies it's not a test failure
+```
+
 **Ubuntu Gate 2 SIGILL Crash (Signal 4):**
 ```
 ❌ Ubuntu Gate 2 crashes immediately with signal 4 (SIGILL), 0 tests run
@@ -91,34 +260,59 @@ Symptoms:
   - Register dump shown
   - "Test run started ... 0 tests ... then crash"
   - May happen before swift test command executes (toolchain init) or during test discovery
-Fix (MUST apply all three):
+
+Layered Mitigation (MUST apply all layers):
+  (a) Job-level env: Set OPENSSL_ia32cap=:0 at job level for ubuntu Gate 2 jobs
+  (b) Step-level env: Set OPENSSL_ia32cap=:0 at step level for test execution steps
+  (c) GITHUB_ENV export: echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV" early in job
+  (d) Inline prefix: Use OPENSSL_ia32cap=:0 swift test ... (guarantees env even if propagation fails)
+  (e) Guardrail verification: Fail fast if OPENSSL_ia32cap != ":0" before tests run
+  (f) Canary test: Run CryptoShimConsistencyTests early to catch SIGILL before full suite
+  (g) Pure Swift fallback: SHA256PureSwift provides test-only fallback if native crypto SIGILLs
+
+Fix steps:
   1. Set OPENSSL_ia32cap at JOB level in workflow YAML:
      env:
        OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
   2. Export OPENSSL_ia32cap via GITHUB_ENV early in job (before any build/test):
-     echo "OPENSSL_ia32cap=:0" >> $GITHUB_ENV
-  3. Add guardrail verification step that fails if OPENSSL_ia32cap is not ":0":
-     if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
-       echo "::error::OPENSSL_ia32cap must be ':0' on Ubuntu Gate 2 to prevent SIGILL"
-       exit 1
-     fi
-  4. Verify canary test passes: swift test -c debug --filter CryptoShimConsistencyTests
+     echo 'OPENSSL_ia32cap=:0' >> "$GITHUB_ENV"
+  3. Set OPENSSL_ia32cap at STEP level for test execution steps:
+     env:
+       OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
+  4. Use inline prefix in swift test command:
+     OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests
+  5. Add guardrail verification step that fails if OPENSSL_ia32cap is not ":0"
+  6. Run canary test early: OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests
+
 Prevention: 
   - Gate Linux Preflight includes crypto shim canary check (catches SIGILL early)
-  - Workflow sets OPENSSL_ia32cap=:0 at job level AND exports via GITHUB_ENV
+  - Workflow sets OPENSSL_ia32cap=:0 at job level + step level + GITHUB_ENV + inline prefix
   - Guardrail verification steps fail fast if env not set correctly
   - Canary test runs before full Gate 2 suite to localize failure
+  - Pure Swift SHA-256 fallback (SHA256PureSwift) available as last resort
 
 How to verify locally (if running on Linux or Docker):
   export OPENSSL_ia32cap=:0
-  swift test -c debug --filter CryptoShimConsistencyTests
+  OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests
   # Should pass without SIGILL
 
-If SIGILL persists after fix:
+If SIGILL persists after all layers:
   - Check env propagation: print OPENSSL_ia32cap in step before swift test
   - Verify GITHUB_ENV export happened: check step logs
   - Check if wrapper scripts sanitize/clear env (preserve OPENSSL_ia32cap)
-  - Add diagnostics: uname -a, lscpu, env | grep OPENSSL
+  - Review Linux diagnostics: uname -a, lscpu, env | grep OPENSSL, ldd xctest output
+  - Enable pure Swift fallback explicitly: Set SSOT_PURE_SWIFT_SHA256=1 in test step env
+    (This bypasses native crypto entirely and uses SHA256PureSwift)
+
+Pure Swift SHA-256 Fallback (Explicit Control):
+  - Environment variable: SSOT_PURE_SWIFT_SHA256=1 (Linux-only)
+  - When enabled: CryptoShim uses SHA256PureSwift instead of native crypto backend
+  - Default behavior: Uses native crypto with OPENSSL_ia32cap=:0 mitigation
+  - Usage: Set in step env for Gate 2 tests if SIGILL persists despite all mitigations
+  - Example:
+    env:
+      SSOT_PURE_SWIFT_SHA256: "1"
+    run: swift test -c debug --filter CryptoShimConsistencyTests
 ```
 
 **How to verify locally:**

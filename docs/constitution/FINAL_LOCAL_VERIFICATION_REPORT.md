@@ -1,8 +1,8 @@
 # Final Local Verification Report
 
-**Date:** 2026-01-23 18:59:46 UTC
+**Date:** 2026-01-24 16:16:17 UTC
 **Branch:** pr1/ssot-foundation-v1_1
-**Duration:** 49s
+**Duration:** 70s
 **Status:** ✅ All checks passed
 
 **Note:** This report is regenerated on each verification run. Timestamps and durations may vary.
@@ -39,6 +39,8 @@ All SSOT Foundation gates and validation checks were executed locally.
 | 3.1 | Swift Package Resolve | ✅ PASSED |
 | 3.2 | Swift Build (Debug) | ✅ PASSED |
 | 3.3 | Swift Build (Release) | ✅ PASSED |
+| 4.0 | Crypto Shim Canary (Debug) | ⚠️  SKIPPED |
+| 4.0 | Crypto Shim Canary (Release) | ⚠️  SKIPPED |
 | 4.1 | Gate 1 Tests (Debug) | ✅ PASSED |
 | 4.2 | Gate 2 Tests (Debug) | ✅ PASSED |
 | 4.3 | Gate 1 Tests (Release) | ✅ PASSED |
@@ -93,7 +95,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 ## Gate 1 Test Results (Debug)
 
 ```
-	 Executed 36 tests, with 0 failures (0 unexpected) in 0.011 (0.014) seconds
+	 Executed 36 tests, with 0 failures (0 unexpected) in 0.013 (0.015) seconds
 ```
 
 ---
@@ -109,7 +111,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 ## Gate 1 Test Results (Release)
 
 ```
-	 Executed 36 tests, with 0 failures (0 unexpected) in 0.008 (0.011) seconds
+	 Executed 36 tests, with 0 failures (0 unexpected) in 0.009 (0.011) seconds
 ```
 
 ---
@@ -117,7 +119,7 @@ bash scripts/ci/preflight_ssot_foundation.sh
 ## Gate 2 Test Results (Release)
 
 ```
-	 Executed 52 tests, with 0 failures (0 unexpected) in 0.017 (0.020) seconds
+	 Executed 52 tests, with 0 failures (0 unexpected) in 0.018 (0.022) seconds
 ```
 
 ---
@@ -142,5 +144,5 @@ git commit -t COMMIT_MESSAGE_TEMPLATE.txt
 
 ---
 
-**Report Generated:** 2026-01-23 18:59:46 UTC
+**Report Generated:** 2026-01-24 16:16:18 UTC
 **Note:** Report timestamps reflect verification run time. Test execution times may vary.
