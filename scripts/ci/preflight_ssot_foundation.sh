@@ -101,6 +101,15 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
+# 1.5. Gate 2 Linux crypto policy (closed-world assertion)
+echo "1.5. Validating Gate 2 Linux crypto policy..."
+if bash scripts/ci/validate_gate2_linux_crypto_policy.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ Gate 2 Linux crypto policy valid"
+else
+    echo "   ❌ Gate 2 Linux crypto policy validation failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
 echo ""
 
 # 2. Audit documentation markers

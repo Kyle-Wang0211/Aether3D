@@ -157,6 +157,24 @@ else
 fi
 echo ""
 
+# Check Gate 2 Linux crypto policy (closed-world assertion)
+echo "8. Validating Gate 2 Linux crypto policy..."
+if [ -f "scripts/ci/validate_gate2_linux_crypto_policy.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_gate2_linux_crypto_policy.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Gate 2 Linux crypto policy valid"
+            else
+                echo "   ❌ $workflow: Gate 2 Linux crypto policy validation failed"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done
+else
+    echo "   ⚠️  validate_gate2_linux_crypto_policy.sh not found, skipping"
+fi
+echo ""
+
 if [ $ERRORS -eq 0 ]; then
     echo "✅ All workflow files valid"
     exit 0

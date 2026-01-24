@@ -25,6 +25,11 @@ on:
       - 'Core/Constants/**'
       - 'Tests/Constants/**'
       - '.github/workflows/ssot-foundation-ci.yml'
+  workflow_dispatch:
+    # Manual trigger for experimental lanes
+  schedule:
+    # Run experimental native crypto lane nightly at 2 AM UTC
+    - cron: '0 2 * * *'
 
 # CI Philosophy: CI is the constitutional court of SSOT.
 # CI must block silent drift, accidental identity changes, explanation inconsistencies, and "green by editing goldens".
@@ -490,9 +495,8 @@ jobs:
     # Linux-only: Disable crypto CPU feature detection to prevent SIGILL on CI CPUs
     # Prevents swift-crypto/OpenSSL/BoringSSL asm SIGILL on some hosted CI CPUs; forces software path; Linux-only.
     # Setting OPENSSL_ia32cap=:0 at job level ensures it's inherited by all steps and child processes
-    env:
-      OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
-    
+    # Setting SSOT_PURE_SWIFT_SHA256=1 forces pure Swift crypto backend (deterministic, no SIGILL risk)
+    # Closed-world: Linux entries explicitly set SSOT_PURE_SWIFT_SHA256="1", macOS entries omit it (absence is intentional)
     strategy:
       fail-fast: false
       matrix:
@@ -500,15 +504,26 @@ jobs:
           - os: macos-14
             xcode_version: '15.4'
             build_config: debug
+            # macOS: SSOT_PURE_SWIFT_SHA256 intentionally absent (uses native CryptoKit)
           - os: macos-14
             xcode_version: '15.4'
             build_config: release
+            # macOS: SSOT_PURE_SWIFT_SHA256 intentionally absent (uses native CryptoKit)
           - os: ubuntu-22.04
             xcode_version: ''
             build_config: debug
+            SSOT_PURE_SWIFT_SHA256: "1"
+            OPENSSL_ia32cap: ":0"
           - os: ubuntu-22.04
             xcode_version: ''
             build_config: release
+            SSOT_PURE_SWIFT_SHA256: "1"
+            OPENSSL_ia32cap: ":0"
+    
+    env:
+      # Job-level env propagates matrix env to all steps (closed-world: Linux entries have explicit values, macOS entries inherit empty/unset)
+      OPENSSL_ia32cap: ${{ matrix.OPENSSL_ia32cap || '' }}
+      SSOT_PURE_SWIFT_SHA256: ${{ matrix.SSOT_PURE_SWIFT_SHA256 || '' }}
     
     steps:
       - name: Concurrency Diagnostics
@@ -620,23 +635,54 @@ jobs:
         env:
           # Step-level env (belt-and-suspenders)
           OPENSSL_ia32cap: ":0"
+          SSOT_PURE_SWIFT_SHA256: "1"
         run: |
           set -euo pipefail
           echo "🔍 Crypto Canary Test (catches SIGILL before full Gate 2 suite)"
-          echo "Testing CryptoShimConsistencyTests with explicit OPENSSL_ia32cap=:0..."
+          echo "Testing CryptoShimConsistencyTests with pure Swift backend (SSOT_PURE_SWIFT_SHA256=1)..."
+          echo ""
+          echo "Environment check:"
+          echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set}"
+          echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
           echo ""
           # Inline prefix ensures env is applied even if step-level env fails
-          OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests || {
+          SSOT_PURE_SWIFT_SHA256=1 OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests 2>&1 | tee /tmp/canary_output.log || {
+            CANARY_EXIT=$?
+            CANARY_OUTPUT=$(cat /tmp/canary_output.log 2>/dev/null || echo "")
             echo ""
-            echo "::error::SIGILL during crypto canary. This indicates native crypto backend illegal instruction."
+            echo "::error::Crypto canary test failed (exit code: $CANARY_EXIT)"
+            echo ""
+            # Check for SIGILL
+            if echo "$CANARY_OUTPUT" | grep -qE "signal code 4|Illegal instruction|SIGILL"; then
+              echo "=== SIGILL_ENVIRONMENTAL_FAILURE ==="
+              echo "swift --version:"
+              swift --version
+              echo ""
+              echo "uname -a:"
+              uname -a
+              echo ""
+              echo "CPU flags:"
+              grep -m1 '^flags' /proc/cpuinfo || echo "  (cpuinfo not available)"
+              echo ""
+              echo "SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set}"
+              echo "OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+              echo ""
+              echo "This SIGILL occurred despite pure Swift backend. Check backend selection log."
+            fi
+            echo ""
             echo "See DEVELOPER_FAILURE_TRIAGE.md → Ubuntu SIGILL section."
-            echo ""
-            echo "Diagnostics:"
-            echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
-            echo "  Test command: OPENSSL_ia32cap=:0 swift test -c debug --filter CryptoShimConsistencyTests"
             exit 1
           }
-          echo "✅ Crypto canary passed (no SIGILL detected)"
+          # Verify backend selection log shows pure Swift
+          if ! grep -q "CryptoShim backend: PURE_SWIFT" /tmp/canary_output.log 2>/dev/null; then
+            echo ""
+            echo "::error::Expected pure Swift backend on Linux Gate 2 (SSOT_PURE_SWIFT_SHA256=1)"
+            echo "Backend selection log not found or incorrect. Check CryptoShim backend selection."
+            echo "Test output:"
+            cat /tmp/canary_output.log 2>/dev/null | tail -20 || echo "  (output not available)"
+            exit 1
+          fi
+          echo "✅ Crypto canary passed (pure Swift backend verified, no SIGILL detected)"
       
       - name: Build (${{ matrix.build_config }})
         env:
@@ -700,8 +746,10 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
-          # Step-level env for ubuntu (belt-and-suspenders)
-          OPENSSL_ia32cap: ${{ matrix.os == 'ubuntu-22.04' && ':0' || '' }}
+          # Step-level env inherits from job-level (which inherits from matrix entries)
+          # Closed-world: Linux matrix entries explicitly set values, macOS entries inherit empty/unset
+          OPENSSL_ia32cap: ${{ env.OPENSSL_ia32cap }}
+          SSOT_PURE_SWIFT_SHA256: ${{ env.SSOT_PURE_SWIFT_SHA256 }}
         run: |
           set -euo pipefail
           echo "🔒 Gate 2: Determinism & Trust Gate (Deep, Blocking)"
@@ -712,9 +760,10 @@ jobs:
             echo "  uname -a: $(uname -a)"
             echo "  Swift: $(swift --version | head -1)"
             echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+            echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set}"
             echo ""
             echo "Environment variables (crypto-related):"
-            env | sort | grep -E "(OPENSSL_ia32cap|ia32cap|CRYPTO|SWIFT)" || echo "  (none found)"
+            env | sort | grep -E "(OPENSSL_ia32cap|SSOT_PURE_SWIFT_SHA256|ia32cap|CRYPTO|SWIFT)" || echo "  (none found)"
             # Final guardrail: Ensure OPENSSL_ia32cap is set for ubuntu to prevent SIGILL
             if [ -z "${OPENSSL_ia32cap:-}" ] || [ "${OPENSSL_ia32cap}" != ":0" ]; then
               echo ""
@@ -723,8 +772,18 @@ jobs:
               echo "This will cause SIGILL crashes. Fix: Ensure OPENSSL_ia32cap=:0 is set at job level, step level, GITHUB_ENV, and inline prefix"
               exit 1
             fi
+            # Guardrail: Ensure SSOT_PURE_SWIFT_SHA256 is set for ubuntu to force pure Swift backend (closed-world assertion)
+            if [[ "${SSOT_PURE_SWIFT_SHA256:-}" != "1" ]]; then
+              echo ""
+              echo "::error::SSOT_PURE_SWIFT_SHA256 must be '1' on Ubuntu Gate 2 to force pure Swift backend"
+              echo "Current value: '${SSOT_PURE_SWIFT_SHA256:-not set}'"
+              echo "This ensures deterministic crypto backend selection and eliminates SIGILL risk"
+              echo "Policy: Linux Gate 2 matrix entries must explicitly set SSOT_PURE_SWIFT_SHA256='1'"
+              exit 1
+            fi
             echo ""
             echo "✅ OPENSSL_ia32cap guardrail passed"
+            echo "✅ SSOT_PURE_SWIFT_SHA256 guardrail passed (pure Swift backend enabled)"
           fi
           echo ""
           echo "Testing:"
@@ -738,13 +797,14 @@ jobs:
           echo "  - Minimum explanation set (D2)"
           echo ""
           if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            echo "Exact swift test invocation (with inline OPENSSL_ia32cap prefix):"
-            echo "  OPENSSL_ia32cap=:0 swift test -c ${{ matrix.build_config }} --filter [Gate 2 test suites]"
+            echo "Exact swift test invocation (with inline env prefixes):"
+            echo "  SSOT_PURE_SWIFT_SHA256=1 OPENSSL_ia32cap=:0 swift test -c ${{ matrix.build_config }} --filter [Gate 2 test suites]"
             echo ""
           fi
           
           # Build filter arguments as array (keeps literal --filter tokens visible to grep-based validators)
           FILTERS=(
+            --filter CryptoBackendPolicyTests
             --filter ColorMatrixIntegrityTests
             --filter DomainPrefixesTests
             --filter ReproducibilityBoundaryTests
@@ -760,19 +820,54 @@ jobs:
             --filter CryptoShimConsistencyTests
           )
           
-          # Inline prefix ensures OPENSSL_ia32cap is applied even if env propagation fails
+          # Inline prefix ensures OPENSSL_ia32cap and SSOT_PURE_SWIFT_SHA256 are applied even if env propagation fails
+          # Closed-world: Linux matrix entries have explicit values, macOS entries have empty/unset (intentional)
           TEST_FAILED=0
+          TEST_OUTPUT_FILE="/tmp/gate2_test_output.log"
           if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
-            if ! OPENSSL_ia32cap=:0 swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}"; then
+            # Linux: use pure Swift backend (SSOT_PURE_SWIFT_SHA256=1) + OPENSSL_ia32cap=:0
+            # Inline prefix uses explicit values from matrix (closed-world assertion)
+            if ! SSOT_PURE_SWIFT_SHA256="${SSOT_PURE_SWIFT_SHA256:-1}" OPENSSL_ia32cap="${OPENSSL_ia32cap:-:0}" swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"; then
               TEST_FAILED=1
             fi
           else
-            if ! swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}"; then
+            # macOS: use native backend (SSOT_PURE_SWIFT_SHA256 intentionally absent)
+            if ! swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"; then
               TEST_FAILED=1
             fi
           fi
           
           if [ $TEST_FAILED -eq 1 ]; then
+            echo ""
+            TEST_OUTPUT=$(cat "$TEST_OUTPUT_FILE" 2>/dev/null || echo "")
+            # Classify SIGILL explicitly (exclusive classification, non-confusing)
+            if echo "$TEST_OUTPUT" | grep -qE "signal code 4|Illegal instruction|SIGILL"; then
+              echo "SSOT_GATE2_FAILURE_CLASS=SIGILL_ENVIRONMENTAL"
+              echo ""
+              echo "=== SIGILL Environmental Failure ==="
+              echo "swift --version:"
+              swift --version
+              echo ""
+              echo "uname -a:"
+              uname -a
+              echo ""
+              if [ "${{ matrix.os }}" == "ubuntu-22.04" ]; then
+                echo "CPU flags:"
+                grep -m1 '^flags' /proc/cpuinfo || echo "  (cpuinfo not available)"
+                echo ""
+              fi
+              echo "SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set}"
+              echo "OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+              # Get backend name from test output if available
+              BACKEND_NAME=$(echo "$TEST_OUTPUT" | grep -oE "CryptoShim backend: (PURE_SWIFT|NATIVE)" | head -1 | sed 's/CryptoShim backend: //' || echo "unknown")
+              echo "Backend name: ${BACKEND_NAME}"
+              echo ""
+              echo "Note: Invariants not evaluated due to crash"
+              echo "This is an environmental failure, not an invariant drift."
+              echo "See DEVELOPER_FAILURE_TRIAGE.md → Ubuntu SIGILL section for repair guidance."
+              exit 1
+            fi
+            # Non-SIGILL failures: standard Gate 2 failure message
             echo ""
             echo "❌ Gate 2 FAILED: Determinism, reproducibility, or user trust violated"
             echo "Invariant IDs: A2, A3, A4, A5, CE, CL2, E2, C1, B1, B2, D2, G1, U1, U16"
@@ -889,3 +984,136 @@ jobs:
           else
             echo "✅ No golden vector changes detected"
           fi
+  
+  # Experimental: Linux Gate 2 with native crypto backend (non-blocking, telemetry only)
+  # Purpose: Monitor native crypto stability without blocking main Gate 2
+  # Runs only on workflow_dispatch or nightly schedule
+  gate_2_linux_native_crypto_experiment:
+    name: Gate 2 — Linux Native Crypto Experiment (Non-Blocking)
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    needs: []
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    # Experimental: Do NOT set SSOT_PURE_SWIFT_SHA256 (uses native crypto backend)
+    # This is for telemetry only - main Gate 2 remains stable with pure Swift backend
+    env:
+      OPENSSL_ia32cap: ":0"
+      # SSOT_PURE_SWIFT_SHA256 intentionally NOT set (experimental native crypto)
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        build_config: [debug, release]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Experimental Native Crypto Notice
+        run: |
+          set -euo pipefail
+          echo "🔬 EXPERIMENTAL: Linux Gate 2 with Native Crypto Backend"
+          echo "This is a non-blocking experimental lane for telemetry only."
+          echo "Main Gate 2 uses pure Swift backend (SSOT_PURE_SWIFT_SHA256=1) for stability."
+          echo ""
+          echo "Environment:"
+          echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set (experimental native crypto)}"
+          echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+          echo ""
+      
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v1
+        with:
+          swift-version: "6.0"
+      
+      - name: Build (${{ matrix.build_config }})
+        env:
+          CONFIGURATION: ${{ matrix.build_config }}
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          echo "Building in ${{ matrix.build_config }} configuration..."
+          swift build -c "${{ matrix.build_config }}" || {
+            echo "❌ Build failed"
+            exit 1
+          }
+      
+      - name: Run Gate 2 Tests (Experimental Native Crypto)
+        env:
+          CONFIGURATION: ${{ matrix.build_config }}
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+          # Experimental: Do NOT set SSOT_PURE_SWIFT_SHA256 (native crypto backend)
+          OPENSSL_ia32cap: ":0"
+        run: |
+          set -euo pipefail
+          echo "🔬 EXPERIMENTAL: Running Gate 2 tests with native crypto backend"
+          echo "OS: ubuntu-22.04, Config: ${{ matrix.build_config }}"
+          echo ""
+          echo "Environment:"
+          echo "  SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set (experimental)}"
+          echo "  OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+          echo ""
+          
+          # Build filter arguments (same as main Gate 2)
+          FILTERS=(
+            --filter CryptoBackendPolicyTests
+            --filter ColorMatrixIntegrityTests
+            --filter DomainPrefixesTests
+            --filter ReproducibilityBoundaryTests
+            --filter BreakingSurfaceTests
+            --filter ExplanationCatalogCoverageTests
+            --filter ReasonCompatibilityTests
+            --filter MinimumExplanationSetTests
+            --filter CatalogUniquenessTests
+            --filter ExplanationIntegrityTests
+            --filter CatalogCrossReferenceTests
+            --filter CatalogActionabilityRulesTests
+            --filter DomainPrefixesClosureTests
+            --filter CryptoShimConsistencyTests
+          )
+          
+          # Run tests with native crypto (no SSOT_PURE_SWIFT_SHA256)
+          TEST_OUTPUT_FILE="/tmp/gate2_experiment_output.log"
+          if ! OPENSSL_ia32cap=:0 swift test -c "${{ matrix.build_config }}" "${FILTERS[@]}" 2>&1 | tee "$TEST_OUTPUT_FILE"; then
+            TEST_OUTPUT=$(cat "$TEST_OUTPUT_FILE" 2>/dev/null || echo "")
+            # Classify SIGILL if present
+            if echo "$TEST_OUTPUT" | grep -qE "signal code 4|Illegal instruction|SIGILL"; then
+              echo ""
+              echo "SSOT_GATE2_FAILURE_CLASS=SIGILL_ENVIRONMENTAL"
+              echo ""
+              echo "=== SIGILL Detected in Experimental Native Crypto Lane ==="
+              echo "swift --version:"
+              swift --version
+              echo ""
+              echo "uname -a:"
+              uname -a
+              echo ""
+              echo "CPU flags:"
+              grep -m1 '^flags' /proc/cpuinfo || echo "  (cpuinfo not available)"
+              echo ""
+              echo "SSOT_PURE_SWIFT_SHA256=${SSOT_PURE_SWIFT_SHA256:-not set (experimental)}"
+              echo "OPENSSL_ia32cap=${OPENSSL_ia32cap:-not set}"
+              BACKEND_NAME=$(echo "$TEST_OUTPUT" | grep -oE "CryptoShim backend: (PURE_SWIFT|NATIVE)" | head -1 | sed 's/CryptoShim backend: //' || echo "unknown")
+              echo "Backend name: ${BACKEND_NAME}"
+              echo ""
+              echo "Note: Invariants not evaluated due to crash"
+              echo "This is an environmental failure, not an invariant drift."
+              echo "This is experimental telemetry. Main Gate 2 uses pure Swift backend for stability."
+            fi
+            echo ""
+            echo "❌ Experimental native crypto test failed (non-blocking)"
+            echo "This failure does not block main Gate 2 (which uses pure Swift backend)."
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ Experimental native crypto test passed (telemetry only, non-blocking)"

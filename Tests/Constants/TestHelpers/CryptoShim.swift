@@ -35,6 +35,31 @@ import Crypto
 /// This shim ensures tests can compute SHA-256 hashes without platform-specific imports.
 /// All test code should use this shim instead of directly importing CryptoKit.
 public enum CryptoShim {
+    /// Returns the active backend name as a stable string identifier.
+    ///
+    /// - Returns: "PURE_SWIFT" if using pure Swift implementation, "NATIVE" if using native crypto backend
+    /// - Note: This is an executable assertion API for test policy enforcement, not just logging
+    public static func activeBackendName() -> String {
+        #if canImport(CryptoKit)
+        // Apple platforms: use CryptoKit (native)
+        return "NATIVE"
+        #elseif canImport(Crypto)
+        // Linux: check if pure Swift backend is enabled
+        #if os(Linux)
+        if ProcessInfo.processInfo.environment["SSOT_PURE_SWIFT_SHA256"] == "1" {
+            return "PURE_SWIFT"
+        } else {
+            return "NATIVE"
+        }
+        #else
+        return "NATIVE"
+        #endif
+        #else
+        // No crypto module available: use pure Swift fallback
+        return "PURE_SWIFT"
+        #endif
+    }
+    
     /// Compute SHA-256 digest as bytes from input data.
     ///
     /// - Parameter data: Input data to hash
@@ -49,9 +74,15 @@ public enum CryptoShim {
         // Pure Swift fallback can be enabled via SSOT_PURE_SWIFT_SHA256=1 env var (Linux-only)
         // This allows explicit control for testing or when native crypto fails
         #if os(Linux)
-        if ProcessInfo.processInfo.environment["SSOT_PURE_SWIFT_SHA256"] == "1" {
+        let usePureSwift = ProcessInfo.processInfo.environment["SSOT_PURE_SWIFT_SHA256"] == "1"
+        if usePureSwift {
             // Explicitly use pure Swift fallback (for testing or SIGILL mitigation)
+            // Log backend selection for CI auditability (test-only, early in Gate 2 runs)
+            print("🔍 CryptoShim backend: PURE_SWIFT (SSOT_PURE_SWIFT_SHA256=1)")
             return SHA256PureSwift.sha256Digest(data)
+        } else {
+            // Default: use native crypto backend (with OPENSSL_ia32cap=:0 mitigation)
+            print("🔍 CryptoShim backend: NATIVE (swift-crypto Crypto module)")
         }
         #endif
         // Default: use native crypto backend (with OPENSSL_ia32cap=:0 mitigation)
@@ -61,6 +92,7 @@ public enum CryptoShim {
         // No crypto module available: use pure Swift fallback (test-only safety net)
         // This ensures tests can run even if swift-crypto dependency is missing
         // SHA256PureSwift is in the same module, so it's always available
+        print("🔍 CryptoShim backend: PURE_SWIFT (no crypto module available)")
         return SHA256PureSwift.sha256Digest(data)
         #endif
     }
