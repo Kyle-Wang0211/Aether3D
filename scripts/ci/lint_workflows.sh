@@ -193,8 +193,25 @@ else
 fi
 echo ""
 
+if [ -f "scripts/ci/validate_gate2_linux_executor_policy.sh" ]; then
+    echo "11. Validating Gate 2 Linux executor policy..."
+    for workflow in $WORKFLOW_FILES; do
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_gate2_linux_executor_policy.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Gate 2 Linux executor policy valid"
+            else
+                echo "   ❌ $workflow: Gate 2 Linux executor policy validation failed"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done
+else
+    echo "   ⚠️  validate_gate2_linux_executor_policy.sh not found, skipping"
+fi
+echo ""
+
 # Meta-validators (E20 requirements)
-echo "10. Validating guardrail integration (meta-validator)..."
+echo "12. Validating guardrail integration (meta-validator)..."
 if [ -f "scripts/ci/validate_guardrail_integration.sh" ]; then
     if bash scripts/ci/validate_guardrail_integration.sh 2>/dev/null; then
         echo "   ✅ Guardrail integration valid"
@@ -339,8 +356,38 @@ else
 fi
 echo ""
 
+# Merge contract structure consistency (SSOT blocking)
+echo "24. Validating merge contract structure consistency (SSOT blocking)..."
+if [ -f "scripts/ci/validate_merge_contract_structure.sh" ]; then
+    if bash scripts/ci/validate_merge_contract_structure.sh 2>/dev/null; then
+        echo "   ✅ Merge contract structure consistent"
+    else
+        echo "   ❌ Merge contract structure validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_merge_contract_structure.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+echo ""
+
+# Branch protection required checks document validation (SSOT blocking)
+echo "19. Validating branch protection required checks document (SSOT blocking)..."
+if [ -f "scripts/ci/validate_required_checks_doc_matches_merge_contract.sh" ]; then
+    if bash scripts/ci/validate_required_checks_doc_matches_merge_contract.sh 2>/dev/null; then
+        echo "   ✅ Branch protection document matches merge contract"
+    else
+        echo "   ❌ Branch protection document validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_required_checks_doc_matches_merge_contract.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+echo ""
+
 # Actions pinning validation (SSOT strict, non-SSOT warning)
-echo "19. Validating actions pinning..."
+echo "20. Validating actions pinning..."
 if [ -f "scripts/ci/validate_actions_pinning.sh" ]; then
     for workflow in $WORKFLOW_FILES; do
         if bash scripts/ci/validate_actions_pinning.sh "$workflow" 2>/dev/null; then
@@ -356,6 +403,65 @@ if [ -f "scripts/ci/validate_actions_pinning.sh" ]; then
     done
 else
     echo "   ⚠️  validate_actions_pinning.sh not found, skipping"
+fi
+echo ""
+
+# Actions pinning audit comment validation (SSOT blocking for SSOT workflows)
+echo "21. Validating actions pinning audit comments..."
+if [ -f "scripts/ci/validate_actions_pinning_audit_comment.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if bash scripts/ci/validate_actions_pinning_audit_comment.sh "$workflow" 2>/dev/null; then
+            echo "   ✅ $workflow: Actions pinning audit comments valid"
+        else
+            if echo "$workflow" | grep -q "ssot-foundation"; then
+                echo "   ❌ $workflow: Actions pinning audit comments validation failed (SSOT blocking)"
+                ERRORS=$((ERRORS + 1))
+            else
+                echo "   ⚠️  $workflow: Actions pinning audit comments validation failed (non-SSOT, warning only)"
+            fi
+        fi
+    done
+else
+    echo "   ❌ validate_actions_pinning_audit_comment.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+echo ""
+
+# Telemetry jobs permissions validation (SSOT blocking)
+echo "22. Validating telemetry jobs permissions (SSOT blocking)..."
+if [ -f "scripts/ci/validate_telemetry_jobs_permissions.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_telemetry_jobs_permissions.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Telemetry jobs permissions valid"
+            else
+                echo "   ❌ $workflow: Telemetry jobs permissions validation failed (SSOT blocking)"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done
+else
+    echo "   ❌ validate_telemetry_jobs_permissions.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+echo ""
+
+# Whitebox runner safety validation (SSOT blocking)
+echo "23. Validating whitebox runner safety (SSOT blocking)..."
+if [ -f "scripts/ci/validate_whitebox_no_self_hosted.sh" ]; then
+    for workflow in $WORKFLOW_FILES; do
+        if echo "$workflow" | grep -q "ssot-foundation"; then
+            if bash scripts/ci/validate_whitebox_no_self_hosted.sh "$workflow" 2>/dev/null; then
+                echo "   ✅ $workflow: Whitebox runner safety valid"
+            else
+                echo "   ❌ $workflow: Whitebox runner safety validation failed (SSOT blocking)"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done
+else
+    echo "   ❌ validate_whitebox_no_self_hosted.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
 fi
 echo ""
 

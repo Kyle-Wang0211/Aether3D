@@ -36,19 +36,81 @@ try:
         # Check if job is a gate (blocking)
         is_gate = 'gate' in job_id.lower() or 'gate' in job_name.lower()
         
+        # Check if this is blocking Gate 2 Linux (must use self-hosted in PRODUCTION mode)
+        # In WHITEBOX mode, Linux Gate 2 is non-blocking telemetry
+        # Read mode from SSOT_MODE.json
+        import json
+        try:
+            with open('docs/constitution/SSOT_MODE.json', 'r') as f:
+                mode_data = json.load(f)
+            merge_mode = mode_data.get('mode', 'WHITEBOX')
+        except:
+            merge_mode = os.environ.get('SSOT_MERGE_CONTRACT_MODE', 'WHITEBOX')
+        is_blocking_gate2_linux = False
+        if merge_mode == 'PRODUCTION':
+            is_blocking_gate2_linux = (job_id == 'gate_2_determinism_trust_linux_self_hosted' or
+                                       (job_id == 'gate_2_determinism_trust' and 
+                                        'linux' in job_name.lower() and 'self-hosted' in job_name.lower()))
+        
         if is_gate:
-            # Gates must use pinned runners
-            if runs_on == 'ubuntu-latest' or runs_on == 'macos-latest':
-                results.append(f"GATE_UNPINNED|{job_id}|{runs_on}")
-            elif 'ubuntu-' in runs_on or 'macos-' in runs_on:
-                # Check if it's a matrix reference
-                if '${{' in runs_on:
-                    # Matrix reference is OK if matrix values are pinned
-                    results.append(f"GATE_MATRIX_RUNNER|{job_id}|{runs_on}")
+            # Blocking Gate 2 Linux must use self-hosted runner
+            if is_blocking_gate2_linux:
+                # Check if runs_on is a matrix reference
+                if '${{' in str(runs_on):
+                    # Check matrix entries for self-hosted Linux
+                    strategy = job_def.get('strategy', {})
+                    matrix = strategy.get('matrix', {})
+                    includes = matrix.get('include', [])
+                    has_self_hosted_linux = False
+                    has_hosted_ubuntu = False
+                    for entry in includes:
+                        entry_runs_on = entry.get('runs_on', entry.get('os', ''))
+                        if isinstance(entry_runs_on, list):
+                            if 'self-hosted' in entry_runs_on and 'linux' in entry_runs_on:
+                                has_self_hosted_linux = True
+                            if 'ubuntu-22.04' in entry_runs_on or entry_runs_on == 'ubuntu-22.04':
+                                has_hosted_ubuntu = True
+                        elif isinstance(entry_runs_on, str):
+                            if 'self-hosted' in entry_runs_on and 'linux' in entry_runs_on:
+                                has_self_hosted_linux = True
+                            if entry_runs_on == 'ubuntu-22.04':
+                                has_hosted_ubuntu = True
+                    
+                    if has_hosted_ubuntu and not has_self_hosted_linux:
+                        results.append(f"GATE2_LINUX_HOSTED|{job_id}|Blocking Gate 2 Linux must use self-hosted runner")
+                    elif has_self_hosted_linux:
+                        results.append(f"GATE_PINNED|{job_id}|{runs_on} (self-hosted Linux)")
+                    else:
+                        results.append(f"GATE_MATRIX_RUNNER|{job_id}|{runs_on}")
+                else:
+                    # Direct runner specification
+                    if isinstance(runs_on, list):
+                        if 'self-hosted' in runs_on and 'linux' in runs_on:
+                            results.append(f"GATE_PINNED|{job_id}|{runs_on}")
+                        elif 'ubuntu-22.04' in runs_on or runs_on == 'ubuntu-22.04':
+                            results.append(f"GATE2_LINUX_HOSTED|{job_id}|Blocking Gate 2 Linux must use self-hosted runner")
+                        else:
+                            results.append(f"GATE_PINNED|{job_id}|{runs_on}")
+                    elif runs_on == 'ubuntu-latest' or runs_on == 'macos-latest':
+                        results.append(f"GATE_UNPINNED|{job_id}|{runs_on}")
+                    elif 'ubuntu-' in str(runs_on) or 'macos-' in str(runs_on):
+                        if runs_on == 'ubuntu-22.04' and is_blocking_gate2_linux:
+                            results.append(f"GATE2_LINUX_HOSTED|{job_id}|Blocking Gate 2 Linux must use self-hosted runner")
+                        else:
+                            results.append(f"GATE_PINNED|{job_id}|{runs_on}")
+                    else:
+                        results.append(f"GATE_PINNED|{job_id}|{runs_on}")
+            else:
+                # Other gates: standard pinning check
+                if runs_on == 'ubuntu-latest' or runs_on == 'macos-latest':
+                    results.append(f"GATE_UNPINNED|{job_id}|{runs_on}")
+                elif 'ubuntu-' in str(runs_on) or 'macos-' in str(runs_on):
+                    if '${{' in str(runs_on):
+                        results.append(f"GATE_MATRIX_RUNNER|{job_id}|{runs_on}")
+                    else:
+                        results.append(f"GATE_PINNED|{job_id}|{runs_on}")
                 else:
                     results.append(f"GATE_PINNED|{job_id}|{runs_on}")
-            else:
-                results.append(f"GATE_PINNED|{job_id}|{runs_on}")
     
     for result in results:
         print(result)
@@ -84,6 +146,12 @@ if [ $ERRORS -eq 0 ]; then
 else
     echo "❌ Runner pinning validation failed ($ERRORS error(s))"
     echo ""
-    echo "Policy: Blocking gates must use pinned runners (ubuntu-22.04, macos-14, not ubuntu-latest)"
+    echo "Policy:"
+    echo "  - Blocking gates must use pinned runners (ubuntu-22.04, macos-14, not ubuntu-latest)"
+    echo "  - Blocking Gate 2 Linux must use self-hosted runner ([self-hosted, linux, x86_64, ssot-gate2])"
+    echo "  - GitHub-hosted ubuntu-22.04 is forbidden for blocking Gate 2 Linux"
+    echo ""
+    echo "Escape hatch: Add '# ssot-guardrail: allow-hosted-blocking-gate2(<reason>)' before the entry"
+    echo "Escape hatch requires: Commit message must contain 'Hosted-Blocking-Gate2: yes'"
     exit 1
 fi

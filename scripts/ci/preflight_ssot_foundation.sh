@@ -196,6 +196,90 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
+# 1.13. Gate 2 Linux executor policy (SSOT blocking)
+echo "1.13. Validating Gate 2 Linux executor policy (SSOT blocking)..."
+if [ -f "scripts/ci/validate_gate2_linux_executor_policy.sh" ]; then
+    if bash scripts/ci/validate_gate2_linux_executor_policy.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+        echo "   ✅ Gate 2 Linux executor policy valid"
+    else
+        echo "   ❌ Gate 2 Linux executor policy validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_gate2_linux_executor_policy.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.14. Branch protection required checks document (SSOT blocking)
+echo "1.14. Validating branch protection required checks document (SSOT blocking)..."
+if [ -f "scripts/ci/validate_required_checks_doc_matches_merge_contract.sh" ]; then
+    if bash scripts/ci/validate_required_checks_doc_matches_merge_contract.sh 2>/dev/null; then
+        echo "   ✅ Branch protection document matches merge contract"
+    else
+        echo "   ❌ Branch protection document validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_required_checks_doc_matches_merge_contract.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.15. Actions pinning audit comments (SSOT blocking)
+echo "1.15. Validating actions pinning audit comments (SSOT blocking)..."
+if [ -f "scripts/ci/validate_actions_pinning_audit_comment.sh" ]; then
+    if bash scripts/ci/validate_actions_pinning_audit_comment.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+        echo "   ✅ Actions pinning audit comments valid"
+    else
+        echo "   ❌ Actions pinning audit comments validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_actions_pinning_audit_comment.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.16. Telemetry jobs permissions (SSOT blocking)
+echo "1.16. Validating telemetry jobs permissions (SSOT blocking)..."
+if [ -f "scripts/ci/validate_telemetry_jobs_permissions.sh" ]; then
+    if bash scripts/ci/validate_telemetry_jobs_permissions.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+        echo "   ✅ Telemetry jobs permissions valid"
+    else
+        echo "   ❌ Telemetry jobs permissions validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_telemetry_jobs_permissions.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.17. Whitebox runner safety (SSOT blocking)
+echo "1.17. Validating whitebox runner safety (SSOT blocking)..."
+if [ -f "scripts/ci/validate_whitebox_no_self_hosted.sh" ]; then
+    if bash scripts/ci/validate_whitebox_no_self_hosted.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+        echo "   ✅ Whitebox runner safety valid"
+    else
+        echo "   ❌ Whitebox runner safety validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_whitebox_no_self_hosted.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.18. Merge contract structure consistency (SSOT blocking)
+echo "1.18. Validating merge contract structure consistency (SSOT blocking)..."
+if [ -f "scripts/ci/validate_merge_contract_structure.sh" ]; then
+    if bash scripts/ci/validate_merge_contract_structure.sh 2>/dev/null; then
+        echo "   ✅ Merge contract structure consistent"
+    else
+        echo "   ❌ Merge contract structure validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_merge_contract_structure.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
 echo ""
 
 # 2. Audit documentation markers

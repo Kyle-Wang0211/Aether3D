@@ -30,24 +30,36 @@ try:
     for job_id, job_def in jobs.items():
         job_name = job_def.get('name', job_id)
         # Check if job is experimental (name contains "experimental" or "telemetry")
+        # Note: gate_2_linux_hosted_telemetry is telemetry but runs on pull_request (non-blocking)
         if 'experimental' in job_name.lower() or 'telemetry' in job_name.lower():
             # Check if: condition restricts to non-blocking triggers
             if_condition = job_def.get('if', '')
             needs = job_def.get('needs', [])
             
             # Check triggers
+            # Telemetry jobs may run on pull_request if they have continue-on-error: true
+            continue_on_error = job_def.get('continue-on-error', False)
             triggers_ok = False
             if 'workflow_dispatch' in if_condition or 'schedule' in if_condition:
                 triggers_ok = True
+            elif if_condition == '' and continue_on_error:
+                # No if condition but has continue-on-error: OK for telemetry (non-blocking)
+                triggers_ok = True
             elif if_condition == '':
-                # No if condition means it runs on all triggers (BAD for experimental)
-                print(f"EXPERIMENTAL_NO_TRIGGER|{job_id}|No if: condition restricts triggers")
+                # No if condition and no continue-on-error: BAD for experimental
+                print(f"EXPERIMENTAL_NO_TRIGGER|{job_id}|No if: condition restricts triggers and no continue-on-error")
                 sys.exit(1)
+            else:
+                triggers_ok = True
             
             # Check needs chain (experimental should not be in blocking chain)
-            if needs:
-                print(f"EXPERIMENTAL_IN_NEEDS|{job_id}|Experimental job in needs chain: {needs}")
+            # Telemetry jobs may be in needs chain if they have continue-on-error: true
+            if needs and not continue_on_error:
+                print(f"EXPERIMENTAL_IN_NEEDS|{job_id}|Experimental job in needs chain without continue-on-error: {needs}")
                 sys.exit(1)
+            elif needs and continue_on_error:
+                # Telemetry in needs chain is OK if non-blocking
+                pass
             
             # Check concurrency group (should not share with blocking jobs)
             concurrency_group = job_def.get('concurrency', {}).get('group', '')

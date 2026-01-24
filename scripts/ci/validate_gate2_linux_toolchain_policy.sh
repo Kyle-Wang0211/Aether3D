@@ -23,105 +23,81 @@ echo ""
 GATE2_SECTION=$(python3 <<'PYTHON_EOF'
 import yaml
 import sys
+import os
 
 try:
     with open('.github/workflows/ssot-foundation-ci.yml', 'r') as f:
         workflow = yaml.safe_load(f)
     
-    # Find gate_2_determinism_trust job
+    # Find Linux Gate 2 job (telemetry in WHITEBOX mode)
+    # Read mode from SSOT_MODE.json
+    import json
+    try:
+        with open('docs/constitution/SSOT_MODE.json', 'r') as f:
+            mode_data = json.load(f)
+        merge_mode = mode_data.get('mode', 'WHITEBOX')
+    except:
+        merge_mode = os.environ.get('SSOT_MERGE_CONTRACT_MODE', 'WHITEBOX')
     jobs = workflow.get('jobs', {})
-    gate2_job = jobs.get('gate_2_determinism_trust', {})
+    if merge_mode == 'PRODUCTION':
+        gate2_job_id = 'gate_2_determinism_trust_linux_self_hosted'
+    else:
+        gate2_job_id = 'gate_2_determinism_trust_linux_telemetry'
+    gate2_job = jobs.get(gate2_job_id, {})
     
     if not gate2_job:
-        print("gate_2_determinism_trust job not found", file=sys.stderr)
+        print(f"{gate2_job_id} job not found", file=sys.stderr)
         sys.exit(1)
     
-    # Get job-level env
+    # Get job-level env (Linux Gate 2 uses direct env, not matrix)
     job_env = gate2_job.get('env', {})
-    
-    # Get matrix entries
-    strategy = gate2_job.get('strategy', {})
-    matrix = strategy.get('matrix', {})
-    includes = matrix.get('include', [])
     
     # Read raw YAML to check for escape hatches
     with open('.github/workflows/ssot-foundation-ci.yml', 'r') as raw_f:
         lines = raw_f.readlines()
     
-    # Check GLIBC_TUNABLES in job-level env (may be conditional expression)
+    # Check GLIBC_TUNABLES in job-level env
     expected_glibc = 'glibc.cpu.hwcaps=-x86-64-v3:-x86-64-v4'
     
-    # Check if GLIBC_TUNABLES is set correctly for blocking Linux Gate 2
-    # It may be a conditional expression like: ${{ matrix.os == 'ubuntu-22.04' && '...' || '' }}
-    # We check the raw YAML for the expected value pattern
-    with open('.github/workflows/ssot-foundation-ci.yml', 'r') as raw_f:
-        raw_content = raw_f.read()
-    
-    # Check if GLIBC_TUNABLES contains the expected value (either literal or in conditional)
-    if expected_glibc in raw_content and 'GLIBC_TUNABLES' in raw_content:
-        # Verify it's set for ubuntu-22.04 (check conditional, matrix field, or literal assignment)
-        # Check for matrix field pattern (preferred: explicit matrix field + env inheritance)
-        matrix_field_pattern = "GLIBC_TUNABLES: ${{ matrix.GLIBC_TUNABLES || '' }}"
-        # Check for conditional expression pattern (legacy)
-        conditional_pattern = "GLIBC_TUNABLES: ${{ matrix.os == 'ubuntu-22.04' && '" + expected_glibc + "' || '' }}"
-        # Check for literal patterns in matrix entries
-        literal_pattern1 = "GLIBC_TUNABLES: " + expected_glibc
-        literal_pattern2 = "GLIBC_TUNABLES: '" + expected_glibc + "'"
-        
-        # Check if matrix entries have GLIBC_TUNABLES set and env uses matrix field
-        has_matrix_field = False
-        for entry in includes:
-            if entry.get('os') == 'ubuntu-22.04' and entry.get('GLIBC_TUNABLES') == expected_glibc:
-                has_matrix_field = True
-                break
-        
-        if (matrix_field_pattern in raw_content and has_matrix_field) or \
-           conditional_pattern in raw_content or \
-           literal_pattern1 in raw_content or \
-           literal_pattern2 in raw_content:
-            print("GLIBC_VALID|" + expected_glibc)
-        else:
-            print("GLIBC_MISSING|" + expected_glibc + "|Pattern not found in expected format")
+    # Linux Gate 2 uses direct job-level env (not matrix)
+    # Check if GLIBC_TUNABLES is set at job level
+    if job_env.get('GLIBC_TUNABLES') == expected_glibc:
+        print("GLIBC_VALID|" + expected_glibc)
     else:
-        print("GLIBC_MISSING|" + expected_glibc + "|GLIBC_TUNABLES not found in workflow")
+        print("GLIBC_MISSING|" + expected_glibc + "|GLIBC_TUNABLES not set correctly in job env (got: '" + str(job_env.get('GLIBC_TUNABLES', 'not set')) + "')")
     
-    # Check each Ubuntu entry for toolchain pinning
-    for idx, entry in enumerate(includes):
-        if entry.get('os') == 'ubuntu-22.04':
-            # Find the line number where this entry's os field appears
-            entry_line_num = None
-            for line_num, line in enumerate(lines, 1):
-                if "os: ubuntu-22.04" in line:
-                    # Check if we've already processed this entry
-                    if entry_line_num is None or line_num > entry_line_num + 10:
-                        entry_line_num = line_num
-                        # Check previous line for escape hatch
-                        if line_num > 1:
-                            prev_line = lines[line_num - 2].strip()
-                            if "ssot-guardrail: allow-linux-toolchain-policy-change" in prev_line:
-                                # Extract reason from comment (required, non-empty, ≤120 chars, single-line)
-                                reason_match = ""
-                                if "(" in prev_line and ")" in prev_line:
-                                    reason_start = prev_line.find("(") + 1
-                                    reason_end = prev_line.find(")")
-                                    reason_match = prev_line[reason_start:reason_end].strip()
-                                
-                                # Validate reason requirements
-                                if not reason_match:
-                                    print("ESCAPE_HATCH_INVALID|" + str(line_num - 1) + "|Reason is required and must be non-empty")
-                                elif len(reason_match) > 120:
-                                    print("ESCAPE_HATCH_INVALID|" + str(line_num - 1) + "|Reason exceeds 120 characters (got " + str(len(reason_match)) + ")")
-                                elif "\n" in reason_match:
-                                    print("ESCAPE_HATCH_INVALID|" + str(line_num - 1) + "|Reason must be single-line")
-                                else:
-                                    print("ESCAPE_HATCH|" + str(line_num - 1) + "|" + reason_match)
-                                break
+    # Check for toolchain pinning in Linux Gate 2 job
+    # Find the job's runs-on line to check for escape hatch
+    job_id = gate2_job_id
+    for line_num, line in enumerate(lines, 1):
+        if job_id in line and 'runs-on:' in line:
+            # Check previous lines for escape hatch (may be 1-3 lines before)
+            for offset in [1, 2, 3]:
+                if line_num > offset:
+                    prev_line = lines[line_num - offset - 1].strip()
+                    if "ssot-guardrail: allow-linux-toolchain-policy-change" in prev_line:
+                        # Extract reason from comment (required, non-empty, ≤120 chars, single-line)
+                        reason_match = ""
+                        if "(" in prev_line and ")" in prev_line:
+                            reason_start = prev_line.find("(") + 1
+                            reason_end = prev_line.find(")")
+                            reason_match = prev_line[reason_start:reason_end].strip()
                         
-                        # Check for toolchain pinning mechanism
-                        # Look for container: or swift-version: or setup-swift action
-                        # This is a simplified check - actual validation happens in step inspection
-                        print("UBUNTU_ENTRY|" + str(idx + 1) + "|Checked")
+                        # Validate reason requirements
+                        if not reason_match:
+                            print("ESCAPE_HATCH_INVALID|" + str(line_num - offset) + "|Reason is required and must be non-empty")
+                        elif len(reason_match) > 120:
+                            print("ESCAPE_HATCH_INVALID|" + str(line_num - offset) + "|Reason exceeds 120 characters (got " + str(len(reason_match)) + ")")
+                        elif "\n" in reason_match:
+                            print("ESCAPE_HATCH_INVALID|" + str(line_num - offset) + "|Reason must be single-line")
+                        else:
+                            print("ESCAPE_HATCH|" + str(line_num - offset) + "|" + reason_match)
                         break
+            
+            # Check for toolchain pinning mechanism (setup-swift action in steps)
+            # Simplified check - actual validation happens in step inspection
+            print("LINUX_ENTRY|1|Checked")
+            break
     
     sys.exit(0)
 except Exception as e:
@@ -151,8 +127,8 @@ while IFS='|' read -r status idx detail; do
         GLIBC_VALID)
             echo "  ✅ GLIBC_TUNABLES correctly set: $detail"
             ;;
-        UBUNTU_ENTRY)
-            echo "  ✅ Ubuntu entry #$idx: Toolchain policy checked"
+        LINUX_ENTRY)
+            echo "  ✅ Linux entry #$idx: Toolchain policy checked"
             ;;
     esac
 done <<< "$GATE2_SECTION"

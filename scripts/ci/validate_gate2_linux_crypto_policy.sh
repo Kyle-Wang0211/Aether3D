@@ -23,68 +23,47 @@ echo ""
 GATE2_SECTION=$(python3 <<PYTHON_EOF
 import yaml
 import sys
+import os
 
 try:
-    with open('$WORKFLOW_FILE', 'r') as f:
+    workflow_file = '$WORKFLOW_FILE'
+    with open(workflow_file, 'r') as f:
         workflow = yaml.safe_load(f)
     
-    # Find gate_2_determinism_trust job
+    # Find Linux Gate 2 job (telemetry in WHITEBOX mode)
+    # Read mode from SSOT_MODE.json
+    import json
+    try:
+        with open('docs/constitution/SSOT_MODE.json', 'r') as f:
+            mode_data = json.load(f)
+        merge_mode = mode_data.get('mode', 'WHITEBOX')
+    except:
+        merge_mode = os.environ.get('SSOT_MERGE_CONTRACT_MODE', 'WHITEBOX')
     jobs = workflow.get('jobs', {})
-    gate2_job = jobs.get('gate_2_determinism_trust', {})
+    if merge_mode == 'PRODUCTION':
+        gate2_job_id = 'gate_2_determinism_trust_linux_self_hosted'
+    else:
+        gate2_job_id = 'gate_2_determinism_trust_linux_telemetry'
+    gate2_job = jobs.get(gate2_job_id, {})
     
     if not gate2_job:
-        print("gate_2_determinism_trust job not found", file=sys.stderr)
+        print(f"{gate2_job_id} job not found", file=sys.stderr)
         sys.exit(1)
     
-    # Get matrix entries
-    strategy = gate2_job.get('strategy', {})
-    matrix = strategy.get('matrix', {})
-    includes = matrix.get('include', [])
+    # Get job-level env (Linux Gate 2 uses direct env, not matrix)
+    job_env = gate2_job.get('env', {})
     
     # Read raw YAML to check for escape hatches
-    with open('$WORKFLOW_FILE', 'r') as raw_f:
+    with open(workflow_file, 'r') as raw_f:
         lines = raw_f.readlines()
     
-    # Check each Ubuntu entry
-    for idx, entry in enumerate(includes):
-        if entry.get('os') == 'ubuntu-22.04':
-            # Find the line number where this entry's os field appears
-            entry_line_num = None
-            for line_num, line in enumerate(lines, 1):
-                if f"os: ubuntu-22.04" in line:
-                    # Check if we've already processed this entry
-                    if entry_line_num is None or line_num > entry_line_num + 10:
-                        entry_line_num = line_num
-                        # Check previous line for escape hatch
-                        if line_num > 1:
-                            prev_line = lines[line_num - 2].strip()
-                            if "ssot-guardrail: allow-linux-crypto-policy-change" in prev_line:
-                                # Extract reason from comment (required, non-empty, ≤120 chars, single-line)
-                                reason_match = ""
-                                if "(" in prev_line and ")" in prev_line:
-                                    reason_start = prev_line.find("(") + 1
-                                    reason_end = prev_line.find(")")
-                                    reason_match = prev_line[reason_start:reason_end].strip()
-                                
-                                # Validate reason requirements
-                                if not reason_match:
-                                    print(f"ESCAPE_HATCH_INVALID|{line_num - 1}|Reason is required and must be non-empty")
-                                elif len(reason_match) > 120:
-                                    print(f"ESCAPE_HATCH_INVALID|{line_num - 1}|Reason exceeds 120 characters (got {len(reason_match)})")
-                                elif "\n" in reason_match:
-                                    print(f"ESCAPE_HATCH_INVALID|{line_num - 1}|Reason must be single-line")
-                                else:
-                                    print(f"ESCAPE_HATCH|{line_num - 1}|{reason_match}")
-                                break
-                        
-                        # Check if SSOT_PURE_SWIFT_SHA256 is set correctly
-                        if 'SSOT_PURE_SWIFT_SHA256' not in entry:
-                            print(f"MISSING|{idx + 1}|SSOT_PURE_SWIFT_SHA256 not set")
-                        elif entry.get('SSOT_PURE_SWIFT_SHA256') != "1":
-                            print(f"INVALID|{idx + 1}|SSOT_PURE_SWIFT_SHA256='{entry.get('SSOT_PURE_SWIFT_SHA256')}' (must be '1')")
-                        else:
-                            print(f"VALID|{idx + 1}|SSOT_PURE_SWIFT_SHA256='1'")
-                        break
+    # Check job-level env for SSOT_PURE_SWIFT_SHA256
+    if 'SSOT_PURE_SWIFT_SHA256' not in job_env:
+        print("MISSING|1|SSOT_PURE_SWIFT_SHA256 not set in job env")
+    elif job_env.get('SSOT_PURE_SWIFT_SHA256') != "1":
+        print(f"INVALID|1|SSOT_PURE_SWIFT_SHA256='{job_env.get('SSOT_PURE_SWIFT_SHA256')}' (must be '1')")
+    else:
+        print("VALID|1|SSOT_PURE_SWIFT_SHA256='1'")
     
     sys.exit(0)
 except Exception as e:
@@ -104,15 +83,15 @@ while IFS='|' read -r status idx detail; do
             echo "  ⚠️  Escape hatch detected at line $LINE_NUM: $REASON"
             ;;
         MISSING)
-            echo "  ❌ Ubuntu entry #$idx: $detail"
+            echo "  ❌ Blocking Linux Gate 2: $detail"
             ERRORS=$((ERRORS + 1))
             ;;
         INVALID)
-            echo "  ❌ Ubuntu entry #$idx: $detail"
+            echo "  ❌ Blocking Linux Gate 2: $detail"
             ERRORS=$((ERRORS + 1))
             ;;
         VALID)
-            echo "  ✅ Ubuntu entry #$idx: $detail"
+            echo "  ✅ Blocking Linux Gate 2: $detail"
             ;;
     esac
 done <<< "$GATE2_SECTION"
@@ -165,7 +144,7 @@ if [ $ERRORS -eq 0 ]; then
 else
     echo "❌ Policy validation failed ($ERRORS error(s))"
     echo ""
-    echo "Policy: Linux Gate 2 matrix entries must explicitly set SSOT_PURE_SWIFT_SHA256=\"1\""
+    echo "Policy: Blocking Linux Gate 2 job must explicitly set SSOT_PURE_SWIFT_SHA256=\"1\" in job env"
     echo "Escape hatch: Add '# ssot-guardrail: allow-linux-crypto-policy-change(<reason>)' before the entry"
     echo "Escape hatch requires: Commit message must contain 'Crypto-Policy-Change: yes'"
     exit 1
