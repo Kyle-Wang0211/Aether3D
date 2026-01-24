@@ -37,10 +37,37 @@ fi
 
 WORKFLOW_NAME=$(basename "$WORKFLOW_FILE" .yml | sed 's/\.yaml$//')
 ERRORS=0
+WARNINGS=0
 TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
+# Tiered strict-mode policy configuration
+# SSOT workflows: hard error if missing 'set -euo pipefail'
+# Non-SSOT workflows: warning only (tolerant for legacy workflows)
+SSOT_WORKFLOWS=(
+    "ssot-foundation-ci.yml"
+)
+NON_SSOT_WORKFLOWS=(
+    "ci.yml"
+    "ci-gate.yml"
+    "quality_precheck.yml"
+)
+
+# Determine if this is an SSOT workflow (strict) or non-SSOT (tolerant)
+IS_SSOT=0
+for ssot_wf in "${SSOT_WORKFLOWS[@]}"; do
+    if echo "$WORKFLOW_FILE" | grep -q "$ssot_wf"; then
+        IS_SSOT=1
+        break
+    fi
+done
+
 echo "🔍 Validating bash syntax in workflow: $WORKFLOW_NAME"
+if [ $IS_SSOT -eq 1 ]; then
+    echo "Policy: SSOT workflow (strict mode required)"
+else
+    echo "Policy: Non-SSOT workflow (warning-only for missing strict mode)"
+fi
 echo ""
 
 # Parse YAML and extract run blocks
@@ -51,6 +78,8 @@ import os
 import subprocess
 
 errors = False
+warnings = False
+is_ssot = $IS_SSOT
 
 try:
     with open('$WORKFLOW_FILE', 'r') as f:
@@ -128,8 +157,13 @@ try:
     
     if errors:
         print("")
-        print("❌ Found bash syntax error(s) or missing 'set -euo pipefail' in workflow run blocks")
+        print("❌ Found bash syntax error(s) or missing 'set -euo pipefail' in SSOT workflow run blocks")
         sys.exit(1)
+    elif warnings:
+        print("")
+        print("⚠️  Found missing 'set -euo pipefail' in non-SSOT workflow (warning only, not blocking)")
+        print("✅ Bash syntax checks passed (with warnings)")
+        sys.exit(0)
     else:
         print("")
         print("✅ All bash syntax checks passed")

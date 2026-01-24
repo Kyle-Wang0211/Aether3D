@@ -122,14 +122,8 @@ if [ $EXIT_CODE -ne 0 ]; then
     ERRORS=$((ERRORS + 1))
 fi
 
-# Fallback: simple grep-based check for common patterns
-if [ $ERRORS -eq 0 ]; then
-    # Check for multiple 'steps:' occurrences that might indicate duplication
-    STEPS_COUNT=$(grep -c "^\s*steps:" "$WORKFLOW_FILE" || echo "0")
-    if [ "$STEPS_COUNT" -gt 10 ]; then
-        echo "⚠️  Found $STEPS_COUNT 'steps:' occurrences (may indicate duplication, verify manually)"
-    fi
-fi
+# Legacy grep-based fallback removed - Python YAML parsing is the single authoritative mechanism
+# This ensures structural correctness and prevents fragile pattern matching
 
 if [ $ERRORS -eq 0 ]; then
     exit 0

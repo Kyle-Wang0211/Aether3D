@@ -45,6 +45,14 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
+# 1.1a. Validate concurrency uniqueness
+if bash scripts/ci/validate_concurrency_uniqueness.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ Concurrency uniqueness valid"
+else
+    echo "   ❌ Concurrency uniqueness validation failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
 # 1.2. Validate no duplicate steps keys
 if bash scripts/ci/validate_no_duplicate_steps_keys.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
     echo "   ✅ No duplicate steps keys"
@@ -116,6 +124,75 @@ if bash scripts/ci/validate_gate2_linux_toolchain_policy.sh .github/workflows/ss
     echo "   ✅ Gate 2 Linux toolchain policy valid"
 else
     echo "   ❌ Gate 2 Linux toolchain policy validation failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.7. Zero tests executed detection
+echo "1.7. Validating zero tests executed detection..."
+if bash scripts/ci/validate_zero_tests_executed.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ Zero tests detection valid"
+else
+    echo "   ❌ Zero tests detection validation failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.8. SIGILL classification
+echo "1.8. Validating SIGILL classification..."
+if bash scripts/ci/validate_sigill_classification.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ SIGILL classification valid"
+else
+    echo "   ❌ SIGILL classification validation failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.9. Gate 2 backend policy test order
+echo "1.9. Validating Gate 2 backend policy test order..."
+if bash scripts/ci/validate_gate2_backend_policy_test_first.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+    echo "   ✅ Gate 2 backend policy test order valid"
+else
+    echo "   ❌ Gate 2 backend policy test order validation failed"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.10. Guardrail wiring (SSOT blocking)
+echo "1.10. Validating guardrail wiring (SSOT blocking)..."
+if [ -f "scripts/ci/validate_guardrail_wiring.sh" ]; then
+    if bash scripts/ci/validate_guardrail_wiring.sh 2>/dev/null; then
+        echo "   ✅ Guardrail wiring valid"
+    else
+        echo "   ❌ Guardrail wiring validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_guardrail_wiring.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.11. Merge contract (SSOT blocking)
+echo "1.11. Validating merge contract (SSOT blocking)..."
+if [ -f "scripts/ci/validate_merge_contract.sh" ]; then
+    if bash scripts/ci/validate_merge_contract.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+        echo "   ✅ Merge contract valid"
+    else
+        echo "   ❌ Merge contract validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_merge_contract.sh not found (SSOT blocking failure)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# 1.12. Actions pinning (SSOT blocking)
+echo "1.12. Validating actions pinning (SSOT blocking)..."
+if [ -f "scripts/ci/validate_actions_pinning.sh" ]; then
+    if bash scripts/ci/validate_actions_pinning.sh .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
+        echo "   ✅ Actions pinning valid"
+    else
+        echo "   ❌ Actions pinning validation failed (SSOT blocking)"
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "   ❌ validate_actions_pinning.sh not found (SSOT blocking failure)"
     ERRORS=$((ERRORS + 1))
 fi
 

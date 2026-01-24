@@ -98,6 +98,46 @@ Fix:
        SSOT_CONCURRENCY_GROUP: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   3. Run: bash scripts/ci/validate_concurrency_contexts.sh
 Prevention: validate_concurrency_contexts.sh detects env.* in concurrency.group
+
+**Guardrail wiring failure: validator exists but not invoked:**
+```
+❌ Guardrail wiring validation failed (SSOT blocking)
+❌ REQUIRED: validate_concurrency_uniqueness.sh not invoked in preflight_ssot_foundation.sh or workflow
+Root cause: Guardrail script exists but is not called by lint_workflows.sh or preflight_ssot_foundation.sh
+
+**Merge contract violation:**
+```
+❌ Merge contract validation failed (SSOT blocking)
+❌ Missing required jobs: gate_1_constitutional
+OR
+❌ Required jobs unreachable on pull_request: gate_2_determinism_trust (if: github.event_name == 'workflow_dispatch')
+Root cause: Merge contract (MERGE_CONTRACT.md) defines required merge-blocking jobs. If a required job is missing, renamed, or gated behind workflow_dispatch/schedule only, the contract is violated.
+Fix:
+  1. Ensure all required jobs exist: gate_0_workflow_lint, gate_linux_preflight_only, gate_1_constitutional, gate_2_determinism_trust, golden_vector_governance.
+  2. Ensure all required jobs are reachable on pull_request events (no if: conditions blocking pull_request).
+  3. Ensure experimental jobs (gate_2_linux_native_crypto_experiment) are NOT in the merge contract.
+Prevention: validate_merge_contract.sh enforces contract compliance. See docs/constitution/MERGE_CONTRACT.md for contract definition.
+
+**Unpinned actions in SSOT workflow:**
+```
+❌ Actions pinning validation failed (SSOT blocking)
+❌ Unpinned action (SSOT requires full SHA): gate_1_constitutional/Checkout: actions/checkout@v4
+Root cause: SSOT workflows require all actions to be pinned to full commit SHAs (40 hex characters) to prevent silent upstream drift. Tags like @v4 can change without notice.
+Fix:
+  1. Find the commit SHA for the action version you want to use.
+  2. Replace actions/checkout@v4 with actions/checkout@<full-40-char-sha>.
+  3. Example: actions/checkout@v4 → actions/checkout@abc123def4567890abcdef1234567890abcdef12
+Finding commit SHAs:
+  - Visit the action's repository (e.g., https://github.com/actions/checkout)
+  - Navigate to the tag/release (e.g., v4)
+  - Copy the full commit SHA from the commit history
+Prevention: validate_actions_pinning.sh enforces pinning for SSOT workflows (hard error) and warns for non-SSOT workflows.
+Fix:
+  1. Check scripts/ci/validate_guardrail_wiring.sh output for missing wiring
+  2. Add missing guardrail invocation to lint_workflows.sh or preflight_ssot_foundation.sh
+  3. Ensure guardrail is called with correct arguments
+  4. Re-run: bash scripts/ci/validate_guardrail_wiring.sh
+Prevention: validate_guardrail_wiring.sh ensures all required guardrails are invoked
 ```
 
 **Duplicate YAML keys ('steps' is already defined):**
