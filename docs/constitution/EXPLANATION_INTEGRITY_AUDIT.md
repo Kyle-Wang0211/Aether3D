@@ -1,5 +1,7 @@
 # Explanation Integrity Audit
 
+<!-- MARKER: EXPLANATION_INTEGRITY -->
+
 **Document Version:** 1.1.1  
 **Status:** IMMUTABLE  
 **Rule ID:** EIA_001

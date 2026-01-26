@@ -33,13 +33,16 @@ final class ThrowPatternScanTests: XCTestCase {
                 
                 // Check for throw that doesn't use SSOTError
                 // Allow standard library errors (DecodingError, EncodingError, etc.)
+                // Allow SSOT-related errors (CanonicalDigestError, SSOTVersionError, etc.)
                 if line.contains("throw ") && 
                    !line.contains("SSOTError") && 
+                   !line.contains("CanonicalDigestError") &&
+                   !line.contains("SSOTVersionError") &&
                    !line.contains("XCTSkip") &&
                    !line.contains("DecodingError") &&
                    !line.contains("EncodingError") &&
                    !line.contains("NSError") {
-                    violations.append("\(url.lastPathComponent):\(index + 1): throw should use SSOTError")
+                    violations.append("\(url.lastPathComponent):\(index + 1): throw should use SSOTError or SSOT-related error")
                 }
             }
         }

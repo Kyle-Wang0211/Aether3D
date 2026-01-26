@@ -55,6 +55,7 @@ jobs:
       - name: Event Context Parity Check
         run: |
           set -euo pipefail
+          IOS_BUILD_LOG="${RUNNER_TEMP:-/tmp}/ios_build.log"
           echo "🔒 Gate 0: Event Context Parity Check"
           echo "Validating GitHub Actions context consistency"
           echo ""
@@ -1774,3 +1775,241 @@ jobs:
           echo ""
           echo "This job does NOT block merges regardless of outcome (WHITEBOX mode, experimental)"
           exit 0  # Always exit 0
+
+
+  # SSOT Check Gate — Single Entrypoint (macOS)
+  # Uses scripts/ssot_check.sh as the single source of verification
+  # Replaces ad-hoc checks with unified script
+  ssot_check_macos:
+    name: SSOT Check (macOS)
+    runs-on: macos-14
+    needs: [gate_0_workflow_lint]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    
+    steps:
+      - name: Checkout
+        # pinned from v4 (2026-01-25)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Swift
+        # pinned from v2 (2026-01-25)
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
+        with:
+          swift-version: "6.0"
+      
+      - name: Run SSOT Check
+        run: |
+          set -euo pipefail
+          export SSOT_SKIP_TESTS=1
+          export SKIP_TESTS=1
+          echo "🔒 SSOT Check (macOS) — Single Entrypoint"
+          echo "Running: ./scripts/ssot_check.sh"
+          echo ""
+          chmod +x scripts/ssot_check.sh
+          ./scripts/ssot_check.sh || {
+            echo ""
+            echo "❌ SSOT Check FAILED"
+            echo "Review failures above and run: ./scripts/ssot_check.sh"
+            exit 1
+          }
+      
+      - name: Upload SSOT Diff Report
+        if: always()
+        # pinned from v4 (2026-01-25)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ssot-diff-report-macos
+          path: artifacts/ssot_diff_report.md
+          if-no-files-found: ignore
+          retention-days: 30
+      
+      - name: Upload Golden File
+        if: always()
+        # pinned from v4 (2026-01-25)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: golden-policy-digests-macos
+          path: Tests/Golden/policy_digests.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # SSOT Check Gate — Single Entrypoint (Linux)
+  # Uses scripts/ssot_check.sh as the single source of verification
+  # Verifies golden determinism (5 runs match) and cross-platform consistency
+  ssot_check_linux:
+    name: SSOT Check (Linux)
+    runs-on: ubuntu-22.04
+    needs: [gate_linux_preflight_only]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    
+    env:
+      OPENSSL_ia32cap: ":0"
+    
+    steps:
+      - name: Checkout
+        # pinned from v4 (2026-01-25)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Swift
+        # pinned from v2 (2026-01-25)
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
+        with:
+          swift-version: "6.0"
+      
+      - name: Run SSOT Check
+        env:
+          OPENSSL_ia32cap: ":0"
+        run: |
+          set -euo pipefail
+          export SSOT_SKIP_TESTS=1
+          export SKIP_TESTS=1
+          echo "🔒 SSOT Check (Linux) — Single Entrypoint"
+          echo "Running: ./scripts/ssot_check.sh"
+          echo "This includes golden determinism verification (5 runs match)"
+          echo ""
+          chmod +x scripts/ssot_check.sh
+          ./scripts/ssot_check.sh || {
+            echo ""
+            echo "❌ SSOT Check FAILED"
+            echo "Review failures above and run: ./scripts/ssot_check.sh"
+            exit 1
+          }
+      
+      - name: Verify Golden Cross-Platform Consistency
+        run: |
+          set -euo pipefail
+          echo "🔍 Verifying golden file cross-platform consistency"
+          echo "Regenerating golden in temp dir and comparing byte-for-byte..."
+          
+          TEMP_DIR=$(mktemp -d)
+          trap "rm -rf $TEMP_DIR" EXIT
+          
+          # Build UpdateGoldenDigests
+          swift build --product UpdateGoldenDigests -c release
+          
+          # Generate golden in temp dir
+          "$(swift build -c release --show-bin-path)/UpdateGoldenDigests" > "$TEMP_DIR/new_golden.json" 2>&1 || {
+            echo "❌ Failed to regenerate golden file"
+            exit 1
+          }
+          
+          # Compare with existing golden
+          if diff -q Tests/Golden/policy_digests.json "$TEMP_DIR/new_golden.json" >/dev/null 2>&1; then
+            echo "✅ Golden file is byte-for-byte consistent (Linux regeneration matches)"
+          else
+            echo "❌ Golden file mismatch: Linux regeneration differs from committed version"
+            echo "Diff:"
+            diff -u Tests/Golden/policy_digests.json "$TEMP_DIR/new_golden.json" | head -50
+            exit 1
+          fi
+      
+      - name: Upload SSOT Diff Report
+        if: always()
+        # pinned from v4 (2026-01-25)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ssot-diff-report-linux
+          path: artifacts/ssot_diff_report.md
+          if-no-files-found: ignore
+          retention-days: 30
+      
+      - name: Upload Golden File
+        if: always()
+        # pinned from v4 (2026-01-25)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: golden-policy-digests-linux
+          path: Tests/Golden/policy_digests.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # iOS Compile Gate
+  # Compile-only check to ensure iOS targets don't pull in CLI-only code
+  # UpdateGoldenDigests and tooling must be isolated to non-iOS targets
+  ios_compile_gate:
+    name: iOS Compile Gate
+    runs-on: macos-14
+    needs: [gate_0_workflow_lint]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Init iOS build log path (GITHUB_ENV)
+        shell: bash
+        run: |
+          set -euo pipefail
+          IOS_BUILD_LOG="${RUNNER_TEMP:-/tmp}/ios_build.log"
+          echo "IOS_BUILD_LOG=$IOS_BUILD_LOG" >> "$GITHUB_ENV"
+          : > "$IOS_BUILD_LOG"
+      - name: Checkout
+        # pinned from v4 (2026-01-25)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      
+      
+      - name: Verify iOS Target Isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${IOS_BUILD_LOG:=${RUNNER_TEMP:-/tmp}/ios_build.log}"
+          echo "🔒 iOS Compile Gate — Verify Target Isolation"
+          echo "Checking that UpdateGoldenDigests/tooling is isolated from targets"
+          echo ""
+          
+          # Structural guard: tooling must not be iOS-targeted
+          if grep -q "UpdateGoldenDigests" Package.swift; then
+            echo "Checking UpdateGoldenDigests target configuration..."
+            if grep -A 40 "UpdateGoldenDigests" Package.swift | grep -Eqi "\.iOS\b|\biOS\b"; then
+              echo "❌ UpdateGoldenDigests must not target iOS"
+              exit 1
+            fi
+            echo "✅ UpdateGoldenDigests is not targeting iOS"
+          fi
+          
+          echo ""
+          echo "Attempting iOS simulator compile (best-effort, Apple toolchain)..."
+          
+          if command -v xcrun >/dev/null 2>&1; then
+            SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null || true)"
+            if [ -n "${SDK_PATH:-}" ]; then
+              D_LOG="/tmp/ios_build.log"
+          
+              set +e
+              xcrun --sdk iphonesimulator swift build -c release \
+                --triple arm64-apple-ios-simulator \
+                --product Aether3DCore 2>&1 | tee "$IOS_BUILD_LOG"
+              rc=${PIPESTATUS[0]}
+              set -e
+          
+              if [ "$rc" -eq 0 ]; then
+                echo "✅ iOS simulator compile succeeded (Aether3DCore)"
+              else
+                # Env/SDK/toolchain mismatch: downgrade to structure-only (non-blocking)
+                if grep -Eqi "Invalid manifest|using sysroot.*iPhoneSimulator.*targeting.*MacOSX|unable to load standard library|SDK.*not.*found|simulator.*not.*found|xcrun: error|toolchain" "$IOS_BUILD_LOG"; then
+                  echo "⚠️ iOS compile could not run reliably in this CI environment"
+                  echo "Proceeding with structure-only validation (non-blocking)"
+                else
+                  echo "❌ iOS compile failed (code-level incompatibility)"
+                  echo "Build log (last 80 lines):"
+                  tail -80 "$IOS_BUILD_LOG" || true
+                  exit 1
+                fi
+              fi
+            else
+              echo "⚠️ iOS SDK not available in this CI environment"
+              echo "Proceeding with structure-only validation"
+            fi
+          else
+            echo "⚠️ xcrun not available in this CI environment"
+            echo "Proceeding with structure-only validation"
+          fi

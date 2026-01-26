@@ -1,5 +1,7 @@
 # Failure Triage Map
 
+<!-- MARKER: FAILURE_TRIAGE -->
+
 **Document Version:** 1.1.1  
 **Status:** IMMUTABLE  
 **Rule ID:** TRIAGE_001
