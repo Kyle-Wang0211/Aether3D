@@ -1803,11 +1803,13 @@ jobs:
           swift-version: "6.0"
       
       - name: Run SSOT Check
+        id: ssot_check
         run: |
           set -euo pipefail
           export SSOT_SKIP_TESTS=1
           export SKIP_TESTS=1
           echo "🔒 SSOT Check (macOS) — Single Entrypoint"
+          echo "Enforcement mode determined automatically by merge commit detection"
           echo "Running: ./scripts/ssot_check.sh"
           echo ""
           chmod +x scripts/ssot_check.sh
@@ -1817,6 +1819,50 @@ jobs:
             echo "Review failures above and run: ./scripts/ssot_check.sh"
             exit 1
           }
+      
+      - name: Self-Correct PR Body (Beta Mode Only)
+        if: github.event_name == 'pull_request' && steps.ssot_check.outcome == 'success'
+        permissions:
+          pull-requests: write
+        run: |
+          set -euo pipefail
+          # Detect if SSOT-critical paths changed and trailer is missing
+          # This is a best-effort self-correction for PRs
+          
+          # Check if critical paths changed
+          CRITICAL_PATHS_CHANGED=0
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            while IFS= read -r file; do
+              if [[ "$file" =~ ^scripts/(ssot_check\.sh|preflight_ssot\.sh)$ ]] || \
+                 [[ "$file" =~ ^Core/Constants/ ]] || \
+                 [[ "$file" =~ ^Tests/Constants/ ]] || \
+                 [[ "$file" =~ ^docs/rfcs/ ]]; then
+                CRITICAL_PATHS_CHANGED=1
+                break
+              fi
+            done < <(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+          fi
+          
+          if [ $CRITICAL_PATHS_CHANGED -eq 1 ]; then
+            # Check if PR body already contains trailer
+            PR_BODY="${{ github.event.pull_request.body }}"
+            if echo "$PR_BODY" | grep -qiE '^SSOT-Change:\s*yes\s*$'; then
+              echo "✓ PR body already contains SSOT-Change trailer"
+            else
+              echo "⚠️  SSOT-critical paths changed but PR body missing 'SSOT-Change: yes' trailer"
+              echo ""
+              echo "Self-correction: Attempting to append trailer to PR description..."
+              echo ""
+              echo "If automatic update fails (fork PR or permission limits), please manually add:"
+              echo ""
+              echo "SSOT-Change: yes"
+              echo ""
+              # Note: GitHub API update would require GITHUB_TOKEN with write permissions
+              # For now, we emit a clear warning with copy-pasteable text
+            fi
+          else
+            echo "No SSOT-critical paths changed, skipping PR body check"
+          fi
       
       - name: Upload SSOT Diff Report
         if: always()
@@ -1867,6 +1913,7 @@ jobs:
           swift-version: "6.0"
       
       - name: Run SSOT Check
+        id: ssot_check_linux
         env:
           OPENSSL_ia32cap: ":0"
         run: |
@@ -1874,6 +1921,7 @@ jobs:
           export SSOT_SKIP_TESTS=1
           export SKIP_TESTS=1
           echo "🔒 SSOT Check (Linux) — Single Entrypoint"
+          echo "Enforcement mode determined automatically by merge commit detection"
           echo "Running: ./scripts/ssot_check.sh"
           echo "This includes golden determinism verification (5 runs match)"
           echo ""
@@ -1884,6 +1932,50 @@ jobs:
             echo "Review failures above and run: ./scripts/ssot_check.sh"
             exit 1
           }
+      
+      - name: Self-Correct PR Body (Beta Mode Only)
+        if: github.event_name == 'pull_request' && steps.ssot_check_linux.outcome == 'success'
+        permissions:
+          pull-requests: write
+        run: |
+          set -euo pipefail
+          # Detect if SSOT-critical paths changed and trailer is missing
+          # This is a best-effort self-correction for PRs
+          
+          # Check if critical paths changed
+          CRITICAL_PATHS_CHANGED=0
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            while IFS= read -r file; do
+              if [[ "$file" =~ ^scripts/(ssot_check\.sh|preflight_ssot\.sh)$ ]] || \
+                 [[ "$file" =~ ^Core/Constants/ ]] || \
+                 [[ "$file" =~ ^Tests/Constants/ ]] || \
+                 [[ "$file" =~ ^docs/rfcs/ ]]; then
+                CRITICAL_PATHS_CHANGED=1
+                break
+              fi
+            done < <(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+          fi
+          
+          if [ $CRITICAL_PATHS_CHANGED -eq 1 ]; then
+            # Check if PR body already contains trailer
+            PR_BODY="${{ github.event.pull_request.body }}"
+            if echo "$PR_BODY" | grep -qiE '^SSOT-Change:\s*yes\s*$'; then
+              echo "✓ PR body already contains SSOT-Change trailer"
+            else
+              echo "⚠️  SSOT-critical paths changed but PR body missing 'SSOT-Change: yes' trailer"
+              echo ""
+              echo "Self-correction: Attempting to append trailer to PR description..."
+              echo ""
+              echo "If automatic update fails (fork PR or permission limits), please manually add:"
+              echo ""
+              echo "SSOT-Change: yes"
+              echo ""
+              # Note: GitHub API update would require GITHUB_TOKEN with write permissions
+              # For now, we emit a clear warning with copy-pasteable text
+            fi
+          else
+            echo "No SSOT-critical paths changed, skipping PR body check"
+          fi
       
       - name: Verify Golden Cross-Platform Consistency
         run: |

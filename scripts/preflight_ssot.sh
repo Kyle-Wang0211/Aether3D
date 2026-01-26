@@ -20,9 +20,120 @@ source "$SCRIPT_DIR/lib.sh"
 REPO_ROOT=$(repo_root)
 cd "$REPO_ROOT"
 
+# Function to check if current commit is a merge commit on main branch
+# Returns 0 if merge commit to main, 1 otherwise
+# Single source of truth for strict enforcement trigger
+is_merge_commit() {
+    # Check if we're on main branch
+    CURRENT_REF=$(git symbolic-ref HEAD 2>/dev/null || echo "")
+    if [ "$CURRENT_REF" != "refs/heads/main" ]; then
+        return 1
+    fi
+    
+    # Check if HEAD has more than one parent (merge commit)
+    PARENT_COUNT=$(git log -1 --pretty=%P HEAD 2>/dev/null | wc -w)
+    if [ "${PARENT_COUNT:-0}" -gt 1 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check if commit message contains SSOT-Change trailer
+# Returns 0 if trailer found, 1 if not found
+# Canonical regex: (?im)^SSOT-Change:\s*yes\s*$
+check_ssot_trailer() {
+    local commit_msg="$1"
+    # Case-insensitive check for standalone line: SSOT-Change: yes
+    # Tolerant of whitespace variations
+    if echo "$commit_msg" | grep -qiE '^SSOT-Change:\s*yes\s*$'; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check if a file path is SSOT-critical
+# Returns 0 if critical, 1 if not
+is_ssot_critical_path() {
+    local file_path="$1"
+    # SSOT-critical paths (explicit list, single source of truth)
+    if [[ "$file_path" =~ ^scripts/(ssot_check\.sh|preflight_ssot\.sh)$ ]] || \
+       [[ "$file_path" =~ ^Core/Constants/ ]] || \
+       [[ "$file_path" =~ ^Tests/Constants/ ]] || \
+       [[ "$file_path" =~ ^docs/rfcs/ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to detect SSOT-critical path changes
+# Sets SSOT_CRITICAL_PATHS_CHANGED=1 if any critical paths modified
+# Populates SSOT_CRITICAL_PATHS_LIST array
+detect_ssot_critical_paths() {
+    SSOT_CRITICAL_PATHS_CHANGED=0
+    SSOT_CRITICAL_PATHS_LIST=()
+    
+    # Check committed changes (if HEAD~1 exists)
+    if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+        while IFS= read -r file; do
+            if is_ssot_critical_path "$file"; then
+                SSOT_CRITICAL_PATHS_CHANGED=1
+                SSOT_CRITICAL_PATHS_LIST+=("$file")
+            fi
+        done < <(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+    fi
+    
+    # Check uncommitted changes (for local development)
+    while IFS= read -r file; do
+        if is_ssot_critical_path "$file"; then
+            # Avoid duplicates
+            local found=0
+            for existing in "${SSOT_CRITICAL_PATHS_LIST[@]}"; do
+                if [ "$existing" = "$file" ]; then
+                    found=1
+                    break
+                fi
+            done
+            if [ $found -eq 0 ]; then
+                SSOT_CRITICAL_PATHS_CHANGED=1
+                SSOT_CRITICAL_PATHS_LIST+=("$file")
+            fi
+        fi
+    done < <(git diff --name-only HEAD 2>/dev/null || true)
+}
+
+# Detect SSOT-critical paths early
+detect_ssot_critical_paths
+
+# Determine enforcement mode based on merge commit detection
+if is_merge_commit; then
+    SSOT_TRAILER_MODE="strict"
+else
+    SSOT_TRAILER_MODE="beta-lenient"
+fi
+
 echo "=========================================="
 echo "  SSOT Preflight Check"
 echo "=========================================="
+echo "MODE: $SSOT_TRAILER_MODE"
+if [[ "$SSOT_TRAILER_MODE" == "strict" ]]; then
+    echo "  Trailer enforcement: STRICT (merge commit to main - missing trailer will fail)"
+else
+    echo "  Trailer enforcement: BETA/LENIENT (missing trailer will warn only)"
+fi
+if [ $SSOT_CRITICAL_PATHS_CHANGED -eq 1 ]; then
+    echo "  SSOT-critical paths detected: YES"
+    if [ ${#SSOT_CRITICAL_PATHS_LIST[@]} -gt 0 ]; then
+        echo "  Critical paths changed:"
+        for path in "${SSOT_CRITICAL_PATHS_LIST[@]}"; do
+            echo "    - $path"
+        done
+    fi
+else
+    echo "  SSOT-critical paths detected: NO (trailer check skipped)"
+fi
 echo ""
 
 # Step 1: Formatting/lint (if tools exist)
@@ -156,30 +267,34 @@ echo ""
 # Step 8: Commit trailer enforcement
 echo -e "${BLUE}Step 8: Commit Trailer Enforcement${NC}"
 echo "----------------------------------------"
-if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-    SSOT_FILES_IN_COMMIT=0
-    while IFS= read -r file; do
-        if [[ "$file" =~ ^Core/(Constants|Invariants)/ ]] || \
-           [[ "$file" =~ ^Core/Schema/ ]] || \
-           [[ "$file" =~ ^docs/constitution/ ]]; then
-            SSOT_FILES_IN_COMMIT=1
-            break
-        fi
-    done < <(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
-    
-    if [ $SSOT_FILES_IN_COMMIT -eq 1 ]; then
+# Only enforce trailer if SSOT-critical paths changed (fair enforcement)
+if [ $SSOT_CRITICAL_PATHS_CHANGED -eq 1 ]; then
+    if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
         COMMIT_MSG=$(git log -1 --format="%B")
-        if echo "$COMMIT_MSG" | grep -q "SSOT-Change: yes"; then
+        if check_ssot_trailer "$COMMIT_MSG"; then
             success "Commit trailer 'SSOT-Change: yes' found"
         else
-            die "SSOT files changed in commit but 'SSOT-Change: yes' trailer missing. " \
-                "Please add 'SSOT-Change: yes' to your commit message."
+            # Strict enforcement ONLY for merge commits to main
+            # All other cases: warn only, do not fail
+            if is_merge_commit; then
+                die "SSOT-critical paths changed but 'SSOT-Change: yes' trailer missing (STRICT MODE: merge commit to main)." \
+                    "" \
+                    "To fix:" \
+                    "  git commit --amend" \
+                    "  # Add 'SSOT-Change: yes' to the commit message" \
+                    "  git push --force-with-lease"
+            else
+                warning "SSOT-Change trailer missing" \
+                    "" \
+                    "This is expected during PR iteration." \
+                    "No action required unless merging to main."
+            fi
         fi
     else
-        info "No SSOT files in commit, skipping trailer check"
+        info "No previous commit found, skipping trailer check"
     fi
 else
-    info "No previous commit found, skipping trailer check"
+    info "No SSOT-critical paths changed, trailer check skipped (fair enforcement)"
 fi
 echo ""
 

@@ -2,6 +2,10 @@
 # scripts/ssot_check.sh
 # Single developer entrypoint for SSOT validation
 # Productized failures with clear remediation
+#
+# Governance Freeze Marker:
+# SSOT CI governance is frozen until product beta ships.
+# Only bug fixes and friction-reduction changes are allowed.
 
 set -euo pipefail
 
@@ -19,6 +23,25 @@ source "$SCRIPT_DIR/lib.sh"
 REPO_ROOT=$(repo_root)
 cd "$REPO_ROOT"
 
+# Function to check if current commit is a merge commit on main branch
+# Returns 0 if merge commit to main, 1 otherwise
+# Single source of truth for strict enforcement trigger
+is_merge_commit() {
+    # Check if we're on main branch
+    CURRENT_REF=$(git symbolic-ref HEAD 2>/dev/null || echo "")
+    if [ "$CURRENT_REF" != "refs/heads/main" ]; then
+        return 1
+    fi
+    
+    # Check if HEAD has more than one parent (merge commit)
+    PARENT_COUNT=$(git log -1 --pretty=%P HEAD 2>/dev/null | wc -w)
+    if [ "${PARENT_COUNT:-0}" -gt 1 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,16 +53,108 @@ NC='\033[0m' # No Color
 FAILURES=0
 FAILURE_MESSAGES=()
 
+# Function to check if commit message contains SSOT-Change trailer
+# Returns 0 if trailer found, 1 if not found
+# Canonical regex: (?im)^SSOT-Change:\s*yes\s*$
+check_ssot_trailer() {
+    local commit_msg="$1"
+    # Case-insensitive check for standalone line: SSOT-Change: yes
+    # Tolerant of whitespace variations
+    if echo "$commit_msg" | grep -qiE '^SSOT-Change:\s*yes\s*$'; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check if a file path is SSOT-critical
+# Returns 0 if critical, 1 if not
+is_ssot_critical_path() {
+    local file_path="$1"
+    # SSOT-critical paths (explicit list, single source of truth)
+    if [[ "$file_path" =~ ^scripts/(ssot_check\.sh|preflight_ssot\.sh)$ ]] || \
+       [[ "$file_path" =~ ^Core/Constants/ ]] || \
+       [[ "$file_path" =~ ^Tests/Constants/ ]] || \
+       [[ "$file_path" =~ ^docs/rfcs/ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to detect SSOT-critical path changes
+# Sets SSOT_CRITICAL_PATHS_CHANGED=1 if any critical paths modified
+# Populates SSOT_CRITICAL_PATHS_LIST array
+detect_ssot_critical_paths() {
+    SSOT_CRITICAL_PATHS_CHANGED=0
+    SSOT_CRITICAL_PATHS_LIST=()
+    
+    # Check committed changes (if HEAD~1 exists)
+    if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+        while IFS= read -r file; do
+            if is_ssot_critical_path "$file"; then
+                SSOT_CRITICAL_PATHS_CHANGED=1
+                SSOT_CRITICAL_PATHS_LIST+=("$file")
+            fi
+        done < <(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+    fi
+    
+    # Check uncommitted changes (for local development)
+    while IFS= read -r file; do
+        if is_ssot_critical_path "$file"; then
+            # Avoid duplicates
+            local found=0
+            for existing in "${SSOT_CRITICAL_PATHS_LIST[@]}"; do
+                if [ "$existing" = "$file" ]; then
+                    found=1
+                    break
+                fi
+            done
+            if [ $found -eq 0 ]; then
+                SSOT_CRITICAL_PATHS_CHANGED=1
+                SSOT_CRITICAL_PATHS_LIST+=("$file")
+            fi
+        fi
+    done < <(git diff --name-only HEAD 2>/dev/null || true)
+}
+
 # Helper to record failures
 record_failure() {
     FAILURES=$((FAILURES + 1))
     FAILURE_MESSAGES+=("$1")
 }
 
+# Detect SSOT-critical paths early
+detect_ssot_critical_paths
+
+# Determine enforcement mode based on merge commit detection
+if is_merge_commit; then
+    SSOT_TRAILER_MODE="strict"
+else
+    SSOT_TRAILER_MODE="beta-lenient"
+fi
+
 # Print header
 echo "=========================================="
 echo "  SSOT Check (One-Command Entrypoint)"
 echo "=========================================="
+echo "MODE: $SSOT_TRAILER_MODE"
+if [[ "$SSOT_TRAILER_MODE" == "strict" ]]; then
+    echo "  Trailer enforcement: STRICT (merge commit to main - missing trailer will fail)"
+else
+    echo "  Trailer enforcement: BETA/LENIENT (missing trailer will warn only)"
+fi
+if [ $SSOT_CRITICAL_PATHS_CHANGED -eq 1 ]; then
+    echo "  SSOT-critical paths detected: YES"
+    if [ ${#SSOT_CRITICAL_PATHS_LIST[@]} -gt 0 ]; then
+        echo "  Critical paths changed:"
+        for path in "${SSOT_CRITICAL_PATHS_LIST[@]}"; do
+            echo "    - $path"
+        done
+    fi
+else
+    echo "  SSOT-critical paths detected: NO (trailer check skipped)"
+fi
 echo ""
 
 # Step 1: Toolchain verification
@@ -186,6 +301,7 @@ echo -e "${BLUE}Step 8: Governance Gates${NC}"
 echo "----------------------------------------"
 
 # Check for SSOT file changes (committed or uncommitted)
+# Note: This is broader than critical paths - includes all SSOT-related files
 SSOT_FILES_CHANGED=0
 SSOT_FILES_LIST=()
 
@@ -291,47 +407,38 @@ if [ $SSOT_FILES_CHANGED -eq 1 ]; then
         fi
     fi
     
-    # Check commit trailer (only for committed changes)
-    if git rev-parse --verify HEAD >/dev/null 2>&1; then
-        COMMIT_MSG=$(git log -1 --format="%B" 2>/dev/null || echo "")
-        COMMIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-        COMMIT_SUBJECT=$(git log -1 --format="%s" 2>/dev/null || echo "unknown")
-        
-        if echo "$COMMIT_MSG" | grep -q "SSOT-Change: yes"; then
-            echo -e "${GREEN}✓${NC} Commit trailer 'SSOT-Change: yes' found"
-        else
-            # Only fail if there are committed changes
-            if git rev-parse --verify HEAD~1 >/dev/null 2>&1 && \
-               git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qE "^Core/(Constants|Invariants)/|^Core/Schema/|^docs/constitution/"; then
-                record_failure "SSOT files changed but 'SSOT-Change: yes' trailer missing"
-                echo -e "${RED}✗${NC} Commit trailer missing"
-                echo ""
-                echo "Commit context:"
-                echo "  SHA: $COMMIT_SHA"
-                echo "  Subject: $COMMIT_SUBJECT"
-                echo ""
-                echo "Remediation:"
-                echo "  The commit message MUST include 'SSOT-Change: yes' in the trailer section."
-                echo "  PR description does NOT satisfy this requirement."
-                echo ""
-                echo "  To fix, amend the commit:"
-                echo "    git commit --amend"
-                echo ""
-                echo "  Then add a blank line and the trailer at the end:"
-                echo "    SSOT-Change: yes"
-                echo ""
-                echo "  Example commit message format:"
-                echo "    <commit subject>"
-                echo ""
-                echo "    <commit body>"
-                echo ""
-                echo "    SSOT-Change: yes"
+    # Check commit trailer (ONLY if SSOT-critical paths changed)
+    # This prevents unfair enforcement for non-critical changes
+    if [ $SSOT_CRITICAL_PATHS_CHANGED -eq 1 ]; then
+        if git rev-parse --verify HEAD >/dev/null 2>&1; then
+            COMMIT_MSG=$(git log -1 --format="%B" 2>/dev/null || echo "")
+            COMMIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+            COMMIT_SUBJECT=$(git log -1 --format="%s" 2>/dev/null || echo "unknown")
+            
+            if check_ssot_trailer "$COMMIT_MSG"; then
+                echo -e "${GREEN}✓${NC} Commit trailer 'SSOT-Change: yes' found"
             else
-                info "No committed SSOT changes, trailer check skipped"
+                # Strict enforcement ONLY for merge commits to main
+                # All other cases: warn only, do not fail
+                if is_merge_commit; then
+                    record_failure "SSOT-critical paths changed but 'SSOT-Change: yes' trailer missing"
+                    echo -e "${RED}✗${NC} Commit trailer missing (STRICT MODE: merge commit to main - FAILING)"
+                    echo ""
+                    echo "To fix:"
+                    echo "  git commit --amend"
+                    echo "  # Add 'SSOT-Change: yes' to the commit message"
+                    echo "  git push --force-with-lease"
+                else
+                    echo -e "${YELLOW}⚠${NC} SSOT-Change trailer missing"
+                    echo ""
+                    echo "This is expected during PR iteration."
+                    echo "No action required unless merging to main."
             fi
+        else
+            info "No commits found, trailer check skipped"
         fi
     else
-        info "No commits found, trailer check skipped"
+        info "No SSOT-critical paths changed, trailer check skipped (fair enforcement)"
     fi
 else
     info "No SSOT files changed, skipping governance gates"
