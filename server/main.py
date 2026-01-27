@@ -109,6 +109,8 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
                 message="Resource not found"
             )
         )
+        # PR1E: 返回404状态码，不是405
+        http_status = status.HTTP_404_NOT_FOUND
     else:
         # 其他HTTP异常映射到业务错误码
         error_code = APIErrorCode.INTERNAL_ERROR
@@ -130,17 +132,17 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
                 message=exc.detail if exc.detail else "Request failed"
             )
         )
+        
+        # 确保状态码在闭集中
+        http_status = exc.status_code
+        if http_status not in [200, 201, 206, 400, 401, 404, 409, 413, 429, 500]:
+            http_status = status.HTTP_500_INTERNAL_SERVER_ERROR
     
     # GATE-7: 包含X-Request-Id
     request_id = getattr(request.state, "request_id", None)
     headers = {}
     if request_id:
         headers["X-Request-Id"] = request_id
-    
-    # 确保状态码在闭集中
-    http_status = exc.status_code
-    if http_status not in [200, 201, 206, 400, 401, 404, 409, 413, 429, 500]:
-        http_status = status.HTTP_500_INTERNAL_SERVER_ERROR
     
     return JSONResponse(
         status_code=http_status,

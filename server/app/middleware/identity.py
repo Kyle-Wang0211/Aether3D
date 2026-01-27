@@ -14,8 +14,8 @@ from app.api.contract import APIError, APIErrorCode, APIResponse
 # UUID v4格式（小写，带连字符）
 UUID_V4_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
 
-# GATE-8: /health端点豁免
-EXEMPT_PATHS = ["/v1/health"]
+# GATE-8: /health端点豁免（包括尾斜杠）
+EXEMPT_PATHS = ["/v1/health", "/v1/health/"]
 
 
 class IdentityMiddleware(BaseHTTPMiddleware):

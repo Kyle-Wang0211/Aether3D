@@ -97,7 +97,7 @@ def test_artifact_download_invalid_range_400():
 # MARK: - PATCH-4: Job Initial State Test
 
 def test_job_initial_state_queued():
-    """PATCH-4: Job初始状态="queued""""
+    """PATCH-4: Job初始状态为queued"""
     # 这个测试需要在complete_upload和create_job中验证
     pass  # 实际测试需要创建job并验证state="queued"
 

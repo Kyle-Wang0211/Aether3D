@@ -122,17 +122,8 @@ async def get_job(
     ).first()
     
     if not job:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Job not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Job")
     
     # 构建progress（根据state）
     progress: Optional[JobProgress] = None
@@ -231,17 +222,8 @@ async def cancel_job(
     ).first()
     
     if not job:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Job not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Job")
     
     # 检查可取消状态
     terminal_states = ["completed", "failed", "cancelled"]
@@ -323,17 +305,8 @@ async def get_timeline(
     ).first()
     
     if not job:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Job not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Job")
     
     events = db.query(TimelineEvent).filter(
         TimelineEvent.job_id == job_id

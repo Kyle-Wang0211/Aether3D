@@ -151,17 +151,8 @@ async def upload_chunk(
     ).first()
     
     if not upload_session:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Upload session not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Upload session")
     
     # GATE-5: Content-Length校验
     content_length = request.headers.get("Content-Length")
@@ -365,17 +356,8 @@ async def get_chunks(
     ).first()
     
     if not upload_session:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Upload session not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Upload session")
     
     # 获取已上传分片
     chunks = db.query(Chunk).filter(Chunk.upload_id == upload_id).all()
@@ -420,17 +402,8 @@ async def complete_upload(
     ).first()
     
     if not upload_session:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Upload session not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Upload session")
     
     # 验证bundle_hash一致性
     if request_body.bundle_hash != upload_session.bundle_hash:

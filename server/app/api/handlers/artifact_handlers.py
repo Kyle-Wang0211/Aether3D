@@ -1,10 +1,8 @@
-# PR#3 — API Contract v2.0
-# Stage: WHITEBOX | Camera-only
-# Endpoints: 12 | HTTP Codes: 10 (3 success + 7 error) | Business Errors: 7
+# PR1E — API Contract Hardening Patch
+# Range Contract Tightening + Anti-enumeration
 
 """产物处理器（2个端点）"""
 
-import re
 from pathlib import Path
 
 from fastapi import Depends, Request, status
@@ -13,11 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.api.contract import APIError, APIErrorCode, APIResponse, GetArtifactResponse, format_rfc3339_utc
 from app.core.config import settings
+from app.core.range_parser import RangeParseError, create_range_error_response, parse_single_range
 from app.database import get_db
 from app.models import Artifact
-
-# Range格式：bytes=start-end（单Range，PATCH-6）
-RANGE_PATTERN = re.compile(r'^bytes=(\d+)-(\d+)$')
 
 
 async def get_artifact(
@@ -30,39 +26,21 @@ async def get_artifact(
     """
     user_id = request.state.user_id
     
-    # 通过job关联查询（确保ownership）
+    # PR1E: 通过job关联查询（确保ownership，统一返回404）
     artifact = db.query(Artifact).join(Artifact.job).filter(
         Artifact.id == artifact_id,
         Artifact.job.has(user_id=user_id)
     ).first()
     
     if not artifact:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Artifact not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Artifact")
     
-    # 过期检查
+    # 过期检查（统一返回404）
     from datetime import datetime
     if datetime.utcnow() > artifact.expires_at:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Artifact not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Artifact")
     
     response_data = GetArtifactResponse(
         artifact_id=artifact.id,
@@ -97,58 +75,35 @@ async def download_artifact(
     """
     user_id = request.state.user_id
     
-    # 通过job关联查询（确保ownership）
+    # PR1E: 通过job关联查询（确保ownership，统一返回404）
     artifact = db.query(Artifact).join(Artifact.job).filter(
         Artifact.id == artifact_id,
         Artifact.job.has(user_id=user_id)
     ).first()
     
     if not artifact:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Artifact not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Artifact")
     
-    # 过期检查
+    # 过期检查（统一返回404）
     from datetime import datetime
     if datetime.utcnow() > artifact.expires_at:
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Artifact not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Artifact")
     
-    # 读取文件
+    # 读取文件（文件不存在也返回404）
     file_path = Path(artifact.file_path)
     if not file_path.exists():
-        error_response = APIResponse(
-            success=False,
-            error=APIError(
-                code=APIErrorCode.RESOURCE_NOT_FOUND,
-                message="Artifact file not found"
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content=error_response.model_dump(exclude_none=True)
-        )
+        from app.core.ownership import create_ownership_error_response
+        return create_ownership_error_response("Artifact")
     
     file_size = artifact.size
     
-    # 处理Range请求（PATCH-6）
+    # PR1E: 明确拒绝If-Range header
+    if request.headers.get("If-Range"):
+        return create_range_error_response("If-Range header not supported")
+    
+    # PR1E: 处理Range请求（使用range_parser）
     range_header = request.headers.get("Range")
     headers = {}
     
@@ -158,52 +113,12 @@ async def download_artifact(
         headers["X-Request-Id"] = request_id
     
     if range_header:
-        # PATCH-6: 检查多Range（包含逗号）
-        if "," in range_header:
-            error_response = APIResponse(
-                success=False,
-                error=APIError(
-                    code=APIErrorCode.INVALID_REQUEST,
-                    message="Multi-range not supported"
-                )
-            )
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content=error_response.model_dump(exclude_none=True)
-            )
-        
-        # 解析Range header
-        match = RANGE_PATTERN.match(range_header)
-        if not match:
-            # 无效格式 → 400（PATCH-6，不是416）
-            error_response = APIResponse(
-                success=False,
-                error=APIError(
-                    code=APIErrorCode.INVALID_REQUEST,
-                    message="Invalid Range format"
-                )
-            )
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content=error_response.model_dump(exclude_none=True)
-            )
-        
-        start = int(match.group(1))
-        end = int(match.group(2))
-        
-        # 验证范围
-        if start > end or start < 0 or end >= file_size:
-            error_response = APIResponse(
-                success=False,
-                error=APIError(
-                    code=APIErrorCode.INVALID_REQUEST,
-                    message="Range not satisfiable"
-                )
-            )
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content=error_response.model_dump(exclude_none=True)
-            )
+        try:
+            # PR1E: 使用range_parser解析（严格拒绝suffix/open-ended/multi-range）
+            start, end = parse_single_range(range_header, file_size)
+        except RangeParseError as e:
+            # PR1E: 所有Range错误返回400 INVALID_REQUEST（不是416）
+            return create_range_error_response(str(e))
         
         # 206 Partial Content
         range_length = end - start + 1
