@@ -7,8 +7,9 @@
 
 set -euo pipefail
 
+# Get repo root (parent of .githooks directory)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Check if we're on a PR1 branch
 CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "")
