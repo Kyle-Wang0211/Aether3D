@@ -29,6 +29,11 @@ README.md is NOT a specification document.
   - **What breaks if violated:** Mathematical correctness, audit trail integrity
   - **Why exists:** Ensures all math operations are safe and auditable
 
+- [COVERAGE_GOVERNANCE.md](COVERAGE_GOVERNANCE.md) - Coverage governance rules (IMMUTABLE)
+  - **Who depends:** CoverageEstimator, StateMachine, UX layer, Pipeline, QA, Audit systems, all future contributors
+  - **What breaks if violated:** Coverage integrity, system architecture, audit trail correctness, cross-platform consistency, long-term system health
+  - **Why exists:** Defines IMMUTABLE constitutional rules for Coverage ownership, dependency direction, scope limitation, and versioning boundaries. Violations are SEV-0 (Constitutional) or SEV-1 (Governance) and MUST be rejected. PR1 is the last line of defense. Rules override all product goals, business requirements, implementation convenience, performance optimization, deadlines, and emergency situations.
+
 - [SYSTEM_CONTRACTS.md](SYSTEM_CONTRACTS.md) - System contracts (mesh input, output fields, session boundaries)
   - **Who depends:** PR#6 (evidence grid), PR#4 (capture), API handlers
   - **What breaks if violated:** Input validation, output contract compliance
