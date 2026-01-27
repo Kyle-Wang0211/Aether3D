@@ -34,6 +34,11 @@ README.md is NOT a specification document.
   - **What breaks if violated:** Input validation, output contract compliance
   - **Why exists:** Defines what inputs are legal and what outputs are guaranteed
 
+- [CAPACITY_LIMIT_CONTRACT.md](CAPACITY_LIMIT_CONTRACT.md) - Capacity limit contract (PR1 C-Class: SOFT/HARD LIMIT)
+  - **Who depends:** Admission control modules, patch tracking systems, QA validation
+  - **What breaks if violated:** Capacity control determinism, evidence irreversibility, UX consistency
+  - **Why exists:** Defines SOFT_LIMIT/HARD_LIMIT semantics, EEB system, no-text UX, and closed-world fuse behavior
+
 - [CROSS_PLATFORM_CONSISTENCY.md](CROSS_PLATFORM_CONSISTENCY.md) - Cross-platform consistency rules
   - **Who depends:** All identity derivation, hash computation, color conversion modules
   - **What breaks if violated:** Cross-platform determinism, identity stability
