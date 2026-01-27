@@ -21,23 +21,20 @@ if [ ! -d ".githooks" ]; then
     exit 1
 fi
 
-echo "Installing Git hooks from .githooks/ to .git/hooks/..."
+echo "Configuring Git to use .githooks/ directory..."
 
-for hook in .githooks/*; do
-    if [ -f "$hook" ] && [ -x "$hook" ]; then
-        hook_name=$(basename "$hook")
-        target=".git/hooks/$hook_name"
-        
-        # Copy hook
-        cp "$hook" "$target"
-        chmod +x "$target"
-        
-        echo "✅ Installed: $hook_name"
-    fi
-done
+# Configure Git to use .githooks as hooks directory
+git config core.hooksPath .githooks
+
+# Ensure hooks are executable
+chmod +x .githooks/pre-push
+chmod +x scripts/ci/piz_local_gate.sh
+chmod +x scripts/dev/install-githooks.sh
 
 echo ""
-echo "✅ Git hooks installed successfully!"
+echo "✅ Git hooks configured successfully!"
 echo ""
 echo "Note: PR1 branches require these hooks to be installed."
 echo "The pre-push hook will run PIZ local gate checks before allowing a push."
+echo ""
+echo "Git hooks path: $(git config core.hooksPath)"

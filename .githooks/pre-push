@@ -21,7 +21,7 @@ if [[ "$CURRENT_BRANCH" == pr1* ]] || [[ "$CURRENT_BRANCH" == *pr1* ]]; then
     
     if ! bash scripts/ci/piz_local_gate.sh; then
         echo ""
-        echo "Skipped=Failure policy. Fix locally first."
+        echo "[PIZ_PUSH_BLOCKED] local gate failed; refusing push"
         exit 1
     fi
     
