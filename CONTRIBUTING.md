@@ -109,6 +109,49 @@ Preflight is advisory tool when available.
 
 scripts/preflight.sh becomes governance-protected once created (requires RFC to modify).
 
+## PR1 PIZ Gate Discipline
+
+**Applicability:**
+
+PR1 branches (branch names containing `pr1`) require local pre-push gate checks.
+
+**Installation:**
+
+Install Git hooks before first push on PR1 branches:
+
+```bash
+bash scripts/dev/install-githooks.sh
+```
+
+**Gate Checks:**
+
+The pre-push hook runs four checks sequentially:
+
+1. Lint PIZ thresholds (`bash scripts/ci/lint_piz_thresholds.sh`)
+2. Run PIZ tests (`swift test --filter PIZ`)
+3. Generate canonical JSON (`swift run PIZFixtureDumper`)
+4. Generate sealing evidence (`swift run PIZSealingEvidence`)
+
+**Manual Execution:**
+
+Run gate manually:
+
+```bash
+bash scripts/ci/piz_local_gate.sh
+```
+
+**Push Behavior:**
+
+- Push is blocked if any check fails
+- Use `git push --no-verify` to bypass (not recommended)
+- All checks must pass before push proceeds
+
+**Authority:**
+
+Local gate is advisory; CI verdict is authoritative.
+
+Local gate prevents pushing code that would fail CI checks.
+
 ## Branch Naming
 
 **Required Formats:**

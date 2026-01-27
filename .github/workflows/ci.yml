@@ -6,6 +6,12 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+# Cancel in-progress runs when a new commit is pushed to the same branch
+# This prevents PR checks from showing stale failed/cancelled runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   preflight:
     name: Preflight (Phase 0.5 guardrails)
