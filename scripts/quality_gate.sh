@@ -7,9 +7,80 @@
 
 set -euo pipefail
 
+# Global hard timeout (seconds)
+TIMEOUT_SECONDS=120
+
+# Per-command timeouts
+CMD_TIMEOUT_WHITE_COMMIT=90
+CMD_TIMEOUT_FIXTURES=45
+CMD_TIMEOUT_DETERMINISM=45
+CMD_TIMEOUT_LINT=30
+CMD_TIMEOUT_JSON=3
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
+
+# Global timeout watchdog
+TIMEOUT_PID=""
+cleanup_timeout() {
+    if [ -n "$TIMEOUT_PID" ]; then
+        kill "$TIMEOUT_PID" 2>/dev/null || true
+        wait "$TIMEOUT_PID" 2>/dev/null || true
+    fi
+}
+
+start_global_timeout() {
+    (
+        sleep "$TIMEOUT_SECONDS"
+        echo "FAIL: quality_gate.sh timeout exceeded (${TIMEOUT_SECONDS}s)" >&2
+        kill $$ 2>/dev/null || true
+    ) &
+    TIMEOUT_PID=$!
+}
+
+trap cleanup_timeout EXIT
+start_global_timeout
+
+# Per-command timeout helper (POSIX-safe, works on macOS + Linux)
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    local cmd="$*"
+    local timeout_flag=$(mktemp)
+    rm -f "$timeout_flag"
+    
+    # Run command in background
+    "$@" &
+    local cmd_pid=$!
+    
+    # Start watchdog
+    (
+        sleep "$timeout_seconds"
+        if kill -0 "$cmd_pid" 2>/dev/null; then
+            touch "$timeout_flag"
+            kill "$cmd_pid" 2>/dev/null || true
+        fi
+    ) &
+    local watchdog_pid=$!
+    
+    # Wait for command
+    wait "$cmd_pid" 2>/dev/null
+    local exit_code=$?
+    
+    # Cancel watchdog
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    
+    # Check if timeout occurred
+    if [ -f "$timeout_flag" ]; then
+        rm -f "$timeout_flag"
+        echo "FAIL: timeout (${timeout_seconds}s): $cmd" >&2
+        exit 1
+    fi
+    
+    return $exit_code
+}
 
 echo "=== PR#5 Quality Pre-check Gates ==="
 echo ""
@@ -30,7 +101,11 @@ PLACEHOLDER_COUNT=$(echo "$PLACEHOLDER_MATCHES" | grep -v "^$" | wc -l | tr -d '
 set -e
 if [ "$PLACEHOLDER_COUNT" -gt 0 ]; then
     echo "FAIL: Found $PLACEHOLDER_COUNT placeholder tests (XCTAssertTrue(true))"
+    echo "Gate: Placeholder Check"
+    echo "Command: grep -rn \"XCTAssertTrue(true)\" Tests/QualityPreCheck/"
+    echo "Output:"
     echo "$PLACEHOLDER_MATCHES"
+    echo "Fix: remove placeholder assertions in Tests/QualityPreCheck."
     exit 1
 fi
 
@@ -41,7 +116,11 @@ PLACEHOLDER_KEYWORDS=$(echo "$PLACEHOLDER_KEYWORD_MATCHES" | grep -v "^$" | wc -
 set -e
 if [ "$PLACEHOLDER_KEYWORDS" -gt 0 ]; then
     echo "FAIL: Found $PLACEHOLDER_KEYWORDS placeholder keywords in test assertions"
+    echo "Gate: Placeholder Check"
+    echo "Command: grep -rn \"TODO.*test|placeholder.*test|WIP.*test\" Tests/QualityPreCheck/"
+    echo "Output:"
     echo "$PLACEHOLDER_KEYWORD_MATCHES"
+    echo "Fix: remove placeholder assertions in Tests/QualityPreCheck."
     exit 1
 fi
 echo "  ✅ No placeholder tests found (checked $PLACEHOLDER_COUNT XCTAssertTrue(true), $PLACEHOLDER_KEYWORDS keywords)"
@@ -51,7 +130,7 @@ echo "[1/5] Running tests..."
 echo "  Command: swift test --filter WhiteCommitTests"
 # PR5.1: Capture full output and exit code, print last 120 lines on failure
 set +e  # Temporarily disable strict mode to capture exit code
-TEST_OUTPUT=$(swift test --filter WhiteCommitTests 2>&1)
+TEST_OUTPUT=$(run_with_timeout "$CMD_TIMEOUT_WHITE_COMMIT" swift test --filter WhiteCommitTests 2>&1)
 TEST_EXIT_CODE=$?
 set -e  # Re-enable strict mode
 
@@ -59,13 +138,17 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
     # Check if failure is due to 0 matching tests (hard failure for Gate 1)
     if echo "$TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
         echo "FAIL: Gate 1 (WhiteCommitTests) matched 0 tests - this is a hard failure"
-        echo "  This indicates misconfiguration or test suite not found"
-        echo "  Output:"
+        echo "Gate: WhiteCommitTests"
+        echo "Command: swift test --filter WhiteCommitTests"
+        echo "Output:"
         echo "$TEST_OUTPUT" | tail -50
+        echo "Fix: ensure WhiteCommitTests exist and filter name matches."
         exit 1
     fi
     
     echo "FAIL: Tests failed (exit code: $TEST_EXIT_CODE)"
+    echo "Gate: WhiteCommitTests"
+    echo "Command: swift test --filter WhiteCommitTests"
     echo ""
     echo "=== Last 120 lines of test output ==="
     echo "$TEST_OUTPUT" | tail -120
@@ -85,6 +168,8 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
     echo ""
     echo "=== Compilation Errors ==="
     echo "$TEST_OUTPUT" | grep -E "error:|warning:" | head -20 || echo "  (No compilation errors found in output)"
+    echo ""
+    echo "Fix: open the failing test cases above and address the first failure."
     exit 1
 fi
 
@@ -95,8 +180,18 @@ echo "  ✅ Tests passed ($TEST_COUNT tests executed)"
 # Gate 2: Lint
 echo "[2/5] Running lint..."
 echo "  Command: $SCRIPT_DIR/quality_lint.sh"
-if ! "$SCRIPT_DIR/quality_lint.sh" 2>&1; then
+set +e
+LINT_OUTPUT=$(run_with_timeout "$CMD_TIMEOUT_LINT" "$SCRIPT_DIR/quality_lint.sh" 2>&1)
+LINT_EXIT_CODE=$?
+set -e
+
+if [ $LINT_EXIT_CODE -ne 0 ]; then
     echo "FAIL: Lint failed"
+    echo "Gate: Lint"
+    echo "Command: $SCRIPT_DIR/quality_lint.sh"
+    echo "Output:"
+    echo "$LINT_OUTPUT" | tail -50
+    echo "Fix: run scripts/quality_lint.sh locally and resolve reported issues."
     exit 1
 fi
 echo "  ✅ Lint checks passed"
@@ -109,8 +204,17 @@ if [ -d "$FIXTURE_DIR" ]; then
     for fixture_file in "$FIXTURE_DIR"/*.json; do
         if [ -f "$fixture_file" ]; then
             FIXTURE_COUNT=$((FIXTURE_COUNT + 1))
-            if ! python3 -m json.tool "$fixture_file" > /dev/null 2>&1; then
+            set +e
+            JSON_OUTPUT=$(run_with_timeout "$CMD_TIMEOUT_JSON" python3 -m json.tool "$fixture_file" 2>&1)
+            JSON_EXIT_CODE=$?
+            set -e
+            if [ $JSON_EXIT_CODE -ne 0 ]; then
                 echo "FAIL: Invalid JSON in fixture: $fixture_file"
+                echo "Gate: Fixture JSON Validation"
+                echo "Command: python3 -m json.tool $fixture_file"
+                echo "Output:"
+                echo "$JSON_OUTPUT"
+                echo "Fix: repair JSON syntax for the failing fixture file."
                 exit 1
             fi
         fi
@@ -124,7 +228,7 @@ fi
 echo "[4/5] Verifying golden fixtures..."
 echo "  Command: swift test --filter QualityPreCheckFixtures"
 set +e  # Temporarily disable strict mode to capture output and exit code
-FIXTURE_TEST_OUTPUT=$(swift test --filter QualityPreCheckFixtures 2>&1)
+FIXTURE_TEST_OUTPUT=$(run_with_timeout "$CMD_TIMEOUT_FIXTURES" swift test --filter QualityPreCheckFixtures 2>&1)
 FIXTURE_TEST_EXIT_CODE=$?
 set -e  # Re-enable strict mode
 
@@ -135,7 +239,11 @@ if [ $FIXTURE_TEST_EXIT_CODE -ne 0 ]; then
         echo "    This is acceptable if fixtures are tested in the main test suite"
     else
         echo "FAIL: Fixture tests failed"
+        echo "Gate: QualityPreCheckFixtures"
+        echo "Command: swift test --filter QualityPreCheckFixtures"
+        echo "Output:"
         echo "$FIXTURE_TEST_OUTPUT" | tail -50
+        echo "Fix: run the same swift test filter locally and fix failing cases."
         exit 1
     fi
 else
@@ -148,7 +256,7 @@ fi
 echo "[5/5] Verifying determinism contracts..."
 echo "  Command: swift test --filter QualityPreCheckDeterminism"
 set +e  # Temporarily disable strict mode to capture output and exit code
-DETERMINISM_TEST_OUTPUT=$(swift test --filter QualityPreCheckDeterminism 2>&1)
+DETERMINISM_TEST_OUTPUT=$(run_with_timeout "$CMD_TIMEOUT_DETERMINISM" swift test --filter QualityPreCheckDeterminism 2>&1)
 DETERMINISM_TEST_EXIT_CODE=$?
 set -e  # Re-enable strict mode
 
@@ -159,7 +267,11 @@ if [ $DETERMINISM_TEST_EXIT_CODE -ne 0 ]; then
         echo "    This is acceptable if determinism is tested in the main test suite"
     else
         echo "FAIL: Determinism tests failed"
+        echo "Gate: QualityPreCheckDeterminism"
+        echo "Command: swift test --filter QualityPreCheckDeterminism"
+        echo "Output:"
         echo "$DETERMINISM_TEST_OUTPUT" | tail -50
+        echo "Fix: run the same swift test filter locally and fix failing cases."
         exit 1
     fi
 else
@@ -186,5 +298,28 @@ else
 fi
 echo ""
 echo "=== All gates passed ==="
+
+# Cleanup global timeout before exit
+cleanup_timeout
+trap - EXIT
+
 exit 0
 
+# ============================================================================
+# Timeout Configuration Summary
+# ============================================================================
+# Global timeout: 120 seconds (entire script)
+#   - Prevents infinite hangs from any source
+#   - Uses background kill watchdog (POSIX-safe, works on macOS + Linux)
+#
+# Per-command timeouts:
+#   - WhiteCommitTests: 90 seconds (longest test suite)
+#   - QualityPreCheckFixtures: 45 seconds (medium test suite)
+#   - QualityPreCheckDeterminism: 45 seconds (medium test suite)
+#   - quality_lint.sh: 30 seconds (linting operations)
+#   - JSON validation: 3 seconds per file (fast parsing)
+#
+# Implementation: run_with_timeout helper uses background kill watchdog
+#   - Works without GNU timeout (POSIX-safe)
+#   - Propagates exit codes correctly
+#   - Provides clear timeout error messages
