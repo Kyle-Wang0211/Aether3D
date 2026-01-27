@@ -8,6 +8,8 @@
 //
 
 import Foundation
+
+#if canImport(SwiftUI)
 import SwiftUI
 
 /// Guidance renderer for no-text UX
@@ -67,3 +69,17 @@ private struct StaticOverlayView: View {
         EmptyView()
     }
 }
+
+#else
+/// Guidance renderer for no-text UX
+/// 
+/// **v2.3b Sealed:**
+/// - MUST NOT use text as primary UX path
+/// - All guidance must be conveyed via visual signals
+public struct GuidanceRenderer {
+    @available(*, unavailable, message: "GuidanceRenderer is only available on Apple platforms with SwiftUI.")
+    public static func render(_ signal: GuidanceSignal) -> Never {
+        fatalError("GuidanceRenderer requires SwiftUI")
+    }
+}
+#endif
