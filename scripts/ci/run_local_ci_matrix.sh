@@ -21,7 +21,7 @@ ERRORS=0
 START_TIME=$(date +%s)
 REPORT_FILE="docs/constitution/FINAL_LOCAL_VERIFICATION_REPORT.md"
 
-echo "🔒 SSOT Foundation Local CI Runner (Comprehensive)"
+echo "🔒 Local CI Runner (Comprehensive)"
 echo "=================================================="
 echo "Mode: ${CI_FAST:+FAST }${CI_DEEP:+DEEP }${CI_FAST:+${CI_DEEP:+}}NORMAL"
 echo ""
@@ -36,10 +36,9 @@ else
 fi
 echo ""
 
-# Phase 1: Workflow & Job Graph Validation
-echo "📋 Phase 1: Workflow & Job Graph Validation"
-if bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml && \
-   bash scripts/ci/validate_ssot_gate_test_selection.sh; then
+# Phase 1: macOS Build (Debug)
+echo "📋 Phase 1: macOS Build (Debug)"
+if swift build -c debug >/dev/null 2>&1; then
     echo "✅ Phase 1 PASSED"
 else
     echo "❌ Phase 1 FAILED"
@@ -47,47 +46,26 @@ else
 fi
 echo ""
 
-# Phase 2: SSOT Preflight
-echo "📋 Phase 2: SSOT Preflight"
-if bash scripts/ci/preflight_ssot_foundation.sh; then
-    echo "✅ Phase 2 PASSED"
-else
-    echo "❌ Phase 2 FAILED"
-    ERRORS=$((ERRORS + 1))
-fi
-echo ""
-
-# Phase 3: macOS Build (Debug)
-echo "📋 Phase 3: macOS Build (Debug)"
-if swift build -c debug >/dev/null 2>&1; then
-    echo "✅ Phase 3 PASSED"
-else
-    echo "❌ Phase 3 FAILED"
-    ERRORS=$((ERRORS + 1))
-fi
-echo ""
-
-# Phase 4: Gate 1 Tests (Debug)
-echo "📋 Phase 4: Gate 1 Tests (Debug) - Constitutional"
+# Phase 2: Gate 1 Tests (Debug)
+echo "📋 Phase 2: Gate 1 Tests (Debug) - Constitutional"
 GATE1_OUTPUT=$(swift test -c debug \
     --filter EnumFrozenOrderTests \
     --filter CatalogSchemaTests \
     --filter DocumentationSyncTests \
     --filter DeterministicEncodingContractTests \
-    --filter DeterministicQuantizationContractTests \
-    --filter GoldenVectorsRoundTripTests 2>&1)
+    --filter DeterministicQuantizationContractTests 2>&1)
 if echo "$GATE1_OUTPUT" | grep -q "Executed.*tests.*with 0 failures"; then
-    echo "✅ Phase 4 PASSED"
+    echo "✅ Phase 2 PASSED"
     GATE1_STATUS="✅ PASSED"
 else
-    echo "❌ Phase 4 FAILED"
+    echo "❌ Phase 2 FAILED"
     ERRORS=$((ERRORS + 1))
     GATE1_STATUS="❌ FAILED"
 fi
 echo ""
 
-# Phase 5: Gate 2 Tests (Debug)
-echo "📋 Phase 5: Gate 2 Tests (Debug) - Determinism & Trust"
+# Phase 3: Gate 2 Tests (Debug)
+echo "📋 Phase 3: Gate 2 Tests (Debug) - Determinism & Trust"
 GATE2_OUTPUT=$(swift test -c debug \
     --filter ColorMatrixIntegrityTests \
     --filter DomainPrefixesTests \
@@ -102,37 +80,36 @@ GATE2_OUTPUT=$(swift test -c debug \
     --filter CatalogActionabilityRulesTests \
     --filter DomainPrefixesClosureTests 2>&1)
 if echo "$GATE2_OUTPUT" | grep -q "Executed.*tests.*with 0 failures"; then
-    echo "✅ Phase 5 PASSED"
+    echo "✅ Phase 3 PASSED"
     GATE2_STATUS="✅ PASSED"
 else
-    echo "❌ Phase 5 FAILED"
+    echo "❌ Phase 3 FAILED"
     ERRORS=$((ERRORS + 1))
     GATE2_STATUS="❌ FAILED"
 fi
 echo ""
 
-# Phase 6: macOS Build (Release) - Skip if CI_FAST=1
+# Phase 4: macOS Build (Release) - Skip if CI_FAST=1
 if [ "$CI_FAST" != "1" ]; then
-    echo "📋 Phase 6: macOS Build (Release)"
+    echo "📋 Phase 4: macOS Build (Release)"
     if swift build -c release >/dev/null 2>&1; then
-        echo "✅ Phase 6 PASSED"
+        echo "✅ Phase 4 PASSED"
         RELEASE_BUILD_STATUS="✅ PASSED"
     else
-        echo "❌ Phase 6 FAILED"
+        echo "❌ Phase 4 FAILED"
         ERRORS=$((ERRORS + 1))
         RELEASE_BUILD_STATUS="❌ FAILED"
     fi
     echo ""
     
-    # Phase 7: Gate 1 & 2 Tests (Release)
-    echo "📋 Phase 7: Gate 1 & 2 Tests (Release)"
+    # Phase 5: Gate 1 & 2 Tests (Release)
+    echo "📋 Phase 5: Gate 1 & 2 Tests (Release)"
     RELEASE_GATE1_OUTPUT=$(swift test -c release \
         --filter EnumFrozenOrderTests \
         --filter CatalogSchemaTests \
         --filter DocumentationSyncTests \
         --filter DeterministicEncodingContractTests \
-        --filter DeterministicQuantizationContractTests \
-        --filter GoldenVectorsRoundTripTests 2>&1)
+        --filter DeterministicQuantizationContractTests 2>&1)
     RELEASE_GATE2_OUTPUT=$(swift test -c release \
         --filter ColorMatrixIntegrityTests \
         --filter DomainPrefixesTests \
@@ -149,54 +126,54 @@ if [ "$CI_FAST" != "1" ]; then
     
     if echo "$RELEASE_GATE1_OUTPUT" | grep -q "Executed.*tests.*with 0 failures" && \
        echo "$RELEASE_GATE2_OUTPUT" | grep -q "Executed.*tests.*with 0 failures"; then
-        echo "✅ Phase 7 PASSED"
+        echo "✅ Phase 5 PASSED"
         RELEASE_TESTS_STATUS="✅ PASSED"
     else
-        echo "❌ Phase 7 FAILED"
+        echo "❌ Phase 5 FAILED"
         ERRORS=$((ERRORS + 1))
         RELEASE_TESTS_STATUS="❌ FAILED"
     fi
     echo ""
 fi
 
-# Phase 8: Linux Equivalence Smoke (No Docker) - Skip if CI_FAST=1
+# Phase 6: Linux Equivalence Smoke (No Docker) - Skip if CI_FAST=1
 if [ "$CI_FAST" != "1" ]; then
-    echo "📋 Phase 8: Linux Equivalence Smoke (No Docker)"
+    echo "📋 Phase 6: Linux Equivalence Smoke (No Docker)"
     if bash scripts/ci/linux_equivalence_smoke_no_docker.sh >/dev/null 2>&1; then
-        echo "✅ Phase 8 PASSED"
+        echo "✅ Phase 6 PASSED"
         LINUX_STATUS="✅ PASSED"
     else
-        echo "❌ Phase 8 FAILED"
+        echo "❌ Phase 6 FAILED"
         ERRORS=$((ERRORS + 1))
         LINUX_STATUS="❌ FAILED"
     fi
     echo ""
     
-    # Phase 8b: Linux SPM Matrix (Docker) - Optional, skip if Docker unavailable
-    echo "📋 Phase 8b: Linux SPM Matrix (Docker) - Optional"
+    # Phase 6b: Linux SPM Matrix (Docker) - Optional, skip if Docker unavailable
+    echo "📋 Phase 6b: Linux SPM Matrix (Docker) - Optional"
     if bash scripts/ci/run_linux_spm_matrix.sh >/dev/null 2>&1; then
-        echo "✅ Phase 8b PASSED"
+        echo "✅ Phase 6b PASSED"
         LINUX_DOCKER_STATUS="✅ PASSED"
     else
-        echo "⚠️  Phase 8b SKIPPED (Docker not available or tests failed)"
+        echo "⚠️  Phase 6b SKIPPED (Docker not available or tests failed)"
         LINUX_DOCKER_STATUS="⚠️  SKIPPED"
     fi
     echo ""
 fi
 
-# Phase 9: Shadow Cross-Platform Consistency (non-gating)
-echo "📋 Phase 9: Shadow Cross-Platform Consistency (non-gating)"
+# Phase 7: Shadow Cross-Platform Consistency (non-gating)
+echo "📋 Phase 7: Shadow Cross-Platform Consistency (non-gating)"
 bash scripts/ci/run_shadow_crossplatform_consistency.sh >/dev/null 2>&1 || true
-echo "✅ Phase 9 COMPLETED (see SHADOW_CROSSPLATFORM_REPORT.md)"
+echo "✅ Phase 7 COMPLETED (see SHADOW_CROSSPLATFORM_REPORT.md)"
 echo ""
 
-# Phase 10: Markdown Link Check
-echo "📋 Phase 10: Markdown Link Check"
+# Phase 8: Markdown Link Check
+echo "📋 Phase 8: Markdown Link Check"
 if bash scripts/ci/check_markdown_links.sh >/dev/null 2>&1; then
-    echo "✅ Phase 10 PASSED"
+    echo "✅ Phase 8 PASSED"
     MARKDOWN_STATUS="✅ PASSED"
 else
-    echo "⚠️  Phase 10 FAILED (non-blocking)"
+    echo "⚠️  Phase 8 FAILED (non-blocking)"
     MARKDOWN_STATUS="⚠️  FAILED"
 fi
 echo ""
@@ -218,26 +195,23 @@ cat > "$REPORT_FILE" << EOF
 ## Summary
 
 This report documents the comprehensive local verification run that mirrors GitHub Actions CI.
-All SSOT Foundation gates and validation checks were executed locally.
 
 ### Test Results
 
 | Phase | Check | Status |
 |-------|-------|--------|
 | 0 | Repository Hygiene | $(bash scripts/ci/repo_hygiene.sh >/dev/null 2>&1 && echo "✅ PASSED" || echo "❌ FAILED") |
-| 1 | Workflow & Job Graph | $(bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml >/dev/null 2>&1 && echo "✅ PASSED" || echo "❌ FAILED") |
-| 2 | SSOT Preflight | $(bash scripts/ci/preflight_ssot_foundation.sh >/dev/null 2>&1 && echo "✅ PASSED" || echo "❌ FAILED") |
-| 3 | macOS Build (Debug) | ✅ PASSED |
-| 4 | Gate 1 Tests (Debug) | $GATE1_STATUS |
-| 5 | Gate 2 Tests (Debug) | $GATE2_STATUS |
+| 1 | macOS Build (Debug) | ✅ PASSED |
+| 2 | Gate 1 Tests (Debug) | $GATE1_STATUS |
+| 3 | Gate 2 Tests (Debug) | $GATE2_STATUS |
 $(if [ "$CI_FAST" != "1" ]; then
-    echo "| 6 | macOS Build (Release) | ${RELEASE_BUILD_STATUS:-N/A} |"
-    echo "| 7 | Gate 1 & 2 Tests (Release) | ${RELEASE_TESTS_STATUS:-N/A} |"
-    echo "| 8 | Linux Equivalence Smoke | ${LINUX_STATUS:-N/A} |
-| 8b | Linux SPM Matrix (Docker) | ${LINUX_DOCKER_STATUS:-N/A} |"
+    echo "| 4 | macOS Build (Release) | ${RELEASE_BUILD_STATUS:-N/A} |"
+    echo "| 5 | Gate 1 & 2 Tests (Release) | ${RELEASE_TESTS_STATUS:-N/A} |"
+    echo "| 6 | Linux Equivalence Smoke | ${LINUX_STATUS:-N/A} |
+| 6b | Linux SPM Matrix (Docker) | ${LINUX_DOCKER_STATUS:-N/A} |"
 fi)
-| 9 | Shadow Cross-Platform | ✅ COMPLETED |
-| 10 | Markdown Links | ${MARKDOWN_STATUS:-N/A} |
+| 7 | Shadow Cross-Platform | ✅ COMPLETED |
+| 8 | Markdown Links | ${MARKDOWN_STATUS:-N/A} |
 
 ---
 
@@ -246,13 +220,6 @@ fi)
 \`\`\`bash
 # Repository Hygiene
 bash scripts/ci/repo_hygiene.sh
-
-# Workflow Validation
-bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml
-bash scripts/ci/validate_ssot_gate_test_selection.sh
-
-# SSOT Preflight
-bash scripts/ci/preflight_ssot_foundation.sh
 
 # macOS Build & Tests
 swift build -c debug

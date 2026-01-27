@@ -34,8 +34,11 @@ for i in "${!MARKERS[@]}"; do
     
     # Check if marker appears in file
     if ! git grep -q "$marker" "$CONSTITUTION_DIR/$expected_file" 2>/dev/null; then
-        echo "⚠️  Marker '$marker' not found in $expected_file"
-        echo "   File exists but marker missing - may need update"
+        echo "❌ Marker '$marker' not found in $expected_file"
+        echo "   Expected marker: $marker"
+        echo "   File checked: $CONSTITUTION_DIR/$expected_file"
+        echo "   Suggested fix: Insert marker at top of file (e.g., '<!-- MARKER: $marker -->' or plain '$marker')"
+        ERRORS=$((ERRORS + 1))
     else
         echo "✅ Found '$marker' in $expected_file"
     fi
@@ -61,7 +64,8 @@ if [ $ERRORS -eq 0 ]; then
     exit 0
 else
     echo ""
-    echo "❌ Found $ERRORS missing file(s)"
-    echo "   Add missing files to $CONSTITUTION_DIR/"
+    echo "❌ Found $ERRORS missing marker(s)"
+    echo "   Add required markers to files in $CONSTITUTION_DIR/"
+    echo "   See error messages above for specific files and markers"
     exit 1
 fi

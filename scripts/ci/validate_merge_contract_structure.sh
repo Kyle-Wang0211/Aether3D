@@ -12,6 +12,12 @@ MERGE_CONTRACT_FILE="${1:-docs/constitution/MERGE_CONTRACT.md}"
 BRANCH_PROTECTION_FILE="${2:-docs/constitution/BRANCH_PROTECTION_REQUIRED_CHECKS.md}"
 WORKFLOW_FILE="${3:-.github/workflows/ssot-foundation-ci.yml}"
 
+# SSOT Foundation workflow removed - skip validation if file doesn't exist
+if [ ! -f "$WORKFLOW_FILE" ]; then
+    echo "SSOT Foundation workflow removed - merge contract structure validation skipped"
+    exit 0
+fi
+
 ERRORS=0
 
 echo "🔒 Validating Merge Contract Structure Consistency"

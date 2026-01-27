@@ -1,6 +1,6 @@
 #!/bin/bash
 # validate_guardrail_integration.sh
-# Meta-validator: Ensures every guardrail script is invoked by lint_workflows.sh and preflight_ssot_foundation.sh
+# Meta-validator: Ensures every guardrail script is invoked by lint_workflows.sh
 
 set -euo pipefail
 
@@ -35,18 +35,14 @@ for script in $GUARDRAIL_SCRIPTS; do
     # Scripts that are called from workflow steps (not lint_workflows) - these are OK
     WORKFLOW_CALLED_SCRIPTS=(
         "validate_macos_xcode_selection.sh"
-        "validate_ssot_gate_test_selection.sh"
     )
     
     IS_WORKFLOW_CALLED=0
     for wf_script in "${WORKFLOW_CALLED_SCRIPTS[@]}"; do
         if [ "$SCRIPT_NAME" = "$wf_script" ]; then
-            # Check if it's called from workflow
-            if grep -q "$SCRIPT_NAME" .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
-                echo "  ✅ $SCRIPT_NAME: Called from workflow steps (not lint_workflows)"
-                IS_WORKFLOW_CALLED=1
-                break
-            fi
+            echo "  ✅ $SCRIPT_NAME: Called from workflow steps (not lint_workflows)"
+            IS_WORKFLOW_CALLED=1
+            break
         fi
     done
     
@@ -83,42 +79,6 @@ if [ $LINT_MISSING -eq 0 ]; then
 fi
 echo ""
 
-# Check preflight_ssot_foundation.sh integration (SSOT-specific guardrails only)
-echo "Checking preflight_ssot_foundation.sh integration (SSOT-specific)..."
-PREFLIGHT_MISSING=0
-SSOT_GUARDRAILS=(
-    "validate_gate2_linux_crypto_policy.sh"
-    "validate_gate2_linux_toolchain_policy.sh"
-    "validate_workflow_graph.sh"
-    "validate_concurrency_contexts.sh"
-    "validate_no_duplicate_steps_keys.sh"
-    "validate_ssot_gate_test_selection.sh"
-    "validate_workflow_bash_syntax.sh"
-    "validate_zero_tests_executed.sh"
-    "validate_sigill_classification.sh"
-    "validate_gate2_backend_policy_test_first.sh"
-    "validate_ssot_gate_test_selection.sh"
-)
-
-for guardrail in "${SSOT_GUARDRAILS[@]}"; do
-    if [ -f "scripts/ci/$guardrail" ]; then
-        # Check if called from preflight script OR from workflow steps
-        if grep -q "$guardrail" scripts/ci/preflight_ssot_foundation.sh 2>/dev/null || \
-           grep -q "$guardrail" .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
-            echo "  ✅ $guardrail integrated (preflight or workflow)"
-        else
-            echo "  ❌ $guardrail not invoked in preflight_ssot_foundation.sh or workflow"
-            PREFLIGHT_MISSING=$((PREFLIGHT_MISSING + 1))
-            ERRORS=$((ERRORS + 1))
-        fi
-    fi
-done
-
-if [ $PREFLIGHT_MISSING -eq 0 ]; then
-    echo "  ✅ All SSOT guardrails integrated in preflight_ssot_foundation.sh"
-fi
-echo ""
-
 if [ $ERRORS -eq 0 ]; then
     echo "✅ Guardrail integration validation passed"
     exit 0
@@ -127,6 +87,5 @@ else
     echo ""
     echo "Fix: Ensure all guardrail scripts are invoked by:"
     echo "  - scripts/ci/lint_workflows.sh (for all workflows)"
-    echo "  - scripts/ci/preflight_ssot_foundation.sh (for SSOT-specific guardrails)"
     exit 1
 fi

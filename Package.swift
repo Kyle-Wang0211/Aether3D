@@ -30,6 +30,14 @@ let package = Package(
       ],
       path: "Core"
     ),
+    .executableTarget(
+      name: "UpdateGoldenDigests",
+      dependencies: [
+        "Aether3DCore",
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
+      path: "Sources/UpdateGoldenDigests"
+    ),
     .testTarget(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],

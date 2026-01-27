@@ -1,5 +1,7 @@
 # Guardian Layer
 
+<!-- MARKER: GUARDIAN_LAYER -->
+
 **Document Version:** 1.1.1  
 **Status:** IMMUTABLE  
 **Rule ID:** GUARDIAN_001

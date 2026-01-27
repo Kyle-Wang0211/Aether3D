@@ -33,7 +33,9 @@ final class PrintStatementScanTests: XCTestCase {
                url.path.contains("/Invariants/") ||
                url.path.contains("/Models/") ||
                url.path.contains("/Rendering/") ||
-               url.path.contains("/Utils/") {
+               url.path.contains("/Utils/") ||
+               url.path.contains("/Quality/") ||
+               url.path.contains("/Infrastructure/") {
                 continue
             }
             

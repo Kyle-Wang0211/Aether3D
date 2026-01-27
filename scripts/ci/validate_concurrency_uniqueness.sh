@@ -21,8 +21,8 @@ fi
 cd "$REPO_ROOT" || exit 1
 
 if [ ! -f "$WORKFLOW_FILE" ]; then
-    echo "❌ Workflow file not found: $WORKFLOW_FILE"
-    exit 1
+    # SSOT Foundation workflow removed - exit gracefully
+    exit 0
 fi
 
 WORKFLOW_NAME=$(basename "$WORKFLOW_FILE" .yml | sed 's/\.yaml$//')
