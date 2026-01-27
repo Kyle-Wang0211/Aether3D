@@ -6,6 +6,7 @@ let package = Package(
   platforms: [
     .macOS(.v13),
     .iOS(.v16)
+    // Linux support is implicit in SwiftPM
   ],
   products: [
     .library(name: "Aether3DCore", targets: ["Aether3DCore"])
