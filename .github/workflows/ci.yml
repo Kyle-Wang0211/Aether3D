@@ -271,8 +271,17 @@ jobs:
     name: PIZ Cross-Platform Comparison
     runs-on: ubuntu-22.04
     needs: piz-matrix
-    if: needs.piz-matrix.result == 'success'
+    if: always()
     steps:
+      - name: Assert piz-matrix success (no-skip policy)
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.piz-matrix.result }}" != "success" ]; then
+            echo "[PIZ_SPEC_VIOLATION] piz-matrix not successful (result=${{ needs.piz-matrix.result }}). Skipped is forbidden."
+            exit 1
+          fi
+          echo "✅ piz-matrix succeeded, proceeding with comparison"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -337,8 +346,17 @@ jobs:
     name: PIZ Sealing Evidence Generation
     runs-on: ubuntu-22.04
     needs: [piz-matrix, piz-compare]
-    if: needs.piz-compare.result == 'success'
+    if: always()
     steps:
+      - name: Assert piz-compare success (no-skip policy)
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.piz-compare.result }}" != "success" ]; then
+            echo "[PIZ_SPEC_VIOLATION] piz-compare not successful (result=${{ needs.piz-compare.result }}). Skipped is forbidden."
+            exit 1
+          fi
+          echo "✅ piz-compare succeeded, proceeding with evidence generation"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:

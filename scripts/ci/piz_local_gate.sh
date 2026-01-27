@@ -33,7 +33,7 @@ echo "[1/4] Running PIZ lint checks..."
 if ! bash scripts/ci/lint_piz_thresholds.sh; then
     ERRORS+=("Lint checks failed")
     FAILURES=$((FAILURES + 1))
-    echo "❌ [1/4] Lint checks FAILED"
+    echo "[PIZ_SPEC_VIOLATION] [1/4] Lint checks FAILED"
 else
     echo "✅ [1/4] Lint checks passed"
 fi
@@ -44,7 +44,7 @@ echo "[2/4] Running PIZ tests..."
 if ! swift test --filter PIZ 2>&1 | tee /tmp/piz_test_output.log; then
     ERRORS+=("PIZ tests failed")
     FAILURES=$((FAILURES + 1))
-    echo "❌ [2/4] PIZ tests FAILED"
+    echo "[PIZ_SPEC_VIOLATION] [2/4] PIZ tests FAILED"
     echo "Last 20 lines of test output:"
     tail -20 /tmp/piz_test_output.log || true
 else
@@ -58,14 +58,14 @@ mkdir -p artifacts/piz
 if ! swift run PIZFixtureDumper 2>&1 | tee /tmp/piz_dumper_output.log; then
     ERRORS+=("PIZFixtureDumper failed")
     FAILURES=$((FAILURES + 1))
-    echo "❌ [3/4] PIZFixtureDumper FAILED"
+    echo "[PIZ_SPEC_VIOLATION] [3/4] PIZFixtureDumper FAILED"
     echo "Last 20 lines of dumper output:"
     tail -20 /tmp/piz_dumper_output.log || true
 else
     if [ ! -f artifacts/piz/piz_canon_full.jsonl ]; then
         ERRORS+=("Canonical JSON file not generated")
         FAILURES=$((FAILURES + 1))
-        echo "❌ [3/4] Canonical JSON file missing"
+        echo "[PIZ_SPEC_VIOLATION] [3/4] Canonical JSON file missing"
     else
         echo "✅ [3/4] PIZFixtureDumper passed (file exists)"
     fi
@@ -84,14 +84,14 @@ fi
 if ! swift run PIZSealingEvidence 2>&1 | tee /tmp/piz_evidence_output.log; then
     ERRORS+=("PIZSealingEvidence failed")
     FAILURES=$((FAILURES + 1))
-    echo "❌ [4/4] PIZSealingEvidence FAILED"
+    echo "[PIZ_SPEC_VIOLATION] [4/4] PIZSealingEvidence FAILED"
     echo "Last 20 lines of evidence output:"
     tail -20 /tmp/piz_evidence_output.log || true
 else
     if [ ! -f artifacts/piz/sealing_evidence.json ] || [ ! -f artifacts/piz/sealing_evidence.md ]; then
         ERRORS+=("Sealing evidence files not generated")
         FAILURES=$((FAILURES + 1))
-        echo "❌ [4/4] Sealing evidence files missing"
+        echo "[PIZ_SPEC_VIOLATION] [4/4] Sealing evidence files missing"
     else
         echo "✅ [4/4] PIZSealingEvidence passed (files exist)"
     fi
@@ -101,12 +101,10 @@ echo ""
 # Summary
 echo "=== Gate Summary ==="
 if [ $FAILURES -eq 0 ]; then
-    echo "✅ All checks passed (4/4)"
-    echo ""
-    echo "You may proceed with git push."
+    echo "PIZ local gate: PASS"
     exit 0
 else
-    echo "❌ Gate FAILED: $FAILURES check(s) failed"
+    echo "[PIZ_SPEC_VIOLATION] PIZ local gate: FAILED ($FAILURES check(s) failed)"
     echo ""
     echo "Failed checks:"
     for error in "${ERRORS[@]}"; do
