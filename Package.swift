@@ -38,6 +38,20 @@ let package = Package(
       ],
       path: "Sources/UpdateGoldenDigests"
     ),
+    .executableTarget(
+      name: "PIZFixtureDumper",
+      dependencies: [
+        "Aether3DCore"
+      ],
+      path: "Sources/PIZFixtureDumper"
+    ),
+    .executableTarget(
+      name: "PIZSealingEvidence",
+      dependencies: [
+        "Aether3DCore"
+      ],
+      path: "Sources/PIZSealingEvidence"
+    ),
     .testTarget(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],

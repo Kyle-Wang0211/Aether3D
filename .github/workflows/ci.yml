@@ -6,6 +6,12 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+# Prevent self-cancellation: allow multiple runs on same branch to complete
+# This ensures macOS jobs are not cancelled when user pushes again before CI finishes
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   preflight:
     name: Preflight (Phase 0.5 guardrails)
@@ -162,3 +168,328 @@ jobs:
           
           set -e
           echo "Platform-safe tests completed"
+
+  piz-matrix:
+    name: PIZ Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        os: [macos-13, ubuntu-22.04]
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "5.9.2"
+          skip-verify-signature: true
+
+      - name: Install system deps (Ubuntu)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
+
+      - name: Build
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          swift build
+
+      - name: Run PIZ Lint
+        run: |
+          set -euo pipefail
+          bash scripts/ci/lint_piz_thresholds.sh || {
+            echo "[PIZ_SPEC_VIOLATION] lint_piz_thresholds failed"
+            exit 1
+          }
+
+      - name: Run PIZ Tests
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        if: matrix.os != 'macos-13'
+        run: |
+          set -euo pipefail
+          swift test --filter PIZ || {
+            echo "[PIZ_SPEC_VIOLATION] swift test failed"
+            exit 1
+          }
+
+      - name: Run PIZ Tests (macOS with retry)
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        if: matrix.os == 'macos-13'
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_wait_seconds: 5
+          command: |
+            set -euo pipefail
+            swift test --filter PIZ || {
+              echo "[PIZ_SPEC_VIOLATION] swift test failed"
+              exit 1
+            }
+
+      - name: Run PIZ Fixture Dumper
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+          PIZ_FIXTURES_PATH: fixtures/piz/nominal
+          PIZ_CANON_OUTPUT: artifacts/piz/piz_canon_full.jsonl
+        if: matrix.os != 'macos-13'
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/piz
+          swift run PIZFixtureDumper || {
+            echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed"
+            exit 1
+          }
+
+      - name: Run PIZ Fixture Dumper (macOS with retry)
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+          PIZ_FIXTURES_PATH: fixtures/piz/nominal
+          PIZ_CANON_OUTPUT: artifacts/piz/piz_canon_full.jsonl
+        if: matrix.os == 'macos-13'
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_wait_seconds: 5
+          command: |
+            set -euo pipefail
+            mkdir -p artifacts/piz
+            swift run PIZFixtureDumper || {
+              echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed"
+              exit 1
+            }
+
+      - name: Verify Canonical JSON Exists
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/piz/piz_canon_full.jsonl ]; then
+            echo "[PIZ_SPEC_VIOLATION] Canonical JSON file not found at artifacts/piz/piz_canon_full.jsonl"
+            echo "Directory contents:"
+            ls -la artifacts/piz/ || true
+            ls -la artifacts/ || true
+            exit 1
+          fi
+          echo "✅ Canonical JSON file exists"
+
+      - name: List Artifacts Directory (Debug)
+        run: |
+          set -euo pipefail
+          echo "=== artifacts/piz contents ==="
+          ls -lh artifacts/piz/ || true
+          echo "=== artifacts contents ==="
+          ls -lh artifacts/ || true
+
+      - name: Upload Canonical JSON Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: piz-canon-${{ matrix.os }}
+          path: artifacts/piz/piz_canon_full.jsonl
+          retention-days: 7
+
+  piz-compare:
+    name: PIZ Cross-Platform Comparison
+    runs-on: ubuntu-22.04
+    needs: piz-matrix
+    if: always()
+    steps:
+      - name: Assert piz-matrix success (no-skip policy)
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.piz-matrix.result }}" != "success" ]; then
+            echo "[PIZ_SPEC_VIOLATION] piz-matrix not successful (result=${{ needs.piz-matrix.result }}). Skipped is forbidden."
+            exit 1
+          fi
+          echo "✅ piz-matrix succeeded, proceeding with comparison"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: piz-canon-macos-13
+          path: artifacts/macos
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: piz-canon-ubuntu-22.04
+          path: artifacts/linux
+          
+      - name: List Available Artifacts (Debug)
+        run: |
+          set -euo pipefail
+          echo "=== Available artifacts ==="
+          ls -lahR artifacts/macos/ artifacts/linux/ || true
+          echo "=== Verifying artifact files ==="
+          test -f artifacts/macos/piz_canon_full.jsonl && echo "✅ macOS artifact exists" || echo "❌ macOS artifact missing"
+          test -f artifacts/linux/piz_canon_full.jsonl && echo "✅ Linux artifact exists" || echo "❌ Linux artifact missing"
+
+      - name: Compare Canonical JSON (Byte-Identical)
+        run: |
+          set -euo pipefail
+          
+          MACOS_FILE="artifacts/macos/piz_canon_full.jsonl"
+          LINUX_FILE="artifacts/linux/piz_canon_full.jsonl"
+          
+          if [ ! -f "$MACOS_FILE" ]; then
+            echo "[PIZ_SPEC_VIOLATION] macOS canonical JSON artifact not found"
+            exit 1
+          fi
+          
+          if [ ! -f "$LINUX_FILE" ]; then
+            echo "[PIZ_SPEC_VIOLATION] Linux canonical JSON artifact not found"
+            exit 1
+          fi
+          
+          if cmp -s "$MACOS_FILE" "$LINUX_FILE"; then
+            echo "✅ Canonical JSON is byte-identical between macOS and Linux"
+          else
+            echo "[PIZ_NUMERIC_DRIFT] canonical JSON differs between macOS and Linux"
+            echo ""
+            echo "First 200 lines of diff:"
+            diff -u <(head -200 "$MACOS_FILE") <(head -200 "$LINUX_FILE") || true
+            echo ""
+            echo "File sizes:"
+            ls -lh "$MACOS_FILE" "$LINUX_FILE"
+            echo ""
+            echo "First 50 bytes (hex):"
+            echo "macOS:"
+            head -c 50 "$MACOS_FILE" | od -An -tx1
+            echo "Linux:"
+            head -c 50 "$LINUX_FILE" | od -An -tx1
+            exit 1
+          fi
+
+  piz-sealing-evidence:
+    name: PIZ Sealing Evidence Generation
+    runs-on: ubuntu-22.04
+    needs: [piz-matrix, piz-compare]
+    if: always()
+    steps:
+      - name: Assert piz-compare success (no-skip policy)
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.piz-compare.result }}" != "success" ]; then
+            echo "[PIZ_SPEC_VIOLATION] piz-compare not successful (result=${{ needs.piz-compare.result }}). Skipped is forbidden."
+            exit 1
+          fi
+          echo "✅ piz-compare succeeded, proceeding with evidence generation"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "5.9.2"
+          skip-verify-signature: true
+
+      - name: Install system deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
+
+      - name: Build
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          swift build
+
+      - name: Download macOS Canonical Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: piz-canon-macos-13
+          path: artifacts/macos
+
+      - name: Download Linux Canonical Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: piz-canon-ubuntu-22.04
+          path: artifacts/linux
+
+      - name: Verify Downloaded Artifacts
+        run: |
+          set -euo pipefail
+          echo "=== Verifying downloaded artifacts ==="
+          ls -lahR artifacts/macos/ artifacts/linux/ || true
+          test -f artifacts/macos/piz_canon_full.jsonl || {
+            echo "[PIZ_SPEC_VIOLATION] macOS artifact not found after download"
+            exit 1
+          }
+          test -f artifacts/linux/piz_canon_full.jsonl || {
+            echo "[PIZ_SPEC_VIOLATION] Linux artifact not found after download"
+            exit 1
+          }
+          echo "✅ Both artifacts verified"
+
+      - name: Run PIZ Sealing Evidence Generator
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+          PIZ_FIXTURES_PATH: fixtures/piz/nominal
+          PIZ_CANON_OUTPUT: artifacts/piz/piz_canon_full.jsonl
+          PIZ_CANON_MACOS: artifacts/macos/piz_canon_full.jsonl
+          PIZ_CANON_LINUX: artifacts/linux/piz_canon_full.jsonl
+          PIZ_EVIDENCE_JSON: artifacts/piz/sealing_evidence.json
+          PIZ_EVIDENCE_MD: artifacts/piz/sealing_evidence.md
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/piz
+          # Copy canonical output to expected location if not present
+          if [ ! -f "$PIZ_CANON_OUTPUT" ]; then
+            if [ -f "$PIZ_CANON_LINUX" ]; then
+              cp "$PIZ_CANON_LINUX" "$PIZ_CANON_OUTPUT"
+            fi
+          fi
+          swift run PIZSealingEvidence || {
+            echo "[PIZ_SPEC_VIOLATION] PIZSealingEvidence failed"
+            exit 1
+          }
+
+      - name: Upload Sealing Evidence Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: piz-sealing-evidence
+          path: |
+            artifacts/piz/sealing_evidence.json
+            artifacts/piz/sealing_evidence.md
+          retention-days: 30
+
+      - name: Display Evidence Summary
+        if: always()
+        run: |
+          if [ -f artifacts/piz/sealing_evidence.md ]; then
+            echo "## Sealing Evidence Summary"
+            cat artifacts/piz/sealing_evidence.md
+          fi
