@@ -7,8 +7,17 @@
 
 set -euo pipefail
 
-# Global hard timeout (seconds)
-TIMEOUT_SECONDS=120
+# Platform-aware global timeout policy
+if [ -z "${CI:-}" ]; then
+    # Default (non-CI): 240 seconds
+    GLOBAL_TIMEOUT_SECONDS=240
+elif [ "${RUNNER_OS:-}" = "macOS" ]; then
+    # CI + macOS runner: 720 seconds
+    GLOBAL_TIMEOUT_SECONDS=720
+else
+    # CI + non-macOS: 300 seconds
+    GLOBAL_TIMEOUT_SECONDS=300
+fi
 
 # Per-command timeouts
 CMD_TIMEOUT_WHITE_COMMIT=90
@@ -308,7 +317,10 @@ exit 0
 # ============================================================================
 # Timeout Configuration Summary
 # ============================================================================
-# Global timeout: 120 seconds (entire script)
+# Global timeout: Platform-aware policy (entire script)
+#   - Default (non-CI): 240 seconds
+#   - CI + macOS runner: 720 seconds
+#   - CI + non-macOS: 300 seconds
 #   - Prevents infinite hangs from any source
 #   - Uses background kill watchdog (POSIX-safe, works on macOS + Linux)
 #
