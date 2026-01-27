@@ -10,7 +10,9 @@
 
 import Foundation
 
-#if canImport(Crypto)
+#if canImport(CryptoKit)
+import CryptoKit
+#elseif canImport(Crypto)
 import Crypto
 #else
 #error("Crypto module required")
