@@ -1,12 +1,12 @@
 # PR1 PIZ Sealing Evidence
 
-**Generated:** 2026-01-27T21:00:22Z
+**Generated:** 2026-01-27T22:15:31Z
 
 ## Spec Document
 
 - **Path:** PR1_F_CLASS_PIZ_INDUSTRIAL_SEALING_UPGRADE_PLAN.md
 - **Git Blob Hash:** a7126ae9b3c4c7afa078dabb7c34ed86dfbe015b
-- **Commit Hash:** c09bcb4648497d2e137eb1b99e8126d909609f70
+- **Commit Hash:** 82b0c2b32e89c56dc29e738fa718a46f8ed1fba5
 
 ## Schema Version
 
@@ -53,17 +53,17 @@
 
 ## Cross-Platform Canonical Evidence
 
-- **macOS SHA256:** N/A
-- **Linux SHA256:** N/A
-- **Byte Identical:** ❌ NO
+- **macOS SHA256:** 458741693c6693633d6a557ae732fa67e07f348b013545b35d1d985f1c253370
+- **Linux SHA256:** 458741693c6693633d6a557ae732fa67e07f348b013545b35d1d985f1c253370
+- **Byte Identical:** ✅ YES
 
 ## Fixtures
 
 | Fixture | Rule IDs | Expected Gate | Canonical SHA256 |
 |---------|----------|---------------|------------------|
-| nominal_001_global_trigger | PIZ_GLOBAL_001, PIZ_COVERED_CELL_001, PIZ_GLOBAL_REGION_001, PIZ_INPUT_VALIDATION_002 | RECAPTURE | ef1dab112912cee2... |
-| nominal_002_local_trigger | PIZ_LOCAL_001, PIZ_COVERED_CELL_001, PIZ_COMPONENT_MEMBERSHIP_001, PIZ_CONNECTIVITY_DETERMINISM_001, PIZ_NOISE_001, PIZ_REGION_ORDER_002 | RECAPTURE | 7d9d5ff0052bb59d... |
-| nominal_003_invalid_input | PIZ_INPUT_VALIDATION_001, PIZ_INPUT_VALIDATION_002, PIZ_FLOAT_CLASSIFICATION_001 | INSUFFICIENT_DATA | 6289b463adbf86f0... |
+| nominal_001_global_trigger | PIZ_GLOBAL_001, PIZ_COVERED_CELL_001, PIZ_GLOBAL_REGION_001, PIZ_INPUT_VALIDATION_002 | RECAPTURE | 0f51904d895eb53e... |
+| nominal_002_local_trigger | PIZ_LOCAL_001, PIZ_COVERED_CELL_001, PIZ_COMPONENT_MEMBERSHIP_001, PIZ_CONNECTIVITY_DETERMINISM_001, PIZ_NOISE_001, PIZ_REGION_ORDER_002 | RECAPTURE | 8d3a9641fb572f17... |
+| nominal_003_invalid_input | PIZ_INPUT_VALIDATION_001, PIZ_INPUT_VALIDATION_002, PIZ_FLOAT_CLASSIFICATION_001 | INSUFFICIENT_DATA | ee7c72dc6b8a6b1f... |
 
 ## Coverage Matrix
 
