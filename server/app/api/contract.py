@@ -21,8 +21,10 @@ T = TypeVar('T')
 
 # MARK: - Business Error Codes
 
+from app.api.error_registry import ERROR_CODE_REGISTRY
+
 class APIErrorCode(str, Enum):
-    """业务错误码（闭集：7个）"""
+    """业务错误码（闭集：7个，必须与ERROR_CODE_REGISTRY一致）"""
     INVALID_REQUEST = "INVALID_REQUEST"
     AUTH_FAILED = "AUTH_FAILED"
     RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
@@ -30,6 +32,11 @@ class APIErrorCode(str, Enum):
     PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE"
     RATE_LIMITED = "RATE_LIMITED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+
+# PR1E: 验证枚举值与注册表一致
+_registry_set = set(ERROR_CODE_REGISTRY)
+_enum_set = {e.value for e in APIErrorCode}
+assert _registry_set == _enum_set, f"Error code mismatch: registry={_registry_set}, enum={_enum_set}"
 
 
 # MARK: - Response Format

@@ -643,5 +643,98 @@ app = FastAPI(redirect_slashes=False)
 
 ---
 
+## §15 PR1E DEFENSIVE RULES（Hardening Patch）
+
+### §15.1 Closed-World Field Policy（闭集字段策略）
+
+**规则**: 所有请求和响应必须严格遵循定义的schema，不允许未知字段。
+
+**实施**:
+- Pydantic配置：`extra="forbid"`（禁止未知字段）
+- 未知字段 → 400 INVALID_REQUEST
+- 响应中不得包含未定义的字段
+
+**测试**: 发送包含未知字段的请求，验证返回400。
+
+### §15.2 Anti-Enumeration Rule（反枚举规则）
+
+**规则**: API handlers永远不返回401/403进行资源访问。
+
+**实施**:
+- 所有所有权检查必须通过 `ensure_ownership_or_404()` helper
+- 资源不存在或不属于用户 → 统一返回404 RESOURCE_NOT_FOUND
+- 无法区分"资源不存在"和"资源不属于用户"
+
+**例外**: Auth middleware可以返回401（认证失败），但handlers不能。
+
+**测试**: Lint测试扫描所有handler模块，禁止直接使用401/403。
+
+### §15.3 Idempotency Semantics（幂等性语义）
+
+**作用域**: `(user_id, http_method, canonical_path, idempotency_key)`
+
+**规范化规则**:
+- 使用 `request.url.path`（不包含query string）
+- 去除尾斜杠（除了根路径"/"）
+
+**行为**:
+- 相同key + 相同endpoint + 相同payload → 幂等成功（返回存储结果）
+- 相同key + 相同endpoint + 不同payload → 409 STATE_CONFLICT
+- 相同key + 不同endpoint → 独立缓存（不冲突）
+- 相同key + 相同path + 不同method → 独立缓存
+
+**TTL**: 24小时（概念性，实际实现可能使用内存缓存）
+
+**测试**: 验证不同endpoint使用相同key不冲突。
+
+### §15.4 Range Limitations（Range限制）
+
+**支持格式**: 仅单range `bytes=start-end`
+
+**明确拒绝**（返回400 INVALID_REQUEST，不是416）:
+- Suffix ranges: `bytes=-500`
+- Open-ended ranges: `bytes=500-`
+- Multi-range: `bytes=0-100,200-300`
+- If-Range header: 如果存在 → 400
+
+**成功响应**（206 Partial Content）:
+- 必须包含 `Content-Range: bytes start-end/total`
+- 必须包含 `Accept-Ranges: bytes`
+
+**测试**: 验证所有不支持的格式返回400而非416。
+
+### §15.5 Request-Id Behavior（Request-Id行为）
+
+**格式**: `^[A-Za-z0-9_-]{8,64}$`（最小8字符，最大64字符）
+
+**行为**:
+- 接受有效的X-Request-Id header → 回传相同值
+- 无效或缺失 → 生成新值（格式：`req_{uuid}`）
+- 所有响应（成功和错误）必须包含X-Request-Id header
+- 错误响应body中的request_id（如果存在）必须与header一致
+
+**测试**: 验证有效/无效/缺失X-Request-Id的处理。
+
+### §15.6 Error Code Evolution Guard（错误码演进保护）
+
+**规则**: 所有错误码必须在 `ERROR_CODE_REGISTRY` 中定义。
+
+**验证**:
+- 注册表与 `APIErrorCode` 枚举完全匹配
+- 注册表与文档（§2）完全匹配
+- 新增错误码必须同时更新注册表和文档
+
+**测试**: 快照测试确保注册表与文档一致。
+
+### §15.7 Contract Document Hash Gate（契约文档哈希门控）
+
+**规则**: `API_CONTRACT.md` 的SHA256哈希值必须与 `API_CONTRACT.hash` 一致。
+
+**目的**: 防止文档意外更改，确保文档变更必须显式更新hash文件。
+
+**测试**: 计算文档SHA256，与hash文件比较。
+
+---
+
 **END OF DOCUMENT**
 

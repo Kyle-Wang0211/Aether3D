@@ -1,8 +1,7 @@
-# PR#3 — API Contract v2.0
-# Stage: WHITEBOX | Camera-only
-# Endpoints: 12 | HTTP Codes: 10 (3 success + 7 error) | Business Errors: 7
+# PR1E — API Contract Hardening Patch
+# Request-Id Forwarding (Strict Validation + Always Present)
 
-"""Request-Id中间件（GATE-7：所有响应包含X-Request-Id）"""
+"""Request-Id中间件（GATE-7 + PR1E严格验证）"""
 
 import re
 import uuid
@@ -10,8 +9,9 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
-# X-Request-Id格式：a-zA-Z0-9_-，最大64字符
-REQUEST_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+# PR1E: X-Request-Id格式严格验证：^[A-Za-z0-9_-]{8,64}$
+# 最小8字符，最大64字符，只允许字母、数字、下划线、连字符
+REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{8,64}$')
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
