@@ -44,6 +44,11 @@ README.md is NOT a specification document.
   - **What breaks if violated:** Capacity control determinism, evidence irreversibility, UX consistency
   - **Why exists:** Defines SOFT_LIMIT/HARD_LIMIT semantics, EEB system, no-text UX, and closed-world fuse behavior
 
+- [OBSERVATION_MODEL_CONSTITUTION.md](OBSERVATION_MODEL_CONSTITUTION.md) - ObservationModel constitutional definition (PR1 E-Class)
+  - **Who depends:** All evidence reasoning modules, PR#6 (evidence grid), all future PRs that use observations
+  - **What breaks if violated:** Evidence validity determination, L1/L2/L3 eligibility, Evidence Escalation Boundary (EEB)
+  - **Why exists:** Defines what constitutes an observation and when it is considered valid evidence. Establishes SSOT for observational validity and EEB rules. Any future PR that contradicts this document is invalid by definition.
+
 - [CROSS_PLATFORM_CONSISTENCY.md](CROSS_PLATFORM_CONSISTENCY.md) - Cross-platform consistency rules
   - **Who depends:** All identity derivation, hash computation, color conversion modules
   - **What breaks if violated:** Cross-platform determinism, identity stability
