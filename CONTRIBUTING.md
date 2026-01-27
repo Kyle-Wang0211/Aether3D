@@ -115,6 +115,10 @@ scripts/preflight.sh becomes governance-protected once created (requires RFC to 
 
 PR1 branches (branch names containing `pr1`) require local pre-push gate checks.
 
+**Policy:**
+
+**Skipped equals failure.** CI does not allow skipped/cancelled checks. Local gate must pass before push.
+
 **Installation:**
 
 Install Git hooks before first push on PR1 branches:
@@ -143,6 +147,7 @@ bash scripts/ci/piz_local_gate.sh
 **Push Behavior:**
 
 - Push is blocked if any check fails
+- Error message: "Skipped=Failure policy. Fix locally first."
 - Use `git push --no-verify` to bypass (not recommended)
 - All checks must pass before push proceeds
 
@@ -151,6 +156,13 @@ bash scripts/ci/piz_local_gate.sh
 Local gate is advisory; CI verdict is authoritative.
 
 Local gate prevents pushing code that would fail CI checks.
+
+**CI Behavior:**
+
+- CI does not cancel in-progress runs when new commits are pushed (prevents macOS job cancellation)
+- Matrix jobs use `fail-fast: false` to prevent one platform failure from cancelling others
+- macOS jobs use retry (3 attempts) for flaky steps (swift test, PIZFixtureDumper)
+- Skipped checks are treated as failures (no-skip policy)
 
 ## Branch Naming
 

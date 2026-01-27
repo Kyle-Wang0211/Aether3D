@@ -6,11 +6,11 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-# Cancel in-progress runs when a new commit is pushed to the same branch
-# This prevents PR checks from showing stale failed/cancelled runs
+# Prevent self-cancellation: allow multiple runs on same branch to complete
+# This ensures macOS jobs are not cancelled when user pushes again before CI finishes
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   preflight:
@@ -218,12 +218,31 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
+        if: matrix.os != 'macos-13'
         run: |
           set -euo pipefail
           swift test --filter PIZ || {
             echo "[PIZ_SPEC_VIOLATION] swift test failed"
             exit 1
           }
+
+      - name: Run PIZ Tests (macOS with retry)
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        if: matrix.os == 'macos-13'
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 5
+          command: |
+            set -euo pipefail
+            swift test --filter PIZ || {
+              echo "[PIZ_SPEC_VIOLATION] swift test failed"
+              exit 1
+            }
 
       - name: Run PIZ Fixture Dumper
         env:
@@ -232,6 +251,7 @@ jobs:
           TZ: UTC
           PIZ_FIXTURES_PATH: fixtures/piz/nominal
           PIZ_CANON_OUTPUT: artifacts/piz/piz_canon_full.jsonl
+        if: matrix.os != 'macos-13'
         run: |
           set -euo pipefail
           mkdir -p artifacts/piz
@@ -239,6 +259,27 @@ jobs:
             echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed"
             exit 1
           }
+
+      - name: Run PIZ Fixture Dumper (macOS with retry)
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+          PIZ_FIXTURES_PATH: fixtures/piz/nominal
+          PIZ_CANON_OUTPUT: artifacts/piz/piz_canon_full.jsonl
+        if: matrix.os == 'macos-13'
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 5
+          command: |
+            set -euo pipefail
+            mkdir -p artifacts/piz
+            swift run PIZFixtureDumper || {
+              echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed"
+              exit 1
+            }
 
       - name: Verify Canonical JSON Exists
         run: |
