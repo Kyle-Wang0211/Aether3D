@@ -9,7 +9,7 @@ on:
 # Prevent self-cancellation: allow multiple runs on same branch to complete
 # This ensures macOS jobs are not cancelled when user pushes again before CI finishes
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
