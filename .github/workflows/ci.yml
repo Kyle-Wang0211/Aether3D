@@ -168,7 +168,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-22.04]
+        os: [macos-13, ubuntu-22.04]
       fail-fast: false
     steps:
       - name: Checkout
@@ -234,10 +234,30 @@ jobs:
             exit 1
           }
 
+      - name: Verify Canonical JSON Exists
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/piz/piz_canon_full.jsonl ]; then
+            echo "[PIZ_SPEC_VIOLATION] Canonical JSON file not found at artifacts/piz/piz_canon_full.jsonl"
+            echo "Directory contents:"
+            ls -la artifacts/piz/ || true
+            ls -la artifacts/ || true
+            exit 1
+          fi
+          echo "✅ Canonical JSON file exists"
+
+      - name: List Artifacts Directory (Debug)
+        run: |
+          set -euo pipefail
+          echo "=== artifacts/piz contents ==="
+          ls -lh artifacts/piz/ || true
+          echo "=== artifacts contents ==="
+          ls -lh artifacts/ || true
+
       - name: Upload Canonical JSON Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: piz-canon-${{ matrix.os == 'macos-latest' && 'macos-latest' || 'ubuntu-22.04' }}
+          name: piz-canon-${{ matrix.os }}
           path: artifacts/piz/piz_canon_full.jsonl
           retention-days: 7
 
@@ -253,7 +273,7 @@ jobs:
       - name: Download macOS Artifact
         uses: actions/download-artifact@v4
         with:
-          name: piz-canon-macos-latest
+          name: piz-canon-macos-13
           path: artifacts/macos
 
       - name: Download Linux Artifact
@@ -339,7 +359,7 @@ jobs:
       - name: Download macOS Canonical Artifact
         uses: actions/download-artifact@v4
         with:
-          name: piz-canon-macos-latest
+          name: piz-canon-macos-13
           path: artifacts/macos
 
       - name: Download Linux Canonical Artifact
