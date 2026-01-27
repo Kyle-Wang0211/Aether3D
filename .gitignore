@@ -39,3 +39,6 @@ server/.venv/
 # macOS Finder duplicate file suffix: " 2"
 *\ 2.*
  main
+
+# generated
+artifacts/

@@ -313,7 +313,7 @@ jobs:
     name: PIZ Cross-Platform Comparison
     runs-on: ubuntu-22.04
     needs: piz-matrix
-    if: always()
+    if: needs.piz-matrix.result == 'success'
     steps:
       - name: Assert piz-matrix success (no-skip policy)
         run: |
@@ -388,7 +388,7 @@ jobs:
     name: PIZ Sealing Evidence Generation
     runs-on: ubuntu-22.04
     needs: [piz-matrix, piz-compare]
-    if: always()
+    if: needs.piz-compare.result == 'success'
     steps:
       - name: Assert piz-compare success (no-skip policy)
         run: |
@@ -493,3 +493,29 @@ jobs:
             echo "## Sealing Evidence Summary"
             cat artifacts/piz/sealing_evidence.md
           fi
+
+  piz-gate:
+    name: PIZ Final Gate (no-skip policy)
+    runs-on: ubuntu-22.04
+    needs: [piz-matrix, piz-compare, piz-sealing-evidence]
+    if: always()
+    steps:
+      - name: Assert all PIZ jobs succeeded (treat skipped/cancelled as failure)
+        run: |
+          set -euo pipefail
+          echo "piz-matrix result: ${{ needs.piz-matrix.result }}"
+          echo "piz-compare result: ${{ needs.piz-compare.result }}"
+          echo "piz-sealing-evidence result: ${{ needs.piz-sealing-evidence.result }}"
+          if [ "${{ needs.piz-matrix.result }}" != "success" ]; then
+            echo "[PIZ_SPEC_VIOLATION] piz-matrix is not success (result=${{ needs.piz-matrix.result }})"
+            exit 1
+          fi
+          if [ "${{ needs.piz-compare.result }}" != "success" ]; then
+            echo "[PIZ_SPEC_VIOLATION] piz-compare is not success (result=${{ needs.piz-compare.result }})"
+            exit 1
+          fi
+          if [ "${{ needs.piz-sealing-evidence.result }}" != "success" ]; then
+            echo "[PIZ_SPEC_VIOLATION] piz-sealing-evidence is not success (result=${{ needs.piz-sealing-evidence.result }})"
+            exit 1
+          fi
+          echo "✅ PIZ Final Gate passed"
