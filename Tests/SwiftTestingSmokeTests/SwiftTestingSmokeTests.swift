@@ -11,7 +11,7 @@ import Testing
 
 @Test("Smoke: Swift Testing discovery")
 func smoke_swift_testing_discovery() async throws {
-    #expect(true)
+    #expect(Bool(true))
 }
 #endif
 

@@ -36,9 +36,8 @@ public struct DeterministicHash {
     
     /// Compute SHA-256 hex hash of UTF-8 string
     public static func sha256Hex(_ string: String) -> String {
-        guard let data = string.data(using: .utf8) else {
-            fatalError("Failed to convert string to UTF-8 data")
-        }
+        // String.data(using: .utf8) never returns nil, but we check for safety
+        guard let data = string.data(using: .utf8) else { fatalError("Failed to convert string to UTF-8 data") }
         return sha256Hex(data)
     }
     

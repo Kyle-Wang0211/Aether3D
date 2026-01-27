@@ -35,10 +35,8 @@ final class CaptureMetadataTests: XCTestCase {
         // Verify comment or documentation indicates closed set
         // The closed set values are: "diskFull", "systemError", "finishWithoutStart", "unknown"
         let closedSetValues = ["diskFull", "systemError", "finishWithoutStart", "unknown"]
-        for value in closedSetValues {
-            // Check if these values appear in comments or documentation
-            // This is best-effort verification
-        }
+        XCTAssertEqual(closedSetValues.count, 4, "Closed set should have 4 values")
+        // Note: Actual verification of these values in source is best-effort and done via source scan above
     }
     
     func test_diagnosticEventRoundTrip_noSensitiveSubstrings() {

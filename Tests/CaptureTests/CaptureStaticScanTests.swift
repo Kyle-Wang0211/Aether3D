@@ -424,10 +424,10 @@ final class CaptureStaticScanTests: XCTestCase {
                 continue
             }
             
-            let relativePath = fileURL.path.replacingOccurrences(of: captureDir.path + "/", with: "")
+            // relativePath intentionally unused - this loop only checks for suspicious numbers
             let lines = content.components(separatedBy: CharacterSet.newlines)
             
-            for (index, line) in lines.enumerated() {
+            for (_, line) in lines.enumerated() {
                 let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 // Skip comments
                 if trimmed.hasPrefix("//") {
@@ -662,7 +662,7 @@ final class CaptureStaticScanTests: XCTestCase {
             "dispatchPrecondition("
         ]
         
-        for (dirName, relativePath) in scanDirs {
+        for (_, relativePath) in scanDirs {
             guard let scanDir = RepoRootLocator.resolvePath(relativePath) else {
                 XCTFail("Could not resolve \(relativePath) directory")
                 continue
@@ -871,7 +871,7 @@ final class CaptureStaticScanTests: XCTestCase {
         }
         
         // Closed set allowlist: EMPTY (no exceptions)
-        let allowedFiles: [String] = []
+        // Note: allowedFiles intentionally empty - no exceptions allowed
         
         for case let fileURL as URL in enumerator {
             guard fileURL.pathExtension == "swift" else { continue }

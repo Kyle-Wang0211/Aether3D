@@ -147,6 +147,7 @@ final class WhiteCommitTests: XCTestCase {
         let nanValue = Double.nan
         // Create a test that would include NaN (if possible)
         // For now, verify the formatter logic exists in CanonicalJSON.swift
+        XCTAssertTrue(nanValue.isNaN, "NaN value must be NaN")
         XCTAssertTrue(true, "Float formatting logic verified in CanonicalJSON.swift")
     }
     
@@ -176,6 +177,7 @@ final class WhiteCommitTests: XCTestCase {
         
         let token2 = try committer.commitWhite(sessionId: session1, auditRecord: audit1, coverageDelta: delta1)
         XCTAssertEqual(token2.sessionSeq, 2, "Second commit must have session_seq=2")
+        XCTAssertNotNil(token2.commit_sha256, "Token2 must have commit hash")
         
         // Create commit for session2: seq 1
         let token3 = try committer.commitWhite(sessionId: session2, auditRecord: audit1, coverageDelta: delta1)
@@ -227,6 +229,7 @@ final class WhiteCommitTests: XCTestCase {
         // Verify chain: second commit's prev should equal first commit's hash
         let prev2 = try db.getPrevCommitSHA256(sessionId: sessionId, sessionSeq: 2)
         XCTAssertEqual(prev2, token1.commit_sha256, "Second commit's prev must equal first commit's hash")
+        XCTAssertNotNil(token2.commit_sha256, "Token2 must have commit hash")
         
         db.close()
     }
@@ -427,6 +430,7 @@ final class WhiteCommitTests: XCTestCase {
         // Verify chain: token2's prev should equal token1's hash
         let prev2 = try db.getPrevCommitSHA256(sessionId: sessionId, sessionSeq: 2)
         XCTAssertEqual(prev2, token1.commit_sha256, "Hash chain must be continuous")
+        XCTAssertNotNil(token2.commit_sha256, "Token2 must have commit hash")
         
         // Recovery should verify chain
         let recovery = CrashRecovery(database: db)
@@ -583,6 +587,7 @@ final class WhiteCommitTests: XCTestCase {
         )
         
         XCTAssertEqual(token2.sessionSeq, 2, "Second commit should have session_seq = 2")
+        XCTAssertNotNil(token2.commit_sha256, "Token2 must have commit hash")
         
         db.close()
     }

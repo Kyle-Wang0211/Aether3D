@@ -37,7 +37,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_emptyFileRecovery() throws {
-        try withAutoreleasepool {
+        withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("empty.ndjson")
             FileManager.default.createFile(atPath: fileURL.path, contents: nil)
             
@@ -59,7 +59,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_validLinesRecovery() throws {
-        try withAutoreleasepool {
+        withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("valid.ndjson")
             
             // 创建包含有效 JSON 行的文件
@@ -89,7 +89,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_truncateCorruptedTail() throws {
-        try withAutoreleasepool {
+        withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("corrupted.ndjson")
             
             // 创建包含有效行和损坏尾部的文件
@@ -123,7 +123,7 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_nonUTF8FileHandling() throws {
-        try withAutoreleasepool {
+        withAutoreleasepool {
             let fileURL = self.tempDir.appendingPathComponent("nonutf8.ndjson")
             
             // 创建包含非 UTF-8 数据的文件
@@ -146,18 +146,18 @@ final class AuditFileWriterRecoveryTests: XCTestCase {
     }
     
     func test_skipRecoveryThrowsError() {
-        do {
-            try withAutoreleasepool {
-                let fileURL = self.tempDir.appendingPathComponent("skip.ndjson")
-                FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-                
+        withAutoreleasepool {
+            let fileURL = self.tempDir.appendingPathComponent("skip.ndjson")
+            FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+            
+            do {
                 _ = try AuditFileWriter(url: fileURL, skipRecovery: true)
                 XCTFail("Expected skipRecoveryNotSupported error")
+            } catch AuditFileWriterError.skipRecoveryNotSupported {
+                // 预期错误
+            } catch {
+                XCTFail("Unexpected error: \(error)")
             }
-        } catch AuditFileWriterError.skipRecoveryNotSupported {
-            // 预期错误
-        } catch {
-            XCTFail("Unexpected error: \(error)")
         }
     }
 }

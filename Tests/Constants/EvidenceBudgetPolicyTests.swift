@@ -144,7 +144,6 @@ final class EvidenceBudgetPolicyTests: XCTestCase {
         // If digests differ, check if budgets increased significantly
         if currentDigest != goldenBudgetDigest {
             // Compare actual budget values
-            var maxIncreaseRatio: Double = 1.0
             var increasedProfile: String? = nil
             
             // Load old budgets from golden (if available) and compare

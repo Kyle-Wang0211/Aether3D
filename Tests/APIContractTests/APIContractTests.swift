@@ -12,15 +12,15 @@ final class APIContractTests: XCTestCase {
     func testHTTPStatusCodeClosedSet() {
         // 验证只有10个HTTP状态码
         let allCodes = HTTPStatusCode.allCases
-        XCTAssertEqual(allCodes.count, HTTPStatusCodeConstants.TOTAL_CODE_COUNT, "HTTP status code count must be exactly 10")
+        XCTAssertEqual(allCodes.count, APIContractConstants.HTTP_CODE_COUNT, "HTTP status code count must be exactly 10")
         
         // 验证成功码数量
         let successCodes = allCodes.filter { $0.isSuccess }
-        XCTAssertEqual(successCodes.count, HTTPStatusCodeConstants.SUCCESS_CODE_COUNT, "Success code count must be 3")
+        XCTAssertEqual(successCodes.count, APIContractConstants.SUCCESS_CODE_COUNT, "Success code count must be 3")
         
         // 验证错误码数量
         let errorCodes = allCodes.filter { !$0.isSuccess }
-        XCTAssertEqual(errorCodes.count, HTTPStatusCodeConstants.ERROR_CODE_COUNT, "Error code count must be 7")
+        XCTAssertEqual(errorCodes.count, APIContractConstants.ERROR_CODE_COUNT, "Error code count must be 7")
         
         // 验证具体状态码
         XCTAssertTrue(allCodes.contains(.ok))
