@@ -42,7 +42,7 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Audit/COVERAGE_GAPS_ANALYSIS.md"],
+      exclude: ["Constants", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
