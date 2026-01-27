@@ -11,7 +11,9 @@
 
 import Foundation
 
-#if canImport(Crypto)
+#if canImport(CryptoKit)
+import CryptoKit
+#elseif canImport(Crypto)
 import Crypto
 #else
 #error("Crypto module required for CanonicalDigest")
@@ -343,7 +345,6 @@ private struct CanonicalKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCon
         try value.encode(to: childContainer)
         
         guard let childValue = childSlot.value else {
-            let path = codingPath.map { $0.stringValue }.joined(separator: ".") + "." + key.stringValue
             throw CanonicalDigestError.missingValue
         }
         
@@ -366,7 +367,7 @@ private struct CanonicalKeyedEncodingContainer<Key: CodingKey>: KeyedEncodingCon
         // This should never be called - nested encoding goes through encode<T>
         // Return a container that will encode via encode<T> path
         let childSlot = Slot()
-        var container = CanonicalKeyedEncodingContainer<NestedKey>(encoder: encoder, slot: childSlot, codingPath: codingPath + [key])
+        let container = CanonicalKeyedEncodingContainer<NestedKey>(encoder: encoder, slot: childSlot, codingPath: codingPath + [key])
         return KeyedEncodingContainer(container)
     }
     
@@ -505,7 +506,6 @@ private struct CanonicalUnkeyedEncodingContainer: UnkeyedEncodingContainer {
         try value.encode(to: childContainer)
         
         guard let childValue = childSlot.value else {
-            let path = codingPath.map { $0.stringValue }.joined(separator: ".") + "[\(count)]"
             throw CanonicalDigestError.missingValue
         }
         

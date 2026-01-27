@@ -1,7 +1,7 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-2.5
-// States: 8 | Transitions: 13 | FailureReasons: 14 | CancelReasons: 2
+// Contract Version: PR2-JSM-2.5 (PR1 C-Class: +1 state CAPACITY_SATURATED)
+// States: 9 | Transitions: 14 | FailureReasons: 14 | CancelReasons: 2
 // ============================================================================
 
 import Foundation
@@ -44,7 +44,7 @@ public final class JobStateMachine {
         let to: JobState
     }
     
-    /// Legal transitions (13 total).
+    /// Legal transitions (14 total, PR1 C-Class adds PROCESSING -> CAPACITY_SATURATED).
     private static let legalTransitions: Set<Transition> = [
         Transition(from: .pending, to: .uploading),
         Transition(from: .pending, to: .cancelled),
@@ -57,6 +57,7 @@ public final class JobStateMachine {
         Transition(from: .processing, to: .packaging),
         Transition(from: .processing, to: .failed),
         Transition(from: .processing, to: .cancelled),
+        Transition(from: .processing, to: .capacitySaturated),  // PR1 C-Class: capacity saturated transition
         Transition(from: .packaging, to: .completed),
         Transition(from: .packaging, to: .failed),
     ]

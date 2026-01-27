@@ -19,7 +19,6 @@ let package = Package(
     .systemLibrary(
       name: "CSQLite",
       path: "Sources/CSQLite",
-      pkgConfig: "sqlite3",
       providers: [.apt(["libsqlite3-dev"]), .brew(["sqlite"])]
     ),
     .target(
@@ -42,7 +41,7 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Audit/COVERAGE_GAPS_ANALYSIS.md"],
+      exclude: ["Constants", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),

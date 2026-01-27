@@ -348,6 +348,7 @@ final class JobStateMachineTests: XCTestCase {
             ("completed", .completed),
             ("failed", .failed),
             ("cancelled", .cancelled),
+            ("capacity_saturated", .capacitySaturated),  // PR1 C-Class
         ]
         
         for (rawValue, expected) in validCases {

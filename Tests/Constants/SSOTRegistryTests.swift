@@ -21,6 +21,7 @@ final class SSOTRegistryTests: XCTestCase {
         // This test verifies that selfCheck would catch duplicates
         // Since we can't easily inject duplicates, we verify the mechanism exists
         let errors = SSOTRegistry.selfCheck()
+        XCTAssertTrue(errors.isEmpty, "Self-check should pass for spec IDs")
         
         // Check that selfCheck validates uniqueness
         var specIds: Set<String> = []
@@ -41,6 +42,7 @@ final class SSOTRegistryTests: XCTestCase {
                           "Duplicate error code stable name: \(code.stableName)")
             stableNames.insert(code.stableName)
         }
+        XCTAssertTrue(errors.isEmpty, "Self-check should pass for error codes validation")
     }
     
     // MARK: - Registry Lookup Tests

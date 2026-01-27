@@ -60,7 +60,7 @@ final class BreakingSurfaceTests: XCTestCase {
             return
         }
         
-        for (_, surface) in surfaces.enumerated() {
+        for (index, surface) in surfaces.enumerated() {
             guard let surfaceId = surface["id"] as? String else {
                 XCTFail("Breaking surface \(index) missing 'id' field")
                 continue

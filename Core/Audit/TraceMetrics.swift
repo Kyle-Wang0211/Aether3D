@@ -1,5 +1,6 @@
 // TraceMetrics.swift
 // PR#8.5 / v0.0.1
+// PR#1 C-Class: Extended with CapacityMetrics
 
 import Foundation
 
@@ -37,6 +38,10 @@ public struct TraceMetrics: Codable, Sendable, Equatable {
     /// - Recommended format: [A-Z0-9_]+
     public let errorCode: String?
     
+    /// Capacity metrics (PR#1 C-Class)
+    /// Structured capacity metrics for SOFT/HARD LIMIT tracking
+    public let capacityMetrics: CapacityMetrics?
+    
     /// Create trace metrics.
     ///
     /// - Precondition: elapsedMs >= 0. Caller bug if violated.
@@ -44,7 +49,8 @@ public struct TraceMetrics: Codable, Sendable, Equatable {
         elapsedMs: Int,
         success: Bool,
         qualityScore: Double?,
-        errorCode: String?
+        errorCode: String?,
+        capacityMetrics: CapacityMetrics? = nil
     ) {
         precondition(elapsedMs >= 0, "elapsedMs must be non-negative")
         precondition(elapsedMs <= 604_800_000, "elapsedMs must not exceed 604800000")
@@ -63,6 +69,7 @@ public struct TraceMetrics: Codable, Sendable, Equatable {
         self.success = success
         self.qualityScore = qualityScore
         self.errorCode = errorCode
+        self.capacityMetrics = capacityMetrics
     }
 }
 

@@ -59,9 +59,9 @@ public struct VoxelKeySpec: Codable, Equatable, Hashable {
         data.append(contentsOf: withUnsafeBytes(of: qX.bigEndian) { Data($0) })
         data.append(contentsOf: withUnsafeBytes(of: qY.bigEndian) { Data($0) })
         data.append(contentsOf: withUnsafeBytes(of: qZ.bigEndian) { Data($0) })
-        var resLevelId64 = Int64(resLevelId)
+        let resLevelId64 = Int64(resLevelId)
         data.append(contentsOf: withUnsafeBytes(of: resLevelId64.bigEndian) { Data($0) })
-        var schemaVersionId16 = schemaVersionId.bigEndian
+        let schemaVersionId16 = schemaVersionId.bigEndian
         data.append(contentsOf: withUnsafeBytes(of: schemaVersionId16) { Data($0) })
         data.append(contentsOf: [profileId])
         return data

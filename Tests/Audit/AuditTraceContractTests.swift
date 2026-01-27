@@ -835,14 +835,6 @@ final class AuditTraceContractTests: XCTestCase {
     }
     
     func test_inputContentHash_invalidLength_rejected() {
-        let log = InMemoryAuditLog()
-        let emitter = AuditTraceEmitter(
-            appendEntry: log.makeAppendClosure(),
-            policyHash: makeTestPolicyHash(),
-            pipelineVersion: "B1",
-            buildMeta: makeTestBuildMeta()
-        )
-        
         // ContentHash with wrong length should be caught by InputDescriptor precondition
         // But if we use valid InputDescriptor, then test ID generation
         let inputs = [InputDescriptor(path: "/test.mp4", contentHash: "abc")]  // Wrong length - but InputDescriptor init validates
@@ -962,27 +954,9 @@ final class AuditTraceContractTests: XCTestCase {
     func test_metrics_elapsedMs_negative_rejected() {
         // TraceMetrics precondition will catch this
         // But we test via validator with invalid entry
-        let entry = AuditEntry(
-            timestamp: Date(),
-            eventType: "trace_end",
-            detailsJson: nil,
-            detailsSchemaVersion: "1.0",
-            schemaVersion: 1,
-            pr85EventType: .traceEnd,
-            entryType: "trace_end",
-            traceId: String(repeating: "a", count: 64),
-            sceneId: String(repeating: "b", count: 64),
-            eventId: String(repeating: "a", count: 64) + ":0",
-            policyHash: makeTestPolicyHash(),
-            pipelineVersion: "B1",
-            inputs: [],
-            paramsSummary: [:],
-            metrics: TraceMetrics(elapsedMs: 0, success: true, qualityScore: nil, errorCode: nil),  // Valid metrics
-            buildMeta: makeTestBuildMeta()
-        )
-        
-        // This will crash due to precondition, not reach validator
+        // Note: Creating invalid metrics (negative elapsedMs) would crash due to precondition
         // So we test the precondition works by not creating invalid metrics
+        // Valid metrics at limit (0) are tested elsewhere
     }
     
     func test_metrics_elapsedMs_tooLarge_rejected() {

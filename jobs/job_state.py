@@ -1,7 +1,7 @@
 # =============================================================================
 # CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-# Contract Version: PR2-JSM-2.5
-# States: 8 | Transitions: 13 | FailureReasons: 14 | CancelReasons: 2
+# Contract Version: PR2-JSM-2.5 (PR1 C-Class: +1 state CAPACITY_SATURATED)
+# States: 9 | Transitions: 14 | FailureReasons: 14 | CancelReasons: 2
 # =============================================================================
 
 """Job state machine implementation (pure function)."""
@@ -14,7 +14,7 @@ from jobs.contract_constants import ContractConstants
 
 
 class JobState(str, Enum):
-    """Job state enumeration (8 states)."""
+    """Job state enumeration (9 states, PR1 C-Class adds CAPACITY_SATURATED)."""
     
     PENDING = "pending"
     UPLOADING = "uploading"
@@ -24,11 +24,12 @@ class JobState(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    CAPACITY_SATURATED = "capacity_saturated"  # PR1 C-Class: terminal non-error state
     
     @property
     def is_terminal(self) -> bool:
         """Whether this state is a terminal state (no further transitions allowed)."""
-        return self in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}
+        return self in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED, JobState.CAPACITY_SATURATED}
     
     @property
     def is_cancellable(self) -> bool:
@@ -96,7 +97,7 @@ class JobStateMachineError(Exception):
         super().__init__(self.message)
 
 
-# Legal transitions (13 total)
+# Legal transitions (14 total, PR1 C-Class adds PROCESSING -> CAPACITY_SATURATED)
 LEGAL_TRANSITIONS: frozenset = frozenset([
     (JobState.PENDING, JobState.UPLOADING),
     (JobState.PENDING, JobState.CANCELLED),
@@ -109,6 +110,7 @@ LEGAL_TRANSITIONS: frozenset = frozenset([
     (JobState.PROCESSING, JobState.PACKAGING),
     (JobState.PROCESSING, JobState.FAILED),
     (JobState.PROCESSING, JobState.CANCELLED),
+    (JobState.PROCESSING, JobState.CAPACITY_SATURATED),  # PR1 C-Class: capacity saturated transition
     (JobState.PACKAGING, JobState.COMPLETED),
     (JobState.PACKAGING, JobState.FAILED),
 ])

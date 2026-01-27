@@ -39,6 +39,7 @@ final class ReproducibilityBoundaryTests: XCTestCase {
         // For now, we verify that the concept exists in constants
         XCTAssertNotNil(CrossPlatformConstants.MESH_EPOCH_SALT_INCLUDED_INPUTS,
             "Reproducibility bundle fields must be defined")
+        XCTAssertFalse(requiredFields.isEmpty, "Required fields list must not be empty")
     }
     
     func test_reproducibilityBoundary_versionFields() {
