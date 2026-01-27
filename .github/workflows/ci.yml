@@ -265,7 +265,7 @@ jobs:
     name: PIZ Cross-Platform Comparison
     runs-on: ubuntu-22.04
     needs: piz-matrix
-    if: always()
+    if: needs.piz-matrix.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -283,10 +283,13 @@ jobs:
           path: artifacts/linux
           
       - name: List Available Artifacts (Debug)
-        if: failure()
         run: |
-          echo "Available artifacts:"
-          ls -la artifacts/macos/ artifacts/linux/ || true
+          set -euo pipefail
+          echo "=== Available artifacts ==="
+          ls -lahR artifacts/macos/ artifacts/linux/ || true
+          echo "=== Verifying artifact files ==="
+          test -f artifacts/macos/piz_canon_full.jsonl && echo "✅ macOS artifact exists" || echo "❌ macOS artifact missing"
+          test -f artifacts/linux/piz_canon_full.jsonl && echo "✅ Linux artifact exists" || echo "❌ Linux artifact missing"
 
       - name: Compare Canonical JSON (Byte-Identical)
         run: |
@@ -328,7 +331,7 @@ jobs:
     name: PIZ Sealing Evidence Generation
     runs-on: ubuntu-22.04
     needs: [piz-matrix, piz-compare]
-    if: always()
+    if: needs.piz-compare.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -367,6 +370,21 @@ jobs:
         with:
           name: piz-canon-ubuntu-22.04
           path: artifacts/linux
+
+      - name: Verify Downloaded Artifacts
+        run: |
+          set -euo pipefail
+          echo "=== Verifying downloaded artifacts ==="
+          ls -lahR artifacts/macos/ artifacts/linux/ || true
+          test -f artifacts/macos/piz_canon_full.jsonl || {
+            echo "[PIZ_SPEC_VIOLATION] macOS artifact not found after download"
+            exit 1
+          }
+          test -f artifacts/linux/piz_canon_full.jsonl || {
+            echo "[PIZ_SPEC_VIOLATION] Linux artifact not found after download"
+            exit 1
+          }
+          echo "✅ Both artifacts verified"
 
       - name: Run PIZ Sealing Evidence Generator
         env:
