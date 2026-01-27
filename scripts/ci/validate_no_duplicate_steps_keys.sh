@@ -12,6 +12,11 @@ if [ -f "${1:-}" ]; then
 else
     REPO_ROOT="${1:-$(git rev-parse --show-toplevel)}"
     WORKFLOW_FILE="${2:-$REPO_ROOT/.github/workflows/ssot-foundation-ci.yml}"
+    
+    # SSOT Foundation workflow removed - skip if file doesn't exist
+    if [ ! -f "$WORKFLOW_FILE" ]; then
+        exit 0
+    fi
 fi
 
 cd "$REPO_ROOT" || exit 1

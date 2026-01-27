@@ -8,8 +8,8 @@ set -euo pipefail
 WORKFLOW_FILE="${1:-.github/workflows/ssot-foundation-ci.yml}"
 
 if [ ! -f "$WORKFLOW_FILE" ]; then
-    echo "❌ Workflow file not found: $WORKFLOW_FILE"
-    exit 1
+    # SSOT Foundation workflow removed - exit gracefully
+    exit 0
 fi
 
 echo "🔍 Validating workflow job graph: $WORKFLOW_FILE"

@@ -96,18 +96,18 @@ else
     echo "   ✅ No TODO in constitution docs (excluding report files and documented TODO sections)"
 fi
 
-# FIXME anywhere in SSOT folders (exclude known report files, legacy docs, and rule definitions)
-echo "   4.2 Checking for FIXME in SSOT folders..."
+# FIXME anywhere in Constants folders (exclude known report files, legacy docs, and rule definitions)
+echo "   4.2 Checking for FIXME in Constants folders..."
 # Exclude FIXME that appears in rule definitions (like "TODO_FIXME" rule name)
-FIXME_IN_SSOT=$(grep -RIl "FIXME" Core/Constants Tests/Constants docs/constitution 2>/dev/null | \
+FIXME_IN_CONSTANTS=$(grep -RIl "FIXME" Core/Constants Tests/Constants docs/constitution 2>/dev/null | \
     grep -v "TEST_AND_CI_HARDENING_REPORT.md" | \
     grep -v "SHADOW_CROSSPLATFORM_REPORT.md" | \
     grep -v "FINAL_LOCAL_VERIFICATION_REPORT.md" | \
     grep -v "FP1_v" || true)
 # Further filter: only flag if FIXME appears outside of rule definitions (not "TODO_FIXME" or similar patterns)
 FIXME_REAL=0
-if [ -n "$FIXME_IN_SSOT" ]; then
-    for file in $FIXME_IN_SSOT; do
+if [ -n "$FIXME_IN_CONSTANTS" ]; then
+    for file in $FIXME_IN_CONSTANTS; do
         # Check if FIXME appears in actual comments/code, not just in rule definitions
         if grep -v "ruleId\|rule\|pattern.*FIXME\|TODO_FIXME" "$file" 2>/dev/null | grep -q "FIXME"; then
             FIXME_REAL=1
@@ -117,11 +117,11 @@ if [ -n "$FIXME_IN_SSOT" ]; then
 fi
 
 if [ $FIXME_REAL -eq 1 ]; then
-    echo "   ❌ Found FIXME in SSOT folders (outside rule definitions):"
-    echo "$FIXME_IN_SSOT" | sed 's/^/      /'
+    echo "   ❌ Found FIXME in Constants folders (outside rule definitions):"
+    echo "$FIXME_IN_CONSTANTS" | sed 's/^/      /'
     ERRORS=$((ERRORS + 1))
 else
-    echo "   ✅ No FIXME in SSOT folders (excluding report files and rule definitions)"
+    echo "   ✅ No FIXME in Constants folders (excluding report files and rule definitions)"
 fi
 
 # System color APIs in ColorSpaceConstants (exclude comments)
@@ -175,15 +175,6 @@ fi
 
 echo ""
 
-# 7. Verify workflow includes OPENSSL_ia32cap for ubuntu Gate 2 jobs
-echo "7. Verifying OPENSSL_ia32cap guardrails in workflow..."
-if grep -q "OPENSSL_ia32cap.*ubuntu-22.04" .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
-    echo "   ✅ OPENSSL_ia32cap guardrails found in workflow"
-else
-    echo "   ⚠️  OPENSSL_ia32cap guardrails not found (may be acceptable if not using ubuntu jobs)"
-fi
-
-echo ""
 
 # Summary
 if [ $ERRORS -eq 0 ]; then

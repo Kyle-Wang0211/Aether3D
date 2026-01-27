@@ -1,6 +1,6 @@
 #!/bin/bash
 # validate_guardrail_wiring.sh
-# Meta-validator: Ensures ALL required CI semantic guardrails are invoked by lint_workflows.sh and preflight_ssot_foundation.sh
+# Meta-validator: Ensures ALL required CI semantic guardrails are invoked by lint_workflows.sh
 
 set -euo pipefail
 
@@ -12,7 +12,7 @@ ERRORS=0
 echo "🔒 Validating Guardrail Wiring (Meta-Validator)"
 echo ""
 
-# Required guardrails that MUST be invoked by both lint_workflows.sh and preflight_ssot_foundation.sh
+# Required guardrails that MUST be invoked by lint_workflows.sh
 REQUIRED_GUARDRAILS=(
     "validate_concurrency_contexts.sh"
     "validate_concurrency_uniqueness.sh"
@@ -62,39 +62,6 @@ if [ $LINT_MISSING -eq 0 ]; then
 fi
 echo ""
 
-echo "Checking preflight_ssot_foundation.sh integration..."
-PREFLIGHT_MISSING=0
-for guardrail in "${REQUIRED_GUARDRAILS[@]}" "${OPTIONAL_GUARDRAILS[@]}"; do
-    if [ ! -f "scripts/ci/$guardrail" ]; then
-        # Skip if file doesn't exist (optional guardrails)
-        if [[ " ${REQUIRED_GUARDRAILS[@]} " =~ " ${guardrail} " ]]; then
-            echo "  ❌ REQUIRED: $guardrail not found in repo"
-            PREFLIGHT_MISSING=$((PREFLIGHT_MISSING + 1))
-            ERRORS=$((ERRORS + 1))
-        fi
-        continue
-    fi
-    
-    # Check if invoked in preflight_ssot_foundation.sh OR in workflow steps
-    if grep -q "$guardrail" scripts/ci/preflight_ssot_foundation.sh 2>/dev/null || \
-       grep -q "$guardrail" .github/workflows/ssot-foundation-ci.yml 2>/dev/null; then
-        echo "  ✅ $guardrail: Invoked in preflight_ssot_foundation.sh or workflow"
-    else
-        if [[ " ${REQUIRED_GUARDRAILS[@]} " =~ " ${guardrail} " ]]; then
-            echo "  ❌ REQUIRED: $guardrail not invoked in preflight_ssot_foundation.sh or workflow"
-            PREFLIGHT_MISSING=$((PREFLIGHT_MISSING + 1))
-            ERRORS=$((ERRORS + 1))
-        else
-            echo "  ⚠️  OPTIONAL: $guardrail not invoked in preflight_ssot_foundation.sh or workflow"
-        fi
-    fi
-done
-
-if [ $PREFLIGHT_MISSING -eq 0 ]; then
-    echo "  ✅ All required guardrails integrated in preflight_ssot_foundation.sh or workflow"
-fi
-echo ""
-
 if [ $ERRORS -eq 0 ]; then
     echo "✅ Guardrail wiring validation passed"
     exit 0
@@ -103,8 +70,5 @@ else
     echo ""
     echo "Fix: Ensure all required guardrail scripts are invoked by:"
     echo "  - scripts/ci/lint_workflows.sh (for all workflows)"
-    echo "  - scripts/ci/preflight_ssot_foundation.sh (for SSOT-specific guardrails)"
-    echo ""
-    echo "Missing wiring detected. This is a blocking SSOT failure."
     exit 1
 fi

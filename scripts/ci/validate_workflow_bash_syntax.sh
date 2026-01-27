@@ -44,9 +44,8 @@ trap "rm -rf $TEMP_DIR" EXIT
 # Tiered strict-mode policy configuration
 # SSOT workflows: hard error if missing 'set -euo pipefail'
 # Non-SSOT workflows: warning only (tolerant for legacy workflows)
-SSOT_WORKFLOWS=(
-    "ssot-foundation-ci.yml"
-)
+# SSOT Foundation workflow removed
+SSOT_WORKFLOWS=()
 NON_SSOT_WORKFLOWS=(
     "ci.yml"
     "ci-gate.yml"

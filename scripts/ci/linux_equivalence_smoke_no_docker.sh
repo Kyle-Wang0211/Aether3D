@@ -40,34 +40,7 @@ echo "1.2 Workflow Lint..."
 if bash scripts/ci/lint_workflows.sh >/dev/null 2>&1; then
     echo "   ✅ PASSED"
 else
-    echo "   ⚠️  FAILED (non-blocking for SSOT Foundation)"
-fi
-echo ""
-
-echo "1.3 Workflow Graph Validation..."
-if bash scripts/ci/validate_workflow_graph.sh .github/workflows/ssot-foundation-ci.yml; then
-    echo "   ✅ PASSED"
-else
-    echo "   ❌ FAILED"
-    ERRORS=$((ERRORS + 1))
-fi
-echo ""
-
-echo "1.4 SSOT Gate Test Selection Validation..."
-if bash scripts/ci/validate_ssot_gate_test_selection.sh; then
-    echo "   ✅ PASSED"
-else
-    echo "   ❌ FAILED"
-    ERRORS=$((ERRORS + 1))
-fi
-echo ""
-
-echo "1.5 SSOT Preflight..."
-if bash scripts/ci/preflight_ssot_foundation.sh; then
-    echo "   ✅ PASSED"
-else
-    echo "   ❌ FAILED"
-    ERRORS=$((ERRORS + 1))
+    echo "   ⚠️  FAILED (non-blocking)"
 fi
 echo ""
 

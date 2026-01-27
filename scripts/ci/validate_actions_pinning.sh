@@ -20,14 +20,9 @@ ERRORS=0
 WARNINGS=0
 
 # Determine if this is an SSOT workflow (strict) or non-SSOT (tolerant)
-SSOT_WORKFLOWS=("ssot-foundation-ci.yml")
+# SSOT Foundation workflow removed - treat as non-SSOT
+SSOT_WORKFLOWS=()
 IS_SSOT=0
-for ssot_wf in "${SSOT_WORKFLOWS[@]}"; do
-    if echo "$WORKFLOW_FILE" | grep -q "$ssot_wf"; then
-        IS_SSOT=1
-        break
-    fi
-done
 
 WORKFLOW_NAME=$(basename "$WORKFLOW_FILE")
 if [ $IS_SSOT -eq 1 ]; then
