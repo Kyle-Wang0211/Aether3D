@@ -10,6 +10,8 @@
 import Foundation
 import Aether3DCore
 
+// Import PIZConstants for canonical timestamp
+
 /// Fixture loader (shared with tests).
 struct PIZFixtureLoader {
     struct Fixture: Codable {
@@ -136,14 +138,23 @@ func main() {
     }
     
     for fixture in fixtures {
-        // Parse timestamp if provided
+        // Parse timestamp if provided, otherwise use canonical timestamp for deterministic output
+        // **Rule ID:** PIZ_SEMANTIC_PARITY_001
         let timestamp: Date
         if let timestampString = fixture.input.timestamp {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            timestamp = formatter.date(from: timestampString) ?? Date()
+            timestamp = formatter.date(from: timestampString) ?? {
+                // Use fixed canonical timestamp for deterministic output
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                return formatter.date(from: "1970-01-01T00:00:00Z")!
+            }()
         } else {
-            timestamp = Date()
+            // Use canonical timestamp for deterministic canonical JSON output
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            timestamp = formatter.date(from: "1970-01-01T00:00:00Z")!
         }
         
         // Run detector

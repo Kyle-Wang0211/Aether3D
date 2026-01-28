@@ -9,6 +9,8 @@
 
 import Foundation
 
+// Import PIZConstants for canonical timestamp
+
 /// Input validation result.
 public enum InputValidationResult {
     case valid
@@ -97,7 +99,12 @@ public struct PIZInputValidator {
                 reason: "Invalid input: \(reason)"
             ),
             assetId: "",
-            timestamp: Date(),
+            timestamp: {
+                // Use fixed canonical timestamp for deterministic output
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                return formatter.date(from: "1970-01-01T00:00:00Z")!
+            }(),
             computePhase: .finalized
         )
     }
