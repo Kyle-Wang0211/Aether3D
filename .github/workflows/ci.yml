@@ -443,16 +443,6 @@ jobs:
             exit 1
           fi
           echo "✅ Linux artifact verified"
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.PIZ_MACOS_ARTIFACT }}
-          path: artifacts/macos
-
-      - name: Download Linux Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.PIZ_LINUX_ARTIFACT }}
-          path: artifacts/linux
           
       - name: List Available Artifacts (Debug)
         run: |
