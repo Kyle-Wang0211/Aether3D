@@ -74,6 +74,31 @@ README.md is NOT a specification document.
   - **What breaks if violated:** Migration safety, data integrity
   - **Why exists:** Provides template for safe version migrations
 
+- [CI_HARDENING_CONSTITUTION.md](CI_HARDENING_CONSTITUTION.md) - CI hardening rules (IMMUTABLE)
+  - **Who depends:** All production code, all future PRs
+  - **What breaks if violated:** Test determinism, CI reliability
+  - **Why exists:** Prevents time-dependent bugs and CI flakiness
+
+- [MODULE_CONTRACT_EQUIVALENCE.md](MODULE_CONTRACT_EQUIVALENCE.md) - Domain contract validity rules
+  - **Who depends:** All future PRs defining domain-specific contracts
+  - **What breaks if violated:** Contract legitimacy, cross-PR consistency
+  - **Why exists:** Establishes what makes a PR's internal contract valid
+
+- [SPEC_DRIFT_HANDLING.md](SPEC_DRIFT_HANDLING.md) - Spec drift protocol
+  - **Who depends:** All PRs with plan-to-implementation differences
+  - **What breaks if violated:** Audit trail, change tracking
+  - **Why exists:** Legitimizes drift, prevents eternal debates
+
+- [LOCAL_PREFLIGHT_GATE.md](LOCAL_PREFLIGHT_GATE.md) - Local pre-flight checks
+  - **Who depends:** All contributors before pushing code
+  - **What breaks if violated:** CI queue pollution, wasted CI minutes
+  - **Why exists:** Catches obvious errors locally before push
+
+- [EMERGENCY_PROTOCOL.md](EMERGENCY_PROTOCOL.md) - Emergency bypass protocol
+  - **Who depends:** All engineers handling production emergencies
+  - **What breaks if violated:** Emergency response capability, accountability
+  - **Why exists:** Defines when and how constitutional rules may be bypassed
+
 ### PR#1 SSOT Foundation v1.1.1 Extension Documents
 
 - [CROSS_PLATFORM_CANONICALIZATION.md](CROSS_PLATFORM_CANONICALIZATION.md) - Canonicalization rules (v1.1.1)
