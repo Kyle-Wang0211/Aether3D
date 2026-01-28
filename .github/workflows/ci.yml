@@ -329,13 +329,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/piz
-          # Generate canonical output twice and compare for determinism
-          swift run PIZFixtureDumper > artifacts/piz/piz_canon_full_1.jsonl 2>&1 || {
-            echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed (first run)"
+          # Build once before determinism check to avoid SwiftPM build logs in output
+          swift build || {
+            echo "[PIZ_SPEC_VIOLATION] swift build failed"
             exit 1
           }
-          swift run PIZFixtureDumper > artifacts/piz/piz_canon_full_2.jsonl 2>&1 || {
+          # Generate canonical output twice and compare for determinism
+          # Use --skip-build to avoid SwiftPM build logs, redirect stderr to log file
+          swift run --skip-build PIZFixtureDumper 2> artifacts/piz/piz_fixture_dumper_run1.log > artifacts/piz/piz_canon_full_1.jsonl || {
+            echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed (first run)"
+            cat artifacts/piz/piz_fixture_dumper_run1.log
+            exit 1
+          }
+          swift run --skip-build PIZFixtureDumper 2> artifacts/piz/piz_fixture_dumper_run2.log > artifacts/piz/piz_canon_full_2.jsonl || {
             echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed (second run)"
+            cat artifacts/piz/piz_fixture_dumper_run2.log
             exit 1
           }
           
@@ -389,13 +397,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/piz
-          # Generate canonical output twice and compare for determinism
-          swift run PIZFixtureDumper > artifacts/piz/piz_canon_full_1.jsonl 2>&1 || {
-            echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed (first run)"
+          # Build once before determinism check to avoid SwiftPM build logs in output
+          swift build || {
+            echo "[PIZ_SPEC_VIOLATION] swift build failed"
             exit 1
           }
-          swift run PIZFixtureDumper > artifacts/piz/piz_canon_full_2.jsonl 2>&1 || {
+          # Generate canonical output twice and compare for determinism
+          # Use --skip-build to avoid SwiftPM build logs, redirect stderr to log file
+          swift run --skip-build PIZFixtureDumper 2> artifacts/piz/piz_fixture_dumper_run1.log > artifacts/piz/piz_canon_full_1.jsonl || {
+            echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed (first run)"
+            cat artifacts/piz/piz_fixture_dumper_run1.log
+            exit 1
+          }
+          swift run --skip-build PIZFixtureDumper 2> artifacts/piz/piz_fixture_dumper_run2.log > artifacts/piz/piz_canon_full_2.jsonl || {
             echo "[PIZ_SPEC_VIOLATION] PIZFixtureDumper failed (second run)"
+            cat artifacts/piz/piz_fixture_dumper_run2.log
             exit 1
           }
           
