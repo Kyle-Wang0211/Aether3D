@@ -1,7 +1,7 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-2.5
-// States: 8 | Transitions: 13 | FailureReasons: 14 | CancelReasons: 2
+// Contract Version: PR2-JSM-3.0
+// States: 8 | Transitions: 13 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import Foundation
