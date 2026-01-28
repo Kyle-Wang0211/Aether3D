@@ -42,3 +42,7 @@ server/.venv/
 
 # generated
 artifacts/
+
+# local verification artifacts
+ZSH_RPROMPT_FIX.md
+scripts/verify_zsh_fix.sh
