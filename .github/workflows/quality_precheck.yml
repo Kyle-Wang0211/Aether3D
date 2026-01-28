@@ -12,7 +12,7 @@ jobs:
   quality-gates:
     strategy:
       matrix:
-        os: [macos-14, ubuntu-22.04]
+        os: [macos-15, ubuntu-22.04]
         swift-version: ["5.9"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
@@ -137,7 +137,7 @@ jobs:
           bash scripts/check_build_warnings.sh
       
       - name: Run Quality Gates (macOS only)
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         env:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8

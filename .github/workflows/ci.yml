@@ -172,10 +172,10 @@ jobs:
   piz-matrix:
     name: PIZ Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 120
     strategy:
       matrix:
-        os: [macos-13, ubuntu-22.04]
+        os: [macos-15, ubuntu-22.04]
       fail-fast: false
     steps:
       - name: Checkout
@@ -219,7 +219,7 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
-        if: matrix.os != 'macos-13'
+        if: matrix.os != 'macos-15'
         run: |
           set -euo pipefail
           swift test --filter PIZ || {
@@ -232,7 +232,7 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
-        if: matrix.os == 'macos-13'
+        if: matrix.os == 'macos-15'
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30
@@ -252,7 +252,7 @@ jobs:
           TZ: UTC
           PIZ_FIXTURES_PATH: fixtures/piz/nominal
           PIZ_CANON_OUTPUT: artifacts/piz/piz_canon_full.jsonl
-        if: matrix.os != 'macos-13'
+        if: matrix.os != 'macos-15'
         run: |
           set -euo pipefail
           mkdir -p artifacts/piz
@@ -268,7 +268,7 @@ jobs:
           TZ: UTC
           PIZ_FIXTURES_PATH: fixtures/piz/nominal
           PIZ_CANON_OUTPUT: artifacts/piz/piz_canon_full.jsonl
-        if: matrix.os == 'macos-13'
+        if: matrix.os == 'macos-15'
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30
@@ -314,6 +314,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: piz-matrix
     if: needs.piz-matrix.result == 'success'
+    env:
+      PIZ_MACOS_ARTIFACT: piz-canon-macos-15
+      PIZ_LINUX_ARTIFACT: piz-canon-ubuntu-22.04
     steps:
       - name: Assert piz-matrix success (no-skip policy)
         run: |
@@ -330,13 +333,13 @@ jobs:
       - name: Download macOS Artifact
         uses: actions/download-artifact@v4
         with:
-          name: piz-canon-macos-13
+          name: ${{ env.PIZ_MACOS_ARTIFACT }}
           path: artifacts/macos
 
       - name: Download Linux Artifact
         uses: actions/download-artifact@v4
         with:
-          name: piz-canon-ubuntu-22.04
+          name: ${{ env.PIZ_LINUX_ARTIFACT }}
           path: artifacts/linux
           
       - name: List Available Artifacts (Debug)
@@ -389,6 +392,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: [piz-matrix, piz-compare]
     if: needs.piz-compare.result == 'success'
+    env:
+      PIZ_MACOS_ARTIFACT: piz-canon-macos-15
+      PIZ_LINUX_ARTIFACT: piz-canon-ubuntu-22.04
     steps:
       - name: Assert piz-compare success (no-skip policy)
         run: |
@@ -428,13 +434,13 @@ jobs:
       - name: Download macOS Canonical Artifact
         uses: actions/download-artifact@v4
         with:
-          name: piz-canon-macos-13
+          name: ${{ env.PIZ_MACOS_ARTIFACT }}
           path: artifacts/macos
 
       - name: Download Linux Canonical Artifact
         uses: actions/download-artifact@v4
         with:
-          name: piz-canon-ubuntu-22.04
+          name: ${{ env.PIZ_LINUX_ARTIFACT }}
           path: artifacts/linux
 
       - name: Verify Downloaded Artifacts
