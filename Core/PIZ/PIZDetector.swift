@@ -16,6 +16,7 @@
 
 import Foundation
 
+// Import PIZConstants for canonical timestamp
 #if canImport(CryptoKit)
 import CryptoKit
 #elseif canImport(Crypto)
@@ -46,11 +47,22 @@ public struct PIZDetector {
     public func detect(
         heatmap: [[Double]],
         assetId: String,
-        timestamp: Date = Date(),
+        timestamp: Date? = nil,
         computePhase: ComputePhase = .finalized,
         previousRecommendation: GateRecommendation? = nil,
         outputProfile: OutputProfile = .fullExplainability
     ) -> PIZReport {
+        // Use canonical timestamp if not provided (for deterministic canonical output)
+        // **Rule ID:** PIZ_SEMANTIC_PARITY_001
+        let canonicalTimestamp: Date
+        if let providedTimestamp = timestamp {
+            canonicalTimestamp = providedTimestamp
+        } else {
+            // Use fixed canonical timestamp for deterministic output
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            canonicalTimestamp = formatter.date(from: "1970-01-01T00:00:00Z")!
+        }
         // Input validation first
         // **Rule ID:** PIZ_INPUT_VALIDATION_001, PIZ_INPUT_VALIDATION_002
         switch PIZInputValidator.validate(heatmap) {
@@ -159,7 +171,7 @@ public struct PIZDetector {
                 regions: pizRegions,
                 recaptureSuggestion: recaptureSuggestion,
                 assetId: assetId,
-                timestamp: timestamp,
+                timestamp: canonicalTimestamp,
                 computePhase: computePhase
             )
         }

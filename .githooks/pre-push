@@ -1,3 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
-bash scripts/ci/piz_local_gate.sh
+# Git pre-push hook for PR1 PIZ Detection
+# WHY: Minimal hook that delegates to isolated bash script.
+#      No set -u here (only in bash script), no complex logic, just exec delegation.
+#
+# To install: bash scripts/dev/install-githooks.sh
+# To bypass: git push --no-verify (not recommended)
+
+# WHY: exec to push_preflight.sh ensures complete isolation from zsh hooks
+exec bash scripts/ci/push_preflight.sh
