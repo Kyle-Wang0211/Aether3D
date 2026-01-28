@@ -184,6 +184,41 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
+      - name: Select stable Xcode on macOS
+        if: matrix.os == 'macos-15'
+        run: |
+          set -euo pipefail
+          echo "=== Available Xcode installations ==="
+          ls -1 /Applications | grep -E '^Xcode(_[0-9]+\.[0-9]+)?\.app$' || echo "No Xcode found in /Applications"
+          echo ""
+
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "✅ Selecting /Applications/$app"
+              sudo xcode-select -s "/Applications/$app/Contents/Developer"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "=== Selecting Xcode (priority: 15.4 > 16.2 > 16.1 > 16.0 > default) ==="
+          pick "Xcode_15.4.app" || \
+          pick "Xcode_16.2.app" || \
+          pick "Xcode_16.1.app" || \
+          pick "Xcode_16.0.app" || \
+          pick "Xcode.app" || {
+            echo "❌ No Xcode found"
+            exit 1
+          }
+
+          echo ""
+          echo "=== Xcode version ==="
+          xcodebuild -version
+          echo ""
+          echo "=== Swift version ==="
+          swift --version
+
       - name: Setup Swift
         uses: swift-actions/setup-swift@v2
         with:
