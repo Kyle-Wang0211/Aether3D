@@ -8,6 +8,10 @@ on:
       - 'scripts/quality_gate.sh'
       - 'scripts/quality_lint.sh'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality-gates:
     strategy:

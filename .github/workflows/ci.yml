@@ -6,11 +6,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-# Prevent self-cancellation: allow multiple runs on same branch to complete
-# This ensures macOS jobs are not cancelled when user pushes again before CI finishes
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   preflight:
@@ -378,7 +376,7 @@ jobs:
       PIZ_MACOS_ARTIFACT: piz-canon-macos-15
       PIZ_LINUX_ARTIFACT: piz-canon-ubuntu-22.04
     steps:
-      - name: Guard: Assert piz-matrix success (no-skip policy)
+      - name: "Guard: Assert piz-matrix success (no-skip policy)"
         run: |
           set -euo pipefail
           if [ "${{ needs.piz-matrix.result }}" != "success" ]; then
@@ -500,7 +498,7 @@ jobs:
       PIZ_MACOS_ARTIFACT: piz-canon-macos-15
       PIZ_LINUX_ARTIFACT: piz-canon-ubuntu-22.04
     steps:
-      - name: Guard: Assert piz-compare success (no-skip policy)
+      - name: "Guard: Assert piz-compare success (no-skip policy)"
         run: |
           set -euo pipefail
           if [ "${{ needs.piz-compare.result }}" != "success" ]; then
