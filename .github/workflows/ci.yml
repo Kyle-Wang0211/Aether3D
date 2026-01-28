@@ -184,7 +184,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-      - name: Select stable Xcode on macOS
+      - name: Select stable Xcode on macOS (single Swift source)
         if: matrix.os == 'macos-15'
         run: |
           set -euo pipefail
@@ -196,30 +196,53 @@ jobs:
             local app="$1"
             if [ -d "/Applications/$app/Contents/Developer" ]; then
               echo "✅ Selecting /Applications/$app"
-              sudo xcode-select -s "/Applications/$app/Contents/Developer"
+              export DEVELOPER_DIR="/Applications/$app/Contents/Developer"
+              sudo xcode-select -s "$DEVELOPER_DIR"
               return 0
             fi
             return 1
           }
 
-          echo "=== Selecting Xcode (priority: 15.4 > 16.2 > 16.1 > 16.0 > default) ==="
-          pick "Xcode_15.4.app" || \
+          echo "=== Selecting Xcode (priority: 16.2 > 16.1 > 16.0 > default) ==="
+          # Note: macOS-15 runner uses Xcode 16.x by default; we prioritize stable versions
+          # WHY: Prevent BitwiseCopyable/swiftinterface errors from mixing Xcode SDK with external Swift toolchain
           pick "Xcode_16.2.app" || \
           pick "Xcode_16.1.app" || \
           pick "Xcode_16.0.app" || \
           pick "Xcode.app" || {
-            echo "❌ No Xcode found"
+            echo "[PIZ_SPEC_VIOLATION] No Xcode found in /Applications"
             exit 1
           }
 
+          export DEVELOPER_DIR="$(xcode-select -p)"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
           echo ""
           echo "=== Xcode version ==="
           xcodebuild -version
           echo ""
-          echo "=== Swift version ==="
-          swift --version
+          echo "=== Swift toolchain verification (xcrun) ==="
+          XCRUN_SWIFT="$(xcrun --find swift)"
+          echo "XCRUN_SWIFT: $XCRUN_SWIFT"
+          echo "DEVELOPER_DIR: $DEVELOPER_DIR"
+          echo ""
+          echo "=== Swift version (xcrun) ==="
+          xcrun swift --version
+          echo ""
+          echo "=== SDK path ==="
+          xcrun --show-sdk-path
+          echo ""
+          if [[ ! "$XCRUN_SWIFT" == "$DEVELOPER_DIR"* ]]; then
+            echo "[PIZ_SPEC_VIOLATION] macOS Swift toolchain mismatch: xcrun swift is not from selected Xcode"
+            echo "XCRUN_SWIFT: $XCRUN_SWIFT"
+            echo "DEVELOPER_DIR: $DEVELOPER_DIR"
+            echo "xcodebuild version:"
+            xcodebuild -version
+            exit 1
+          fi
+          echo "✅ Swift is from selected Xcode (verified via xcrun)"
 
-      - name: Setup Swift
+      - name: Setup Swift (Linux only)
+        if: matrix.os == 'ubuntu-22.04'
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: "5.9.2"
@@ -348,24 +371,78 @@ jobs:
     name: PIZ Cross-Platform Comparison
     runs-on: ubuntu-22.04
     needs: piz-matrix
-    if: needs.piz-matrix.result == 'success'
+    # WHY: always() ensures job runs even if upstream fails, then guard step fails explicitly
+    # This prevents "skipped" status and provides clear failure reason
+    if: always()
     env:
       PIZ_MACOS_ARTIFACT: piz-canon-macos-15
       PIZ_LINUX_ARTIFACT: piz-canon-ubuntu-22.04
     steps:
-      - name: Assert piz-matrix success (no-skip policy)
+      - name: Guard: Assert piz-matrix success (no-skip policy)
         run: |
           set -euo pipefail
           if [ "${{ needs.piz-matrix.result }}" != "success" ]; then
-            echo "[PIZ_SPEC_VIOLATION] piz-matrix not successful (result=${{ needs.piz-matrix.result }}). Skipped is forbidden."
+            echo "[PIZ_SPEC_VIOLATION] piz-matrix not successful (result=${{ needs.piz-matrix.result }}). Cannot compare."
+            echo "Upstream job status: ${{ needs.piz-matrix.result }}"
             exit 1
           fi
           echo "✅ piz-matrix succeeded, proceeding with comparison"
+
+      - name: Artifact presence proof (piz-compare)
+        run: |
+          set -euo pipefail
+          echo "=== Expected artifacts ==="
+          echo "macOS artifact: ${{ env.PIZ_MACOS_ARTIFACT }}"
+          echo "Linux artifact: ${{ env.PIZ_LINUX_ARTIFACT }}"
+          echo "Upstream piz-matrix result: ${{ needs.piz-matrix.result }}"
+          # Note: We cannot check artifact existence via API before download,
+          # but download step will fail with clear error if artifact is missing.
+          # This step serves as documentation of expected artifact names.
 
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Download macOS Artifact
+        continue-on-error: false
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.PIZ_MACOS_ARTIFACT }}
+          path: artifacts/macos
+        # If download fails, GitHub Actions will show clear error with artifact name
+
+      - name: Verify macOS artifact downloaded
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/macos/piz_canon_full.jsonl ]; then
+            echo "[PIZ_SPEC_VIOLATION] macOS artifact download failed or file missing"
+            echo "Expected artifact name: ${{ env.PIZ_MACOS_ARTIFACT }}"
+            echo "Expected file path: artifacts/macos/piz_canon_full.jsonl"
+            echo "Upstream piz-matrix result: ${{ needs.piz-matrix.result }}"
+            ls -lah artifacts/macos/ || echo "artifacts/macos/ directory does not exist"
+            exit 1
+          fi
+          echo "✅ macOS artifact verified"
+
+      - name: Download Linux Artifact
+        continue-on-error: false
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.PIZ_LINUX_ARTIFACT }}
+          path: artifacts/linux
+        # If download fails, GitHub Actions will show clear error with artifact name
+
+      - name: Verify Linux artifact downloaded
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/linux/piz_canon_full.jsonl ]; then
+            echo "[PIZ_SPEC_VIOLATION] Linux artifact download failed or file missing"
+            echo "Expected artifact name: ${{ env.PIZ_LINUX_ARTIFACT }}"
+            echo "Expected file path: artifacts/linux/piz_canon_full.jsonl"
+            echo "Upstream piz-matrix result: ${{ needs.piz-matrix.result }}"
+            ls -lah artifacts/linux/ || echo "artifacts/linux/ directory does not exist"
+            exit 1
+          fi
+          echo "✅ Linux artifact verified"
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.PIZ_MACOS_ARTIFACT }}
@@ -426,19 +503,34 @@ jobs:
     name: PIZ Sealing Evidence Generation
     runs-on: ubuntu-22.04
     needs: [piz-matrix, piz-compare]
-    if: needs.piz-compare.result == 'success'
+    # WHY: always() ensures job runs even if upstream fails, then guard step fails explicitly
+    # This prevents "skipped" status and provides clear failure reason
+    if: always()
     env:
       PIZ_MACOS_ARTIFACT: piz-canon-macos-15
       PIZ_LINUX_ARTIFACT: piz-canon-ubuntu-22.04
     steps:
-      - name: Assert piz-compare success (no-skip policy)
+      - name: Guard: Assert piz-compare success (no-skip policy)
         run: |
           set -euo pipefail
           if [ "${{ needs.piz-compare.result }}" != "success" ]; then
-            echo "[PIZ_SPEC_VIOLATION] piz-compare not successful (result=${{ needs.piz-compare.result }}). Skipped is forbidden."
+            echo "[PIZ_SPEC_VIOLATION] piz-compare not successful (result=${{ needs.piz-compare.result }}). Cannot generate evidence."
+            echo "Upstream job status: piz-compare=${{ needs.piz-compare.result }}, piz-matrix=${{ needs.piz-matrix.result }}"
             exit 1
           fi
           echo "✅ piz-compare succeeded, proceeding with evidence generation"
+
+      - name: Artifact presence proof (piz-sealing-evidence)
+        run: |
+          set -euo pipefail
+          echo "=== Expected artifacts ==="
+          echo "macOS artifact: ${{ env.PIZ_MACOS_ARTIFACT }}"
+          echo "Linux artifact: ${{ env.PIZ_LINUX_ARTIFACT }}"
+          echo "Upstream piz-compare result: ${{ needs.piz-compare.result }}"
+          echo "Upstream piz-matrix result: ${{ needs.piz-matrix.result }}"
+          # Note: We cannot check artifact existence via API before download,
+          # but download step will fail with clear error if artifact is missing.
+          # This step serves as documentation of expected artifact names.
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -467,31 +559,48 @@ jobs:
           swift build
 
       - name: Download macOS Canonical Artifact
+        continue-on-error: false
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.PIZ_MACOS_ARTIFACT }}
           path: artifacts/macos
+        # If download fails, GitHub Actions will show clear error with artifact name
+
+      - name: Verify macOS artifact downloaded (piz-sealing-evidence)
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/macos/piz_canon_full.jsonl ]; then
+            echo "[PIZ_SPEC_VIOLATION] macOS artifact download failed or file missing"
+            echo "Expected artifact name: ${{ env.PIZ_MACOS_ARTIFACT }}"
+            echo "Expected file path: artifacts/macos/piz_canon_full.jsonl"
+            echo "Upstream piz-compare result: ${{ needs.piz-compare.result }}"
+            echo "Upstream piz-matrix result: ${{ needs.piz-matrix.result }}"
+            ls -lah artifacts/macos/ || echo "artifacts/macos/ directory does not exist"
+            exit 1
+          fi
+          echo "✅ macOS artifact verified"
 
       - name: Download Linux Canonical Artifact
+        continue-on-error: false
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.PIZ_LINUX_ARTIFACT }}
           path: artifacts/linux
+        # If download fails, GitHub Actions will show clear error with artifact name
 
-      - name: Verify Downloaded Artifacts
+      - name: Verify Linux artifact downloaded (piz-sealing-evidence)
         run: |
           set -euo pipefail
-          echo "=== Verifying downloaded artifacts ==="
-          ls -lahR artifacts/macos/ artifacts/linux/ || true
-          test -f artifacts/macos/piz_canon_full.jsonl || {
-            echo "[PIZ_SPEC_VIOLATION] macOS artifact not found after download"
+          if [ ! -f artifacts/linux/piz_canon_full.jsonl ]; then
+            echo "[PIZ_SPEC_VIOLATION] Linux artifact download failed or file missing"
+            echo "Expected artifact name: ${{ env.PIZ_LINUX_ARTIFACT }}"
+            echo "Expected file path: artifacts/linux/piz_canon_full.jsonl"
+            echo "Upstream piz-compare result: ${{ needs.piz-compare.result }}"
+            echo "Upstream piz-matrix result: ${{ needs.piz-matrix.result }}"
+            ls -lah artifacts/linux/ || echo "artifacts/linux/ directory does not exist"
             exit 1
-          }
-          test -f artifacts/linux/piz_canon_full.jsonl || {
-            echo "[PIZ_SPEC_VIOLATION] Linux artifact not found after download"
-            exit 1
-          }
-          echo "✅ Both artifacts verified"
+          fi
+          echo "✅ Linux artifact verified"
 
       - name: Run PIZ Sealing Evidence Generator
         env:
