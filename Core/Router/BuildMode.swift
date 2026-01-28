@@ -8,7 +8,7 @@
 import Foundation
 
 /// 构建模式
-enum BuildMode {
+public enum BuildMode: String, Codable, CaseIterable, Sendable {
     /// Enter 模式：快速进入，T+1-2s 内显示可漫游结果
     case enter
     
@@ -17,5 +17,16 @@ enum BuildMode {
     
     /// Fail-soft 模式：降级输出照片空间
     case failSoft
+    
+    // MARK: - PR1 C-Class Capacity Control Modes
+    
+    /// Normal mode: standard admission behavior
+    case NORMAL
+    
+    /// Damping mode: SOFT_LIMIT triggered, more selective admission
+    case DAMPING
+    
+    /// Saturated mode: HARD_LIMIT triggered, all admissions rejected
+    case SATURATED
 }
 

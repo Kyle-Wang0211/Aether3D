@@ -1,7 +1,7 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-3.0
-// States: 8 | Transitions: 13 | FailureReasons: 17 | CancelReasons: 3
+// Contract Version: PR2-JSM-3.0-merged
+// States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import Foundation
@@ -139,7 +139,7 @@ public final class ProgressEstimator {
         case .queued: return .processing
         case .processing: return .packaging
         case .packaging: return nil  // completed is terminal
-        case .completed, .failed, .cancelled: return nil
+        case .completed, .failed, .cancelled, .capacitySaturated: return nil
         }
     }
 }

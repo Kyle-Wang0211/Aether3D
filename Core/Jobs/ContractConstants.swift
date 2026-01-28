@@ -1,7 +1,7 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-3.0
-// States: 8 | Transitions: 13 | FailureReasons: 17 | CancelReasons: 3
+// Contract Version: PR2-JSM-3.0-merged
+// States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import Foundation
@@ -11,21 +11,21 @@ public enum ContractConstants {
     // MARK: - Version
     
     /// Contract version identifier
-    public static let CONTRACT_VERSION = "PR2-JSM-3.0"
+    public static let CONTRACT_VERSION = "PR2-JSM-3.0-merged"
     
     // MARK: - Counts (MUST match actual enum counts)
     
-    /// Total number of job states
-    public static let STATE_COUNT = 8
+    /// Total number of job states (PR1 C-Class: +1 for CAPACITY_SATURATED)
+    public static let STATE_COUNT = 9
     
-    /// Number of legal state transitions
-    public static let LEGAL_TRANSITION_COUNT = 13
+    /// Number of legal state transitions (PR1: 14, PR2: +1 for PACKAGING->CAPACITY_SATURATED = 15)
+    public static let LEGAL_TRANSITION_COUNT = 15
     
-    /// Number of illegal state transitions (8 × 8 - 13 = 51)
-    public static let ILLEGAL_TRANSITION_COUNT = 51
+    /// Number of illegal state transitions (9 × 9 - 15 = 66)
+    public static let ILLEGAL_TRANSITION_COUNT = 66
     
-    /// Total number of possible state pairs (8 × 8 = 64)
-    public static let TOTAL_STATE_PAIRS = 64
+    /// Total number of possible state pairs (9 × 9 = 81)
+    public static let TOTAL_STATE_PAIRS = 81
     
     /// Total number of failure reasons (v3.0: +3)
     public static let FAILURE_REASON_COUNT = 17

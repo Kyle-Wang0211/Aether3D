@@ -1,0 +1,26 @@
+{
+  "testCases": [
+    {
+      "name": "single_cell_gray",
+      "input": {
+        "changes": [
+          {"cellIndex": 100, "newState": 1}
+        ]
+      },
+      "expectedBytesHex": "010000006400000001",
+      "expectedSHA256": "ed11ae45e914944f118473ca52d26c0e303ef729bf1f20b22be810f5b962e494"
+    },
+    {
+      "name": "two_cells_mixed",
+      "input": {
+        "changes": [
+          {"cellIndex": 256, "newState": 2},
+          {"cellIndex": 512, "newState": 1}
+        ]
+      },
+      "expectedBytesHex": "0200000000010000020002000001",
+      "expectedSHA256": "84e7a44038857ba5254a3edbb5917a5ca88f58facf5ab037fa321fccf1be39a0"
+    }
+  ]
+}
+

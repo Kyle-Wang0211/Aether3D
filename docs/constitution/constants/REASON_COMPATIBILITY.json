@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1",
+  "description": "Reason compatibility rules to prevent contradictory combinations",
+  "precedenceConstraints": [
+    {
+      "rule": "capture_occluded_outranks_missing",
+      "description": "capture_occluded must outrank missing/boundary in primaryReason selection",
+      "higherPriority": "PRC_CAPTURE_OCCLUDED",
+      "lowerPriority": ["PRC_BOUNDARY_UNCERTAIN"],
+      "rationale": "Hand occlusion anti-mislead rule"
+    }
+  ],
+  "allowedSecondaryReasons": {
+    "PRC_CAPTURE_OCCLUDED": ["PRC_BOUNDARY_UNCERTAIN"],
+    "PRC_STRUCTURAL_OCCLUSION_CONFIRMED": ["PRC_BOUNDARY_UNCERTAIN"],
+    "PRC_SPECULAR": ["PRC_BOUNDARY_UNCERTAIN"],
+    "PRC_TRANSPARENT_SEETHROUGH": ["PRC_BOUNDARY_UNCERTAIN"]
+  },
+  "disallowedCombinations": [
+    {
+      "primary": "PRC_NORMAL",
+      "secondary": ["PRC_CAPTURE_OCCLUDED", "PRC_STRUCTURAL_OCCLUSION_CONFIRMED"],
+      "reason": "Normal cannot coexist with occlusion"
+    }
+  ],
+  "gapTypeMapping": {
+    "true_missing": ["PRC_BOUNDARY_UNCERTAIN"],
+    "capture_occluded": ["PRC_CAPTURE_OCCLUDED"],
+    "structural_occluded": ["PRC_STRUCTURAL_OCCLUSION_CONFIRMED"],
+    "boundary_uncertain": ["PRC_BOUNDARY_UNCERTAIN"],
+    "not_applicable": ["PRC_NORMAL"]
+  }
+}

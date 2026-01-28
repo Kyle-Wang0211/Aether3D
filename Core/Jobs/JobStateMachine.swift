@@ -1,7 +1,7 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-3.0
-// States: 8 | Transitions: 13 | FailureReasons: 17 | CancelReasons: 3
+// Contract Version: PR2-JSM-3.0-merged
+// States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import Foundation
@@ -84,7 +84,7 @@ public final class JobStateMachine {
         let to: JobState
     }
     
-    /// Legal transitions (13 total).
+    /// Legal transitions (15 total: PR1 adds PROCESSING->CAPACITY_SATURATED, PR2 adds PACKAGING->CAPACITY_SATURATED).
     private static let legalTransitions: Set<Transition> = [
         Transition(from: .pending, to: .uploading),
         Transition(from: .pending, to: .cancelled),
@@ -97,8 +97,10 @@ public final class JobStateMachine {
         Transition(from: .processing, to: .packaging),
         Transition(from: .processing, to: .failed),
         Transition(from: .processing, to: .cancelled),
+        Transition(from: .processing, to: .capacitySaturated),  // PR1 C-Class: capacity saturated transition
         Transition(from: .packaging, to: .completed),
         Transition(from: .packaging, to: .failed),
+        Transition(from: .packaging, to: .capacitySaturated),   // PR2: packaging can also saturate capacity
     ]
     
     /// Failure reason binding map (which reasons are allowed from which states).

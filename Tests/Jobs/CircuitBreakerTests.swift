@@ -1,7 +1,7 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-3.0
-// States: 8 | Transitions: 13 | FailureReasons: 17 | CancelReasons: 3
+// Contract Version: PR2-JSM-3.0-merged
+// States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import XCTest

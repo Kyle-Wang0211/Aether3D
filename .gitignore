@@ -27,8 +27,22 @@ build/
 .build/
 .swiftpm/
 
+ fix/pr1-system-adjust
+# python venv
+server/.venv/
+.venv/
+venv/
+
 # Python venv
 server/.venv/
 
 # macOS Finder duplicate file suffix: " 2"
 *\ 2.*
+ main
+
+# generated
+artifacts/
+
+# local verification artifacts
+ZSH_RPROMPT_FIX.md
+scripts/verify_zsh_fix.sh
