@@ -85,15 +85,16 @@ jobs:
 
       - name: Label SSOT changes
         if: github.event_name == 'pull_request'
+        continue-on-error: true  # Don't fail the job if labeling fails (permission issues)
         uses: actions/github-script@v7
         with:
           script: |
             const { execSync } = require('child_process');
-            
+
             // Get changed files
             const baseRef = '${{ github.base_ref }}';
             const files = execSync(`git diff --name-only origin/${baseRef}...HEAD`).toString().split('\n');
-            
+
             const ssotPrefixes = [
               'Core/Constants/',
               'Core/SSOT/',
@@ -102,26 +103,31 @@ jobs:
               'scripts/ci/',
               'scripts/hooks/'
             ];
-            
+
             const hasSSOTChanges = files.some(f =>
               ssotPrefixes.some(p => f.startsWith(p))
             );
-            
+
             if (hasSSOTChanges) {
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                labels: ['ssot-change', 'requires-review']
-              });
-              
-              // Add comment
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: '⚠️ **SSOT Change Detected**\n\nThis PR modifies SSOT-protected files. Please ensure:\n\n- [ ] All commits have `SSOT-Change: yes` footer\n- [ ] Changes are reviewed by CODEOWNERS\n- [ ] No bypass attempts detected'
-              });
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  labels: ['ssot-change', 'requires-review']
+                });
+
+                // Add comment (only if labeling succeeded)
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: '⚠️ **SSOT Change Detected**\n\nThis PR modifies SSOT-protected files. Please ensure:\n\n- [ ] All commits have `SSOT-Change: yes` footer\n- [ ] Changes are reviewed by CODEOWNERS\n- [ ] No bypass attempts detected'
+                });
+              } catch (error) {
+                console.log('Warning: Could not add labels/comments (may lack permissions):', error.message);
+                // Non-blocking - labeling is informational only
+              }
             }
 
   preflight:
