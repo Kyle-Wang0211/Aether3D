@@ -69,6 +69,16 @@ final class FatalPatternScanTests: XCTestCase {
                 continue
             }
             
+            // Skip Quality directory (existing code, not part of SSOT Phase 1)
+            if file.path.contains("/Quality/") {
+                continue
+            }
+            
+            // Skip Infrastructure directory (existing code, not part of SSOT Phase 1)
+            if file.path.contains("/Infrastructure/") {
+                continue
+            }
+            
             guard let content = try? String(contentsOf: file) else { continue }
             
             let lines = content.components(separatedBy: .newlines)

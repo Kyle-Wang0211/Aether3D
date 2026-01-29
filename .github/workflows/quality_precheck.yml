@@ -1,0 +1,380 @@
+name: Quality Pre-check Gates
+
+on:
+  pull_request:
+    paths:
+      - 'Core/Quality/**'
+      - 'Tests/QualityPreCheck/**'
+      - 'scripts/quality_gate.sh'
+      - 'scripts/quality_lint.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gates:
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-22.04]
+        swift-version: ["5.9"]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    # Note: ubuntu-22.04 is pinned because setup-swift@v1 does not support ubuntu-24.04
+    # This prevents silent breakage when ubuntu-latest updates to an unsupported version
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Select stable Xcode on macOS (single Swift source)
+        if: matrix.os == 'macos-15'
+        run: |
+          set -euo pipefail
+          echo "=== Available Xcode installations ==="
+          ls -1 /Applications | grep -E '^Xcode(_[0-9]+\.[0-9]+)?\.app$' || echo "No Xcode found in /Applications"
+          echo ""
+
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "✅ Selecting /Applications/$app"
+              export DEVELOPER_DIR="/Applications/$app/Contents/Developer"
+              sudo xcode-select -s "$DEVELOPER_DIR"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "=== Selecting Xcode (priority: 16.2 > 16.1 > 16.0 > default) ==="
+          # Note: macOS-15 runner uses Xcode 16.x by default; we prioritize stable versions
+          # WHY: Prevent BitwiseCopyable/swiftinterface errors from mixing Xcode SDK with external Swift toolchain
+          pick "Xcode_16.2.app" || \
+          pick "Xcode_16.1.app" || \
+          pick "Xcode_16.0.app" || \
+          pick "Xcode.app" || {
+            echo "[PIZ_SPEC_VIOLATION] No Xcode found in /Applications"
+            exit 1
+          }
+
+          export DEVELOPER_DIR="$(xcode-select -p)"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          echo ""
+          echo "=== Xcode version ==="
+          xcodebuild -version
+          echo ""
+          echo "=== Swift toolchain verification (xcrun) ==="
+          XCRUN_SWIFT="$(xcrun --find swift)"
+          echo "XCRUN_SWIFT: $XCRUN_SWIFT"
+          echo "DEVELOPER_DIR: $DEVELOPER_DIR"
+          echo ""
+          echo "=== Swift version (xcrun) ==="
+          xcrun swift --version
+          echo ""
+          echo "=== SDK path ==="
+          xcrun --show-sdk-path
+          echo ""
+          if [[ ! "$XCRUN_SWIFT" == "$DEVELOPER_DIR"* ]]; then
+            echo "[PIZ_SPEC_VIOLATION] macOS Swift toolchain mismatch: xcrun swift is not from selected Xcode"
+            echo "XCRUN_SWIFT: $XCRUN_SWIFT"
+            echo "DEVELOPER_DIR: $DEVELOPER_DIR"
+            echo "xcodebuild version:"
+            xcodebuild -version
+            exit 1
+          fi
+          echo "✅ Swift is from selected Xcode (verified via xcrun)"
+      
+      - name: Setup Swift (Linux only)
+        if: matrix.os == 'ubuntu-22.04'
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: ${{ matrix.swift-version }}
+          skip-verify-signature: true
+      
+      - name: Install system deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
+      
+      - name: Platform Diagnostics
+        run: |
+          set -euo pipefail
+          echo "=== Platform Information ==="
+          uname -a
+          swift --version
+          swift package describe || echo "Package description not available"
+          echo "============================"
+      
+      - name: Platform Drift Guard
+        run: |
+          set -euo pipefail
+          echo "=== Checking for unconditional Apple framework imports ==="
+          
+          # List of Apple-only frameworks that must be conditionally imported
+          # Use heredoc to avoid quoting issues
+          cat > /tmp/drift_guard.awk <<'AWK_EOF'
+          BEGIN {
+            frameworks[1] = "CoreMotion"
+            frameworks[2] = "CoreGraphics"
+            frameworks[3] = "UIKit"
+            frameworks[4] = "AppKit"
+            frameworks[5] = "AVFoundation"
+            frameworks[6] = "CoreLocation"
+            frameworks[7] = "Metal"
+            frameworks[8] = "ARKit"
+            frameworks[9] = "SceneKit"
+            frameworks[10] = "RealityKit"
+            frameworks[11] = "Accelerate"
+            frameworks[12] = "CryptoKit"
+            frameworks[13] = "SQLite3"
+            numFrameworks = 13
+            found = 0
+          }
+          /^[[:space:]]*#if canImport\(/ {
+            guarded = 1
+            for (i = 1; i <= numFrameworks; i++) {
+              if (index($0, frameworks[i]) > 0) {
+                guardedFramework = frameworks[i]
+                break
+              }
+            }
+            next
+          }
+          /^[[:space:]]*#endif/ {
+            guarded = 0
+            guardedFramework = ""
+            next
+          }
+          /^[[:space:]]*import[[:space:]]+/ {
+            for (i = 1; i <= numFrameworks; i++) {
+              if (match($0, "^[[:space:]]*import[[:space:]]+" frameworks[i] "[^a-zA-Z]")) {
+                if (!guarded || guardedFramework != frameworks[i]) {
+                  print FILENAME ":" NR ":" $0
+                  found = 1
+                  break
+                }
+              }
+            }
+          }
+          END {
+            exit found ? 1 : 0
+          }
+          AWK_EOF
+          
+          # Run the guard check
+          set +e
+          UNGUARDED_IMPORTS=$(find Core/Quality/ -name "*.swift" -type f -exec awk -f /tmp/drift_guard.awk {} + 2>&1)
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ] || [ -n "$UNGUARDED_IMPORTS" ]; then
+            echo "FAIL: Found unconditional Apple framework imports (must be guarded with #if canImport(<Framework>)):"
+            echo "$UNGUARDED_IMPORTS"
+            exit 1
+          fi
+          
+          echo "✅ Platform drift guard passed (checked: CoreMotion, CoreGraphics, UIKit, AppKit, AVFoundation, CoreLocation, Metal, ARKit, SceneKit, RealityKit, Accelerate, CryptoKit, SQLite3)"
+      
+      - name: Build (All Platforms)
+        env:
+          LC_ALL: C
+          LANG: C
+        run: |
+          set -euo pipefail
+          set -x
+          chmod +x scripts/*.sh scripts/hooks/pre-push scripts/install_hooks.sh || true
+          cd "$(git rev-parse --show-toplevel)"
+          swift package clean
+          swift build
+      
+      - name: Check Build Warnings
+        run: |
+          set -euo pipefail
+          set -x
+          cd "$(git rev-parse --show-toplevel)"
+          bash scripts/check_build_warnings.sh
+      
+      - name: Run Quality Gates (macOS only)
+        if: matrix.os == 'macos-15'
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+        run: |
+          set -euo pipefail
+          set -x
+          cd "$(git rev-parse --show-toplevel)"
+          bash ./scripts/quality_gate.sh
+      
+      - name: Run Platform-Safe Tests (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          set -x
+          cd "$(git rev-parse --show-toplevel)"
+          chmod +x scripts/*.sh scripts/hooks/* || true
+          
+          # List all tests to verify compilation
+          echo "=== Listing available tests ==="
+          swift test --list-tests || echo "Test listing failed (may be acceptable)"
+          
+          # Run platform-safe tests (explicit filters, no discovery dependency)
+          echo "=== Running platform-safe tests ==="
+          
+          # WhiteCommitTests: platform-agnostic (SQLite-based)
+          echo "Running WhiteCommitTests..."
+          set +e
+          WHITE_TEST_OUTPUT=$(swift test --filter WhiteCommitTests 2>&1)
+          WHITE_TEST_EXIT=$?
+          set -e
+          if [ $WHITE_TEST_EXIT -ne 0 ]; then
+            if echo "$WHITE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: WhiteCommitTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: WhiteCommitTests failed"
+              echo "$WHITE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          fi
+          echo "✅ WhiteCommitTests passed"
+          
+          # Fixture tests: platform-agnostic (JSON parsing)
+          echo "Running QualityPreCheckFixtures..."
+          set +e
+          FIXTURE_TEST_OUTPUT=$(swift test --filter QualityPreCheckFixtures 2>&1)
+          FIXTURE_TEST_EXIT=$?
+          set -e
+          if [ $FIXTURE_TEST_EXIT -ne 0 ]; then
+            if echo "$FIXTURE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "⚠️  QualityPreCheckFixtures matched 0 tests (acceptable if fixtures tested elsewhere)"
+            else
+              echo "FAIL: QualityPreCheckFixtures failed"
+              echo "$FIXTURE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ QualityPreCheckFixtures passed"
+          fi
+          
+          # Determinism tests: platform-agnostic (math/encoding)
+          echo "Running QualityPreCheckDeterminism..."
+          set +e
+          DETERMINISM_TEST_OUTPUT=$(swift test --filter QualityPreCheckDeterminism 2>&1)
+          DETERMINISM_TEST_EXIT=$?
+          set -e
+          if [ $DETERMINISM_TEST_EXIT -ne 0 ]; then
+            if echo "$DETERMINISM_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "⚠️  QualityPreCheckDeterminism matched 0 tests (acceptable if tested elsewhere)"
+            else
+              echo "FAIL: QualityPreCheckDeterminism failed"
+              echo "$DETERMINISM_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ QualityPreCheckDeterminism passed"
+          fi
+          
+          # DeterministicTriangulatorPlatformTests: cross-platform geometry
+          echo "Running DeterministicTriangulatorPlatformTests..."
+          set +e
+          TRIANG_TEST_OUTPUT=$(swift test --filter DeterministicTriangulatorPlatformTests 2>&1)
+          TRIANG_TEST_EXIT=$?
+          set -e
+          if [ $TRIANG_TEST_EXIT -ne 0 ]; then
+            if echo "$TRIANG_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: DeterministicTriangulatorPlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: DeterministicTriangulatorPlatformTests failed"
+              echo "$TRIANG_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ DeterministicTriangulatorPlatformTests passed"
+          fi
+          
+          # PoseSnapshotTests: cross-platform pose
+          echo "Running PoseSnapshotTests..."
+          set +e
+          POSE_TEST_OUTPUT=$(swift test --filter PoseSnapshotTests 2>&1)
+          POSE_TEST_EXIT=$?
+          set -e
+          if [ $POSE_TEST_EXIT -ne 0 ]; then
+            if echo "$POSE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "⚠️  PoseSnapshotTests matched 0 tests (acceptable if tested elsewhere)"
+            else
+              echo "FAIL: PoseSnapshotTests failed"
+              echo "$POSE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ PoseSnapshotTests passed"
+          fi
+          
+          # BrightnessAnalyzerPlatformTests: cross-platform brightness (required)
+          echo "Running BrightnessAnalyzerPlatformTests..."
+          set +e
+          BRIGHTNESS_TEST_OUTPUT=$(swift test --filter BrightnessAnalyzerPlatformTests 2>&1)
+          BRIGHTNESS_TEST_EXIT=$?
+          set -e
+          if [ $BRIGHTNESS_TEST_EXIT -ne 0 ]; then
+            if echo "$BRIGHTNESS_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: BrightnessAnalyzerPlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: BrightnessAnalyzerPlatformTests failed"
+              echo "$BRIGHTNESS_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ BrightnessAnalyzerPlatformTests passed"
+          fi
+          
+          # SHA256UtilityPlatformTests: cross-platform SHA-256 hashing (required)
+          echo "Running SHA256UtilityPlatformTests..."
+          set +e
+          SHA256_TEST_OUTPUT=$(swift test --filter SHA256UtilityPlatformTests 2>&1)
+          SHA256_TEST_EXIT=$?
+          set -e
+          if [ $SHA256_TEST_EXIT -ne 0 ]; then
+            if echo "$SHA256_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: SHA256UtilityPlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: SHA256UtilityPlatformTests failed"
+              echo "$SHA256_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ SHA256UtilityPlatformTests passed"
+          fi
+          
+          # SQLitePlatformTests: cross-platform SQLite linkage (required)
+          echo "Running SQLitePlatformTests..."
+          set +e
+          SQLITE_TEST_OUTPUT=$(swift test --filter SQLitePlatformTests 2>&1)
+          SQLITE_TEST_EXIT=$?
+          set -e
+          if [ $SQLITE_TEST_EXIT -ne 0 ]; then
+            if echo "$SQLITE_TEST_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+              echo "FAIL: SQLitePlatformTests matched 0 tests (required suite)"
+              exit 1
+            else
+              echo "FAIL: SQLitePlatformTests failed"
+              echo "$SQLITE_TEST_OUTPUT" | tail -50
+              exit 1
+            fi
+          else
+            echo "✅ SQLitePlatformTests passed"
+          fi
+          
+          echo "=== All platform-safe tests completed ==="
+

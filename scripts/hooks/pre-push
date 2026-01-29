@@ -1,0 +1,22 @@
+#!/bin/bash
+# Pre-push hook for Quality Pre-check gates
+# PR#5.1: Repo-root robust hook installation
+
+set -euo pipefail
+
+# Resolve repo root via git (most reliable method)
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "ERROR: Cannot resolve repository root. Are you in a git repository?" >&2
+    exit 1
+}
+
+# Verify quality_gate.sh exists
+GATE_SCRIPT="$REPO_ROOT/scripts/quality_gate.sh"
+if [ ! -f "$GATE_SCRIPT" ]; then
+    echo "ERROR: Quality gate script not found: $GATE_SCRIPT" >&2
+    exit 1
+fi
+
+# Run quality gates
+exec "$GATE_SCRIPT"
+

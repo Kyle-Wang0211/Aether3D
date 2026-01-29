@@ -46,8 +46,48 @@ public let INVARIANT_POLICIES: [InvariantViolationPolicy] = [
         invariantName: "policy_hash_mismatch",
         severity: .fatal,
         responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "profile_not_closed_set",
+        severity: .fatal,
+        responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "profile_runtime_switch",
+        severity: .fatal,
+        responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "grid_resolution_not_in_closed_set",
+        severity: .fatal,
+        responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "patch_size_out_of_profile_range",
+        severity: .fatal,
+        responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "dynamic_precision",
+        severity: .fatal,
+        responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "float_in_identity",
+        severity: .fatal,
+        responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "evidence_budget_exceeded",
+        severity: .hardFail,
+        responseAction: .halt
+    ),
+    InvariantViolationPolicy(
+        invariantName: "micro_scale_direct_display",
+        severity: .hardFail,
+        responseAction: .halt
     )
 ]
 
-public let GOLDEN_POLICY_HASH: String = "50837f3d89aa2d5f39ed8a5793b801f4bd209ba2263d9bf0d66c97663a710f1e"
+public let GOLDEN_POLICY_HASH: String = "71398104e0d1f6fcecd381d893fd5c3a0f49d4740a86740030f7874b2ddf86bf"
 

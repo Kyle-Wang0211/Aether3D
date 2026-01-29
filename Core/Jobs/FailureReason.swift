@@ -1,12 +1,12 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-2.5
-// States: 8 | Transitions: 13 | FailureReasons: 14 | CancelReasons: 2
+// Contract Version: PR2-JSM-3.0-merged
+// States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import Foundation
 
-/// Failure reason enumeration (14 reasons).
+/// Failure reason enumeration (17 reasons).
 public enum FailureReason: String, Codable, CaseIterable {
     case networkError = "network_error"
     case uploadInterrupted = "upload_interrupted"
@@ -20,6 +20,9 @@ public enum FailureReason: String, Codable, CaseIterable {
     case trainingFailed = "training_failed"
     case gpuOutOfMemory = "gpu_out_of_memory"
     case processingTimeout = "processing_timeout"
+    case heartbeatTimeout = "heartbeat_timeout"     // NEW: v3.0
+    case stalledProcessing = "stalled_processing"   // NEW: v3.0
+    case resourceExhausted = "resource_exhausted"   // NEW: v3.0
     case packagingFailed = "packaging_failed"
     case internalError = "internal_error"
     
@@ -28,10 +31,12 @@ public enum FailureReason: String, Codable, CaseIterable {
         switch self {
         case .networkError, .uploadInterrupted, .serverUnavailable,
              .trainingFailed, .gpuOutOfMemory, .processingTimeout,
+             .heartbeatTimeout, .stalledProcessing,  // NEW: retryable
              .packagingFailed, .internalError:
             return true
         case .invalidVideoFormat, .videoTooShort, .videoTooLong,
-             .insufficientFrames, .poseEstimationFailed, .lowRegistrationRate:
+             .insufficientFrames, .poseEstimationFailed, .lowRegistrationRate,
+             .resourceExhausted:  // NEW: not retryable (permanent)
             return false
         }
     }
@@ -44,7 +49,9 @@ public enum FailureReason: String, Codable, CaseIterable {
         case .serverUnavailable, .invalidVideoFormat, .videoTooShort,
              .videoTooLong, .insufficientFrames, .poseEstimationFailed,
              .lowRegistrationRate, .trainingFailed, .gpuOutOfMemory,
-             .processingTimeout, .packagingFailed, .internalError:
+             .processingTimeout, .heartbeatTimeout, .stalledProcessing,  // NEW
+             .resourceExhausted,  // NEW
+             .packagingFailed, .internalError:
             return true
         }
     }

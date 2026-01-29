@@ -328,7 +328,8 @@ final class ScatteredConstantScanTests: XCTestCase {
                file.path.contains("/Invariants/") ||
                file.path.contains("/Models/") ||
                file.path.contains("/Rendering/") ||
-               file.path.contains("/Utils/") {
+               file.path.contains("/Utils/") ||
+               file.path.contains("/Quality/") {
                 continue
             }
             

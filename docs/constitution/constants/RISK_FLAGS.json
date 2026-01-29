@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1",
+  "entries": [
+    {
+      "code": "RISK_SYNTHETIC_SUSPECTED",
+      "rawValue": "SYNTHETIC_SUSPECTED",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "疑似 CGI/合成数据",
+      "blockLevel": "none",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_NO_ORIGINAL_FRAMES",
+      "rawValue": "NO_ORIGINAL_FRAMES",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "无原始帧数据",
+      "blockLevel": "block_strict",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_EXTERNAL_MESH_IMPORT",
+      "rawValue": "EXTERNAL_MESH_IMPORT",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "外部 mesh 导入",
+      "blockLevel": "block_trade",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_TIMESTAMP_ANOMALY",
+      "rawValue": "TIMESTAMP_ANOMALY",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "时间戳异常",
+      "blockLevel": "none",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_CLOCK_MANIPULATION",
+      "rawValue": "CLOCK_MANIPULATION",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "疑似时钟篡改",
+      "blockLevel": "block_trade",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_EVIDENCE_INJECTION",
+      "rawValue": "EVIDENCE_INJECTION",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "疑似证据注入",
+      "blockLevel": "block_strict",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_OBSERVATION_WITHOUT_FRAME",
+      "rawValue": "OBSERVATION_WITHOUT_FRAME",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "observation 无对应帧",
+      "blockLevel": "block_strict",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_EMULATOR_DETECTED",
+      "rawValue": "EMULATOR_DETECTED",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "检测到模拟器",
+      "blockLevel": "block_trade",
+      "noAccusationLanguage": true
+    },
+    {
+      "code": "RISK_ROOT_JAILBREAK_DETECTED",
+      "rawValue": "ROOT_JAILBREAK_DETECTED",
+      "category": "risk_flag",
+      "firstIntroducedInFoundationVersion": "1.1",
+      "description": "检测到 root/越狱",
+      "blockLevel": "block_trade",
+      "noAccusationLanguage": true
+    }
+  ]
+}

@@ -1,13 +1,31 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-2.5
-// States: 8 | Transitions: 13 | FailureReasons: 14 | CancelReasons: 2
+// Contract Version: PR2-JSM-3.0-merged
+// States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import Foundation
 
+/// Source of state transition.
+public enum TransitionSource: String, Codable {
+    case client = "client"       // Mobile app initiated
+    case server = "server"       // Backend initiated
+    case system = "system"       // Automatic (timeout, heartbeat failure)
+}
+
+/// Device state enumeration.
+public enum DeviceState: String, Codable {
+    case foreground
+    case background
+    case lowPower
+    case networkConstrained
+}
+
 /// Transition log structure for state change events.
 public struct TransitionLog: Codable {
+    /// Unique transition ID (UUID) for idempotency
+    public let transitionId: String
+    
     public let jobId: String
     public let from: JobState
     public let to: JobState
@@ -16,15 +34,33 @@ public struct TransitionLog: Codable {
     public let timestamp: Date
     public let contractVersion: String
     
+    /// Retry attempt number (0 = first attempt, nil = not a retry)
+    public let retryAttempt: Int?
+    
+    /// Source of transition (client/server/system)
+    public let source: TransitionSource
+    
+    /// Session ID for correlating transitions within a user session
+    public let sessionId: String?
+    
+    /// Device state at transition time
+    public let deviceState: DeviceState?
+    
     public init(
+        transitionId: String = UUID().uuidString,
         jobId: String,
         from: JobState,
         to: JobState,
         failureReason: FailureReason?,
         cancelReason: CancelReason?,
         timestamp: Date,
-        contractVersion: String
+        contractVersion: String,
+        retryAttempt: Int? = nil,
+        source: TransitionSource = .client,
+        sessionId: String? = nil,
+        deviceState: DeviceState? = nil
     ) {
+        self.transitionId = transitionId
         self.jobId = jobId
         self.from = from
         self.to = to
@@ -32,6 +68,10 @@ public struct TransitionLog: Codable {
         self.cancelReason = cancelReason
         self.timestamp = timestamp
         self.contractVersion = contractVersion
+        self.retryAttempt = retryAttempt
+        self.source = source
+        self.sessionId = sessionId
+        self.deviceState = deviceState
     }
 }
 
@@ -44,7 +84,7 @@ public final class JobStateMachine {
         let to: JobState
     }
     
-    /// Legal transitions (13 total).
+    /// Legal transitions (15 total: PR1 adds PROCESSING->CAPACITY_SATURATED, PR2 adds PACKAGING->CAPACITY_SATURATED).
     private static let legalTransitions: Set<Transition> = [
         Transition(from: .pending, to: .uploading),
         Transition(from: .pending, to: .cancelled),
@@ -57,8 +97,10 @@ public final class JobStateMachine {
         Transition(from: .processing, to: .packaging),
         Transition(from: .processing, to: .failed),
         Transition(from: .processing, to: .cancelled),
+        Transition(from: .processing, to: .capacitySaturated),  // PR1 C-Class: capacity saturated transition
         Transition(from: .packaging, to: .completed),
         Transition(from: .packaging, to: .failed),
+        Transition(from: .packaging, to: .capacitySaturated),   // PR2: packaging can also saturate capacity
     ]
     
     /// Failure reason binding map (which reasons are allowed from which states).
@@ -75,6 +117,9 @@ public final class JobStateMachine {
         .trainingFailed: [.processing],
         .gpuOutOfMemory: [.processing],
         .processingTimeout: [.processing],
+        .heartbeatTimeout: [.processing],      // NEW v3.0
+        .stalledProcessing: [.processing],     // NEW v3.0
+        .resourceExhausted: [.processing],     // NEW v3.0
         .packagingFailed: [.packaging],
         .internalError: [.uploading, .queued, .processing, .packaging],
     ]
@@ -83,6 +128,7 @@ public final class JobStateMachine {
     private static let cancelReasonBinding: [CancelReason: Set<JobState>] = [
         .userRequested: [.pending, .uploading, .queued, .processing],
         .appTerminated: [.pending, .uploading, .queued, .processing],
+        .systemTimeout: [.pending, .uploading, .queued],  // NEW v3.0 (not PROCESSING - use heartbeatTimeout instead)
     ]
     
     // MARK: - Public Methods
@@ -148,6 +194,7 @@ public final class JobStateMachine {
     
     /// Execute state transition (pure function).
     /// - Parameters:
+    ///   - transitionId: Unique transition ID for idempotency (optional, auto-generated if nil)
     ///   - jobId: Job ID (snowflake ID, 15-20 digits)
     ///   - from: Current state
     ///   - to: Target state
@@ -155,10 +202,16 @@ public final class JobStateMachine {
     ///   - cancelReason: Cancel reason (required when to == .cancelled)
     ///   - elapsedSeconds: Seconds elapsed since entering PROCESSING (required for PROCESSING → CANCELLED)
     ///   - isServerSide: Whether this is a server-side call (for serverOnly validation)
+    ///   - retryAttempt: Retry attempt number (0-indexed, nil if not a retry)
+    ///   - source: Source of transition (client/server/system)
+    ///   - sessionId: Session ID for correlating transitions
+    ///   - deviceState: Device state at transition time
+    ///   - idempotencyCheck: Callback to check if transitionId already executed (returns true if duplicate)
     ///   - logger: Log callback
     /// - Returns: New state after transition
     /// - Throws: JobStateMachineError if transition is invalid
     public static func transition(
+        transitionId: String? = nil,
         jobId: String,
         from: JobState,
         to: JobState,
@@ -166,8 +219,22 @@ public final class JobStateMachine {
         cancelReason: CancelReason? = nil,
         elapsedSeconds: Int? = nil,
         isServerSide: Bool = false,
+        retryAttempt: Int? = nil,
+        source: TransitionSource = .client,
+        sessionId: String? = nil,
+        deviceState: DeviceState? = nil,
+        idempotencyCheck: ((String) -> Bool)? = nil,
         logger: ((TransitionLog) -> Void)? = nil
     ) throws -> JobState {
+        // Generate transition ID if not provided
+        let finalTransitionId = transitionId ?? UUID().uuidString
+        
+        // 0. Idempotency check (highest priority)
+        if let check = idempotencyCheck, check(finalTransitionId) {
+            // Already executed - return current state (idempotent behavior)
+            return from
+        }
+        
         // Error priority order (strictly enforced):
         // 1. jobId validation
         try validateJobId(jobId)
@@ -215,18 +282,69 @@ public final class JobStateMachine {
             }
         }
         
-        // 7. Log transition
+        // 7. Log transition (with enhanced fields)
         logger?(TransitionLog(
+            transitionId: finalTransitionId,
             jobId: jobId,
             from: from,
             to: to,
             failureReason: failureReason,
             cancelReason: cancelReason,
             timestamp: Date(),
-            contractVersion: ContractConstants.CONTRACT_VERSION
+            contractVersion: ContractConstants.CONTRACT_VERSION,
+            retryAttempt: retryAttempt,
+            source: source,
+            sessionId: sessionId,
+            deviceState: deviceState
         ))
         
         return to
+    }
+    
+    /// Async transition with cancellation support (Swift 6 compatible)
+    /// Reference: https://developer.apple.com/documentation/swift/task/iscancelled
+    @available(macOS 10.15, iOS 13.0, *)
+    public static func transitionAsync(
+        transitionId: String? = nil,
+        jobId: String,
+        from: JobState,
+        to: JobState,
+        failureReason: FailureReason? = nil,
+        cancelReason: CancelReason? = nil,
+        elapsedSeconds: Int? = nil,
+        isServerSide: Bool = false,
+        retryAttempt: Int? = nil,
+        source: TransitionSource = .client,
+        sessionId: String? = nil,
+        deviceState: DeviceState? = nil,
+        idempotencyCheck: ((String) -> Bool)? = nil,
+        logger: ((TransitionLog) -> Void)? = nil
+    ) async throws -> JobState {
+        // Check for task cancellation before expensive operations
+        try Task.checkCancellation()
+        
+        // Perform synchronous validation
+        let result = try transition(
+            transitionId: transitionId,
+            jobId: jobId,
+            from: from,
+            to: to,
+            failureReason: failureReason,
+            cancelReason: cancelReason,
+            elapsedSeconds: elapsedSeconds,
+            isServerSide: isServerSide,
+            retryAttempt: retryAttempt,
+            source: source,
+            sessionId: sessionId,
+            deviceState: deviceState,
+            idempotencyCheck: idempotencyCheck,
+            logger: logger
+        )
+        
+        // Check again after operation
+        try Task.checkCancellation()
+        
+        return result
     }
 }
 

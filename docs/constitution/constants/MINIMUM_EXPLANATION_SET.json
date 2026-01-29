@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1.1",
+  "description": "Minimum required explanation coverage set. CI MUST fail if catalog does not cover this minimum.",
+  "mandatoryPrimaryReasonCodes": [
+    "PRC_NORMAL",
+    "PRC_CAPTURE_OCCLUDED",
+    "PRC_STRUCTURAL_OCCLUSION_CONFIRMED",
+    "PRC_BOUNDARY_UNCERTAIN",
+    "PRC_SPECULAR",
+    "PRC_TRANSPARENT_SEETHROUGH",
+    "PRC_POROUS_SEETHROUGH",
+    "PRC_DYNAMIC_MOTION",
+    "PRC_EDGE_CASE_TRIGGERED",
+    "PRC_RISK_FLAGGED"
+  ],
+  "mandatoryActionHintCodes": [
+    "HINT_CLEAR_OCCLUSION",
+    "HINT_CHANGE_ANGLE",
+    "HINT_SLOW_DOWN",
+    "HINT_IMPROVE_LIGHT",
+    "HINT_AVOID_REFLECTION",
+    "HINT_STABILIZE_OBJECT",
+    "HINT_DECLARE_REFLECTIVE",
+    "HINT_DECLARE_TRANSPARENT",
+    "HINT_DECLARE_DYNAMIC",
+    "HINT_RESUME_IN_SAME_LIGHT"
+  ],
+  "note": "All codes listed here must exist in USER_EXPLANATION_CATALOG.json. CI tests enforce completeness."
+}

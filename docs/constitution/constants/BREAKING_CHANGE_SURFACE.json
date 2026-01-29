@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1.1",
+  "description": "Machine-readable breaking change surface definition. Any change touching these requires contractVersion bump, RFC, and explicit migration note.",
+  "breakingSurfaces": [
+    {
+      "id": "encoding.byte_order",
+      "description": "Integer byte order (Big-Endian)",
+      "impact": "Changes patchId, geomId, meshEpochSalt",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "encoding.string_format",
+      "description": "String encoding format (length-prefixed UTF-8, no NUL)",
+      "impact": "Changes patchId, geomId, meshEpochSalt",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "encoding.unicode_normalization",
+      "description": "Unicode normalization (NFC)",
+      "impact": "Changes string-based identities",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "quant.geom_precision",
+      "description": "geomId quantization precision (1mm)",
+      "impact": "Changes geomId values",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "quant.patch_precision",
+      "description": "patchId quantization precision (0.1mm)",
+      "impact": "Changes patchId values",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "rounding_mode",
+      "description": "Quantization rounding mode (ROUND_HALF_AWAY_FROM_ZERO)",
+      "impact": "Changes quantized values",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "hash_algorithm",
+      "description": "Hash algorithm (SHA-256)",
+      "impact": "Changes all hash outputs",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "domain_separation_prefixes",
+      "description": "Domain separation prefix strings",
+      "impact": "Changes hash outputs",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "color.white_point",
+      "description": "Color white point (D65)",
+      "impact": "Changes Lab color values, L3 evidence",
+      "requires": ["contractVersion_bump", "RFC", "migration_note", "no_L3_inheritance"]
+    },
+    {
+      "id": "color.matrix",
+      "description": "Color conversion matrices (sRGB→XYZ→Lab)",
+      "impact": "Changes Lab color values, L3 evidence",
+      "requires": ["contractVersion_bump", "RFC", "migration_note", "no_L3_inheritance"]
+    },
+    {
+      "id": "cross_platform_tolerances",
+      "description": "Cross-platform numerical tolerances (CL2)",
+      "impact": "Changes equivalence test results",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    },
+    {
+      "id": "guaranteed_output_fields",
+      "description": "Guaranteed output contract fields",
+      "impact": "Breaks downstream consumers",
+      "requires": ["contractVersion_bump", "RFC", "migration_note"]
+    }
+  ]
+}

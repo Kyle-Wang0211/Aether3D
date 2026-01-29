@@ -1,0 +1,7 @@
+{
+  "mode": "WHITEBOX",
+  "version": "1.0.0",
+  "description": "Single Source of Truth for merge contract mode. Valid values: WHITEBOX, PRODUCTION",
+  "last_updated": "2026-01-24",
+  "authoritative": true
+}

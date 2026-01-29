@@ -1,7 +1,7 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-2.5
-// States: 8 | Transitions: 13 | FailureReasons: 14 | CancelReasons: 2
+// Contract Version: PR2-JSM-3.0-merged
+// States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
 import XCTest
@@ -348,6 +348,7 @@ final class JobStateMachineTests: XCTestCase {
             ("completed", .completed),
             ("failed", .failed),
             ("cancelled", .cancelled),
+            ("capacity_saturated", .capacitySaturated),  // PR1 C-Class
         ]
         
         for (rawValue, expected) in validCases {
@@ -385,6 +386,9 @@ final class JobStateMachineTests: XCTestCase {
             ("training_failed", .trainingFailed),
             ("gpu_out_of_memory", .gpuOutOfMemory),
             ("processing_timeout", .processingTimeout),
+            ("heartbeat_timeout", .heartbeatTimeout),        // NEW v3.0
+            ("stalled_processing", .stalledProcessing),      // NEW v3.0
+            ("resource_exhausted", .resourceExhausted),      // NEW v3.0
             ("packaging_failed", .packagingFailed),
             ("internal_error", .internalError),
         ]
@@ -402,6 +406,7 @@ final class JobStateMachineTests: XCTestCase {
         let validCases: [(String, CancelReason)] = [
             ("user_requested", .userRequested),
             ("app_terminated", .appTerminated),
+            ("system_timeout", .systemTimeout),  // NEW v3.0
         ]
         
         for (rawValue, expected) in validCases {
@@ -467,6 +472,167 @@ final class JobStateMachineTests: XCTestCase {
                 )
             )
         }
+    }
+    
+    // MARK: - Test 11: New Failure Reasons (v3.0)
+    
+    func testNewFailureReasons() {
+        // heartbeatTimeout from PROCESSING
+        XCTAssertNoThrow(
+            try JobStateMachine.transition(
+                jobId: validJobId,
+                from: .processing,
+                to: .failed,
+                failureReason: .heartbeatTimeout,
+                isServerSide: true
+            )
+        )
+        
+        // stalledProcessing from PROCESSING
+        XCTAssertNoThrow(
+            try JobStateMachine.transition(
+                jobId: validJobId,
+                from: .processing,
+                to: .failed,
+                failureReason: .stalledProcessing,
+                isServerSide: true
+            )
+        )
+        
+        // resourceExhausted from PROCESSING
+        XCTAssertNoThrow(
+            try JobStateMachine.transition(
+                jobId: validJobId,
+                from: .processing,
+                to: .failed,
+                failureReason: .resourceExhausted,
+                isServerSide: true
+            )
+        )
+        
+        // Verify new reasons are server-only
+        for reason in [FailureReason.heartbeatTimeout, .stalledProcessing, .resourceExhausted] {
+            XCTAssertTrue(reason.isServerOnly)
+        }
+        
+        // Verify retryable status
+        XCTAssertTrue(FailureReason.heartbeatTimeout.isRetryable)
+        XCTAssertTrue(FailureReason.stalledProcessing.isRetryable)
+        XCTAssertFalse(FailureReason.resourceExhausted.isRetryable)  // Permanent failure
+    }
+    
+    // MARK: - Test 12: New Cancel Reason (v3.0)
+    
+    func testSystemTimeoutCancelReason() {
+        // systemTimeout from PENDING
+        XCTAssertNoThrow(
+            try JobStateMachine.transition(
+                jobId: validJobId,
+                from: .pending,
+                to: .cancelled,
+                cancelReason: .systemTimeout
+            )
+        )
+        
+        // systemTimeout from QUEUED
+        XCTAssertNoThrow(
+            try JobStateMachine.transition(
+                jobId: validJobId,
+                from: .queued,
+                to: .cancelled,
+                cancelReason: .systemTimeout
+            )
+        )
+        
+        // systemTimeout NOT allowed from PROCESSING (use heartbeatTimeout instead)
+        XCTAssertThrowsError(
+            try JobStateMachine.transition(
+                jobId: validJobId,
+                from: .processing,
+                to: .cancelled,
+                cancelReason: .systemTimeout,
+                elapsedSeconds: 10
+            )
+        )
+    }
+    
+    // MARK: - Test 13: Failure Reason Count (v3.0)
+    
+    func testFailureReasonCountV3() {
+        XCTAssertEqual(FailureReason.allCases.count, ContractConstants.FAILURE_REASON_COUNT)
+        XCTAssertEqual(ContractConstants.FAILURE_REASON_COUNT, 17)
+    }
+    
+    // MARK: - Test 14: Cancel Reason Count (v3.0)
+    
+    func testCancelReasonCountV3() {
+        XCTAssertEqual(CancelReason.allCases.count, ContractConstants.CANCEL_REASON_COUNT)
+        XCTAssertEqual(ContractConstants.CANCEL_REASON_COUNT, 3)
+    }
+    
+    // MARK: - Test 15: Idempotency Check (v3.0)
+    
+    func testIdempotencyCheck() {
+        var executedTransitionIds: Set<String> = []
+        
+        let idempotencyCheck: (String) -> Bool = { transitionId in
+            if executedTransitionIds.contains(transitionId) {
+                return true  // Already executed
+            }
+            executedTransitionIds.insert(transitionId)
+            return false  // Not executed yet
+        }
+        
+        let transitionId = UUID().uuidString
+        
+        // First call should succeed
+        XCTAssertNoThrow(
+            try JobStateMachine.transition(
+                transitionId: transitionId,
+                jobId: validJobId,
+                from: .pending,
+                to: .uploading,
+                idempotencyCheck: idempotencyCheck
+            )
+        )
+        
+        // Second call with same transitionId should return current state (idempotent)
+        let result = try! JobStateMachine.transition(
+            transitionId: transitionId,
+            jobId: validJobId,
+            from: .uploading,  // Current state after first transition
+            to: .queued,
+            idempotencyCheck: idempotencyCheck
+        )
+        
+        // Should return current state, not perform transition
+        XCTAssertEqual(result, .uploading)
+    }
+    
+    // MARK: - Test 16: Enhanced TransitionLog Fields (v3.0)
+    
+    func testEnhancedTransitionLog() {
+        var loggedTransition: TransitionLog?
+        
+        try! JobStateMachine.transition(
+            jobId: validJobId,
+            from: .pending,
+            to: .uploading,
+            retryAttempt: 2,
+            source: .server,
+            sessionId: "test-session-123",
+            deviceState: .foreground,
+            logger: { log in
+                loggedTransition = log
+            }
+        )
+        
+        XCTAssertNotNil(loggedTransition)
+        XCTAssertNotNil(loggedTransition?.transitionId)
+        XCTAssertEqual(loggedTransition?.retryAttempt, 2)
+        XCTAssertEqual(loggedTransition?.source, .server)
+        XCTAssertEqual(loggedTransition?.sessionId, "test-session-123")
+        XCTAssertEqual(loggedTransition?.deviceState, .foreground)
     }
 }
 
