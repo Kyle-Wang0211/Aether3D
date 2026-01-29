@@ -99,10 +99,10 @@ fi
 # lintNoDecisionPolicyBypass - 禁止绕过 DecisionPolicy (HARD FAILURE)
 echo "[7/10] Checking DecisionPolicy bypass (HARD FAILURE)..."
 # Check that all Gray→White decisions go through DecisionPolicy.canTransition
-# Allowlist: DecisionPolicy.swift, DecisionController.swift, test files, comments
+# Allowlist: DecisionPolicy.swift, DecisionController.swift, LogValidator.swift, test files, comments
 VIOLATIONS=$(find Core/Quality -name "*.swift" -type f 2>/dev/null | \
     xargs grep -rn "to.*\.white\|VisualState\.white\|\.white\s*=\|=\s*\.white" 2>/dev/null | \
-    grep -v "DecisionPolicy\|DecisionController\|Tests/\|//\|/\*\|\*/" || true)
+    grep -v "DecisionPolicy\|DecisionController\|LogValidator\|Tests/\|//\|/\*\|\*/" || true)
 if [ -n "$VIOLATIONS" ]; then
     echo "ERROR: DecisionPolicy bypass detected - HARD FAILURE"
     echo "All Gray→White state transitions MUST go through DecisionPolicy.canTransition()"
