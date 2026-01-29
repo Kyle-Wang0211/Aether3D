@@ -56,7 +56,7 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
+      exclude: ["Constants", "Upload", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
@@ -70,6 +70,11 @@ let package = Package(
         .product(name: "Crypto", package: "swift-crypto")
       ],
       path: "Tests/Constants"
+    ),
+    .testTarget(
+      name: "UploadTests",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/Upload"
     )
   ]
 )

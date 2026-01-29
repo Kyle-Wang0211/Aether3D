@@ -44,6 +44,9 @@ public enum APIContractConstants {
     public static let MAX_CHUNK_COUNT = 200
     
     /// 分片大小（5MB，服务端权威值，GATE-6）
+    /// @available(*, deprecated, message: "Use UploadConstants.CHUNK_SIZE_DEFAULT_BYTES instead")
+    /// Legacy chunk size constant - preserved for backward compatibility.
+    /// New code should use UploadConstants for all upload configuration.
     public static let CHUNK_SIZE_BYTES = 5 * 1024 * 1024
     
     /// 分片最大大小（5MB，硬上限，用于413判断）
