@@ -31,7 +31,8 @@ final class FrameQualityConstantsTests: XCTestCase {
     }
     
     func testAllSpecsCount() {
-        XCTAssertEqual(FrameQualityConstants.allSpecs.count, 5)
+        // PR5-QUALITY-2.0: Added 5 new specs (tenengrad, minOrbFeatures, specularHighlight, maxAngularVelocity, maxLuminanceVariance)
+        XCTAssertEqual(FrameQualityConstants.allSpecs.count, 10)
     }
 }
 

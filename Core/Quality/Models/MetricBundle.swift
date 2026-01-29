@@ -8,22 +8,36 @@
 
 import Foundation
 
-/// MetricBundle - bundle of all quality metrics
+/// MetricBundle - bundle of all quality metrics (PR5-QUALITY-2.0)
 public struct MetricBundle: Codable {
+    // Existing metrics
     public let brightness: MetricResult?
     public let laplacian: MetricResult?
     public let featureScore: MetricResult?
     public let motionScore: MetricResult?
     public let saturation: MetricResult?
     public let focus: MetricResult?
-    
+
+    // NEW: PR5-QUALITY-2.0 metrics
+    public let tenengrad: MetricResult?
+    public let material: MaterialResult?
+    public let photometric: PhotometricResult?
+    public let angularVelocity: MetricResult?
+    public let depthQuality: MetricResult?
+
     public init(
         brightness: MetricResult? = nil,
         laplacian: MetricResult? = nil,
         featureScore: MetricResult? = nil,
         motionScore: MetricResult? = nil,
         saturation: MetricResult? = nil,
-        focus: MetricResult? = nil
+        focus: MetricResult? = nil,
+        // NEW
+        tenengrad: MetricResult? = nil,
+        material: MaterialResult? = nil,
+        photometric: PhotometricResult? = nil,
+        angularVelocity: MetricResult? = nil,
+        depthQuality: MetricResult? = nil
     ) {
         self.brightness = brightness
         self.laplacian = laplacian
@@ -31,6 +45,12 @@ public struct MetricBundle: Codable {
         self.motionScore = motionScore
         self.saturation = saturation
         self.focus = focus
+        // NEW
+        self.tenengrad = tenengrad
+        self.material = material
+        self.photometric = photometric
+        self.angularVelocity = angularVelocity
+        self.depthQuality = depthQuality
     }
 }
 
