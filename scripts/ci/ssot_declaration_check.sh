@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# SSOT Declaration Check - Multi-commit aware
+# Checks ALL commits in the push range, not just HEAD
+# 
+# This script verifies that commits touching SSOT-protected paths
+# have the required SSOT-Change: yes footer in their commit messages.
+#
+# Environment variables:
+#   CI: Set by GitHub Actions
+#   GITHUB_BASE_REF: Base branch for PRs (default: main)
+#   PRE_PUSH_HOOK: Set by pre-push hook
+#
+# Exit codes:
+#   0: All checks passed
+#   1: SSOT declaration check failed
+
+# SSOT Path Prefixes - Changes to these paths require SSOT-Change: yes
+SSOT_PATH_PREFIXES=(
+  "Core/Constants/"
+  "Core/SSOT/"
+  "docs/constitution/"
+  ".github/workflows/"
+  "scripts/ci/"
+  "scripts/hooks/"
+)
+
+# SSOT File Patterns - Specific files that are SSOT regardless of directory
+SSOT_FILE_PATTERNS=(
+  "Core/Models/Observation.*\.swift"
+  "Core/Models/EvidenceEscalation.*\.swift"
+)
+
+# Emergency override pattern
+EMERGENCY_PATTERN='^EMERGENCY: (API_KEY_LEAK|LEGAL|DATA_BREACH) / .* / INC-[0-9]{8}-[0-9]{3}$'
+
+echo "==> SSOT Declaration Check"
+
+# Determine commit range based on context:
+# 1. CI environment: Compare against base branch (origin/main)
+# 2. Pre-push hook: Compare against remote tracking branch
+# 3. Local: Use staged or working tree changes
+
+if [[ -n "${CI:-}" ]]; then
+  # CI: Compare HEAD against origin/main
+  BASE_BRANCH="${GITHUB_BASE_REF:-main}"
+  if git rev-parse --verify "origin/$BASE_BRANCH" >/dev/null 2>&1; then
+    COMMIT_RANGE="origin/$BASE_BRANCH..HEAD"
+  else
+    # Fallback: compare with previous commit
+    COMMIT_RANGE="HEAD~1..HEAD"
+  fi
+  echo "    Environment: CI"
+  echo "    Base branch: $BASE_BRANCH"
+elif [[ -n "${PRE_PUSH_HOOK:-}" ]]; then
+  # Pre-push: Compare against what's being pushed
+  # $1=remote $2=url, stdin has <local ref> <local sha> <remote ref> <remote sha>
+  COMMIT_RANGE="@{push}..HEAD"
+  echo "    Environment: Pre-push hook"
+else
+  # Local: Prefer staged changes; fall back to working tree
+  # For local, we check HEAD commit only
+  COMMIT_RANGE="HEAD~1..HEAD"
+  echo "    Environment: Local"
+fi
+
+echo "    Commit range: $COMMIT_RANGE"
+
+# Get list of commits in the range
+COMMITS=$(git rev-list "$COMMIT_RANGE" 2>/dev/null || echo "HEAD")
+COMMIT_COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ' || echo "1")
+
+# Handle case where COMMITS is empty (no commits in range)
+if [[ -z "$COMMITS" ]] || [[ "$COMMITS" == "" ]]; then
+  COMMITS="HEAD"
+  COMMIT_COUNT=1
+fi
+
+echo "    Commits to check: $COMMIT_COUNT"
+echo ""
+
+FAILED=0
+
+# Check each commit individually
+for commit in $COMMITS; do
+  # Skip if commit doesn't exist
+  if ! git rev-parse --verify "$commit" >/dev/null 2>&1; then
+    continue
+  fi
+
+  commit_short=$(git rev-parse --short "$commit" 2>/dev/null || echo "$commit")
+  commit_msg=$(git log -1 --pretty=%B "$commit" 2>/dev/null || echo "")
+  
+  echo "--- Checking commit: $commit_short ---"
+  echo "    $(git log -1 --oneline "$commit" 2>/dev/null || echo "Unknown commit")"
+
+  # Check for emergency override
+  if echo "$commit_msg" | grep -Eq "$EMERGENCY_PATTERN"; then
+    echo "    🚨 EMERGENCY OVERRIDE detected"
+    echo "    Emergency commits bypass normal SSOT checks"
+    echo "    Remember: Emergency must be closed within 24h"
+    echo "    ✅ PASS (emergency override)"
+    echo ""
+    continue
+  fi
+
+  # Get changed files for this commit
+  changed=$(git diff-tree --no-commit-id --name-only -r "$commit" 2>/dev/null || true)
+  deleted=$(git diff-tree --no-commit-id --name-only --diff-filter=D -r "$commit" 2>/dev/null || true)
+  
+  all_files="$changed"
+  if [[ -n "$deleted" ]]; then
+    all_files="$all_files"$'\n'"$deleted"
+  fi
+
+  # Check if any SSOT paths are touched
+  needs_yes=0
+  touched_ssot_files=""
+  touched_ssot_patterns=""
+
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+
+    # Check prefixes
+    for p in "${SSOT_PATH_PREFIXES[@]}"; do
+      if [[ "$f" == "$p"* ]]; then
+        needs_yes=1
+        touched_ssot_files="$touched_ssot_files\n  - $f (prefix: $p)"
+        break
+      fi
+    done
+
+    # Check patterns (glob-style matching)
+    for pattern in "${SSOT_FILE_PATTERNS[@]}"; do
+      # Convert glob pattern to regex for matching
+      regex_pattern=$(echo "$pattern" | sed 's/\*/[^\/]*/g')
+      if [[ "$f" =~ $regex_pattern ]]; then
+        needs_yes=1
+        touched_ssot_patterns="$touched_ssot_patterns\n  - $f (pattern: $pattern)"
+        break
+      fi
+    done
+  done <<< "$all_files"
+
+  # Check commit message for SSOT footer
+  has_footer=0
+  has_yes=0
+  
+  if echo "$commit_msg" | grep -Eq '^SSOT-Change: (yes|no)$'; then
+    has_footer=1
+  fi
+  
+  if echo "$commit_msg" | grep -Eq '^SSOT-Change: yes$'; then
+    has_yes=1
+  fi
+
+  # Validate based on whether SSOT paths are touched
+  if [[ "$needs_yes" -eq 1 ]]; then
+    if [[ "$has_yes" -ne 1 ]]; then
+      echo "    ❌ FAIL: Commit touches SSOT paths but lacks SSOT-Change: yes"
+      printf "    Touched SSOT files:$touched_ssot_files$touched_ssot_patterns\n"
+      echo ""
+      FAILED=1
+    else
+      echo "    ✅ PASS: SSOT-Change: yes declared for SSOT modifications"
+      printf "    Touched SSOT files:$touched_ssot_files$touched_ssot_patterns\n"
+    fi
+  else
+    if [[ "$has_footer" -ne 1 ]]; then
+      echo "    ❌ FAIL: Commit missing SSOT-Change footer"
+      echo "    All commits must include either 'SSOT-Change: yes' or 'SSOT-Change: no'"
+      FAILED=1
+    else
+      echo "    ✅ PASS: SSOT-Change footer present"
+    fi
+  fi
+
+  # Check for revert commits that touch SSOT
+  if echo "$commit_msg" | grep -qiE '^Revert "|This reverts commit'; then
+    echo "    ⚠️  Revert commit detected"
+    
+    # Get original commit being reverted
+    original_sha=$(echo "$commit_msg" | grep -oE '[a-f0-9]{40}' | head -1 || true)
+    
+    if [[ -n "$original_sha" ]] && git rev-parse --verify "$original_sha" >/dev/null 2>&1; then
+      # Check if original commit touched SSOT
+      original_files=$(git diff-tree --no-commit-id --name-only -r "$original_sha" 2>/dev/null || true)
+      
+      for f in $original_files; do
+        for p in "${SSOT_PATH_PREFIXES[@]}"; do
+          if [[ "$f" == "$p"* ]]; then
+            echo "    ⚠️  Reverting SSOT commit: $original_sha"
+            echo "    SSOT file: $f"
+            
+            if ! echo "$commit_msg" | grep -Eq '^SSOT-Change: yes$'; then
+              echo "    ❌ FAIL: Reverting SSOT commit requires SSOT-Change: yes"
+              FAILED=1
+            else
+              echo "    ✅ PASS: Revert has SSOT-Change: yes"
+            fi
+            break
+          fi
+        done
+      done
+    fi
+  fi
+
+  echo ""
+done
+
+# Summary
+echo "==> Summary"
+if [[ "$FAILED" -ne 0 ]]; then
+  echo "❌ SSOT declaration check FAILED"
+  echo ""
+  echo "To fix:"
+  echo "  1. For SSOT changes: git commit --amend, add 'SSOT-Change: yes'"
+  echo "  2. For non-SSOT changes: git commit --amend, add 'SSOT-Change: no'"
+  echo "  3. For revert commits touching SSOT: add 'SSOT-Change: yes'"
+  exit 1
+fi
+
+echo "✅ SSOT declaration check PASSED"
+exit 0

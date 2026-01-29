@@ -38,6 +38,30 @@
 
 ---
 
+<!-- SSOT:PROTECTED_PATHS:BEGIN -->
+## Protected Path Prefixes
+
+Changes to files under these paths require `SSOT-Change: yes` in commit message.
+
+| Path Prefix | Category | Rationale |
+|-------------|----------|-----------|
+| Core/Constants/ | Constants | All SSOT constant definitions |
+| Core/SSOT/ | Evidence | Evidence escalation boundaries (PR#1) |
+| docs/constitution/ | Governance | Constitutional documents and policies |
+| .github/workflows/ | CI/CD | Workflow files are security boundaries |
+| scripts/ci/ | CI/CD | CI scripts enforce SSOT gates |
+| scripts/hooks/ | Git Hooks | Hook scripts enforce local gates |
+
+### Protected File Patterns
+
+| Pattern | Category | Rationale |
+|---------|----------|-----------|
+| Core/Models/Observation*.swift | Model | Observation model core types |
+| Core/Models/EvidenceEscalation*.swift | Model | Evidence escalation types |
+<!-- SSOT:PROTECTED_PATHS:END -->
+
+---
+
 <!-- SSOT:SYSTEM_CONSTANTS:BEGIN -->
 ## System Constants
 

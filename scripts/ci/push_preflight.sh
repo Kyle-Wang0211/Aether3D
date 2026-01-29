@@ -48,8 +48,17 @@ git config --get core.hooksPath 2>/dev/null || echo "core.hooksPath: <not set or
 echo "--- End Diagnostic Header ---"
 echo ""
 
+# Step 0: SSOT declaration check
+echo "[0/6] SSOT declaration check"
+bash scripts/ci/ssot_declaration_check.sh || {
+    echo "❌ SSOT declaration check FAILED"
+    exit 1
+}
+echo "✅ SSOT declaration check passed"
+echo ""
+
 # Step 1: YAML static parsing
-echo "[1/5] YAML static parsing"
+echo "[1/6] YAML static parsing"
 python3 <<'PY'
 import yaml
 import sys
@@ -69,33 +78,42 @@ PY
 echo ""
 
 # Step 2: SwiftPM checks
-echo "[2/5] SwiftPM: package resolve"
+echo "[2/6] SwiftPM: package resolve"
 swift package resolve
 echo "✅ swift package resolve passed"
 echo ""
 
-echo "[3/5] SwiftPM: build"
+echo "[3/6] SwiftPM: build"
 swift build
 echo "✅ swift build passed"
 echo ""
 
-echo "[4/5] SwiftPM: test (first run)"
+echo "[4/6] SwiftPM: test (first run)"
 swift test --filter PIZ
 echo "✅ swift test --filter PIZ (first run) passed"
 echo ""
 
-echo "[4/5] SwiftPM: test (second run - stability check)"
+echo "[4/6] SwiftPM: test (second run - stability check)"
 swift test --filter PIZ
 echo "✅ swift test --filter PIZ (second run) passed"
 echo ""
 
-# Step 3: PIZ local gate
-echo "[5/5] PIZ local gate"
+# Step 5: PIZ local gate
+echo "[5/6] PIZ local gate"
 bash scripts/ci/piz_local_gate.sh
 echo "✅ PIZ local gate passed"
 echo ""
 
-# Step 4: actionlint (optional)
+# Step 6: SSOT integrity verification
+echo "[6/6] SSOT integrity verification"
+bash scripts/ci/ssot_integrity_verify.sh || {
+    echo "❌ SSOT integrity check FAILED"
+    exit 1
+}
+echo "✅ SSOT integrity check passed"
+echo ""
+
+# Step 7: actionlint (optional)
 echo "[Optional] actionlint check"
 if command -v actionlint >/dev/null 2>&1; then
     actionlint -color || {

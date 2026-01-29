@@ -56,7 +56,7 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Upload", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
+      exclude: ["Constants", "Upload", "CI", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
@@ -75,6 +75,11 @@ let package = Package(
       name: "UploadTests",
       dependencies: ["Aether3DCore"],
       path: "Tests/Upload"
+    ),
+    .testTarget(
+      name: "CITests",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/CI"
     )
   ]
 )

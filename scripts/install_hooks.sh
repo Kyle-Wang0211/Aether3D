@@ -34,6 +34,21 @@ cp "$PRE_PUSH_TEMPLATE" "$PRE_PUSH_HOOK"
 chmod +x "$PRE_PUSH_HOOK"
 
 echo "✅ Pre-push hook installed successfully"
+
+# Install pre-commit hook (if exists)
+PRE_COMMIT_TEMPLATE="$TEMPLATE_DIR/pre-commit"
+PRE_COMMIT_HOOK="$HOOKS_DIR/pre-commit"
+
+if [ -f "$PRE_COMMIT_TEMPLATE" ]; then
+    echo "Installing pre-commit hook..."
+    cp "$PRE_COMMIT_TEMPLATE" "$PRE_COMMIT_HOOK"
+    chmod +x "$PRE_COMMIT_HOOK"
+    echo "✅ Pre-commit hook installed successfully"
+else
+    echo "⚠️  Pre-commit hook template not found: $PRE_COMMIT_TEMPLATE"
+    echo "   (Will be created in Phase 1, Task N2)"
+fi
+
 echo ""
 echo "Note: Hooks are not version-controlled. Run this script after cloning the repository."
 
