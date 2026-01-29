@@ -11,6 +11,125 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ============================================================================
+  # SSOT Declaration Gate (cannot be bypassed with --no-verify)
+  # ============================================================================
+  ssot-declaration-gate:
+    name: SSOT Declaration Gate
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Must! For diff comparison
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Fetch base branch
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin ${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}
+
+      - name: Verify SSOT declarations
+        env:
+          CI: "true"
+          GITHUB_BASE_REF: ${{ github.base_ref || 'main' }}
+          GITHUB_HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          echo "=== SSOT Declaration Gate (CI-enforced) ==="
+          echo "Base ref: $GITHUB_BASE_REF"
+          echo "Head ref: ${{ github.head_ref || github.ref_name }}"
+          bash scripts/ci/ssot_declaration_check.sh
+
+      - name: Verify SSOT integrity
+        run: |
+          bash scripts/ci/ssot_integrity_verify.sh
+
+      - name: Verify SSOT consistency
+        run: |
+          bash scripts/ci/ssot_consistency_verify.sh
+
+      - name: Verify CI integrity
+        run: |
+          bash scripts/ci/ci_integrity_verify.sh
+
+      - name: Detect workflow self-modification
+        run: |
+          WORKFLOW_CHANGES=$(git diff --name-only origin/${{ github.base_ref || 'main' }}...HEAD -- .github/workflows/ || true)
+          if [ -n "$WORKFLOW_CHANGES" ]; then
+            echo "⚠️  WARNING: This PR modifies CI workflow files:"
+            echo "$WORKFLOW_CHANGES"
+            echo ""
+            echo "Workflow changes require:"
+            echo "  1. SSOT-Change: yes in commit message"
+            echo "  2. CODEOWNERS approval"
+            echo "  3. Additional security review"
+            COMMIT_MSG=$(git log -1 --pretty=%B)
+            if ! echo "$COMMIT_MSG" | grep -qE '^SSOT-Change: yes$'; then
+              echo "❌ FAIL: Workflow modification without SSOT-Change: yes"
+              exit 1
+            fi
+          fi
+
+      - name: Generate SSOT audit log
+        if: always()
+        run: |
+          bash scripts/ci/ssot_audit_log.sh || true
+
+      - name: Upload audit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssot-audit-log
+          path: .ssot_audit.jsonl
+          if-no-files-found: ignore
+
+      - name: Label SSOT changes
+        if: github.event_name == 'pull_request'
+        continue-on-error: true  # Don't fail the job if labeling fails (permission issues)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            // Get changed files
+            const baseRef = '${{ github.base_ref }}';
+            const files = execSync(`git diff --name-only origin/${baseRef}...HEAD`).toString().split('\n');
+
+            const ssotPrefixes = [
+              'Core/Constants/',
+              'Core/SSOT/',
+              'docs/constitution/',
+              '.github/workflows/',
+              'scripts/ci/',
+              'scripts/hooks/'
+            ];
+
+            const hasSSOTChanges = files.some(f =>
+              ssotPrefixes.some(p => f.startsWith(p))
+            );
+
+            if (hasSSOTChanges) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  labels: ['ssot-change', 'requires-review']
+                });
+
+                // Add comment (only if labeling succeeded)
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: '⚠️ **SSOT Change Detected**\n\nThis PR modifies SSOT-protected files. Please ensure:\n\n- [ ] All commits have `SSOT-Change: yes` footer\n- [ ] Changes are reviewed by CODEOWNERS\n- [ ] No bypass attempts detected'
+                });
+              } catch (error) {
+                console.log('Warning: Could not add labels/comments (may lack permissions):', error.message);
+                // Non-blocking - labeling is informational only
+              }
+            }
+
   preflight:
     name: Preflight (Phase 0.5 guardrails)
     runs-on: ubuntu-22.04
@@ -77,6 +196,7 @@ jobs:
   test-and-lint:
     name: Test & Lint
     runs-on: ubuntu-22.04
+    needs: [ssot-declaration-gate]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -170,6 +290,7 @@ jobs:
   piz-matrix:
     name: PIZ Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    needs: [ssot-declaration-gate]
     timeout-minutes: 120
     strategy:
       matrix:

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pre-commit hook: Early SSOT detection
+# Warns about staged SSOT changes before commit message is written
+# 
+# This hook does NOT block commits - it only warns.
+# The commit-msg hook will enforce the SSOT-Change footer requirement.
+
+SSOT_PREFIXES=(
+  "Core/Constants/"
+  "Core/SSOT/"
+  "docs/constitution/"
+  ".github/workflows/"
+  "scripts/ci/"
+  "scripts/hooks/"
+)
+
+SSOT_PATTERNS=(
+  "Core/Models/Observation.*\.swift"
+  "Core/Models/EvidenceEscalation.*\.swift"
+)
+
+# Get staged files
+STAGED=$(git diff --name-only --cached 2>/dev/null || true)
+
+if [[ -z "$STAGED" ]]; then
+  exit 0
+fi
+
+# Check for SSOT files
+SSOT_STAGED=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  
+  # Check prefixes
+  for p in "${SSOT_PREFIXES[@]}"; do
+    if [[ "$f" == "$p"* ]]; then
+      SSOT_STAGED="$SSOT_STAGED  - $f\n"
+      break
+    fi
+  done
+  
+  # Check patterns
+  for pattern in "${SSOT_PATTERNS[@]}"; do
+    regex_pattern=$(echo "$pattern" | sed 's/\*/[^\/]*/g')
+    if [[ "$f" =~ $regex_pattern ]]; then
+      SSOT_STAGED="$SSOT_STAGED  - $f\n"
+      break
+    fi
+  done
+done <<< "$STAGED"
+
+if [[ -n "$SSOT_STAGED" ]]; then
+  echo "⚠️  SSOT files staged for commit:"
+  printf "$SSOT_STAGED"
+  echo ""
+  echo "Remember: Your commit message MUST include:"
+  echo "  SSOT-Change: yes"
+  echo ""
+  echo "The commit-msg hook will enforce this requirement."
+  # Don't block, just warn
+fi
+
+exit 0

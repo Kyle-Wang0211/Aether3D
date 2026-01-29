@@ -96,16 +96,22 @@ if [ "$SHA256_COUNT" -ne 1 ]; then
     ERRORS=1
 fi
 
-# lintNoDecisionPolicyBypass - 禁止绕过 DecisionPolicy
-echo "[7/10] Checking DecisionPolicy bypass..."
+# lintNoDecisionPolicyBypass - 禁止绕过 DecisionPolicy (HARD FAILURE)
+echo "[7/10] Checking DecisionPolicy bypass (HARD FAILURE)..."
 # Check that all Gray→White decisions go through DecisionPolicy.canTransition
-# This is a structural check - would need AST parsing for full verification
-# For now, check that no other files have "Gray→White" logic
-VIOLATIONS=$(find Core/Quality -name "*.swift" -type f | xargs grep -rn "to.*\.white\|VisualState\.white" 2>/dev/null | grep -v "DecisionPolicy\|DecisionController\|//\|comment" || true)
+# Allowlist: DecisionPolicy.swift, DecisionController.swift, LogValidator.swift, test files, comments
+VIOLATIONS=$(find Core/Quality -name "*.swift" -type f 2>/dev/null | \
+    xargs grep -rn "to.*\.white\|VisualState\.white\|\.white\s*=\|=\s*\.white" 2>/dev/null | \
+    grep -v "DecisionPolicy\|DecisionController\|LogValidator\|Tests/\|//\|/\*\|\*/" || true)
 if [ -n "$VIOLATIONS" ]; then
-    echo "WARNING: Potential DecisionPolicy bypass detected (manual check required)"
+    echo "ERROR: DecisionPolicy bypass detected - HARD FAILURE"
+    echo "All Gray→White state transitions MUST go through DecisionPolicy.canTransition()"
+    echo ""
+    echo "Violations found:"
     echo "$VIOLATIONS"
-    # Don't fail, but warn
+    echo ""
+    echo "Fix: Route state transitions through DecisionPolicy, or add to allowlist if false positive"
+    ERRORS=1
 fi
 
 # lintNoFrameBasedTiming - 禁止基于帧的计时 (H2)
