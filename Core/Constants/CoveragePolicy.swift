@@ -137,6 +137,10 @@ public enum CoveragePolicy {
             return smallObjectMacro
         case .largeScene:
             return largeScene
+        case .proMacro:
+            return smallObjectMacro  // proMacro uses same policy as smallObjectMacro (high detail)
+        case .cinematicScene:
+            return largeScene  // cinematicScene uses same policy as largeScene (room-scale)
         }
     }
     

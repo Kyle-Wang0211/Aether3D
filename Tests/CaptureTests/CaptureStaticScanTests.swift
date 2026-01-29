@@ -7,6 +7,7 @@
 
 import XCTest
 import Foundation
+@testable import Aether3DCore
 
 final class CaptureStaticScanTests: XCTestCase {
     
@@ -896,6 +897,264 @@ final class CaptureStaticScanTests: XCTestCase {
                         // No allowlist - fail immediately
                         XCTFail("[PR4][SCAN] banned_asyncAfter file=\(relativePath) match=.asyncAfter( at line \(index + 1): \(trimmed)")
                     }
+                }
+            }
+        }
+    }
+    
+    // MARK: - New Constants Validation
+    
+    func test_bitrateEstimatesHaveAllTiers() {
+        let requiredKeys = [
+            "8K_60", "8K_30",
+            "4K_120", "4K_60", "4K_30",
+            "1080p_120", "1080p_60", "1080p_30",
+            "720p_60", "720p_30",
+            "default"
+        ]
+        
+        // Access private bitrateEstimates via estimatedBitrate function
+        // We'll test that all tiers can be resolved
+        let tiers: [ResolutionTier] = [.t8K, .t4K, .t1080p, .t720p, .t2K, .t480p, .lower]
+        let fpsValues: [Double] = [120, 60, 30]
+        
+        for tier in tiers {
+            for fps in fpsValues {
+                let bitrate = CaptureRecordingConstants.estimatedBitrate(tier: tier, fps: fps)
+                XCTAssertGreaterThan(bitrate, 0, "[PR4][SCAN] missing_bitrate_tier: \(tier.rawValue)@\(fps)fps")
+            }
+        }
+    }
+    
+    func test_minBitrateFor3DReconstructionIsReasonable() {
+        let minBitrate = CaptureRecordingConstants.minBitrateFor3DReconstruction
+        XCTAssertGreaterThanOrEqual(minBitrate, 30_000_000, "[PR4][SCAN] Min 3D bitrate should be >= 30 Mbps")
+        XCTAssertLessThanOrEqual(minBitrate, 100_000_000, "[PR4][SCAN] Min 3D bitrate should be <= 100 Mbps")
+    }
+    
+    func test_fpsMatchToleranceIsTight() {
+        let tolerance = CaptureRecordingConstants.fpsMatchTolerance
+        XCTAssertLessThanOrEqual(tolerance, 0.1, "[PR4][SCAN] FPS tolerance should be <= 0.1 for precision")
+        XCTAssertGreaterThanOrEqual(tolerance, 0.05, "[PR4][SCAN] FPS tolerance should allow NTSC compatibility")
+    }
+    
+    func test_thermalWeightsAreOrdered() {
+        XCTAssertLessThan(
+            CaptureRecordingConstants.thermalWeightNominal,
+            CaptureRecordingConstants.thermalWeightFair,
+            "[PR4][SCAN] Nominal < Fair"
+        )
+        XCTAssertLessThan(
+            CaptureRecordingConstants.thermalWeightFair,
+            CaptureRecordingConstants.thermalWeightSerious,
+            "[PR4][SCAN] Fair < Serious"
+        )
+        XCTAssertLessThan(
+            CaptureRecordingConstants.thermalWeightSerious,
+            CaptureRecordingConstants.thermalWeightCritical,
+            "[PR4][SCAN] Serious < Critical"
+        )
+    }
+    
+    func test_thermalWeightsAreMonotonic() {
+        // Thermal weights must increase with severity
+        XCTAssertEqual(CaptureRecordingConstants.thermalWeightNominal, 0, "[PR4][SCAN] Nominal should be 0")
+        XCTAssertEqual(CaptureRecordingConstants.thermalWeightFair, 1, "[PR4][SCAN] Fair should be 1")
+        XCTAssertEqual(CaptureRecordingConstants.thermalWeightSerious, 2, "[PR4][SCAN] Serious should be 2")
+        XCTAssertEqual(CaptureRecordingConstants.thermalWeightCritical, 3, "[PR4][SCAN] Critical should be 3")
+    }
+    
+    func test_storageThresholdsAreReasonable() {
+        let base = CaptureRecordingConstants.minFreeSpaceBytesBase
+        let warning = CaptureRecordingConstants.lowStorageWarningBytes
+        let critical = CaptureRecordingConstants.criticalStorageBytes
+        
+        XCTAssertGreaterThan(warning, critical, "[PR4][SCAN] Warning threshold should be > critical")
+        XCTAssertGreaterThanOrEqual(base, critical, "[PR4][SCAN] Base minimum should be >= critical")
+    }
+    
+    // MARK: - Cross-Platform Compatibility Scan
+    
+    func test_coreConstantsContainNoPlatformSpecificCode() {
+        guard let constantsPath = RepoRootLocator.resolvePath("Core/Constants") else {
+            XCTFail("[PR4][SCAN] Could not resolve Core/Constants directory")
+            return
+        }
+        
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: constantsPath, includingPropertiesForKeys: nil) else {
+            XCTFail("[PR4][SCAN] Could not enumerate Core/Constants")
+            return
+        }
+        
+        let forbiddenPlatformPatterns = [
+            "UIDevice",
+            "UIKit",
+            "AppKit",
+            "ProcessInfo.processInfo.thermalState",
+            "Bundle.main",
+            "#if os(iOS)",
+            "#if os(macOS)",
+            "#if targetEnvironment"
+        ]
+        
+        for case let fileURL as URL in enumerator {
+            guard fileURL.pathExtension == "swift" else { continue }
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+            
+            let lines = content.components(separatedBy: .newlines)
+            for (index, line) in lines.enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.hasPrefix("//") else { continue }
+                
+                for pattern in forbiddenPlatformPatterns {
+                    if line.contains(pattern) {
+                        XCTFail("[PR4][SCAN] platform_specific_code file=\(fileURL.lastPathComponent) pattern=\(pattern) line=\(index + 1)")
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Linux CI Compatibility
+    
+    func test_noAppleOnlyAPIsInCoreConstants() {
+        let forbiddenAPIs = [
+            "CMTime(",
+            "AVAsset",
+            "AVCapture",
+            "CIImage",
+            "CGImage",
+            "UIImage",
+            "NSImage"
+        ]
+        
+        // This test validates Core/Constants can compile on Linux
+        guard let path = RepoRootLocator.resolvePath("Core/Constants") else {
+            XCTFail("[PR4][SCAN] Could not resolve path")
+            return
+        }
+        
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: path, includingPropertiesForKeys: nil) else {
+            return
+        }
+        
+        for case let fileURL as URL in enumerator {
+            guard fileURL.pathExtension == "swift" else { continue }
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+            
+            for api in forbiddenAPIs {
+                if content.contains(api) {
+                    XCTFail("[PR4][SCAN] apple_only_api file=\(fileURL.lastPathComponent) api=\(api)")
+                }
+            }
+        }
+    }
+    
+    func test_coreConstantsHaveNoPlatformConditionals() {
+        guard let path = RepoRootLocator.resolvePath("Core/Constants") else {
+            XCTFail("[PR4][SCAN] Could not resolve path")
+            return
+        }
+        
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: path, includingPropertiesForKeys: nil) else {
+            return
+        }
+        
+        let forbiddenPatterns = [
+            "#if os(iOS)",
+            "#if os(macOS)",
+            "#if targetEnvironment",
+            "#if canImport(UIKit)",
+            "#if canImport(AppKit)"
+        ]
+        
+        for case let fileURL as URL in enumerator {
+            guard fileURL.pathExtension == "swift" else { continue }
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+            
+            for pattern in forbiddenPatterns {
+                if content.contains(pattern) {
+                    XCTFail("[PR4][SCAN] platform_conditional file=\(fileURL.lastPathComponent) pattern=\(pattern)")
+                }
+            }
+        }
+    }
+    
+    func test_resolutionTierFrozenCaseOrderHash() {
+        // Verify ResolutionTier case order hasn't changed
+        let caseNames = ResolutionTier.allCases.map { $0.rawValue }
+        XCTAssertEqual(caseNames.count, 7, "[PR4][SCAN] ResolutionTier should have 7 cases after enhancement")
+        
+        // Verify order: original 5 cases first, then new ones appended
+        let expectedOrder = ["8K", "4K", "1080p", "720p", "lower", "2K", "480p"]
+        XCTAssertEqual(caseNames, expectedOrder, "[PR4][SCAN] ResolutionTier cases must maintain append-only order")
+    }
+    
+    func test_captureQualityPresetFrozenCaseOrderHash() {
+        let caseNames = CaptureQualityPreset.allCases.map { $0.rawValue }
+        XCTAssertEqual(caseNames.count, 6, "[PR4][SCAN] CaptureQualityPreset should have 6 cases")
+        
+        let expectedOrder = ["economy", "standard", "high", "ultra", "proRes", "proResMax"]
+        XCTAssertEqual(caseNames, expectedOrder, "[PR4][SCAN] CaptureQualityPreset cases must maintain order")
+    }
+    
+    func test_constantsAreCompileTimeDeterministic() {
+        // These constants must be identical across runs
+        let bitrate1 = CaptureRecordingConstants.estimatedBitrate(tier: .t4K, fps: 60)
+        let bitrate2 = CaptureRecordingConstants.estimatedBitrate(tier: .t4K, fps: 60)
+        XCTAssertEqual(bitrate1, bitrate2, "[PR4][SCAN] Constants must be deterministic")
+        
+        // Verify constants exist at compile time
+        XCTAssertGreaterThan(bitrate1, 0, "[PR4][SCAN] 4K_60 bitrate must exist at compile time")
+    }
+    
+    func test_proResConstantsAreReasonable() {
+        // ProRes 422 HQ at 4K30 should be ~165 Mbps
+        let proRes4K30 = CaptureRecordingConstants.proRes422HQBitrate4K30
+        XCTAssertGreaterThanOrEqual(proRes4K30, 150_000_000, "[PR4][SCAN] ProRes 4K30 >= 150 Mbps")
+        XCTAssertLessThanOrEqual(proRes4K30, 200_000_000, "[PR4][SCAN] ProRes 4K30 <= 200 Mbps")
+        
+        // ProRes 422 HQ at 4K60 should be ~330 Mbps
+        let proRes4K60 = CaptureRecordingConstants.proRes422HQBitrate4K60
+        XCTAssertGreaterThanOrEqual(proRes4K60, 300_000_000, "[PR4][SCAN] ProRes 4K60 >= 300 Mbps")
+        XCTAssertLessThanOrEqual(proRes4K60, 400_000_000, "[PR4][SCAN] ProRes 4K60 <= 400 Mbps")
+        
+        // Storage write speed requirement
+        let writeSpeed = CaptureRecordingConstants.proResMinStorageWriteSpeedMBps
+        XCTAssertGreaterThanOrEqual(writeSpeed, 200, "[PR4][SCAN] ProRes requires >= 200 MB/s write speed")
+    }
+    
+    func test_noHardcodedDeviceModelsInAppCapture() {
+        guard let captureDir = RepoRootLocator.resolvePath("App/Capture") else {
+            XCTFail("[PR4][SCAN] Could not resolve App/Capture directory")
+            return
+        }
+        
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: captureDir, includingPropertiesForKeys: nil) else {
+            return
+        }
+        
+        // Device model strings should be in CaptureRecordingConstants, not hardcoded
+        let forbiddenPatterns = [
+            "\"iPhone15,2\"",
+            "\"iPhone15,3\"",
+            "\"iPhone16,1\"",
+            "\"iPhone16,2\""
+        ]
+        
+        for case let fileURL as URL in enumerator {
+            guard fileURL.pathExtension == "swift" else { continue }
+            guard fileURL.lastPathComponent != "CaptureRecordingConstants.swift" else { continue }
+            
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+            
+            for pattern in forbiddenPatterns {
+                if content.contains(pattern) {
+                    XCTFail("[PR4][SCAN] hardcoded_device_model file=\(fileURL.lastPathComponent) pattern=\(pattern)")
                 }
             }
         }
