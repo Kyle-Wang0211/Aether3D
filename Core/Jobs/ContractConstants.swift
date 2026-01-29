@@ -1,6 +1,6 @@
 // ============================================================================
 // CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
-// Contract Version: PR2-JSM-3.0-merged
+// Contract Version: PR3-API-1.0
 // States: 9 | Transitions: 15 | FailureReasons: 17 | CancelReasons: 3
 // ============================================================================
 
@@ -11,7 +11,10 @@ public enum ContractConstants {
     // MARK: - Version
     
     /// Contract version identifier
-    public static let CONTRACT_VERSION = "PR2-JSM-3.0-merged"
+    public static let CONTRACT_VERSION = "PR3-API-1.0"
+    
+    /// Upload infrastructure version (see UploadConstants.swift)
+    public static let UPLOAD_MODULE_VERSION = UploadConstants.UPLOAD_CONTRACT_VERSION
     
     // MARK: - Counts (MUST match actual enum counts)
     
