@@ -31,6 +31,7 @@ private protocol FileManagerProvider {
     func copyItem(from: URL, to: URL) throws
     func removeItem(at url: URL) throws
     func freeDiskBytes(for url: URL) -> UInt64?
+    func createDirectory(at url: URL, withIntermediateDirectories: Bool) throws
 }
 
 // ClockProvider and TimerScheduler protocols are defined in dedicated files:
@@ -75,6 +76,10 @@ private struct DefaultFileManagerProvider: FileManagerProvider {
     func freeDiskBytes(for url: URL) -> UInt64? {
         try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             .volumeAvailableCapacityForImportantUsage
+    }
+    
+    func createDirectory(at url: URL, withIntermediateDirectories createIntermediates: Bool) throws {
+        try fm.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: nil)
     }
 }
 

@@ -2,8 +2,13 @@
 //  CaptureMetadata.swift
 //  progect2
 //
-//  Created for PR#4 Capture Recording
+//  PR#4 Capture Recording Enhancement
 //
+// ============================================================================
+// CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
+// Contract Version: PR4-CAPTURE-1.1
+// States: N/A | Warnings: 32 | QualityPresets: 6 | ResolutionTiers: 7
+// ============================================================================
 
 import Foundation
 import AVFoundation
@@ -109,6 +114,31 @@ enum WarningCode: String, Codable {
     // Video Verification Warnings
     case audioTrackDetected
     case playableCheckFalse
+    
+    // NEW: Quality Warnings
+    case bitrateBelow3DMinimum    // Bitrate < 50 Mbps
+    case resolutionBelow4K        // Not 4K+ tier
+    case fpsBelow30               // < 30 FPS
+    case noHDRAvailable           // HDR not available/enabled
+    
+    // NEW: Thermal Warnings
+    case thermalQualityReduced    // Quality reduced due to thermal
+    case thermalFpsReduced        // FPS reduced due to thermal
+    
+    // NEW: Storage Warnings
+    case storageLow5GB            // < 5GB remaining
+    case storageCritical1GB       // < 1GB remaining
+    case estimatedRecordingTruncated  // May hit storage limit before duration
+    
+    // NEW: Device Capability Warnings
+    case proResUnavailable        // Device doesn't support ProRes
+    case appleLogUnavailable      // Device doesn't support Apple Log
+    case hdr10PlusUnavailable     // Device doesn't support HDR10+
+    
+    // NEW: Focus/Exposure Warnings
+    case continuousFocusHunting   // Focus instability detected
+    case exposureFluctuating      // Exposure changes frequently
+    case motionBlurDetected       // Motion blur in frames
 }
 
 // MARK: - v4.2 Types
@@ -136,6 +166,23 @@ enum DiagnosticEventCode: String, Codable {
     case staleFinishDiscardedEpoch
     case staleFinishDiscardedURL
     case duplicateFinishIgnored
+    
+    // NEW: Thermal response events
+    case thermalWarningTriggered
+    case thermalQualityReduced
+    case thermalFpsReduced
+    case thermalRecordingStopped
+    
+    // NEW: Storage events
+    case storageLowWarning
+    case storageCriticalWarning
+    case storageEstimatedTruncation
+    
+    // NEW: Quality events
+    case qualityPresetApplied
+    case qualityFallbackTriggered
+    case proResActivated
+    case proResUnavailable
 }
 
 // MARK: - v4.3 Types

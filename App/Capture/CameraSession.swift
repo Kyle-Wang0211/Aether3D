@@ -2,8 +2,13 @@
 //  CameraSession.swift
 //  progect2
 //
-//  Created for PR#4 Capture Recording
+//  PR#4 Capture Recording Enhancement
 //
+// ============================================================================
+// CONSTITUTIONAL CONTRACT - DO NOT EDIT WITHOUT RFC
+// Contract Version: PR4-CAPTURE-1.1
+// States: N/A | Warnings: 32 | QualityPresets: 6 | ResolutionTiers: 7
+// ============================================================================
 
 import Foundation
 import AVFoundation
@@ -214,7 +219,7 @@ final class CameraSession: CameraSessionProtocol {
         }
         
         // Select highest tier
-        let sortedTiers: [ResolutionTier] = [.t8K, .t4K, .t1080p, .t720p, .lower]
+        let sortedTiers: [ResolutionTier] = [.t8K, .t4K, .t1080p, .t720p, .lower, .t2K, .t480p]
         guard let selectedTier = sortedTiers.first(where: { tierGroups[$0] != nil }) else {
             throw RecordingError.configurationFailed(.formatSelectionFailed)
         }
@@ -231,10 +236,7 @@ final class CameraSession: CameraSessionProtocol {
                 for candidateFps in CaptureRecordingConstants.candidateFps {
                     if abs(candidateFps - fpsRange.maxFrameRate) < CaptureRecordingConstants.fpsMatchTolerance ||
                        (candidateFps <= fpsRange.maxFrameRate && candidateFps >= fpsRange.minFrameRate) {
-                        let hdrCapable = format.isVideoHDRSupported
-                        let hevcCapable = format.isVideoCodecSupported(.hevc)
-                        
-                        let score = Int64(candidateFps * 100) + (hdrCapable ? 10 : 0) + (hevcCapable ? 5 : 0)
+                        let score = calculateFormatScore(format: format, fps: candidateFps)
                         
                         let frameDuration = CMTime(value: 1, timescale: Int32(candidateFps))
                         
@@ -305,16 +307,62 @@ final class CameraSession: CameraSessionProtocol {
         }
     }
     
+    private func calculateFormatScore(format: AVCaptureDevice.Format, fps: Double) -> Int64 {
+        var score: Int64 = 0
+        
+        // FPS contribution
+        score += Int64(fps) * CaptureRecordingConstants.scoreWeightFps
+        
+        // Resolution contribution
+        let dimensions = format.formatDescription.dimensions
+        let maxDimension = max(dimensions.width, dimensions.height)
+        score += Int64(maxDimension) / 100 * CaptureRecordingConstants.scoreWeightResolution
+        
+        // HDR contribution (safe check)
+        if format.isVideoHDRSupported {
+            score += CaptureRecordingConstants.scoreWeightHDR
+        }
+        
+        // HEVC contribution
+        if format.isVideoCodecSupported(.hevc) {
+            score += CaptureRecordingConstants.scoreWeightHEVC
+        }
+        
+        // ProRes contribution (iOS 15+ only, safe check)
+        if #available(iOS 15.0, *) {
+            // Check if format supports ProRes codec types
+            if format.supportedVideoCodecTypes.contains(.hevc) {
+                // Additional ProRes check would go here if AVFoundation API provides it
+                // For now, we rely on device capability detection via constants
+            }
+        }
+        
+        // Apple Log contribution (iOS 17.2+ only)
+        if #available(iOS 17.2, *) {
+            // Apple Log support detection would go here
+            // This is a placeholder for future implementation
+        }
+        
+        // Dolby Vision and HDR10+ detection would require additional AVFoundation APIs
+        // These are format-specific and may not be directly queryable
+        
+        return score
+    }
+    
     private func determineTier(width: Int, height: Int) -> ResolutionTier {
         let maxDim = max(width, height)
         if maxDim >= 7680 {
             return .t8K
         } else if maxDim >= 3840 {
             return .t4K
+        } else if maxDim >= 2560 {
+            return .t2K      // NEW: Support t2K
         } else if maxDim >= 1920 {
             return .t1080p
         } else if maxDim >= 1280 {
             return .t720p
+        } else if maxDim >= 640 {
+            return .t480p   // NEW: Support t480p
         } else {
             return .lower
         }
@@ -397,6 +445,19 @@ final class CameraSession: CameraSessionProtocol {
         if !captureSession.isRunning {
             captureSession.startRunning()
         }
+    }
+}
+
+// MARK: - String Extensions
+
+extension String {
+    var fourCharCode: FourCharCode {
+        guard count == 4 else { return 0 }
+        var result: FourCharCode = 0
+        for char in utf16 {
+            result = (result << 8) | FourCharCode(char)
+        }
+        return result
     }
 }
 
