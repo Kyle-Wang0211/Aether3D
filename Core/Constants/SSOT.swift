@@ -143,13 +143,53 @@ public enum SSOT {
     /// S4 maximum edge RMS (pixels)
     public static var s4MaxEdgeRmsPx: Double { CoverageVisualizationConstants.s4MaxEdgeRmsPx }
     
+    // MARK: - Ultra-Granular Capture Policies (PR1 vNext)
+    
+    /// Capture profile (closed set)
+    /// **Deprecated:** Use CaptureProfile enum directly
+    @available(*, deprecated, message: "Use CaptureProfile enum directly")
+    public static var captureProfile: CaptureProfile { .standard }
+    
+    /// Grid resolutions for a profile (LengthQ, not Double)
+    public static func gridResolutions(for profile: CaptureProfile) -> [LengthQ] {
+        return GridResolutionPolicy.allowedResolutions(for: profile)
+    }
+    
+    /// Patch policy for a profile
+    public static func patchPolicy(for profile: CaptureProfile) -> PatchPolicySpec {
+        return PatchPolicy.policy(for: profile)
+    }
+    
+    /// Coverage policy for a profile
+    public static func coveragePolicy(for profile: CaptureProfile) -> CoveragePolicySpec {
+        return CoveragePolicy.policy(for: profile)
+    }
+    
+    /// Evidence budget policy for a profile
+    public static func evidenceBudgetPolicy(for profile: CaptureProfile) -> EvidenceBudgetPolicySpec {
+        return EvidenceBudgetPolicy.policy(for: profile)
+    }
+    
+    /// Display policy
+    public static var displayPolicy: DisplayPolicy.DigestInput {
+        return DisplayPolicy.digestInput(schemaVersionId: SSOTVersion.schemaVersionId)
+    }
+    
+    // MARK: - Legacy Patch Size Constants (Deprecated)
+    
     /// Patch size minimum (meters)
+    /// **Deprecated:** Use patchPolicy(for:) instead
+    @available(*, deprecated, message: "Use SSOT.patchPolicy(for:) instead")
     public static var patchSizeMinM: Double { CoverageVisualizationConstants.patchSizeMinM }
     
     /// Patch size maximum (meters)
+    /// **Deprecated:** Use patchPolicy(for:) instead
+    @available(*, deprecated, message: "Use SSOT.patchPolicy(for:) instead")
     public static var patchSizeMaxM: Double { CoverageVisualizationConstants.patchSizeMaxM }
     
     /// Patch size fallback (meters)
+    /// **Deprecated:** Use patchPolicy(for:) instead
+    @available(*, deprecated, message: "Use SSOT.patchPolicy(for:) instead")
     public static var patchSizeFallbackM: Double { CoverageVisualizationConstants.patchSizeFallbackM }
     
     // MARK: - Storage Constants

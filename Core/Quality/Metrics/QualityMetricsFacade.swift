@@ -22,12 +22,12 @@ public class QualityMetricsFacade {
     private let textureAnalyzer: TextureAnalyzer
     private let motionAnalyzer: MotionAnalyzer
     private let focusDetector: FocusDetector
-    
+
     // NEW: PR5-QUALITY-2.0 analyzers
     private let tenengradDetector: TenengradDetector
     private let materialAnalyzer: MaterialAnalyzer
     private let photometricChecker: PhotometricConsistencyChecker
-    
+
     public init(
         brightnessAnalyzer: BrightnessAnalyzer,
         blurDetector: BlurDetector,
@@ -51,7 +51,7 @@ public class QualityMetricsFacade {
         self.materialAnalyzer = materialAnalyzer ?? MaterialAnalyzer()
         self.photometricChecker = photometricChecker ?? PhotometricConsistencyChecker()
     }
-    
+
     /// Compute all metrics for given quality level (PR5-QUALITY-2.0)
     /// H2: No shared mutable state across analyzers
     public func computeMetrics(qualityLevel: QualityLevel) -> MetricBundle {
@@ -62,12 +62,12 @@ public class QualityMetricsFacade {
         let texture = textureAnalyzer.analyze(qualityLevel: qualityLevel)
         let motion = motionAnalyzer.analyze(qualityLevel: qualityLevel)
         let focus = focusDetector.detect(qualityLevel: qualityLevel)
-        
+
         // NEW: PR5-QUALITY-2.0 metrics
         let tenengrad = tenengradDetector.detect(qualityLevel: qualityLevel)
         let material = materialAnalyzer.analyze(qualityLevel: qualityLevel)
         let photometric = photometricChecker.checkConsistency()
-        
+
         return MetricBundle(
             brightness: brightness,
             laplacian: laplacian,
@@ -84,4 +84,3 @@ public class QualityMetricsFacade {
         )
     }
 }
-

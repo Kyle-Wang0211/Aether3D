@@ -10,20 +10,21 @@ import Foundation
 
 /// MetricBundle - bundle of all quality metrics (PR5-QUALITY-2.0)
 public struct MetricBundle: Codable {
+    // Existing metrics
     public let brightness: MetricResult?
     public let laplacian: MetricResult?
     public let featureScore: MetricResult?
     public let motionScore: MetricResult?
     public let saturation: MetricResult?
     public let focus: MetricResult?
-    
+
     // NEW: PR5-QUALITY-2.0 metrics
     public let tenengrad: MetricResult?
     public let material: MaterialResult?
     public let photometric: PhotometricResult?
     public let angularVelocity: MetricResult?
     public let depthQuality: MetricResult?
-    
+
     public init(
         brightness: MetricResult? = nil,
         laplacian: MetricResult? = nil,

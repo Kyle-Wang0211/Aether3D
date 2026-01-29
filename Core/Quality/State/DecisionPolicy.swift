@@ -82,16 +82,16 @@ public struct DecisionPolicy {
         
         return (false, "Cannot retreat visual state")
     }
-    
+
     // MARK: - Profile-Aware Thresholds (PR5-QUALITY-2.0)
-    
+
     /// Get effective Laplacian threshold for given capture profile
     /// Different profiles have different sharpness requirements
     public static func getEffectiveLaplacianThreshold(
         for profile: CaptureProfile
     ) -> Double {
         let base = FrameQualityConstants.blurThresholdLaplacian
-        
+
         switch profile {
         case .standard:
             return base  // 200
@@ -105,13 +105,13 @@ public struct DecisionPolicy {
             return base * FrameQualityConstants.LAPLACIAN_MULTIPLIER_CINEMATIC  // 180
         }
     }
-    
+
     /// Get effective minimum ORB feature count for given capture profile
     public static func getEffectiveMinFeatureCount(
         for profile: CaptureProfile
     ) -> Int {
         let base = FrameQualityConstants.MIN_ORB_FEATURES_FOR_SFM
-        
+
         switch profile {
         case .standard, .largeScene:
             return base  // 500
@@ -121,13 +121,13 @@ public struct DecisionPolicy {
             return Int(Double(base) * FrameQualityConstants.FEATURE_MULTIPLIER_CINEMATIC)  // 350
         }
     }
-    
+
     /// Get effective Tenengrad threshold for given capture profile
     public static func getEffectiveTenengradThreshold(
         for profile: CaptureProfile
     ) -> Double {
         let base = FrameQualityConstants.TENENGRAD_THRESHOLD
-        
+
         switch profile {
         case .standard, .largeScene, .cinematicScene:
             return base  // 50

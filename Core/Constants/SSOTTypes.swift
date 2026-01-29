@@ -28,6 +28,7 @@ public enum SSOTUnit: String, Codable, CaseIterable {
     case variance
     case brightness
     case percent
+    // PR5-QUALITY-2.0 additions
     case degreesPerSecond
 }
 
@@ -39,6 +40,7 @@ public enum ThresholdCategory: String, Codable, CaseIterable {
     case performance
     case safety
     case resource
+    // PR5-QUALITY-2.0 additions
     case motion
     case photometric
 }

@@ -9,18 +9,7 @@
 
 import Foundation
 
-/// Lab color representation
-public struct LabColor: Codable, Equatable {
-    public let l: Double  // Luminance (0-100)
-    public let a: Double  // Green-Red (-128 to 127)
-    public let b: Double  // Blue-Yellow (-128 to 127)
-    
-    public init(l: Double, a: Double, b: Double) {
-        self.l = l
-        self.a = a
-        self.b = b
-    }
-}
+// Note: LabColor is defined in Core/Models/ObservationTypes.swift
 
 /// Photometric consistency result
 public struct PhotometricResult: Codable, Equatable {

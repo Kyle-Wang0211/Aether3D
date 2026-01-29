@@ -6,18 +6,20 @@ let package = Package(
   platforms: [
     .macOS(.v13),
     .iOS(.v16)
+    // Linux support is implicit in SwiftPM
   ],
   products: [
     .library(name: "Aether3DCore", targets: ["Aether3DCore"])
   ],
   dependencies: [
+    // swift-crypto: Required for Linux compatibility (replaces Apple-only CryptoKit)
+    // Used by ConstantsTests target for cross-platform SHA-256 hashing
     .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
   ],
   targets: [
     .systemLibrary(
       name: "CSQLite",
       path: "Sources/CSQLite",
-      pkgConfig: "sqlite3",
       providers: [.apt(["libsqlite3-dev"]), .brew(["sqlite"])]
     ),
     .target(
@@ -28,11 +30,33 @@ let package = Package(
       ],
       path: "Core"
     ),
+    .executableTarget(
+      name: "UpdateGoldenDigests",
+      dependencies: [
+        "Aether3DCore",
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
+      path: "Sources/UpdateGoldenDigests"
+    ),
+    .executableTarget(
+      name: "PIZFixtureDumper",
+      dependencies: [
+        "Aether3DCore"
+      ],
+      path: "Sources/PIZFixtureDumper"
+    ),
+    .executableTarget(
+      name: "PIZSealingEvidence",
+      dependencies: [
+        "Aether3DCore"
+      ],
+      path: "Sources/PIZSealingEvidence"
+    ),
     .testTarget(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Audit/COVERAGE_GAPS_ANALYSIS.md"],
+      exclude: ["Constants", "Upload", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
@@ -41,8 +65,16 @@ let package = Package(
     ),
     .testTarget(
       name: "ConstantsTests",
-      dependencies: ["Aether3DCore"],
+      dependencies: [
+        "Aether3DCore",
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
       path: "Tests/Constants"
+    ),
+    .testTarget(
+      name: "UploadTests",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/Upload"
     )
   ]
 )
