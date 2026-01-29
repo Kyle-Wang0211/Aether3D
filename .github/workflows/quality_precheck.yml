@@ -8,11 +8,15 @@ on:
       - 'scripts/quality_gate.sh'
       - 'scripts/quality_lint.sh'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality-gates:
     strategy:
       matrix:
-        os: [macos-14, ubuntu-22.04]
+        os: [macos-15, ubuntu-22.04]
         swift-version: ["5.9"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
@@ -21,21 +25,84 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Select stable Xcode on macOS (single Swift source)
+        if: matrix.os == 'macos-15'
+        run: |
+          set -euo pipefail
+          echo "=== Available Xcode installations ==="
+          ls -1 /Applications | grep -E '^Xcode(_[0-9]+\.[0-9]+)?\.app$' || echo "No Xcode found in /Applications"
+          echo ""
+
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "✅ Selecting /Applications/$app"
+              export DEVELOPER_DIR="/Applications/$app/Contents/Developer"
+              sudo xcode-select -s "$DEVELOPER_DIR"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "=== Selecting Xcode (priority: 16.2 > 16.1 > 16.0 > default) ==="
+          # Note: macOS-15 runner uses Xcode 16.x by default; we prioritize stable versions
+          # WHY: Prevent BitwiseCopyable/swiftinterface errors from mixing Xcode SDK with external Swift toolchain
+          pick "Xcode_16.2.app" || \
+          pick "Xcode_16.1.app" || \
+          pick "Xcode_16.0.app" || \
+          pick "Xcode.app" || {
+            echo "[PIZ_SPEC_VIOLATION] No Xcode found in /Applications"
+            exit 1
+          }
+
+          export DEVELOPER_DIR="$(xcode-select -p)"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          echo ""
+          echo "=== Xcode version ==="
+          xcodebuild -version
+          echo ""
+          echo "=== Swift toolchain verification (xcrun) ==="
+          XCRUN_SWIFT="$(xcrun --find swift)"
+          echo "XCRUN_SWIFT: $XCRUN_SWIFT"
+          echo "DEVELOPER_DIR: $DEVELOPER_DIR"
+          echo ""
+          echo "=== Swift version (xcrun) ==="
+          xcrun swift --version
+          echo ""
+          echo "=== SDK path ==="
+          xcrun --show-sdk-path
+          echo ""
+          if [[ ! "$XCRUN_SWIFT" == "$DEVELOPER_DIR"* ]]; then
+            echo "[PIZ_SPEC_VIOLATION] macOS Swift toolchain mismatch: xcrun swift is not from selected Xcode"
+            echo "XCRUN_SWIFT: $XCRUN_SWIFT"
+            echo "DEVELOPER_DIR: $DEVELOPER_DIR"
+            echo "xcodebuild version:"
+            xcodebuild -version
+            exit 1
+          fi
+          echo "✅ Swift is from selected Xcode (verified via xcrun)"
       
-      - name: Setup Swift
+      - name: Setup Swift (Linux only)
+        if: matrix.os == 'ubuntu-22.04'
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: ${{ matrix.swift-version }}
-          skip-verify-signature: ${{ matrix.os == 'ubuntu-22.04' }}
+          skip-verify-signature: true
       
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev pkg-config
       
       - name: Platform Diagnostics
         run: |
+          set -euo pipefail
           echo "=== Platform Information ==="
           uname -a
           swift --version
@@ -117,6 +184,7 @@ jobs:
           LC_ALL: C
           LANG: C
         run: |
+          set -euo pipefail
           set -x
           chmod +x scripts/*.sh scripts/hooks/pre-push scripts/install_hooks.sh || true
           cd "$(git rev-parse --show-toplevel)"
@@ -125,16 +193,18 @@ jobs:
       
       - name: Check Build Warnings
         run: |
+          set -euo pipefail
           set -x
           cd "$(git rev-parse --show-toplevel)"
           bash scripts/check_build_warnings.sh
       
       - name: Run Quality Gates (macOS only)
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         env:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
         run: |
+          set -euo pipefail
           set -x
           cd "$(git rev-parse --show-toplevel)"
           bash ./scripts/quality_gate.sh
@@ -146,6 +216,7 @@ jobs:
           LANG: en_US.UTF-8
           TZ: UTC
         run: |
+          set -euo pipefail
           set -x
           cd "$(git rev-parse --show-toplevel)"
           chmod +x scripts/*.sh scripts/hooks/* || true

@@ -7,14 +7,16 @@ on:
 
 jobs:
   gate:
-    runs-on: macos-latest
+    runs-on: macos-15  # Pinned to prevent runner drift (replaces legacy macos-latest)
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       
       - name: Run CI checks
         run: |
+          set -euo pipefail
           chmod +x scripts/ci/*.sh
           bash scripts/ci/run_all.sh
 
