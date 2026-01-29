@@ -33,24 +33,27 @@ echo "[1/2] Extracting constants from SSOT_CONSTANTS.md..."
 extract_swift_value() {
   local swift_file="$1"
   local prop_name="$2"
-  
+
   if [ ! -f "$swift_file" ]; then
     echo "NOT_FOUND"
     return
   fi
-  
-  # Look for: static let propName = value or static let propName: Type = value
-  local swift_value=$(grep -E "static\s+(let|var)\s+$prop_name\s*(:|=)" "$swift_file" 2>/dev/null | \
-    sed -E 's/.*=\s*([0-9.]+).*/\1/' | head -1 || echo "NOT_FOUND")
-  
-  # Handle infinity
-  if [[ "$swift_value" == "NOT_FOUND" ]]; then
-    if grep -qE "$prop_name.*\.infinity|$prop_name.*Double\.infinity" "$swift_file" 2>/dev/null; then
-      echo "∞"
-      return
-    fi
+
+  # First check for infinity - must check before numeric extraction
+  local line=$(grep -E "static\s+(let|var)\s+$prop_name" "$swift_file" 2>/dev/null | head -1)
+  if [[ "$line" =~ \.infinity ]] || [[ "$line" =~ Double\.infinity ]] || [[ "$line" =~ TimeInterval\.infinity ]]; then
+    echo "∞"
+    return
   fi
-  
+
+  # Look for: static let propName = value or static let propName: Type = value
+  local swift_value=$(echo "$line" | sed -E 's/.*=\s*([0-9.]+).*/\1/' || echo "NOT_FOUND")
+
+  # If extraction failed (no numeric), mark as NOT_FOUND
+  if [[ ! "$swift_value" =~ ^[0-9.]+$ ]]; then
+    swift_value="NOT_FOUND"
+  fi
+
   echo "$swift_value"
 }
 

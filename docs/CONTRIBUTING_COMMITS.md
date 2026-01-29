@@ -79,8 +79,8 @@ SSOT-Change: no
 ### Enforcement
 
 1. **Local**: `commit-msg` hook validates format
-2. **Local**: `pre-push` hook runs quality gate
-3. **CI**: Independent SSOT gate verification (cannot be bypassed)
+2. **Local**: `pre-push` hook runs quality checks
+3. **CI**: Independent SSOT verification (cannot be bypassed)
 4. **GitHub**: CODEOWNERS requires approval for protected paths
 
 ## Examples
