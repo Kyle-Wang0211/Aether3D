@@ -82,5 +82,58 @@ public struct DecisionPolicy {
         
         return (false, "Cannot retreat visual state")
     }
+    
+    // MARK: - Profile-Aware Thresholds (PR5-QUALITY-2.0)
+    
+    /// Get effective Laplacian threshold for given capture profile
+    /// Different profiles have different sharpness requirements
+    public static func getEffectiveLaplacianThreshold(
+        for profile: CaptureProfile
+    ) -> Double {
+        let base = FrameQualityConstants.blurThresholdLaplacian
+        
+        switch profile {
+        case .standard:
+            return base  // 200
+        case .smallObjectMacro:
+            return base * FrameQualityConstants.LAPLACIAN_MULTIPLIER_PRO_MACRO  // 250
+        case .largeScene:
+            return base * FrameQualityConstants.LAPLACIAN_MULTIPLIER_LARGE_SCENE  // 180
+        case .proMacro:
+            return base * FrameQualityConstants.LAPLACIAN_MULTIPLIER_PRO_MACRO  // 250
+        case .cinematicScene:
+            return base * FrameQualityConstants.LAPLACIAN_MULTIPLIER_CINEMATIC  // 180
+        }
+    }
+    
+    /// Get effective minimum ORB feature count for given capture profile
+    public static func getEffectiveMinFeatureCount(
+        for profile: CaptureProfile
+    ) -> Int {
+        let base = FrameQualityConstants.MIN_ORB_FEATURES_FOR_SFM
+        
+        switch profile {
+        case .standard, .largeScene:
+            return base  // 500
+        case .smallObjectMacro, .proMacro:
+            return Int(Double(base) * FrameQualityConstants.FEATURE_MULTIPLIER_PRO_MACRO)  // 600
+        case .cinematicScene:
+            return Int(Double(base) * FrameQualityConstants.FEATURE_MULTIPLIER_CINEMATIC)  // 350
+        }
+    }
+    
+    /// Get effective Tenengrad threshold for given capture profile
+    public static func getEffectiveTenengradThreshold(
+        for profile: CaptureProfile
+    ) -> Double {
+        let base = FrameQualityConstants.TENENGRAD_THRESHOLD
+        
+        switch profile {
+        case .standard, .largeScene, .cinematicScene:
+            return base  // 50
+        case .smallObjectMacro, .proMacro:
+            return base * 1.2  // 60 (sharper required for macro)
+        }
+    }
 }
 

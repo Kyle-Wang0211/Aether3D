@@ -28,6 +28,7 @@ public enum SSOTUnit: String, Codable, CaseIterable {
     case variance
     case brightness
     case percent
+    case degreesPerSecond
 }
 
 // MARK: - Categories
@@ -38,6 +39,8 @@ public enum ThresholdCategory: String, Codable, CaseIterable {
     case performance
     case safety
     case resource
+    case motion
+    case photometric
 }
 
 /// Behavior when a value exceeds a threshold.
