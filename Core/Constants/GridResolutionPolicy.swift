@@ -42,6 +42,10 @@ public enum GridResolutionPolicy {
             return recommendedCaptureFloorSmallObjectMacro
         case .largeScene:
             return recommendedCaptureFloorLargeScene
+        case .proMacro:
+            return recommendedCaptureFloorSmallObjectMacro  // proMacro uses same floor as smallObjectMacro (high detail)
+        case .cinematicScene:
+            return recommendedCaptureFloorLargeScene  // cinematicScene uses same floor as largeScene (room-scale)
         }
     }
     
@@ -83,6 +87,24 @@ public enum GridResolutionPolicy {
                 LengthQ(scaleId: .geomId, quanta: 10),        // 1cm
             ]
         case .largeScene:
+            return [
+                LengthQ(scaleId: .geomId, quanta: 5),   // 5mm
+                LengthQ(scaleId: .geomId, quanta: 10),  // 1cm
+                LengthQ(scaleId: .geomId, quanta: 20),   // 2cm
+                LengthQ(scaleId: .geomId, quanta: 50),  // 5cm
+            ]
+        case .proMacro:
+            // proMacro uses same resolutions as smallObjectMacro (high detail)
+            return [
+                LengthQ(scaleId: .systemMinimum, quanta: 5),  // 0.25mm
+                LengthQ(scaleId: .systemMinimum, quanta: 10), // 0.5mm
+                LengthQ(scaleId: .geomId, quanta: 1),         // 1mm
+                LengthQ(scaleId: .geomId, quanta: 2),         // 2mm
+                LengthQ(scaleId: .geomId, quanta: 5),         // 5mm
+                LengthQ(scaleId: .geomId, quanta: 10),        // 1cm
+            ]
+        case .cinematicScene:
+            // cinematicScene uses same resolutions as largeScene (room-scale)
             return [
                 LengthQ(scaleId: .geomId, quanta: 5),   // 5mm
                 LengthQ(scaleId: .geomId, quanta: 10),  // 1cm

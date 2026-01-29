@@ -117,6 +117,10 @@ public enum EvidenceBudgetPolicy {
             return smallObjectMacro
         case .largeScene:
             return largeScene
+        case .proMacro:
+            return smallObjectMacro  // proMacro uses same budget as smallObjectMacro (high detail)
+        case .cinematicScene:
+            return largeScene  // cinematicScene uses same budget as largeScene (room-scale)
         }
     }
     
