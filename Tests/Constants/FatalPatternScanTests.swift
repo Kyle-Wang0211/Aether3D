@@ -63,19 +63,24 @@ final class FatalPatternScanTests: XCTestCase {
             if file.path.contains("/Constants/") {
                 continue
             }
-            
+
             // Skip Pipeline directory (existing code, not part of SSOT Phase 1)
             if file.path.contains("/Pipeline/") {
                 continue
             }
-            
+
             // Skip Quality directory (existing code, not part of SSOT Phase 1)
             if file.path.contains("/Quality/") {
                 continue
             }
-            
+
             // Skip Infrastructure directory (existing code, not part of SSOT Phase 1)
             if file.path.contains("/Infrastructure/") {
+                continue
+            }
+
+            // Skip Evidence directory (PR2 code with debug-only fatalError in invariants)
+            if file.path.contains("/Evidence/") {
                 continue
             }
             

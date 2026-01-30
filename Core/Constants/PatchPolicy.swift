@@ -86,7 +86,25 @@ public enum PatchPolicy {
         schemaVersionId: SSOTVersion.schemaVersionId,
         documentation: "Large scene patch policy: 10mm to 1m edge lengths"
     )
-    
+
+    /// Patch policy for proMacro profile
+    public static let proMacro = PatchPolicySpec(
+        profileId: CaptureProfile.proMacro.profileId,
+        minEdgeLength: LengthQ(scaleId: .systemMinimum, quanta: 5).digestInput(), // 0.25mm
+        maxEdgeLength: LengthQ(scaleId: .geomId, quanta: 30).digestInput(), // 3cm
+        schemaVersionId: SSOTVersion.schemaVersionId,
+        documentation: "Pro macro patch policy: 0.25mm to 3cm edge lengths (turntable scanning)"
+    )
+
+    /// Patch policy for cinematicScene profile
+    public static let cinematicScene = PatchPolicySpec(
+        profileId: CaptureProfile.cinematicScene.profileId,
+        minEdgeLength: LengthQ(scaleId: .geomId, quanta: 8).digestInput(), // 8mm
+        maxEdgeLength: LengthQ(scaleId: .geomId, quanta: 800).digestInput(), // 80cm
+        schemaVersionId: SSOTVersion.schemaVersionId,
+        documentation: "Cinematic scene patch policy: 8mm to 80cm edge lengths (dolly movement)"
+    )
+
     // MARK: - Policy Lookup
     
     /// Get patch policy for a profile
@@ -99,9 +117,9 @@ public enum PatchPolicy {
         case .largeScene:
             return largeScene
         case .proMacro:
-            return smallObjectMacro  // proMacro uses same policy as smallObjectMacro (high detail)
+            return proMacro
         case .cinematicScene:
-            return largeScene  // cinematicScene uses same policy as largeScene (room-scale)
+            return cinematicScene
         }
     }
     
@@ -111,7 +129,9 @@ public enum PatchPolicy {
     public static let allPolicies: [PatchPolicySpec] = [
         standard,
         smallObjectMacro,
-        largeScene
+        largeScene,
+        proMacro,
+        cinematicScene
     ]
     
     // MARK: - Digest Input
