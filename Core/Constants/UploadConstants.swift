@@ -298,32 +298,33 @@ public enum UploadConstants {
 #if DEBUG
 /// Compile-time assertions for constant validity
 /// These run only in debug builds to catch configuration errors
+/// FATAL_OK: Debug-only assertions for sanity checking constant relationships
 private enum UploadConstantsValidation {
     static func validate() {
         // Chunk size ordering
-        assert(UploadConstants.CHUNK_SIZE_MIN_BYTES < UploadConstants.CHUNK_SIZE_DEFAULT_BYTES,
+        assert(UploadConstants.CHUNK_SIZE_MIN_BYTES < UploadConstants.CHUNK_SIZE_DEFAULT_BYTES, // FATAL_OK
                "MIN chunk size must be less than DEFAULT")
-        assert(UploadConstants.CHUNK_SIZE_DEFAULT_BYTES < UploadConstants.CHUNK_SIZE_MAX_BYTES,
+        assert(UploadConstants.CHUNK_SIZE_DEFAULT_BYTES < UploadConstants.CHUNK_SIZE_MAX_BYTES, // FATAL_OK
                "DEFAULT chunk size must be less than MAX")
 
         // Network speed ordering
-        assert(UploadConstants.NETWORK_SPEED_SLOW_MBPS < UploadConstants.NETWORK_SPEED_NORMAL_MBPS,
+        assert(UploadConstants.NETWORK_SPEED_SLOW_MBPS < UploadConstants.NETWORK_SPEED_NORMAL_MBPS, // FATAL_OK
                "SLOW speed must be less than NORMAL")
-        assert(UploadConstants.NETWORK_SPEED_NORMAL_MBPS < UploadConstants.NETWORK_SPEED_FAST_MBPS,
+        assert(UploadConstants.NETWORK_SPEED_NORMAL_MBPS < UploadConstants.NETWORK_SPEED_FAST_MBPS, // FATAL_OK
                "NORMAL speed must be less than FAST")
 
         // Parallelism bounds
-        assert(UploadConstants.MIN_PARALLEL_CHUNK_UPLOADS >= 1,
+        assert(UploadConstants.MIN_PARALLEL_CHUNK_UPLOADS >= 1, // FATAL_OK
                "MIN parallel uploads must be at least 1")
-        assert(UploadConstants.MIN_PARALLEL_CHUNK_UPLOADS <= UploadConstants.MAX_PARALLEL_CHUNK_UPLOADS,
+        assert(UploadConstants.MIN_PARALLEL_CHUNK_UPLOADS <= UploadConstants.MAX_PARALLEL_CHUNK_UPLOADS, // FATAL_OK
                "MIN parallel uploads must not exceed MAX")
 
         // Timeout sanity
-        assert(UploadConstants.STALL_DETECTION_TIMEOUT_SECONDS < UploadConstants.CHUNK_TIMEOUT_SECONDS,
+        assert(UploadConstants.STALL_DETECTION_TIMEOUT_SECONDS < UploadConstants.CHUNK_TIMEOUT_SECONDS, // FATAL_OK
                "Stall detection must be faster than chunk timeout")
 
         // Retry sanity
-        assert(UploadConstants.RETRY_BASE_DELAY_SECONDS < UploadConstants.RETRY_MAX_DELAY_SECONDS,
+        assert(UploadConstants.RETRY_BASE_DELAY_SECONDS < UploadConstants.RETRY_MAX_DELAY_SECONDS, // FATAL_OK
                "Base retry delay must be less than max")
     }
 }

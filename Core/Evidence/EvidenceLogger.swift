@@ -7,7 +7,10 @@
 //
 
 import Foundation
-import os.log
+
+#if canImport(os)
+import os
+#endif
 
 /// Structured evidence event
 public protocol EvidenceEvent: Codable, Sendable {
@@ -143,32 +146,51 @@ public struct AggregatorUpdateEvent: EvidenceEvent {
 }
 
 /// Evidence logger with structured events
+/// Cross-platform: uses os.log on Apple platforms, print() on Linux
 public enum EvidenceLogger {
-    
+
+    #if canImport(os)
     private static let log = OSLog(subsystem: "com.aether3d.evidence", category: "Evidence")
-    
+    #endif
+
     /// Log structured event
     public static func logEvent<T: EvidenceEvent>(_ event: T) {
         #if DEBUG
         if let jsonData = try? JSONEncoder().encode(event),
            let jsonString = String(data: jsonData, encoding: .utf8) {
+            #if canImport(os)
             os_log("%{public}@", log: log, type: .info, jsonString)
+            #else
+            print("[Evidence:EVENT] \(jsonString)")
+            #endif
         }
         #endif
     }
-    
+
     /// Log warning
     public static func warn(_ message: String, file: StaticString = #file, line: UInt = #line) {
+        #if canImport(os)
         os_log("%{public}@", log: log, type: .error, "[WARN] \(file):\(line) - \(message)")
+        #else
+        print("[Evidence:WARN] \(file):\(line) - \(message)")
+        #endif
     }
-    
+
     /// Log error
     public static func error(_ message: String, file: StaticString = #file, line: UInt = #line) {
+        #if canImport(os)
         os_log("%{public}@", log: log, type: .fault, "[ERROR] \(file):\(line) - \(message)")
+        #else
+        print("[Evidence:ERROR] \(file):\(line) - \(message)")
+        #endif
     }
-    
+
     /// Log info
     public static func info(_ message: String) {
+        #if canImport(os)
         os_log("%{public}@", log: log, type: .info, message)
+        #else
+        print("[Evidence:INFO] \(message)")
+        #endif
     }
 }

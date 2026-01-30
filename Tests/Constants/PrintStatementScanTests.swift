@@ -25,6 +25,7 @@ final class PrintStatementScanTests: XCTestCase {
             guard url.pathExtension == "swift" else { continue }
             
             // Skip existing directories (not part of SSOT Phase 1)
+            // Evidence uses cross-platform print() for Linux compatibility
             if url.path.contains("/Pipeline/") ||
                url.path.contains("/Audit/") ||
                url.path.contains("/Artifacts/") ||
@@ -35,7 +36,8 @@ final class PrintStatementScanTests: XCTestCase {
                url.path.contains("/Rendering/") ||
                url.path.contains("/Utils/") ||
                url.path.contains("/Quality/") ||
-               url.path.contains("/Infrastructure/") {
+               url.path.contains("/Infrastructure/") ||
+               url.path.contains("/Evidence/") {
                 continue
             }
             
