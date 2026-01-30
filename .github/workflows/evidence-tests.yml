@@ -16,14 +16,18 @@ on:
 
 jobs:
   behavior-lock-tests:
-    runs-on: macos-latest
+    runs-on: macos-15
+    # Note: macOS runner uses Xcode's built-in Swift, no setup-swift needed
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Swift
-        uses: swift-actions/setup-swift@v1
-        with:
-          swift-version: "5.9"
+      - name: Select Xcode
+        run: |
+          # Use Xcode 16.x for Swift 5.9+ compatibility
+          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer || \
+          sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer || \
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          swift --version
 
       - name: Build
         run: swift build
@@ -57,14 +61,21 @@ jobs:
           exit 1
 
   cross-platform-consistency:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    # Note: ubuntu-22.04 is pinned because setup-swift@v1 does not support ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Swift
-        uses: swift-actions/setup-swift@v1
+        uses: swift-actions/setup-swift@v2
         with:
           swift-version: "5.9"
+          skip-verify-signature: true
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
 
       - name: Build
         run: swift build
