@@ -62,26 +62,29 @@ final class EvidenceEndToEndDeterminismTests: XCTestCase {
     /// Test that replay produces identical results
     func testReplayDeterminism() async throws {
         let sequence = TestDataGenerator.generateObservationSequence(count: 30, patchCount: 3)
-        
+
+        // Fixed timestamp for determinism (avoids cross-platform time differences)
+        let fixedTimestampMs: Int64 = 1000000000000
+
         // First run
         let engine1 = await IsolatedEvidenceEngine()
         for (obs, gateQ, softQ, verdict) in sequence {
             await engine1.processObservation(obs, gateQuality: gateQ, softQuality: softQ, verdict: verdict)
         }
         let snapshot1 = await engine1.snapshot()
-        let export1 = try await engine1.exportStateJSON()
-        
+        let export1 = try await engine1.exportStateJSON(timestampMs: fixedTimestampMs)
+
         // Second run (replay)
         let engine2 = await IsolatedEvidenceEngine()
         for (obs, gateQ, softQ, verdict) in sequence {
             await engine2.processObservation(obs, gateQuality: gateQ, softQuality: softQ, verdict: verdict)
         }
         let snapshot2 = await engine2.snapshot()
-        let export2 = try await engine2.exportStateJSON()
-        
+        let export2 = try await engine2.exportStateJSON(timestampMs: fixedTimestampMs)
+
         // Exports must be byte-identical
         XCTAssertEqual(export1, export2, "Replay must produce identical export")
-        
+
         // Snapshots must match
         XCTAssertEqual(snapshot1.gateDisplay, snapshot2.gateDisplay, accuracy: 1e-9)
         XCTAssertEqual(snapshot1.softDisplay, snapshot2.softDisplay, accuracy: 1e-9)

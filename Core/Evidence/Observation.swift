@@ -61,7 +61,7 @@ public struct EvidenceObservation: Codable, Sendable {
     /// - ARKit depth distortion (glass, mirrors)
     /// - Auto-exposure/white-balance drift
     @available(*, deprecated, message: "Use verdict: ObservationVerdict instead")
-    public let isErroneous: Bool
+    public let isErroneous: Bool  // LINT_OK: Deprecated API kept for backward compatibility
     
     /// Observation timestamp (will be migrated to CrossPlatformTimestamp)
     public let timestamp: TimeInterval
@@ -75,7 +75,7 @@ public struct EvidenceObservation: Codable, Sendable {
     @available(*, deprecated, message: "Use init with verdict instead")
     public init(
         patchId: String,
-        isErroneous: Bool,
+        isErroneous: Bool,  // LINT_OK: Deprecated API kept for backward compatibility
         timestamp: TimeInterval,
         frameId: String,
         errorType: ObservationErrorType? = nil

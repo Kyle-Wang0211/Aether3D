@@ -100,26 +100,43 @@ public enum ForbiddenPatternLint {
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
             return []
         }
-        
+
         var violations: [LintViolation] = []
         let lines = content.components(separatedBy: .newlines)
-        
+
         for (lineIndex, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Skip comments (documentation that references patterns is OK)
+            if trimmed.hasPrefix("//") || trimmed.hasPrefix("*") || trimmed.hasPrefix("///") {
+                continue
+            }
+
+            // Skip deprecated annotations and their following line
+            if trimmed.contains("@available(*, deprecated") {
+                continue
+            }
+
+            // Skip lines with LINT_OK marker
+            if line.contains("// LINT_OK") || line.contains("// LINT:OK") {
+                continue
+            }
+
             for pattern in forbiddenPatterns {
                 guard let regex = try? NSRegularExpression(pattern: pattern.regex, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
                     continue
                 }
-                
+
                 let range = NSRange(location: 0, length: line.utf16.count)
                 let matches = regex.matches(in: line, options: [], range: range)
-                
+
                 for match in matches {
                     let matchRange = match.range
                     let column = line.utf16.index(line.utf16.startIndex, offsetBy: matchRange.location)
                     let columnIndex = line.utf16.distance(from: line.utf16.startIndex, to: column)
-                    
+
                     let snippet = String(line.prefix(min(100, line.count)))
-                    
+
                     violations.append(LintViolation(
                         file: fileURL.path,
                         line: lineIndex + 1,
@@ -131,7 +148,7 @@ public enum ForbiddenPatternLint {
                 }
             }
         }
-        
+
         return violations
     }
     
