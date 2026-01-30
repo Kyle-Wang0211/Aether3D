@@ -105,7 +105,29 @@ public enum EvidenceBudgetPolicy {
         schemaVersionId: SSOTVersion.schemaVersionId,
         documentation: "Large scene evidence budget: Balanced limits for room-scale scenes. Prevents unbounded cost growth, ensures deterministic resource limits, provides explainable failure modes when exceeded."
     )
-    
+
+    /// Evidence budget for proMacro profile
+    public static let proMacro = EvidenceBudgetPolicySpec(
+        profileId: CaptureProfile.proMacro.profileId,
+        maxCells: 15_000_000,        // 15M cells (highest detail turntable)
+        maxPatches: 75_000_000,      // 75M patches
+        maxEvidenceEvents: 750_000_000, // 750M events
+        maxAuditBytes: 75_000_000_000,  // 75GB audit
+        schemaVersionId: SSOTVersion.schemaVersionId,
+        documentation: "Pro macro evidence budget: Highest limits for professional turntable scanning. Prevents unbounded cost growth, ensures deterministic resource limits, provides explainable failure modes when exceeded."
+    )
+
+    /// Evidence budget for cinematicScene profile
+    public static let cinematicScene = EvidenceBudgetPolicySpec(
+        profileId: CaptureProfile.cinematicScene.profileId,
+        maxCells: 3_000_000,         // 3M cells (cinematic dolly)
+        maxPatches: 15_000_000,      // 15M patches
+        maxEvidenceEvents: 150_000_000, // 150M events
+        maxAuditBytes: 15_000_000_000,  // 15GB audit
+        schemaVersionId: SSOTVersion.schemaVersionId,
+        documentation: "Cinematic scene evidence budget: Balanced limits for cinematic dolly captures. Prevents unbounded cost growth, ensures deterministic resource limits, provides explainable failure modes when exceeded."
+    )
+
     // MARK: - Policy Lookup
     
     /// Get evidence budget policy for a profile
@@ -118,9 +140,9 @@ public enum EvidenceBudgetPolicy {
         case .largeScene:
             return largeScene
         case .proMacro:
-            return smallObjectMacro  // proMacro uses same budget as smallObjectMacro (high detail)
+            return proMacro
         case .cinematicScene:
-            return largeScene  // cinematicScene uses same budget as largeScene (room-scale)
+            return cinematicScene
         }
     }
     
@@ -130,7 +152,9 @@ public enum EvidenceBudgetPolicy {
     public static let allPolicies: [EvidenceBudgetPolicySpec] = [
         standard,
         smallObjectMacro,
-        largeScene
+        largeScene,
+        proMacro,
+        cinematicScene
     ]
     
     // MARK: - Digest Input

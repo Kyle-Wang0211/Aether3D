@@ -1,0 +1,73 @@
+name: Evidence System Tests
+
+on:
+  push:
+    paths:
+      - 'Core/Evidence/**'
+      - 'Tests/Evidence/**'
+      - 'Scripts/ForbiddenPatternLint.swift'
+      - '.github/workflows/evidence-tests.yml'
+  pull_request:
+    paths:
+      - 'Core/Evidence/**'
+      - 'Tests/Evidence/**'
+      - 'Scripts/ForbiddenPatternLint.swift'
+      - '.github/workflows/evidence-tests.yml'
+
+jobs:
+  behavior-lock-tests:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v1
+        with:
+          swift-version: "5.9"
+
+      - name: Build
+        run: swift build
+
+      - name: Run Forbidden Pattern Lint
+        run: |
+          swift Scripts/ForbiddenPatternLint.swift .
+        continue-on-error: false
+
+      - name: Run Behavior Lock Tests
+        run: swift test --filter "GoldenFixtureTests"
+
+      - name: Run Deterministic Encoding Tests
+        run: swift test --filter "DeterministicEncodingTests"
+
+      - name: Run Forbidden Pattern Lint Tests
+        run: swift test --filter "ForbiddenPatternLintTests"
+
+      - name: Run End-to-End Integration Tests
+        run: swift test --filter "EvidenceEndToEndDeterminismTests|EvidenceAdmissionThroughputTests|EvidenceDisplayMonotonicityTests|EvidenceDeltaSemanticsTests|EvidenceOutOfOrderTests"
+
+      - name: Run All PR2 Evidence Tests
+        run: swift test --filter "PatchEvidenceMapTests|DynamicWeightsTests|PatchDisplayMapTests|TokenBucketLimiterTests|ViewDiversityTrackerTests|EnumUnknownHandlingTests|EvidenceObservabilityTests|EvidenceReplayTests|EvidenceHealthRedlineTests"
+
+      - name: Fail on Golden Mismatch
+        if: failure()
+        run: |
+          echo "::error::Behavior lock test failed. Golden fixture mismatch detected."
+          echo "::error::If this change is intentional, update golden fixtures with:"
+          echo "::error::  swift test --filter UpdateGoldenFixtures"
+          exit 1
+
+  cross-platform-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v1
+        with:
+          swift-version: "5.9"
+
+      - name: Build
+        run: swift build
+
+      - name: Run Cross-Platform Tests
+        run: swift test --filter "CrossPlatformTestUtils|DeterministicEncodingTests|EvidenceEndToEndDeterminismTests"

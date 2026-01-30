@@ -125,7 +125,29 @@ public enum CoveragePolicy {
         schemaVersionId: SSOTVersion.schemaVersionId,
         documentation: "Large scene coverage policy: 2 views/cell, 2 parallax bins, max 5cm holes"
     )
-    
+
+    /// Coverage policy for proMacro profile
+    public static let proMacro = CoveragePolicySpec(
+        profileId: CaptureProfile.proMacro.profileId,
+        minViewsPerCell: 6,
+        minParallaxBins: 4,
+        maxHoleDiameterAllowed: LengthQ(scaleId: .systemMinimum, quanta: 5).digestInput(), // 0.25mm
+        evidenceConfidenceLevels: [.L0, .L1, .L2, .L3],
+        schemaVersionId: SSOTVersion.schemaVersionId,
+        documentation: "Pro macro coverage policy: 6 views/cell, 4 parallax bins, max 0.25mm holes (turntable scanning)"
+    )
+
+    /// Coverage policy for cinematicScene profile
+    public static let cinematicScene = CoveragePolicySpec(
+        profileId: CaptureProfile.cinematicScene.profileId,
+        minViewsPerCell: 2,
+        minParallaxBins: 2,
+        maxHoleDiameterAllowed: LengthQ(scaleId: .geomId, quanta: 30).digestInput(), // 3cm
+        evidenceConfidenceLevels: [.L0, .L1, .L2, .L3],
+        schemaVersionId: SSOTVersion.schemaVersionId,
+        documentation: "Cinematic scene coverage policy: 2 views/cell, 2 parallax bins, max 3cm holes (dolly movement)"
+    )
+
     // MARK: - Policy Lookup
     
     /// Get coverage policy for a profile
@@ -138,9 +160,9 @@ public enum CoveragePolicy {
         case .largeScene:
             return largeScene
         case .proMacro:
-            return smallObjectMacro  // proMacro uses same policy as smallObjectMacro (high detail)
+            return proMacro
         case .cinematicScene:
-            return largeScene  // cinematicScene uses same policy as largeScene (room-scale)
+            return cinematicScene
         }
     }
     
@@ -150,7 +172,9 @@ public enum CoveragePolicy {
     public static let allPolicies: [CoveragePolicySpec] = [
         standard,
         smallObjectMacro,
-        largeScene
+        largeScene,
+        proMacro,
+        cinematicScene
     ]
     
     // MARK: - Digest Input
