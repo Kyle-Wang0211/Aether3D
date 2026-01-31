@@ -53,7 +53,8 @@ jobs:
         run: swift test --filter "PatchEvidenceMapTests|DynamicWeightsTests|PatchDisplayMapTests|TokenBucketLimiterTests|ViewDiversityTrackerTests|EnumUnknownHandlingTests|EvidenceObservabilityTests|EvidenceReplayTests|EvidenceHealthRedlineTests"
 
       - name: Run PR3 Gate Tests
-        run: swift test --filter "HardGatesV13Tests|EvidenceVector3Tests|GateGainFunctionsTests|GateCoverageTrackerTests|GateInputValidatorTests|PR3InternalQualityTests|SmartAntiBoostSmootherTests|GateDeterminismTests|GateIntegrationTests"
+        # Note: Use Aether3DCoreTests prefix to avoid matching SSOTGateIntegrationTests
+        run: swift test --filter "HardGatesV13Tests|EvidenceVector3Tests|GateGainFunctionsTests|GateCoverageTrackerTests|GateInputValidatorTests|PR3InternalQualityTests|SmartAntiBoostSmootherTests|GateDeterminismTests|Aether3DCoreTests.GateIntegrationTests"
 
       - name: Run PR3 Math Tests
         run: swift test --filter "PRMathTests|StableLogisticTests|QuantizerQ01Tests|QuantizerAngleTests|ZeroTrigPhiBucketingTests|ZeroTrigThetaBucketingTests|ThetaBucketBitsetTests|PhiBucketBitsetTests|CircularSpanBitsetTests"
