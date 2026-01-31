@@ -52,6 +52,25 @@ jobs:
       - name: Run All PR2 Evidence Tests
         run: swift test --filter "PatchEvidenceMapTests|DynamicWeightsTests|PatchDisplayMapTests|TokenBucketLimiterTests|ViewDiversityTrackerTests|EnumUnknownHandlingTests|EvidenceObservabilityTests|EvidenceReplayTests|EvidenceHealthRedlineTests"
 
+      - name: Run PR3 Gate Tests
+        # Note: Use Aether3DCoreTests prefix to avoid matching SSOTGateIntegrationTests
+        run: swift test --filter "HardGatesV13Tests|EvidenceVector3Tests|GateGainFunctionsTests|GateCoverageTrackerTests|GateInputValidatorTests|PR3InternalQualityTests|SmartAntiBoostSmootherTests|GateDeterminismTests|Aether3DCoreTests.GateIntegrationTests"
+
+      - name: Run PR3 Math Tests
+        run: swift test --filter "PRMathTests|StableLogisticTests|QuantizerQ01Tests|QuantizerAngleTests|ZeroTrigPhiBucketingTests|ZeroTrigThetaBucketingTests|ThetaBucketBitsetTests|PhiBucketBitsetTests|CircularSpanBitsetTests"
+
+      - name: Run PR3 Golden Tests (Double Backend Only)
+        run: swift test --filter "GateGoldenTests"
+        continue-on-error: false
+
+      - name: Run PR3 Fast Backend Error Bounds Tests
+        run: swift test --filter "GateFastBackendTests"
+        continue-on-error: false
+
+      - name: Run PR3 Performance Benchmarks
+        run: swift test --filter "GatePerformanceBenchmarks"
+        continue-on-error: true  # Benchmarks may be flaky
+
       - name: Fail on Golden Mismatch
         if: failure()
         run: |
@@ -82,3 +101,6 @@ jobs:
 
       - name: Run Cross-Platform Tests
         run: swift test --filter "CrossPlatformTestUtils|DeterministicEncodingTests|EvidenceEndToEndDeterminismTests"
+
+      - name: Run PR3 Cross-Platform Consistency Tests
+        run: swift test --filter "GateDeterminismTests|GateGoldenTests|ZeroTrigPhiBucketingTests|ZeroTrigThetaBucketingTests"

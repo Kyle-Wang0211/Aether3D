@@ -38,6 +38,12 @@ public final class IsolatedEvidenceEngine {
     private var gateDeltaTracker: AsymmetricDeltaTracker
     private var softDeltaTracker: AsymmetricDeltaTracker
     
+    // MARK: - PR3 Gate Quality Computer
+    
+    /// Gate quality computer (PR3)
+    /// Computes gateQuality from view coverage, geometry, and basic quality metrics
+    private let gateComputer: GateQualityComputer
+    
     // MARK: - Initialization
     
     public init() {
@@ -46,6 +52,7 @@ public final class IsolatedEvidenceEngine {
         self.patchDisplay = PatchDisplayMap()
         self.gateDeltaTracker = AsymmetricDeltaTracker()
         self.softDeltaTracker = AsymmetricDeltaTracker()
+        self.gateComputer = GateQualityComputer()
     }
     
     // MARK: - Processing (isolated to actor)
@@ -175,6 +182,66 @@ public final class IsolatedEvidenceEngine {
         softDisplay = 0.0
         gateDeltaTracker.reset()
         softDeltaTracker.reset()
+        gateComputer.reset()
+    }
+    
+    // MARK: - PR3 Gate Processing
+    
+    /// Process frame with automatic gate quality computation (PR3)
+    ///
+    /// This is a convenience method that computes gateQuality automatically
+    /// from frame metrics and camera/patch positions.
+    ///
+    /// NOTE: This does NOT modify the existing processObservation() method.
+    /// It is a new API for PR3 integration.
+    ///
+    /// - Parameters:
+    ///   - observation: Evidence observation
+    ///   - cameraPosition: Camera position in world space (EvidenceVector3)
+    ///   - patchPosition: Patch center position in world space (EvidenceVector3)
+    ///   - reprojRmsPx: Reprojection RMS error (pixels)
+    ///   - edgeRmsPx: Edge reprojection RMS error (pixels)
+    ///   - sharpness: Sharpness score (0-100)
+    ///   - overexposureRatio: Overexposed pixel ratio (0-1)
+    ///   - underexposureRatio: Underexposed pixel ratio (0-1)
+    ///   - frameIndex: Frame index (for deterministic eviction)
+    ///   - softQuality: Soft quality (from PR4, 0.0 placeholder for now)
+    ///   - verdict: Observation verdict
+    public func processFrameWithGate(
+        observation: EvidenceObservation,
+        cameraPosition: EvidenceVector3,
+        patchPosition: EvidenceVector3,
+        reprojRmsPx: Double,
+        edgeRmsPx: Double,
+        sharpness: Double,
+        overexposureRatio: Double,
+        underexposureRatio: Double,
+        frameIndex: Int,
+        softQuality: Double = 0.0,  // Placeholder until PR4
+        verdict: ObservationVerdict
+    ) {
+        // Compute direction vector (from camera to patch)
+        let direction = (patchPosition - cameraPosition).normalized()
+        
+        // Compute gate quality using GateQualityComputer
+        let gateQuality = gateComputer.computeGateQuality(
+            patchId: observation.patchId,
+            direction: direction,
+            reprojRmsPx: reprojRmsPx,
+            edgeRmsPx: edgeRmsPx,
+            sharpness: sharpness,
+            overexposureRatio: overexposureRatio,
+            underexposureRatio: underexposureRatio,
+            frameIndex: frameIndex
+        )
+        
+        // Process with computed gate quality
+        processObservation(
+            observation,
+            gateQuality: gateQuality,
+            softQuality: softQuality,
+            verdict: verdict
+        )
     }
 }
 
