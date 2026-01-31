@@ -19,7 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
+        with:
+          fetch-depth: 0  # Fetch full history for git diff
+
       - name: Check PR3 allowed paths
         run: |
           # Allowed paths for PR3
@@ -31,15 +33,32 @@ jobs:
             "Core/Evidence/Constants/"
             "Core/Evidence/Vector/"
             "Core/Evidence/Tier/"
+            "Core/Evidence/IsolatedEvidenceEngine.swift"
             "Tests/Evidence/PR3/"
             "Tests/Evidence/PRMath/"
-            "Scripts/ForbiddenPatternLint.swift"
+            "Tests/Evidence/EvidenceVector3Tests.swift"
+            "Tests/Evidence/GateIntegrationTests.swift"
+            "Tests/Evidence/HardGatesV13Tests.swift"
+            "scripts/ForbiddenPatternLint.swift"
+            "docs/pr/"
             ".github/workflows/pr3-whitelist.yml"
             ".github/workflows/evidence-tests.yml"
           )
-          
-          # Get changed files
-          CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+
+          # Get changed files - use merge base for PR comparison
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          # Fallback for non-PR contexts
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA=$(git merge-base origin/main HEAD 2>/dev/null || echo "HEAD~1")
+          fi
+          if [ -z "$HEAD_SHA" ]; then
+            HEAD_SHA="HEAD"
+          fi
+
+          echo "Comparing $BASE_SHA..$HEAD_SHA"
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
           
           # Check each changed file
           for file in $CHANGED_FILES; do

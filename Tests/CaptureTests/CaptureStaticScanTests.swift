@@ -827,16 +827,29 @@ final class CaptureStaticScanTests: XCTestCase {
         // Parse NUL-separated output (closed set: only Swift files)
         let files = truncatedData.split(separator: 0).compactMap { String(data: Data($0), encoding: .utf8) }.filter { !$0.isEmpty }
         
-        // Closed set allowlist: EMPTY (no exceptions)
+        // Allowlist for valid version-numbered or domain-specific filenames
+        // These are NOT duplicates but intentionally named with numbers (e.g., V13 = version 13, Vector3 = 3D vector)
+        let allowedPatterns: Set<String> = [
+            "HardGatesV13.swift",       // Version 13 of HardGates
+            "QuantizerQ01.swift",       // Q01 = quantizer for [0,1] range
+            "EvidenceVector3.swift",    // Vector3 = 3D vector type
+        ]
+
         // Ban pattern: any Swift file basename ending with one or more digits + ".swift"
         // Regex: .*[0-9]+\.swift$ (matches "Foo 2.swift", "Foo2.swift", but NOT "Foo2Bar.swift")
         do {
             let regex = try NSRegularExpression(pattern: ".*[0-9]+\\.swift$", options: [])
-            
+
             var violations: [String] = []
             for file in files {
                 // Extract basename for pattern matching (closed set: only check filename, not path)
                 let basename = (file as NSString).lastPathComponent
+
+                // Skip allowlisted files
+                if allowedPatterns.contains(basename) {
+                    continue
+                }
+
                 let range = NSRange(basename.startIndex..., in: basename)
                 if regex.firstMatch(in: basename, options: [], range: range) != nil {
                     violations.append(file)

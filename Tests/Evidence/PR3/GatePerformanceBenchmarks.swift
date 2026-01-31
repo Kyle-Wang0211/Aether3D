@@ -6,7 +6,19 @@
 //
 
 import XCTest
+import Foundation
 @testable import Aether3DCore
+
+/// Cross-platform high-resolution timer for performance measurement
+private func benchmarkTime() -> Double {
+    #if canImport(Darwin)
+    // macOS/iOS: Use CFAbsoluteTimeGetCurrent for highest precision
+    return CFAbsoluteTimeGetCurrent()
+    #else
+    // Linux: Use Date for cross-platform compatibility
+    return Date().timeIntervalSinceReferenceDate
+    #endif
+}
 
 final class GatePerformanceBenchmarks: XCTestCase {
 
@@ -18,18 +30,18 @@ final class GatePerformanceBenchmarks: XCTestCase {
         let iterations = 100_000
 
         // Stable sigmoid baseline
-        let stableStart = CFAbsoluteTimeGetCurrent()
+        let stableStart = benchmarkTime()
         for i in 0..<iterations {
             _ = StableLogistic.sigmoid(Double(i % 16) - 8.0)
         }
-        let stableTime = CFAbsoluteTimeGetCurrent() - stableStart
+        let stableTime = benchmarkTime() - stableStart
 
         // LUT sigmoid
-        let lutStart = CFAbsoluteTimeGetCurrent()
+        let lutStart = benchmarkTime()
         for i in 0..<iterations {
             _ = LUTSigmoidGuarded.sigmoid(Double(i % 16) - 8.0)
         }
-        let lutTime = CFAbsoluteTimeGetCurrent() - lutStart
+        let lutTime = benchmarkTime() - lutStart
 
         print("Sigmoid performance (\(iterations) iterations):")
         print("  Stable: \(stableTime * 1000)ms")
@@ -65,7 +77,7 @@ final class GatePerformanceBenchmarks: XCTestCase {
 
         let computer = GateQualityComputer()
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = benchmarkTime()
 
         for iteration in 0..<iterations {
             for (index, input) in inputs.enumerated() {
@@ -82,7 +94,7 @@ final class GatePerformanceBenchmarks: XCTestCase {
             }
         }
 
-        let totalTime = CFAbsoluteTimeGetCurrent() - start
+        let totalTime = benchmarkTime() - start
         let perFrameTime = totalTime / Double(iterations)
         let perPatchTime = perFrameTime / Double(patches)
 
