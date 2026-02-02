@@ -88,7 +88,20 @@ jobs:
         run: swift build -c release
 
       - name: Run Tests
-        run: swift test
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          # Run all tests - PR4 modules are designed to be cross-platform
+          # If specific tests fail on Linux, they should be conditionally compiled
+          swift test 2>&1 || {
+            echo "❌ Tests failed. Checking for platform-specific issues..."
+            # Re-run with verbose output to capture failure details
+            swift test --verbose 2>&1 | tail -100
+            exit 1
+          }
 
       - name: Generate Determinism Digest
         run: |

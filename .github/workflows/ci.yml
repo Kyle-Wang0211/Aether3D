@@ -60,14 +60,44 @@ jobs:
             echo "$WORKFLOW_CHANGES"
             echo ""
             echo "Workflow changes require:"
-            echo "  1. SSOT-Change: yes in commit message"
+            echo "  1. SSOT-Change: yes in commit message(s) that modify workflow files"
             echo "  2. CODEOWNERS approval"
             echo "  3. Additional security review"
-            COMMIT_MSG=$(git log -1 --pretty=%B)
-            if ! echo "$COMMIT_MSG" | grep -qE '^SSOT-Change: yes$'; then
-              echo "❌ FAIL: Workflow modification without SSOT-Change: yes"
+
+            # Check all commits that touch workflow files (not just HEAD)
+            # Get commits that actually modified workflow files
+            FAILED=0
+            for file in $WORKFLOW_CHANGES; do
+              # Get all commits that modified this workflow file
+              COMMITS_TOUCHING_FILE=$(git log --oneline origin/${{ github.base_ref || 'main' }}..HEAD --follow -- "$file" | head -20)
+              if [ -n "$COMMITS_TOUCHING_FILE" ]; then
+                echo ""
+                echo "Commits modifying $file:"
+                echo "$COMMITS_TOUCHING_FILE"
+
+                # Check each commit that touched this file
+                while IFS= read -r commit_line; do
+                  [ -z "$commit_line" ] && continue
+                  COMMIT_SHA=$(echo "$commit_line" | cut -d' ' -f1)
+                  COMMIT_MSG=$(git log -1 --pretty=%B "$COMMIT_SHA")
+
+                  if ! echo "$COMMIT_MSG" | grep -qE '^SSOT-Change: yes$'; then
+                    echo "❌ Commit $COMMIT_SHA modifies workflow but lacks SSOT-Change: yes"
+                    FAILED=1
+                  else
+                    echo "✅ Commit $COMMIT_SHA has SSOT-Change: yes"
+                  fi
+                done <<< "$COMMITS_TOUCHING_FILE"
+              fi
+            done
+
+            if [ "$FAILED" -eq 1 ]; then
+              echo ""
+              echo "❌ FAIL: Workflow modification without SSOT-Change: yes in the modifying commit(s)"
               exit 1
             fi
+            echo ""
+            echo "✅ All workflow-modifying commits have SSOT-Change: yes"
           fi
 
       - name: Generate SSOT audit log
