@@ -175,11 +175,11 @@ public enum LUTBasedMath {
         let resultQ16 = RangeCompleteSoftmaxLUT.expQ16(xQ16)
         return Double(resultQ16) / 65536.0
     }
-    
+
     public static func log(_ x: Double) -> Double {
         guard x > 0 else { return -.infinity }
-        // Simplified implementation
-        return Darwin.log(x)
+        // Cross-platform: use Foundation's log function
+        return Foundation.log(x)
     }
 }
 
