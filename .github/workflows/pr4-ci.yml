@@ -84,6 +84,12 @@ jobs:
           apt-get update
           apt-get install -y libsqlite3-dev
 
+      - name: Configure git safe directory
+        run: |
+          # Fix "dubious ownership" error in Docker container
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$(pwd)"
+
       - name: Build
         run: swift build -c release
 
