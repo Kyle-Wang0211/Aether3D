@@ -38,13 +38,26 @@ fi
 
 echo "✅ No Accelerate in critical path"
 
-# Step 3: Verify no circular dependencies
+# Step 3: Verify no circular dependencies by checking swift build for actual errors
 echo "Checking for circular dependencies..."
 
-swift build 2>&1 | grep -i "circular" && {
+# Run swift build and capture output
+BUILD_OUTPUT=$(swift build 2>&1) || {
+    # Build failed - check if it's a circular dependency error
+    if echo "$BUILD_OUTPUT" | grep -qi "circular dependency"; then
+        echo "❌ Circular dependency detected"
+        echo "$BUILD_OUTPUT" | grep -i "circular"
+        exit 1
+    fi
+    # Other build error - not a circular dependency, continue
+    echo "⚠️ Build had warnings/errors (not circular dependency related)"
+}
+
+# Also check for the specific error pattern
+if echo "$BUILD_OUTPUT" | grep -qE "error:.*circular|cyclic dependency"; then
     echo "❌ Circular dependency detected"
     exit 1
-} || true
+fi
 
 echo "✅ No circular dependencies"
 
