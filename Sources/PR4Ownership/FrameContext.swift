@@ -8,6 +8,7 @@
 import Foundation
 import PR4Math
 import PR4PathTrace
+import PR4Protocols
 
 /// Frame context - owns all mutable state for a single frame
 ///
@@ -169,8 +170,9 @@ public enum FrameContextError: Error {
     case alreadyConsumed
 }
 
-public typealias SourceID = String
-public typealias DepthSample = Double
-public typealias CalibrationData = [String: Double]
+// Type aliases are defined in PR4Protocols module:
+// - SourceID = String
+// - DepthSample = Double
+// - CalibrationData = [String: Double]
 
 // SoftGateState moved to PR4Gate module

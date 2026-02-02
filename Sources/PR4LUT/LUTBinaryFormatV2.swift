@@ -6,11 +6,7 @@
 //
 
 import Foundation
-#if canImport(CryptoKit)
-import CryptoKit
-#else
 import Crypto
-#endif
 import PR4Math
 
 /// LUT binary format V2
@@ -129,11 +125,7 @@ public enum LUTBinaryFormatV2 {
         }
         
         // Footer (SHA-256)
-        #if canImport(CryptoKit)
         let hash = SHA256.hash(data: data)
-        #else
-        let hash = SHA256.hash(data: data)
-        #endif
         data.append(contentsOf: hash)
         
         try data.write(to: url)
@@ -162,11 +154,7 @@ public enum LUTBinaryFormatV2 {
         // Verify checksum
         let contentData = data[0..<(data.count - footerSize)]
         let storedHash = data[(data.count - footerSize)...]
-        #if canImport(CryptoKit)
         let computedHash = SHA256.hash(data: contentData)
-        #else
-        let computedHash = SHA256.hash(data: contentData)
-        #endif
         
         guard Array(storedHash) == Array(computedHash) else {
             throw LUTError.checksumMismatch

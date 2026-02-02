@@ -6,14 +6,19 @@
 //
 
 import Foundation
+import PR4Protocols
 
 /// Quality result
-public struct QualityResult {
+public struct QualityResult: HasDoubleValue {
     public let value: Double
     public let uncertainty: Double
-    
+
     public init(value: Double, uncertainty: Double) {
         self.value = value
         self.uncertainty = uncertainty
     }
+
+    // MARK: - HasDoubleValue conformance
+
+    public var doubleValue: Double { value }
 }

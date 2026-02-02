@@ -98,6 +98,12 @@ let package = Package(
       dependencies: ["Aether3DCore"],
       path: "Tests/CI"
     ),
+    // PR4 V10 targets - Phase 0: Foundation Protocols (no dependencies)
+    .target(
+      name: "PR4Protocols",
+      dependencies: [],
+      path: "Sources/PR4Protocols"
+    ),
     // PR4 V10 targets - Phase 1: Foundation
     .target(
       name: "PR4Math",
@@ -111,7 +117,7 @@ let package = Package(
     ),
     .target(
       name: "PR4Ownership",
-      dependencies: ["PR4Math", "PR4PathTrace", "PR4Quality", "PR4Gate"],
+      dependencies: ["PR4Math", "PR4PathTrace", "PR4Protocols"],
       path: "Sources/PR4Ownership"
     ),
     // PR4 V10 test targets
@@ -138,7 +144,10 @@ let package = Package(
     ),
     .target(
       name: "PR4LUT",
-      dependencies: ["PR4Math"],
+      dependencies: [
+        "PR4Math",
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
       path: "Sources/PR4LUT"
     ),
     .target(
@@ -200,12 +209,12 @@ let package = Package(
     ),
     .target(
       name: "PR4Quality",
-      dependencies: ["PR4Math", "PR4LUT", "PR4Overflow", "PR4Uncertainty"],
+      dependencies: ["PR4Math", "PR4LUT", "PR4Overflow", "PR4Uncertainty", "PR4Protocols"],
       path: "Sources/PR4Quality"
     ),
     .target(
       name: "PR4Gate",
-      dependencies: ["PR4Math", "PR4Health"],
+      dependencies: ["PR4Math", "PR4Health", "PR4Protocols"],
       path: "Sources/PR4Gate"
     ),
     .target(
