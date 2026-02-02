@@ -92,6 +92,7 @@ jobs:
           LC_ALL: en_US.UTF-8
           LANG: en_US.UTF-8
           TZ: UTC
+        shell: bash
         run: |
           set -euo pipefail
           # Run all tests - PR4 modules are designed to be cross-platform
