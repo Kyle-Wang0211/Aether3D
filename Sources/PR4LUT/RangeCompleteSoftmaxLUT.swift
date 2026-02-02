@@ -8,6 +8,14 @@
 import Foundation
 import PR4Math
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
+
 /// Range-complete softmax LUT
 ///
 /// V8 RULE: LUT covers exp(x) for x in [-32, 0] in Q16.16 format.
@@ -69,7 +77,7 @@ public enum RangeCompleteSoftmaxLUT {
             let x = Double(i) * Q16.toDouble(stepSize) + Q16.toDouble(minInput)
             // x is in [-32, 0], so exp(x) is in [exp(-32), 1]
             // exp(-32) ≈ 1.27e-14, so exp(x) * 65536 is in [0, 65536]
-            let expValue = Darwin.exp(x)
+            let expValue = Foundation.exp(x)
             // Clamp to [0, 1] range before converting to Q16
             let clampedExp = Swift.max(0.0, Swift.min(expValue, 1.0))
             let q16Value = Q16.fromDouble(clampedExp)

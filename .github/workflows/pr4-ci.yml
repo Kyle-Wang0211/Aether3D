@@ -79,6 +79,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y libsqlite3-dev
+
       - name: Build
         run: swift build -c release
 

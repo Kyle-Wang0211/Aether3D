@@ -42,7 +42,6 @@ public enum LUTReproducibleGenerator {
         // All in Q16.16 arithmetic
         
         var result = Q16.one  // Start with 1.0
-        var term = Q16.one    // Current term
         var xPower = xQ16     // x^n
         
         for n in 1..<terms {
