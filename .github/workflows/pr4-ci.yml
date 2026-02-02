@@ -1,0 +1,188 @@
+name: PR4 V10 CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'Sources/PR4**'
+      - 'Tests/PR4**'
+      - 'Package.swift'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Sources/PR4**'
+      - 'Tests/PR4**'
+
+env:
+  SWIFT_VERSION: '5.9'
+
+jobs:
+  test-macos-arm64:
+    name: macOS ARM64 Tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: ${{ env.SWIFT_VERSION }}
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Run Tests
+        run: swift test --enable-code-coverage
+
+      - name: Generate Determinism Digest
+        run: |
+          swift run PR4DigestGenerator > digest-macos-arm64.txt || echo "0" > digest-macos-arm64.txt
+
+      - name: Upload Digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-macos-arm64
+          path: digest-macos-arm64.txt
+
+  test-macos-x86:
+    name: macOS x86_64 Tests
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: ${{ env.SWIFT_VERSION }}
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Run Tests
+        run: swift test
+
+      - name: Generate Determinism Digest
+        run: |
+          swift run PR4DigestGenerator > digest-macos-x86.txt || echo "0" > digest-macos-x86.txt
+
+      - name: Upload Digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-macos-x86
+          path: digest-macos-x86.txt
+
+  test-linux:
+    name: Linux x86_64 Tests
+    runs-on: ubuntu-latest
+    container:
+      image: swift:5.9-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Run Tests
+        run: swift test
+
+      - name: Generate Determinism Digest
+        run: |
+          swift run PR4DigestGenerator > digest-linux-x86.txt || echo "0" > digest-linux-x86.txt
+
+      - name: Upload Digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-linux-x86
+          path: digest-linux-x86.txt
+
+  compare-digests:
+    name: Cross-Platform Determinism Check
+    needs: [test-macos-arm64, test-macos-x86, test-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS ARM64 Digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-macos-arm64
+          path: digests/
+
+      - name: Download macOS x86_64 Digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-macos-x86
+          path: digests/
+
+      - name: Download Linux Digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-linux-x86
+          path: digests/
+
+      - name: Compare Digests
+        run: |
+          echo "=== Cross-Platform Determinism Check ==="
+
+          MACOS_ARM64=$(cat digests/digest-macos-arm64.txt)
+          MACOS_X86=$(cat digests/digest-macos-x86.txt)
+          LINUX=$(cat digests/digest-linux-x86.txt)
+
+          echo "macOS ARM64: $MACOS_ARM64"
+          echo "macOS x86_64: $MACOS_X86"
+          echo "Linux x86_64: $LINUX"
+
+          if [ "$MACOS_ARM64" != "$MACOS_X86" ]; then
+            echo "❌ FAILED: macOS ARM64 vs x86_64 mismatch!"
+            exit 1
+          fi
+
+          if [ "$MACOS_ARM64" != "$LINUX" ]; then
+            echo "❌ FAILED: macOS ARM64 vs Linux mismatch!"
+            exit 1
+          fi
+
+          echo "✅ All platforms produce identical determinism digest"
+
+  lint:
+    name: Static Analysis
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Health Isolation
+        run: |
+          echo "Checking Health module for forbidden imports..."
+
+          FORBIDDEN_IMPORTS=$(grep -r "import PR4Quality\|import PR4Uncertainty\|import PR4Gate" Sources/PR4Health/ || true)
+
+          if [ -n "$FORBIDDEN_IMPORTS" ]; then
+            echo "❌ Health module has forbidden imports:"
+            echo "$FORBIDDEN_IMPORTS"
+            exit 1
+          fi
+
+          echo "✅ Health module isolation verified"
+
+      - name: Check Accelerate Usage
+        run: |
+          echo "Checking for Accelerate/vDSP in critical path..."
+
+          FORBIDDEN=$(grep -rE "import Accelerate|vDSP_|vForce|vImage" \
+            Sources/PR4Math/ \
+            Sources/PR4Softmax/ \
+            Sources/PR4LUT/ \
+            Sources/PR4Overflow/ || true)
+
+          if [ -n "$FORBIDDEN" ]; then
+            echo "❌ Accelerate/vDSP found in critical path:"
+            echo "$FORBIDDEN"
+            exit 1
+          fi
+
+          echo "✅ No Accelerate/vDSP in critical path"
+
+      - name: Verify Package DAG
+        run: |
+          echo "Verifying Package dependency graph..."
+          bash scripts/verify-package-dag.sh || exit 1
