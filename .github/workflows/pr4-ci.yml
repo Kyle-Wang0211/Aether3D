@@ -13,9 +13,6 @@ on:
       - 'Sources/PR4**'
       - 'Tests/PR4**'
 
-env:
-  SWIFT_VERSION: '5.9'
-
 jobs:
   test-macos-arm64:
     name: macOS ARM64 Tests
@@ -23,10 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: ${{ env.SWIFT_VERSION }}
+      - name: Show Swift Version
+        run: swift --version
 
       - name: Build
         run: swift build -c release
@@ -46,14 +41,12 @@ jobs:
 
   test-macos-x86:
     name: macOS x86_64 Tests
-    runs-on: macos-15-large
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: ${{ env.SWIFT_VERSION }}
+      - name: Show Swift Version
+        run: swift --version
 
       - name: Build
         run: swift build -c release
