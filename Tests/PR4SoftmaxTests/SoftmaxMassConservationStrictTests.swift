@@ -97,11 +97,14 @@ final class SoftmaxMassConservationStrictTests: XCTestCase {
             
             // Each weight should be approximately 65536 / count
             // Allow wider tolerance for remainder distribution
+            // The remainder (up to count-1) is added to one element
             let expectedWeight = 65536 / count
+            let maxRemainder = 65536 % count
             for (j, w) in weights.enumerated() {
-                // Allow ±10 for rounding and remainder distribution
-                XCTAssertTrue(abs(w - Int64(expectedWeight)) <= 10,
-                    "Uniform weight[\(j)] for count=\(count): expected ~\(expectedWeight), got \(w)")
+                // Allow for base weight + full remainder (which goes to one element)
+                let tolerance = Int64(maxRemainder)
+                XCTAssertTrue(abs(w - Int64(expectedWeight)) <= tolerance,
+                    "Uniform weight[\(j)] for count=\(count): expected ~\(expectedWeight)±\(tolerance), got \(w)")
             }
         }
     }

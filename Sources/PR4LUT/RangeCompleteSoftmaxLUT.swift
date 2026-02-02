@@ -127,13 +127,15 @@ public enum RangeCompleteSoftmaxLUT {
         if index < lutSize - 1 && clamped < 0 {
             let lower = lut[safeIndex]
             let upper = lut[Swift.min(safeIndex + 1, lutSize - 1)]
-            
+
             // Interpolation factor
             let remainder = offset % stepSize
             let factor = Double(remainder) / Double(stepSize)
-            
+
+            // Note: lower and upper are already in Q16 format, so we just interpolate
+            // and convert to Int64 without calling Q16.fromDouble (which would multiply by 65536 again)
             let interpolated = Double(lower) * (1.0 - factor) + Double(upper) * factor
-            return Q16.fromDouble(interpolated)
+            return Int64(interpolated.rounded(.toNearestOrEven))
         }
         
         return lut[safeIndex]

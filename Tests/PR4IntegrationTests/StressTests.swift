@@ -20,17 +20,32 @@ final class StressTests: XCTestCase {
     /// Test Q16 arithmetic at boundaries
     func testQ16BoundaryValues() {
         // Test addition near boundaries
-        let (sum1, overflow1) = Q16.add(Int64.max / 2, Int64.max / 2)
-        XCTAssertTrue(overflow1, "Large addition should overflow")
-        
+        // Note: Int64.max / 2 + Int64.max / 2 = Int64.max - 1, so it doesn't overflow
+        // We need values that actually cause overflow
+        let (_, overflow1) = Q16.add(Int64.max, 1)
+        XCTAssertTrue(overflow1, "Int64.max + 1 should overflow")
+
+        // Test that large but non-overflowing addition works
+        let (sum2, overflow2) = Q16.add(Int64.max / 2, Int64.max / 2)
+        XCTAssertFalse(overflow2, "Int64.max/2 + Int64.max/2 does not overflow (result is Int64.max - 1)")
+        XCTAssertEqual(sum2, Int64.max - 1)
+
         // Test multiplication near boundaries
         let (prod1, overflow3) = Q16.multiply(65536, 65536)
         XCTAssertFalse(overflow3, "1.0 * 1.0 should not overflow")
         XCTAssertEqual(prod1, 65536, "1.0 * 1.0 = 1.0")
-        
-        // Test multiplication that should overflow
+
+        // Note: Q16.multiply uses Int128 intermediate, so Int64.max * 65536 >> 16 = Int64.max
+        // This does NOT overflow because the 128-bit intermediate handles it.
+        // The multiplication result fits in Int64 after the right shift.
         let (prod2, overflow4) = Q16.multiply(Int64.max, 65536)
-        XCTAssertTrue(overflow4, "Large multiplication should overflow")
+        XCTAssertFalse(overflow4, "Int64.max * 1.0 fits after shift")
+        XCTAssertEqual(prod2, Int64.max, "Int64.max * 1.0 = Int64.max")
+
+        // To cause actual overflow, we need a result that exceeds Int64.max after shift
+        // Int64.max * Int64.max >> 16 will definitely overflow
+        let (_, overflow5) = Q16.multiply(Int64.max, Int64.max)
+        XCTAssertTrue(overflow5, "Int64.max * Int64.max should overflow")
     }
     
     /// Test softmax with extreme spread
