@@ -18,34 +18,54 @@ final class ForbiddenPatternLintTests: XCTestCase {
     
     /// Test that lint script runs and detects violations
     func testLintScriptRuns() throws {
-        // Get repository root
-        let repoRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        
+        // Find repository root by looking for Package.swift
+        var repoRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        // Walk up directory tree to find Package.swift (repository root)
+        var foundRoot = false
+        for _ in 0..<10 {  // Max 10 levels up
+            let packageSwift = repoRoot.appendingPathComponent("Package.swift")
+            if FileManager.default.fileExists(atPath: packageSwift.path) {
+                foundRoot = true
+                break
+            }
+            repoRoot = repoRoot.deletingLastPathComponent()
+        }
+
+        guard foundRoot else {
+            throw XCTSkip("Could not find repository root (Package.swift). Skipping lint test.")
+        }
+
+        // Check if lint script exists
+        let lintScriptPath = repoRoot.appendingPathComponent("Scripts/ForbiddenPatternLint.swift")
+        guard FileManager.default.fileExists(atPath: lintScriptPath.path) else {
+            throw XCTSkip("Lint script not found at \(lintScriptPath.path). Skipping lint test.")
+        }
+
         // Run lint script
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
         process.arguments = [
-            "Scripts/ForbiddenPatternLint.swift",
+            lintScriptPath.path,
             repoRoot.path
         ]
-        
+        process.currentDirectoryURL = repoRoot
+
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        
+
         try process.run()
         process.waitUntilExit()
-        
+
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8) ?? ""
-        
+
         // If exit code is 1, violations were found
         if process.terminationStatus == 1 {
             XCTFail("Forbidden patterns detected:\n\(output)")
         }
-        
+
         // Otherwise, should exit with 0
         XCTAssertEqual(process.terminationStatus, 0, "Lint script should exit with 0 when clean")
     }

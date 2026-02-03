@@ -93,17 +93,25 @@ final class SSOTConsistencyTests: XCTestCase {
     
     private func extractValueFromDoc(section: String, constant: String) throws -> String? {
         let content = try String(contentsOf: ssotDoc, encoding: .utf8)
-        
-        // Find section
+
+        // Find section using regex with dotMatchesLineSeparators
         let sectionPattern = "SSOT:\(section):BEGIN(.+?)SSOT:\(section):END"
-        guard let sectionMatch = content.range(of: sectionPattern, options: .regularExpression) else {
+        guard let regex = try? NSRegularExpression(pattern: sectionPattern, options: .dotMatchesLineSeparators) else {
             return nil
         }
-        
-        let sectionContent = String(content[sectionMatch])
-        
+
+        let range = NSRange(content.startIndex..., in: content)
+        guard let sectionMatch = regex.firstMatch(in: content, options: [], range: range),
+              let matchRange = Range(sectionMatch.range, in: content) else {
+            return nil
+        }
+
+        let sectionContent = String(content[matchRange])
+
         // Find constant value in table
-        // Format: | ConstantName | value | unit | ...
+        // Format: | SSOT_ID | Value | Unit | ... (for SYSTEM_CONSTANTS)
+        // Format: | SSOT_ID | Value | Unit | Rationale (for CONVERSION_CONSTANTS)
+        // Format: | SSOT_ID | Value | Unit | Category | ... (for QUALITY_THRESHOLDS)
         let lines = sectionContent.components(separatedBy: "\n")
         for line in lines {
             if line.contains(constant) {
@@ -113,36 +121,36 @@ final class SSOTConsistencyTests: XCTestCase {
                 }
             }
         }
-        
+
         return nil
     }
     
     private func extractValueFromSwift(file: String, property: String) throws -> String? {
         let filePath = constantsDir.appendingPathComponent(file)
-        
+
         guard FileManager.default.fileExists(atPath: filePath.path) else {
             return nil
         }
-        
+
         let content = try String(contentsOf: filePath, encoding: .utf8)
-        
+
         // Look for: static let property = value or static let property: Type = value
-        let pattern = #"static\s+(?:let|var)\s+\#(property)\s*(?::\s*\w+)?\s*=\s*([0-9.]+|\.infinity|Double\.infinity)"#
+        let pattern = "static\\s+(?:let|var)\\s+\(property)\\s*(?::\\s*\\w+)?\\s*=\\s*([0-9.]+|\\.infinity|Double\\.infinity)"
         let regex = try NSRegularExpression(pattern: pattern)
         let range = NSRange(content.startIndex..., in: content)
-        
+
         if let match = regex.firstMatch(in: content, range: range),
            let valueRange = Range(match.range(at: 1), in: content) {
             let value = String(content[valueRange])
-            
+
             // Normalize infinity
             if value.contains("infinity") {
                 return "∞"
             }
-            
+
             return value
         }
-        
+
         return nil
     }
 }

@@ -21,7 +21,7 @@ public protocol EvidenceEvent: Codable, Sendable {
 
 /// Admission decision event
 public struct AdmissionDecisionEvent: EvidenceEvent {
-    public let eventType = "admission_decision"
+    public var eventType = "admission_decision"
     public let timestampMs: Int64
     public let patchId: String?
     public let allowed: Bool
@@ -45,7 +45,7 @@ public struct AdmissionDecisionEvent: EvidenceEvent {
 
 /// Ledger update event
 public struct LedgerUpdateEvent: EvidenceEvent {
-    public let eventType = "ledger_update"
+    public var eventType = "ledger_update"
     public let timestampMs: Int64
     public let patchId: String?
     public let previousEvidence: Double
@@ -72,7 +72,7 @@ public struct LedgerUpdateEvent: EvidenceEvent {
 
 /// Display update event
 public struct DisplayUpdateEvent: EvidenceEvent {
-    public let eventType = "display_update"
+    public var eventType = "display_update"
     public let timestampMs: Int64
     public let patchId: String?
     public let previousDisplay: Double
@@ -96,7 +96,7 @@ public struct DisplayUpdateEvent: EvidenceEvent {
 
 /// Delta update event
 public struct DeltaUpdateEvent: EvidenceEvent {
-    public let eventType = "delta_update"
+    public var eventType = "delta_update"
     public let timestampMs: Int64
     public let patchId: String?
     public let rawDelta: Double
@@ -123,7 +123,7 @@ public struct DeltaUpdateEvent: EvidenceEvent {
 
 /// Aggregator update event
 public struct AggregatorUpdateEvent: EvidenceEvent {
-    public let eventType = "aggregator_update"
+    public var eventType = "aggregator_update"
     public let timestampMs: Int64
     public let patchId: String?
     public let totalEvidence: Double

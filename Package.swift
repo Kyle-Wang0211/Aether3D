@@ -9,7 +9,24 @@ let package = Package(
     // Linux support is implicit in SwiftPM
   ],
   products: [
-    .library(name: "Aether3DCore", targets: ["Aether3DCore"])
+    .library(name: "Aether3DCore", targets: ["Aether3DCore"]),
+    // PR4 V10 modules
+    .library(name: "PR4Math", targets: ["PR4Math"]),
+    .library(name: "PR4PathTrace", targets: ["PR4PathTrace"]),
+    .library(name: "PR4Ownership", targets: ["PR4Ownership"]),
+    .library(name: "PR4Overflow", targets: ["PR4Overflow"]),
+    .library(name: "PR4LUT", targets: ["PR4LUT"]),
+    .library(name: "PR4Determinism", targets: ["PR4Determinism"]),
+    .library(name: "PR4Softmax", targets: ["PR4Softmax"]),
+    .library(name: "PR4Health", targets: ["PR4Health"]),
+    .library(name: "PR4Uncertainty", targets: ["PR4Uncertainty"]),
+    .library(name: "PR4Calibration", targets: ["PR4Calibration"]),
+    .library(name: "PR4Package", targets: ["PR4Package"]),
+    .library(name: "PR4Golden", targets: ["PR4Golden"]),
+    .library(name: "PR4Quality", targets: ["PR4Quality"]),
+    .library(name: "PR4Gate", targets: ["PR4Gate"]),
+    .library(name: "PR4Fusion", targets: ["PR4Fusion"]),
+    .executable(name: "PR4DigestGenerator", targets: ["PR4DigestGenerator"])
   ],
   dependencies: [
     // swift-crypto: Required for Linux compatibility (replaces Apple-only CryptoKit)
@@ -56,7 +73,7 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Upload", "CI", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden"],
+      exclude: ["Constants", "Upload", "CI", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden", "PR4MathTests", "PR4PathTraceTests", "PR4OwnershipTests", "PR4OverflowTests", "PR4LUTTests", "PR4DeterminismTests", "PR4SoftmaxTests", "PR4HealthTests", "PR4UncertaintyTests", "PR4CalibrationTests", "PR4GoldenTests", "PR4IntegrationTests"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
@@ -80,6 +97,156 @@ let package = Package(
       name: "CITests",
       dependencies: ["Aether3DCore"],
       path: "Tests/CI"
+    ),
+    // PR4 V10 targets - Phase 0: Foundation Protocols (no dependencies)
+    .target(
+      name: "PR4Protocols",
+      dependencies: [],
+      path: "Sources/PR4Protocols"
+    ),
+    // PR4 V10 targets - Phase 1: Foundation
+    .target(
+      name: "PR4Math",
+      dependencies: [],
+      path: "Sources/PR4Math"
+    ),
+    .target(
+      name: "PR4PathTrace",
+      dependencies: [],
+      path: "Sources/PR4PathTrace"
+    ),
+    .target(
+      name: "PR4Ownership",
+      dependencies: ["PR4Math", "PR4PathTrace", "PR4Protocols"],
+      path: "Sources/PR4Ownership"
+    ),
+    // PR4 V10 test targets
+    .testTarget(
+      name: "PR4MathTests",
+      dependencies: ["PR4Math"],
+      path: "Tests/PR4MathTests"
+    ),
+    .testTarget(
+      name: "PR4PathTraceTests",
+      dependencies: ["PR4PathTrace"],
+      path: "Tests/PR4PathTraceTests"
+    ),
+    .testTarget(
+      name: "PR4OwnershipTests",
+      dependencies: ["PR4Ownership"],
+      path: "Tests/PR4OwnershipTests"
+    ),
+    // PR4 V10 targets - Phase 2: Core Infrastructure
+    .target(
+      name: "PR4Overflow",
+      dependencies: ["PR4Math"],
+      path: "Sources/PR4Overflow"
+    ),
+    .target(
+      name: "PR4LUT",
+      dependencies: [
+        "PR4Math",
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
+      path: "Sources/PR4LUT"
+    ),
+    .target(
+      name: "PR4Determinism",
+      dependencies: ["PR4Math", "PR4LUT"],
+      path: "Sources/PR4Determinism"
+    ),
+    .target(
+      name: "PR4Softmax",
+      dependencies: ["PR4Math", "PR4LUT", "PR4Overflow", "PR4PathTrace"],
+      path: "Sources/PR4Softmax"
+    ),
+    // PR4 V10 test targets - Phase 2
+    .testTarget(
+      name: "PR4OverflowTests",
+      dependencies: ["PR4Overflow"],
+      path: "Tests/PR4OverflowTests"
+    ),
+    .testTarget(
+      name: "PR4LUTTests",
+      dependencies: ["PR4LUT"],
+      path: "Tests/PR4LUTTests"
+    ),
+    .testTarget(
+      name: "PR4DeterminismTests",
+      dependencies: ["PR4Determinism"],
+      path: "Tests/PR4DeterminismTests"
+    ),
+    .testTarget(
+      name: "PR4SoftmaxTests",
+      dependencies: ["PR4Softmax"],
+      path: "Tests/PR4SoftmaxTests"
+    ),
+    // PR4 V10 targets - Phase 3-5: Additional modules
+    .target(
+      name: "PR4Health",
+      dependencies: ["PR4Math"],
+      path: "Sources/PR4Health"
+    ),
+    .target(
+      name: "PR4Uncertainty",
+      dependencies: ["PR4Math"],
+      path: "Sources/PR4Uncertainty"
+    ),
+    .target(
+      name: "PR4Calibration",
+      dependencies: ["PR4Math"],
+      path: "Sources/PR4Calibration"
+    ),
+    .target(
+      name: "PR4Package",
+      dependencies: [],
+      path: "Sources/PR4Package"
+    ),
+    .target(
+      name: "PR4Golden",
+      dependencies: [],
+      path: "Sources/PR4Golden"
+    ),
+    .target(
+      name: "PR4Quality",
+      dependencies: ["PR4Math", "PR4LUT", "PR4Overflow", "PR4Uncertainty", "PR4Protocols"],
+      path: "Sources/PR4Quality"
+    ),
+    .target(
+      name: "PR4Gate",
+      dependencies: ["PR4Math", "PR4Health", "PR4Protocols"],
+      path: "Sources/PR4Gate"
+    ),
+    .target(
+      name: "PR4Fusion",
+      dependencies: ["PR4Math", "PR4PathTrace", "PR4Ownership", "PR4Health", "PR4Quality", "PR4Gate", "PR4Softmax", "PR4Overflow", "PR4LUT", "PR4Determinism", "PR4Package"],
+      path: "Sources/PR4Fusion"
+    ),
+    .executableTarget(
+      name: "PR4DigestGenerator",
+      dependencies: ["PR4Math", "PR4Softmax", "PR4LUT"],
+      path: "Sources/PR4Tools"
+    ),
+    // PR4 V10 test targets - Phase 3-5
+    .testTarget(
+      name: "PR4HealthTests",
+      dependencies: ["PR4Health"],
+      path: "Tests/PR4HealthTests"
+    ),
+    .testTarget(
+      name: "PR4UncertaintyTests",
+      dependencies: ["PR4Uncertainty"],
+      path: "Tests/PR4UncertaintyTests"
+    ),
+    .testTarget(
+      name: "PR4CalibrationTests",
+      dependencies: ["PR4Calibration"],
+      path: "Tests/PR4CalibrationTests"
+    ),
+    .testTarget(
+      name: "PR4IntegrationTests",
+      dependencies: ["PR4Math", "PR4Softmax", "PR4LUT", "PR4Overflow"],
+      path: "Tests/PR4IntegrationTests"
     )
   ]
 )

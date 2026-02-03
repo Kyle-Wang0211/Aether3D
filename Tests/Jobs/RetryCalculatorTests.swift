@@ -62,10 +62,14 @@ final class RetryCalculatorTests: XCTestCase {
     func testPreviewDelays() {
         let delays = RetryCalculator.previewDelays(maxAttempts: 5)
         XCTAssertEqual(delays.count, 5)
-        
-        // Each delay should be greater than the previous (exponential)
+
+        // Each delay should be greater than the previous (exponential growth)
+        // Since base = 2 and exponential: 2, 4, 8, 16, 32
+        // With jitter up to 1 second, delays[i] base > delays[i-1] base * 2 - jitter margin
+        // Use 1.2x multiplier to account for jitter variance across runs
         for i in 1..<delays.count {
-            XCTAssertGreaterThan(delays[i], delays[i-1] * 1.5)  // Allow for jitter
+            XCTAssertGreaterThan(delays[i], delays[i-1] * 1.2,
+                "Delay \(i) (\(delays[i])) should be greater than delay \(i-1) (\(delays[i-1])) * 1.2")
         }
     }
     

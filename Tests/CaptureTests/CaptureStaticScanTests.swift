@@ -833,6 +833,11 @@ final class CaptureStaticScanTests: XCTestCase {
             "HardGatesV13.swift",       // Version 13 of HardGates
             "QuantizerQ01.swift",       // Q01 = quantizer for [0,1] range
             "EvidenceVector3.swift",    // Vector3 = 3D vector type
+            "DeterminismDigestV2.swift",    // V2 = version 2 algorithm
+            "LUTBinaryFormatV2.swift",      // V2 = version 2 format
+            "Int128.swift",                 // Int128 = 128-bit integer type
+            "PathDeterminismTraceV2.swift", // V2 = version 2 trace
+            "SoftmaxExactSumV2.swift",      // V2 = version 2 algorithm
         ]
 
         // Ban pattern: any Swift file basename ending with one or more digits + ".swift"

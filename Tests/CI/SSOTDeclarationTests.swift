@@ -158,28 +158,30 @@ final class SSOTDeclarationTests: XCTestCase {
     }
     
     func testFilePatternMatching() {
+        // These patterns are already regex patterns: .* means any char, \\. means literal dot
         let patterns = [
             "Core/Models/Observation.*\\.swift",
             "Core/Models/EvidenceEscalation.*\\.swift"
         ]
-        
+
         let shouldMatch = [
             "Core/Models/ObservationModel.swift",
             "Core/Models/ObservationTypes.swift",
             "Core/Models/EvidenceEscalationBoundary.swift"
         ]
-        
+
         let shouldNotMatch = [
             "Core/Models/ObservationHelper.swift.bak",
             "Core/Models/Observation/SubDir.swift",
             "Core/Models/OtherModel.swift"
         ]
-        
+
         for path in shouldMatch {
             var matched = false
             for pattern in patterns {
-                let regexPattern = pattern.replacingOccurrences(of: ".", with: "\\.")
-                    .replacingOccurrences(of: "*", with: "[^/]*")
+                // Patterns are already in regex format, use them directly
+                // Replace .* with [^/]* to prevent matching across directories
+                let regexPattern = pattern.replacingOccurrences(of: ".*", with: "[^/]*")
                 if path.range(of: "^\(regexPattern)$", options: .regularExpression) != nil {
                     matched = true
                     break
@@ -187,12 +189,13 @@ final class SSOTDeclarationTests: XCTestCase {
             }
             XCTAssertTrue(matched, "Should match pattern: \(path)")
         }
-        
+
         for path in shouldNotMatch {
             var matched = false
             for pattern in patterns {
-                let regexPattern = pattern.replacingOccurrences(of: ".", with: "\\.")
-                    .replacingOccurrences(of: "*", with: "[^/]*")
+                // Patterns are already in regex format, use them directly
+                // Replace .* with [^/]* to prevent matching across directories
+                let regexPattern = pattern.replacingOccurrences(of: ".*", with: "[^/]*")
                 if path.range(of: "^\(regexPattern)$", options: .regularExpression) != nil {
                     matched = true
                     break

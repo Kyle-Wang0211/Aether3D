@@ -182,13 +182,13 @@ final class SSOTGateIntegrationTests: XCTestCase {
     private func validateCommitMessage(_ message: String) -> Bool {
         let lines = message.components(separatedBy: "\n")
         guard let header = lines.first else { return false }
-        
-        // Check header format
-        let headerPattern = "^(feat|fix|refactor|test|docs|chore)\\([a-z0-9_-]+\\): .+"
+
+        // Check header format - also allow "ci" prefix for CI/workflow changes
+        let headerPattern = "^(feat|fix|refactor|test|docs|chore|ci)\\([a-z0-9_-]+\\): .+|^(ci): .+"
         guard header.range(of: headerPattern, options: .regularExpression) != nil else {
             return false
         }
-        
+
         // Check for SSOT footer
         let footerPattern = "^SSOT-Change: (yes|no)$"
         for line in lines {
@@ -196,7 +196,7 @@ final class SSOTGateIntegrationTests: XCTestCase {
                 return true
             }
         }
-        
+
         return false
     }
     

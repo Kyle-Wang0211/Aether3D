@@ -103,6 +103,7 @@ final class DecisionPolicyBypassTests: XCTestCase {
             #"\.white\s*="#,
             #"=\s*\.white"#,
             #"return\s+\.white"#,
+            #"case\s+\.white"#,
         ]
         
         for pattern in patterns {
