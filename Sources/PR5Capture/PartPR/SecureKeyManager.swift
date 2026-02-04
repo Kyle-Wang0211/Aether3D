@@ -7,7 +7,6 @@
 //
 
 import Foundation
-import Security
 
 /// Secure key manager
 ///
