@@ -7,7 +7,11 @@
 //
 
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#elseif canImport(Crypto)
+import Crypto
+#endif
 
 /// End-to-end encryption
 ///
