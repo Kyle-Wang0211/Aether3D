@@ -104,7 +104,7 @@ final class PR5Quality2Tests: XCTestCase {
         let checker = PhotometricConsistencyChecker(windowSize: 5)
         
         // Add consistent frames (very small variation to ensure consistency)
-        for i in 0..<5 {
+        for _ in 0..<5 {
             checker.update(
                 luminance: 128.0,  // Identical luminance
                 exposure: 0.01,     // Identical exposure

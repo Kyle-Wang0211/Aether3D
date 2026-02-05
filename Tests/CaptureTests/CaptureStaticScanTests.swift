@@ -830,14 +830,16 @@ final class CaptureStaticScanTests: XCTestCase {
         // Allowlist for valid version-numbered or domain-specific filenames
         // These are NOT duplicates but intentionally named with numbers (e.g., V13 = version 13, Vector3 = 3D vector)
         let allowedPatterns: Set<String> = [
-            "HardGatesV13.swift",       // Version 13 of HardGates
-            "QuantizerQ01.swift",       // Q01 = quantizer for [0,1] range
-            "EvidenceVector3.swift",    // Vector3 = 3D vector type
+            "HardGatesV13.swift",           // Version 13 of HardGates
+            "QuantizerQ01.swift",           // Q01 = quantizer for [0,1] range
+            "EvidenceVector3.swift",        // Vector3 = 3D vector type
             "DeterminismDigestV2.swift",    // V2 = version 2 algorithm
             "LUTBinaryFormatV2.swift",      // V2 = version 2 format
             "Int128.swift",                 // Int128 = 128-bit integer type
             "PathDeterminismTraceV2.swift", // V2 = version 2 trace
             "SoftmaxExactSumV2.swift",      // V2 = version 2 algorithm
+            "UUIDRFC4122.swift",            // RFC 4122 UUID implementation
+            "gen-fixtures-decisionhash-v1.swift", // v1 = version 1 fixture generator script
         ]
 
         // Ban pattern: any Swift file basename ending with one or more digits + ".swift"
@@ -923,19 +925,17 @@ final class CaptureStaticScanTests: XCTestCase {
     // MARK: - New Constants Validation
     
     func test_bitrateEstimatesHaveAllTiers() {
-        let requiredKeys = [
-            "8K_60", "8K_30",
-            "4K_120", "4K_60", "4K_30",
-            "1080p_120", "1080p_60", "1080p_30",
-            "720p_60", "720p_30",
-            "default"
-        ]
-        
+        // Validate that all expected tier/fps combinations return valid bitrates
+        // Note: These are the expected keys that should be covered by the test
+        // (Previously defined as requiredKeys but validation is done via iteration)
+        //   "8K_60", "8K_30", "4K_120", "4K_60", "4K_30",
+        //   "1080p_120", "1080p_60", "1080p_30", "720p_60", "720p_30", "default"
+
         // Access private bitrateEstimates via estimatedBitrate function
         // We'll test that all tiers can be resolved
         let tiers: [ResolutionTier] = [.t8K, .t4K, .t1080p, .t720p, .t2K, .t480p, .lower]
         let fpsValues: [Double] = [120, 60, 30]
-        
+
         for tier in tiers {
             for fps in fpsValues {
                 let bitrate = CaptureRecordingConstants.estimatedBitrate(tier: tier, fps: fps)

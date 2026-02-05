@@ -41,8 +41,8 @@ final class ISPDetectorTests: XCTestCase {
             (Array(repeating: 0.5, count: 100), .low),  // Uniform (low ISP)
             (Array(repeating: 0.8, count: 100), .medium),  // Higher intensity
         ]
-        
-        for (pixels, expectedMin) in testCases {
+
+        for (pixels, _) in testCases {
             let result = await detector.analyzeISP(pixelValues: pixels, metadata: [:])
             // Verify strength is classified (should be one of the valid values)
             XCTAssertTrue([.none, .low, .medium, .high, .extreme].contains(result.strength))

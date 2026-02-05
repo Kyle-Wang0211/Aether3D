@@ -415,9 +415,9 @@ final class CapacityLimitTests: XCTestCase {
         // Hash should be identical for same inputs
         XCTAssertEqual(decision1.decisionHash, decision2.decisionHash, "Decision hash should be deterministic")
         
-        // Verify hash is not empty
-        XCTAssertFalse(decision1.decisionHash.isEmpty, "Decision hash should not be empty")
-        XCTAssertFalse(decision2.decisionHash.isEmpty, "Decision hash should not be empty")
+        // Verify hash is not empty (check bytes count)
+        XCTAssertEqual(decision1.decisionHash.bytes.count, 32, "Decision hash should be 32 bytes")
+        XCTAssertEqual(decision2.decisionHash.bytes.count, 32, "Decision hash should be 32 bytes")
     }
     
     /// Test: Decision hash changes when inputs change

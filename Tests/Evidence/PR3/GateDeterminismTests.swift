@@ -42,8 +42,8 @@ final class GateDeterminismTests: XCTestCase {
             EvidenceVector3(x: 0.0, y: 0.0, z: 1.0).normalized()
         ]
 
-        var tracker1 = GateCoverageTracker()
-        var tracker2 = GateCoverageTracker()
+        let tracker1 = GateCoverageTracker()
+        let tracker2 = GateCoverageTracker()
 
         for (i, dir) in directions1.enumerated() {
             tracker1.recordObservation(

@@ -1,0 +1,52 @@
+{
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "policyHash": 0,
+  "decisions": [
+    {
+      "candidateId": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+      "patchCountShadow": 100,
+      "eebRemaining": 9500000,
+      "eebDelta": 100000,
+      "buildMode": "NORMAL",
+      "classification": "ACCEPTED",
+      "rejectReason": null,
+      "valueScore": 500000,
+      "perFlowCounters": [25, 25, 25, 25],
+      "throttleStats": null,
+      "degradationLevel": 0,
+      "degradationReasonCode": null
+    },
+    {
+      "candidateId": "6ba7b811-9dad-11d1-80b4-00c04fd430c8",
+      "patchCountShadow": 200,
+      "eebRemaining": 9400000,
+      "eebDelta": 100000,
+      "buildMode": "NORMAL",
+      "classification": "ACCEPTED",
+      "rejectReason": null,
+      "valueScore": 600000,
+      "perFlowCounters": [50, 50, 50, 50],
+      "throttleStats": null,
+      "degradationLevel": 0,
+      "degradationReasonCode": null
+    },
+    {
+      "candidateId": "6ba7b812-9dad-11d1-80b4-00c04fd430c8",
+      "patchCountShadow": 300,
+      "eebRemaining": 9300000,
+      "eebDelta": 0,
+      "buildMode": "DAMPING",
+      "classification": "REJECTED",
+      "rejectReason": "LOW_GAIN_SOFT",
+      "valueScore": 50000,
+      "perFlowCounters": [75, 75, 75, 75],
+      "throttleStats": {
+        "windowStartTick": 1000,
+        "windowDurationTicks": 100,
+        "attemptsInWindow": 5
+      },
+      "degradationLevel": 1,
+      "degradationReasonCode": 1
+    }
+  ]
+}

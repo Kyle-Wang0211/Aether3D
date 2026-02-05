@@ -153,12 +153,7 @@ final class CryptoShimConsistencyTests: XCTestCase {
 }
 
 // MARK: - Character Extensions
-
-private extension Character {
-    var isHexDigit: Bool {
-        return ("0"..."9").contains(self) || ("a"..."f").contains(self) || ("A"..."F").contains(self)
-    }
-}
+// Note: isHexDigit is defined in Tests/Support/FixtureLoader.swift
 
 private extension String {
     func repeating(_ count: Int) -> String {

@@ -164,9 +164,5 @@ final class QualityPreCheckFixturesTests: XCTestCase {
     }
 }
 
-extension Character {
-    var isHexDigit: Bool {
-        return ("0"..."9").contains(self) || ("a"..."f").contains(self) || ("A"..."F").contains(self)
-    }
-}
+// Note: isHexDigit extension is defined in Tests/Support/FixtureLoader.swift
 

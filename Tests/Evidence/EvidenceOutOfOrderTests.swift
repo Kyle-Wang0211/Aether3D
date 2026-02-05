@@ -24,7 +24,7 @@ final class EvidenceOutOfOrderTests: XCTestCase {
             await engineOrdered.processObservation(obs, gateQuality: gateQ, softQuality: softQ, verdict: verdict)
         }
         let snapshotOrdered = await engineOrdered.snapshot()
-        let exportOrdered = try await engineOrdered.exportStateJSON()
+        _ = try await engineOrdered.exportStateJSON()
         
         // Process shuffled sequence with reorder buffer
         let engineShuffled = await IsolatedEvidenceEngine()
