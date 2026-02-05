@@ -73,7 +73,7 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Upload", "CI", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden", "PR4MathTests", "PR4PathTraceTests", "PR4OwnershipTests", "PR4OverflowTests", "PR4LUTTests", "PR4DeterminismTests", "PR4SoftmaxTests", "PR4HealthTests", "PR4UncertaintyTests", "PR4CalibrationTests", "PR4GoldenTests", "PR4IntegrationTests"],
+      exclude: ["Constants", "Upload", "CI", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden", "PR4MathTests", "PR4PathTraceTests", "PR4OwnershipTests", "PR4OverflowTests", "PR4LUTTests", "PR4DeterminismTests", "PR4SoftmaxTests", "PR4HealthTests", "PR4UncertaintyTests", "PR4CalibrationTests", "PR4GoldenTests", "PR4IntegrationTests", "PR5CaptureTests"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
@@ -226,6 +226,23 @@ let package = Package(
       name: "PR4DigestGenerator",
       dependencies: ["PR4Math", "PR4Softmax", "PR4LUT"],
       path: "Sources/PR4Tools"
+    ),
+    // PR5Capture targets - v1.8.1 Complete Hardening Patch
+    .target(
+      name: "PR5Capture",
+      dependencies: [
+        "PR4Math",
+        "PR4Ownership",
+        "PR4Quality",
+        "PR4Gate",
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
+      path: "Sources/PR5Capture"
+    ),
+    .testTarget(
+      name: "PR5CaptureTests",
+      dependencies: ["PR5Capture"],
+      path: "Tests/PR5CaptureTests"
     ),
     // PR4 V10 test targets - Phase 3-5
     .testTarget(
