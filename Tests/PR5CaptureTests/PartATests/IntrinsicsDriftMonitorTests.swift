@@ -14,16 +14,14 @@ final class IntrinsicsDriftMonitorTests: XCTestCase {
     var monitor: IntrinsicsDriftMonitor!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         monitor = IntrinsicsDriftMonitor(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         monitor = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

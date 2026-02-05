@@ -14,16 +14,14 @@ final class AuditTrailRecorderTests: XCTestCase {
     var recorder: AuditTrailRecorder!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         recorder = AuditTrailRecorder(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         recorder = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

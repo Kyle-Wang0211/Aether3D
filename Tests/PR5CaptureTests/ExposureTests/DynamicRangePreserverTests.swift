@@ -14,16 +14,14 @@ final class DynamicRangePreserverTests: XCTestCase {
     var preserver: DynamicRangePreserver!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         preserver = DynamicRangePreserver(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         preserver = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

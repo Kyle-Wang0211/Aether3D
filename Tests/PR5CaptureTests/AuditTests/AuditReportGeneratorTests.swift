@@ -14,16 +14,14 @@ final class AuditReportGeneratorTests: XCTestCase {
     var generator: AuditReportGenerator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         generator = AuditReportGenerator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         generator = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

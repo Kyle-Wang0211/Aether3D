@@ -14,16 +14,14 @@ final class UploadIntegrityGuardTests: XCTestCase {
     var guard_: UploadIntegrityGuard!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         guard_ = UploadIntegrityGuard(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         guard_ = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

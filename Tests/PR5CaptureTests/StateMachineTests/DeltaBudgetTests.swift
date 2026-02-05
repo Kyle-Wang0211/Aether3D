@@ -14,16 +14,14 @@ final class DeltaBudgetTests: XCTestCase {
     var budget: DeltaBudget!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         budget = DeltaBudget(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         budget = nil
         config = nil
-        super.tearDown()
     }
     
     func testDeltaApplication() async {

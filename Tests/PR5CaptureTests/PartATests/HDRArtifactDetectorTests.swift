@@ -14,16 +14,14 @@ final class HDRArtifactDetectorTests: XCTestCase {
     var detector: HDRArtifactDetector!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         detector = HDRArtifactDetector(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         detector = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

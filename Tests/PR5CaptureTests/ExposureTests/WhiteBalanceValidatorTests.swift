@@ -14,16 +14,14 @@ final class WhiteBalanceValidatorTests: XCTestCase {
     var validator: WhiteBalanceValidator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         validator = WhiteBalanceValidator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         validator = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

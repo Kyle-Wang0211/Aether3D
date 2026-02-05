@@ -14,16 +14,14 @@ final class AuditModeControllerTests: XCTestCase {
     var controller: AuditModeController!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         controller = AuditModeController(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         controller = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

@@ -14,16 +14,14 @@ final class IntegrityHashChainTests: XCTestCase {
     var chain: IntegrityHashChain!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         chain = IntegrityHashChain(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         chain = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

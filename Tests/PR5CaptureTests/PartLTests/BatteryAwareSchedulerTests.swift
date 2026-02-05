@@ -14,16 +14,14 @@ final class BatteryAwareSchedulerTests: XCTestCase {
     var scheduler: BatteryAwareScheduler!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         scheduler = BatteryAwareScheduler(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         scheduler = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

@@ -14,16 +14,14 @@ final class MinimumProgressGuaranteeTests: XCTestCase {
     var guarantee: MinimumProgressGuarantee!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         guarantee = MinimumProgressGuarantee(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         guarantee = nil
         config = nil
-        super.tearDown()
     }
     
     func testStagnationDetection() async {

@@ -14,16 +14,14 @@ final class CrossPlatformNormalizerTests: XCTestCase {
     var normalizer: CrossPlatformNormalizer!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         normalizer = CrossPlatformNormalizer(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         normalizer = nil
         config = nil
-        super.tearDown()
     }
     
     func testNormalize() async {

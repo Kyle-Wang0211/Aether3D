@@ -14,16 +14,14 @@ final class RefinementStrategySelectorTests: XCTestCase {
     var selector: RefinementStrategySelector!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         selector = RefinementStrategySelector(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         selector = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

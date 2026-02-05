@@ -14,16 +14,14 @@ final class DeterministicRNGManagerTests: XCTestCase {
     var rng: DeterministicRNGManager!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         rng = DeterministicRNGManager(config: config, seed: 12345)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         rng = nil
         config = nil
-        super.tearDown()
     }
     
     func testDeterministicSequence() async {

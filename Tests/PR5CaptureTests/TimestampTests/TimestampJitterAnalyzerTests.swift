@@ -14,16 +14,14 @@ final class TimestampJitterAnalyzerTests: XCTestCase {
     var analyzer: TimestampJitterAnalyzer!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         analyzer = TimestampJitterAnalyzer(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         analyzer = nil
         config = nil
-        super.tearDown()
     }
     
     func testCameraTimestampRecording() async {

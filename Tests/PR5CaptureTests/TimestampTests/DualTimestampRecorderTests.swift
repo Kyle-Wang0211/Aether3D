@@ -14,16 +14,14 @@ final class DualTimestampRecorderTests: XCTestCase {
     var recorder: DualTimestampRecorder!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         recorder = DualTimestampRecorder(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         recorder = nil
         config = nil
-        super.tearDown()
     }
     
     func testTimestampRecording() async {

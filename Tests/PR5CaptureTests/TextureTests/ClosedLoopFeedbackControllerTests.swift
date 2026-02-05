@@ -14,16 +14,14 @@ final class ClosedLoopFeedbackControllerTests: XCTestCase {
     var controller: ClosedLoopFeedbackController!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         controller = ClosedLoopFeedbackController(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         controller = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

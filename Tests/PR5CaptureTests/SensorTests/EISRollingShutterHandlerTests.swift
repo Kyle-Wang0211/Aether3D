@@ -14,16 +14,14 @@ final class EISRollingShutterHandlerTests: XCTestCase {
     var handler: EISRollingShutterHandler!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         handler = EISRollingShutterHandler(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         handler = nil
         config = nil
-        super.tearDown()
     }
     
     func testEISDetection() async {

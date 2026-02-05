@@ -14,16 +14,14 @@ final class DebuggerDetectorTests: XCTestCase {
     var detector: DebuggerDetector!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         detector = DebuggerDetector(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         detector = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

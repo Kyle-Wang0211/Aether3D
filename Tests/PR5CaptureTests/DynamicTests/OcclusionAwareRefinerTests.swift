@@ -14,16 +14,14 @@ final class OcclusionAwareRefinerTests: XCTestCase {
     var refiner: OcclusionAwareRefiner!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         refiner = OcclusionAwareRefiner(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         refiner = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

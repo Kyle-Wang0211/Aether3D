@@ -14,16 +14,14 @@ final class AdaptiveTextureThresholdTests: XCTestCase {
     var threshold: AdaptiveTextureThreshold!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         threshold = AdaptiveTextureThreshold(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         threshold = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

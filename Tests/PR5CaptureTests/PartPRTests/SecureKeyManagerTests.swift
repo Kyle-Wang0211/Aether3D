@@ -14,16 +14,14 @@ final class SecureKeyManagerTests: XCTestCase {
     var manager: SecureKeyManager!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         manager = SecureKeyManager(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         manager = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

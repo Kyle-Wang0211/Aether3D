@@ -14,16 +14,14 @@ final class CodeSignatureValidatorTests: XCTestCase {
     var validator: CodeSignatureValidator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         validator = CodeSignatureValidator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         validator = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

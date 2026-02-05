@@ -14,16 +14,14 @@ final class ExposureLockVerifierTests: XCTestCase {
     var verifier: ExposureLockVerifier!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         verifier = ExposureLockVerifier(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         verifier = nil
         config = nil
-        super.tearDown()
     }
     
     func testExposureLock() async {

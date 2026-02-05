@@ -14,16 +14,14 @@ final class FeatureRichnessEvaluatorTests: XCTestCase {
     var evaluator: FeatureRichnessEvaluator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         evaluator = FeatureRichnessEvaluator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         evaluator = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

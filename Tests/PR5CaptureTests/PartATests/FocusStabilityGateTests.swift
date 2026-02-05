@@ -14,16 +14,14 @@ final class FocusStabilityGateTests: XCTestCase {
     var gate: FocusStabilityGate!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         gate = FocusStabilityGate(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         gate = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

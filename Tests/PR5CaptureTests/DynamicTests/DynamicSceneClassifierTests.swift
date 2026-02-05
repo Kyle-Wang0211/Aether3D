@@ -14,16 +14,14 @@ final class DynamicSceneClassifierTests: XCTestCase {
     var classifier: DynamicSceneClassifier!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         classifier = DynamicSceneClassifier(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         classifier = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

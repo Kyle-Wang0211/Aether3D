@@ -13,14 +13,12 @@ final class EndToEndCaptureFlowTests: XCTestCase {
 
     var profile: ExtremeProfile!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         profile = ExtremeProfile(profile: .standard)
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         profile = nil
-        super.tearDown()
     }
 
     // MARK: - End-to-End Flow Tests

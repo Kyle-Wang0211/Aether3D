@@ -14,16 +14,14 @@ final class RecoveryPointCreatorTests: XCTestCase {
     var creator: RecoveryPointCreator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         creator = RecoveryPointCreator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         creator = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

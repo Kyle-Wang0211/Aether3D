@@ -14,16 +14,14 @@ final class RelocalizationStateManagerTests: XCTestCase {
     var manager: RelocalizationStateManager!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         manager = RelocalizationStateManager(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         manager = nil
         config = nil
-        super.tearDown()
     }
     
     func testTrackingToRelocalizing() async {

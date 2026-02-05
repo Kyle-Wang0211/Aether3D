@@ -14,16 +14,14 @@ final class QualityMetricAggregatorTests: XCTestCase {
     var aggregator: QualityMetricAggregator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         aggregator = QualityMetricAggregator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         aggregator = nil
         config = nil
-        super.tearDown()
     }
     
     func testAggregateMetrics() async {

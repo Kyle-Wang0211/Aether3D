@@ -14,16 +14,14 @@ final class RiskScoreCalculatorTests: XCTestCase {
     var calculator: RiskScoreCalculator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         calculator = RiskScoreCalculator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         calculator = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

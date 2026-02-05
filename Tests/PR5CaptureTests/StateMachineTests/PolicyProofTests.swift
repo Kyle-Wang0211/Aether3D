@@ -14,16 +14,14 @@ final class PolicyProofTests: XCTestCase {
     var proofGenerator: PolicyProof!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         proofGenerator = PolicyProof(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         proofGenerator = nil
         config = nil
-        super.tearDown()
     }
     
     func testProofGeneration() async {

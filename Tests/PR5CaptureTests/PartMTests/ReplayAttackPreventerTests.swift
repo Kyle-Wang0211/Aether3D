@@ -14,16 +14,14 @@ final class ReplayAttackPreventerTests: XCTestCase {
     var preventer: ReplayAttackPreventer!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         preventer = ReplayAttackPreventer(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         preventer = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

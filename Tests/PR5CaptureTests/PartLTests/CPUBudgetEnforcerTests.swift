@@ -14,16 +14,14 @@ final class CPUBudgetEnforcerTests: XCTestCase {
     var enforcer: CPUBudgetEnforcer!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         enforcer = CPUBudgetEnforcer(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         enforcer = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

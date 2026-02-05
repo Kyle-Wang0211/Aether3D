@@ -14,16 +14,14 @@ final class ISPDetectorTests: XCTestCase {
     var detector: ISPDetector!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         detector = ISPDetector(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         detector = nil
         config = nil
-        super.tearDown()
     }
     
     func testNoiseFloorAnalysis() async {

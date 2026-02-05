@@ -14,16 +14,14 @@ final class ConfidenceIntervalTrackerTests: XCTestCase {
     var tracker: ConfidenceIntervalTracker!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         tracker = ConfidenceIntervalTracker(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         tracker = nil
         config = nil
-        super.tearDown()
     }
     
     func testConfidenceInterval() async {

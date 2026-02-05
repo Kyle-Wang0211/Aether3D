@@ -14,16 +14,14 @@ final class HysteresisStateMachineTests: XCTestCase {
     var stateMachine: HysteresisStateMachine!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         stateMachine = HysteresisStateMachine(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         stateMachine = nil
         config = nil
-        super.tearDown()
     }
     
     func testHysteresisEnter() async {

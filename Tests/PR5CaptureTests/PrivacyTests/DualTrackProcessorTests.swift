@@ -14,16 +14,14 @@ final class DualTrackProcessorTests: XCTestCase {
     var processor: DualTrackProcessor!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         processor = DualTrackProcessor(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         processor = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

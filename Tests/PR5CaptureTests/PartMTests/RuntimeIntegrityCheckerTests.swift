@@ -14,16 +14,14 @@ final class RuntimeIntegrityCheckerTests: XCTestCase {
     var checker: RuntimeIntegrityChecker!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         checker = RuntimeIntegrityChecker(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         checker = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

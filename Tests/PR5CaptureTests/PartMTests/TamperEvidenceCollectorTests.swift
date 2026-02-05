@@ -14,16 +14,14 @@ final class TamperEvidenceCollectorTests: XCTestCase {
     var collector: TamperEvidenceCollector!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         collector = TamperEvidenceCollector(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         collector = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

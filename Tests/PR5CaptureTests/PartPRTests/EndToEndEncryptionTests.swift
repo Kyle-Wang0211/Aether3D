@@ -14,16 +14,14 @@ final class EndToEndEncryptionTests: XCTestCase {
     var encryption: EndToEndEncryption!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         encryption = EndToEndEncryption(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         encryption = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

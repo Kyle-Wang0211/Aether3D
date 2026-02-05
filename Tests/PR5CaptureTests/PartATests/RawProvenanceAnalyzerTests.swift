@@ -14,16 +14,14 @@ final class RawProvenanceAnalyzerTests: XCTestCase {
     var analyzer: RawProvenanceAnalyzer!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         analyzer = RawProvenanceAnalyzer(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         analyzer = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

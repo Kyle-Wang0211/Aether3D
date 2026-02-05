@@ -14,16 +14,14 @@ final class PartialResultSalvagerTests: XCTestCase {
     var salvager: PartialResultSalvager!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         salvager = PartialResultSalvager(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         salvager = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

@@ -14,16 +14,14 @@ final class PerformanceBudgetAllocatorTests: XCTestCase {
     var allocator: PerformanceBudgetAllocator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         allocator = PerformanceBudgetAllocator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         allocator = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

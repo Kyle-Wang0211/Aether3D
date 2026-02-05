@@ -14,16 +14,14 @@ final class FrameDropPredictorTests: XCTestCase {
     var predictor: FrameDropPredictor!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         predictor = FrameDropPredictor(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         predictor = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

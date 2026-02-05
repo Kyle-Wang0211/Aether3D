@@ -14,16 +14,14 @@ final class CapturePolicyResolverTests: XCTestCase {
     var resolver: CapturePolicyResolver!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         resolver = CapturePolicyResolver(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         resolver = nil
         config = nil
-        super.tearDown()
     }
     
     func testPolicyRegistration() async {

@@ -14,16 +14,14 @@ final class BitExactValidatorTests: XCTestCase {
     var validator: BitExactValidator!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         validator = BitExactValidator(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         validator = nil
         config = nil
-        super.tearDown()
     }
     
     func testBitExactMatch() async {

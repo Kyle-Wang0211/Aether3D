@@ -14,16 +14,14 @@ final class AdaptiveThresholdManagerTests: XCTestCase {
     var manager: AdaptiveThresholdManager!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         manager = AdaptiveThresholdManager(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         manager = nil
         config = nil
-        super.tearDown()
     }
     
     func testThresholdAdaptation() async {

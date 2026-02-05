@@ -14,16 +14,14 @@ final class TextureQualityGateTests: XCTestCase {
     var gate: TextureQualityGate!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         gate = TextureQualityGate(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         gate = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

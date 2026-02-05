@@ -14,16 +14,14 @@ final class LensChangeDetectorTests: XCTestCase {
     var detector: LensChangeDetector!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         detector = LensChangeDetector(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         detector = nil
         config = nil
-        super.tearDown()
     }
     
     func testFirstLensDetection() async {

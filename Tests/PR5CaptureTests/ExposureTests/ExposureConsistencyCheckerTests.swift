@@ -14,16 +14,14 @@ final class ExposureConsistencyCheckerTests: XCTestCase {
     var checker: ExposureConsistencyChecker!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         checker = ExposureConsistencyChecker(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         checker = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

@@ -14,16 +14,14 @@ final class FramePacingClassifierTests: XCTestCase {
     var classifier: FramePacingClassifier!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         classifier = FramePacingClassifier(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         classifier = nil
         config = nil
-        super.tearDown()
     }
     
     func test30FPSClassification() async {

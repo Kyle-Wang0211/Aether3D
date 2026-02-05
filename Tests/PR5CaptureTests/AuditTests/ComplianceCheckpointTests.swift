@@ -14,16 +14,14 @@ final class ComplianceCheckpointTests: XCTestCase {
     var checkpoint: ComplianceCheckpoint!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         checkpoint = ComplianceCheckpoint(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         checkpoint = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

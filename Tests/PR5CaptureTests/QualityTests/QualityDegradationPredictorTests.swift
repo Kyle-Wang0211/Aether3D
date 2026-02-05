@@ -14,16 +14,14 @@ final class QualityDegradationPredictorTests: XCTestCase {
     var predictor: QualityDegradationPredictor!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         predictor = QualityDegradationPredictor(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         predictor = nil
         config = nil
-        super.tearDown()
     }
     
     func testDegradationPrediction() async {

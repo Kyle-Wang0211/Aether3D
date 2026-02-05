@@ -14,16 +14,14 @@ final class PrivacyBudgetManagerTests: XCTestCase {
     var manager: PrivacyBudgetManager!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         manager = PrivacyBudgetManager(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         manager = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests

@@ -14,16 +14,14 @@ final class PoseChainPreserverTests: XCTestCase {
     var preserver: PoseChainPreserver!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         preserver = PoseChainPreserver(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         preserver = nil
         config = nil
-        super.tearDown()
     }
     
     func testAddPose() async {

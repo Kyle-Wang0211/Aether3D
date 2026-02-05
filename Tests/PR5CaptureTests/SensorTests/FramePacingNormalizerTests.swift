@@ -14,16 +14,14 @@ final class FramePacingNormalizerTests: XCTestCase {
     var normalizer: FramePacingNormalizer!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         normalizer = FramePacingNormalizer(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         normalizer = nil
         config = nil
-        super.tearDown()
     }
     
     func testFPSEstimation() async {

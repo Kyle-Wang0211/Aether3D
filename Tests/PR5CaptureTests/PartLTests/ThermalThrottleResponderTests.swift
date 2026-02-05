@@ -14,16 +14,14 @@ final class ThermalThrottleResponderTests: XCTestCase {
     var responder: ThermalThrottleResponder!
     var config: ExtremeProfile!
     
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         config = ExtremeProfile(profile: .standard)
         responder = ThermalThrottleResponder(config: config)
     }
     
-    override func tearDown() {
+    override func tearDown() async throws {
         responder = nil
         config = nil
-        super.tearDown()
     }
     
     // MARK: - Happy Path Tests
