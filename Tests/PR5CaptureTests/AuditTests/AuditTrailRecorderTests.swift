@@ -42,7 +42,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             operation: "capture",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await recorder.recordEntry(entry)
         let result = await recorder.verifyIntegrity()
@@ -53,7 +53,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             operation: "process",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await recorder.recordEntry(entry)
         let result = await recorder.verifyIntegrity()
@@ -64,7 +64,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             timestamp: Date(), operation: "test",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await recorder.recordEntry(entry)
         let result = await recorder.verifyIntegrity()
@@ -77,7 +77,7 @@ final class AuditTrailRecorderTests: XCTestCase {
             let entry = AuditTrailRecorder.AuditEntry(
                 operation: "operation\(i)",
                 userId: "user1",
-                result: "success",
+                result: "success"
             )
             await recorder.recordEntry(entry)
         }
@@ -96,7 +96,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             timestamp: Date(), operation: "test",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await recorder.recordEntry(entry)
         let result = await recorder.verifyIntegrity()
@@ -108,7 +108,7 @@ final class AuditTrailRecorderTests: XCTestCase {
             let entry = AuditTrailRecorder.AuditEntry(
                 operation: "operation\(i)",
                 userId: "user1",
-                result: "success",
+                result: "success"
             )
             await recorder.recordEntry(entry)
         }
@@ -122,14 +122,14 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry1 = AuditTrailRecorder.AuditEntry(
             operation: "operation1",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await recorder.recordEntry(entry1)
         
         let entry2 = AuditTrailRecorder.AuditEntry(
             operation: "operation2",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await recorder.recordEntry(entry2)
         
@@ -145,7 +145,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             timestamp: Date(), operation: "test",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await prodRecorder.recordEntry(entry)
         let result = await prodRecorder.verifyIntegrity()
@@ -158,7 +158,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             timestamp: Date(), operation: "test",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await devRecorder.recordEntry(entry)
         let result = await devRecorder.verifyIntegrity()
@@ -171,7 +171,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             timestamp: Date(), operation: "test",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await testRecorder.recordEntry(entry)
         let result = await testRecorder.verifyIntegrity()
@@ -184,7 +184,7 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry = AuditTrailRecorder.AuditEntry(
             timestamp: Date(), operation: "test",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         await paranoidRecorder.recordEntry(entry)
         let result = await paranoidRecorder.verifyIntegrity()
@@ -200,7 +200,7 @@ final class AuditTrailRecorderTests: XCTestCase {
                     let entry = AuditTrailRecorder.AuditEntry(
                         operation: "operation\(i)",
                         userId: "user1",
-                        result: "success",
+                        result: "success"
                     )
                     await self.recorder.recordEntry(entry)
                 }
@@ -217,12 +217,12 @@ final class AuditTrailRecorderTests: XCTestCase {
         let entry1 = AuditTrailRecorder.AuditEntry(
             operation: "operation1",
             userId: "user1",
-            result: "success",
+            result: "success"
         )
         let entry2 = AuditTrailRecorder.AuditEntry(
             operation: "operation2",
             userId: "user2",
-            result: "success",
+            result: "success"
         )
         
         await recorder1.recordEntry(entry1)
