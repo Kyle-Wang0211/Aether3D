@@ -99,30 +99,31 @@ final class WhiteCommitTests: XCTestCase {
     }
     
     func testCoverageDeltaPayloadEndiannessAndHash() throws {
-        // P0-7: Test CoverageDelta LITTLE-ENDIAN encoding with golden fixture
+        // v6.0: Test CoverageDelta BIG-ENDIAN encoding with golden fixture
         // Create test delta manually (fixture loading may not work in SwiftPM)
         let changes = [
             CoverageDelta.CellChange(cellIndex: 100, newState: 1)
         ]
         let delta = CoverageDelta(changes: changes)
-        
+
         // Encode
         let payload = try delta.encode()
-        
-        // Verify LITTLE-ENDIAN: changedCount=1 (u32 LE) = 0x01000000
-        // cellIndex=100 (u32 LE) = 0x64000000, newState=1 (u8) = 0x01
-        // Expected: 01 00 00 00 64 00 00 00 01
-        let expectedBytes: [UInt8] = [0x01, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x01]
+
+        // v6.0: Verify BIG-ENDIAN encoding
+        // changedCount=1 (u32 BE) = 0x00000001
+        // cellIndex=100 (u32 BE) = 0x00000064, newState=1 (u8) = 0x01
+        // Expected: 00 00 00 01 00 00 00 64 01
+        let expectedBytes: [UInt8] = [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x64, 0x01]
         XCTAssertEqual(payload.count, expectedBytes.count, "Payload size mismatch")
         for (index, expectedByte) in expectedBytes.enumerated() {
             XCTAssertEqual(payload[index], expectedByte, "Byte mismatch at index \(index)")
         }
-        
-        // Verify SHA256 (computed from actual bytes)
+
+        // Verify SHA256 (updated for BE encoding)
         let sha256 = try delta.computeSHA256()
         XCTAssertEqual(sha256.count, 64, "SHA256 must be 64 hex characters")
-        // Real SHA256 computed: ed11ae45e914944f118473ca52d26c0e303ef729bf1f20b22be810f5b962e494
-        XCTAssertEqual(sha256, "ed11ae45e914944f118473ca52d26c0e303ef729bf1f20b22be810f5b962e494", "SHA256 mismatch")
+        // v6.0 BE SHA256: a1b16aec4a00d60afc0dd754d308b2be6f63149b3249632f8190ecf08d783778
+        XCTAssertEqual(sha256, "a1b16aec4a00d60afc0dd754d308b2be6f63149b3249632f8190ecf08d783778", "SHA256 mismatch")
     }
     
     func testCanonicalJSONFloatEdgeCases_negativeZero_rounding_scientificNotationForbidden() throws {
