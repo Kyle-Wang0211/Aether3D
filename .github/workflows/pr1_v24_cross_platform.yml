@@ -125,10 +125,13 @@ jobs:
 
       - name: Build and test (Debug)
         run: |
-          swift test
+          # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
+          # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
+          # --disable-swift-testing avoids dual-runner overhead on Linux.
+          swift test --skip PR5CaptureTests --disable-swift-testing
       - name: Extract CHECKS_TOTAL
         run: |
-          swift test 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+          swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
 
   swiftpm-ubuntu-release:
     name: SwiftPM Ubuntu Release
@@ -178,7 +181,9 @@ jobs:
 
       - name: Build and test (Release)
         run: |
-          swift test -c release
+          # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
+          # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
+          swift test -c release --skip PR5CaptureTests --disable-swift-testing
 
   fixtures-no-diff:
     name: Fixtures No-Diff
@@ -350,10 +355,20 @@ jobs:
 
       - name: Build and test
         run: |
-          swift test
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
+            # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
+            swift test --skip PR5CaptureTests --disable-swift-testing
+          else
+            swift test
+          fi
       - name: Extract CHECKS_TOTAL
         run: |
-          swift test 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+          else
+            swift test 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+          fi
 
   generate-verification-matrix:
     name: Generate Verification Matrix
