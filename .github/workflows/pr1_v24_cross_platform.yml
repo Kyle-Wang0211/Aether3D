@@ -85,7 +85,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
       - name: Import Swift GPG key
         run: |
           set -euo pipefail
@@ -119,7 +123,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
       - name: Import Swift GPG key
         run: |
           set -euo pipefail
@@ -150,7 +158,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
       - name: Import Swift GPG key
         run: |
           set -euo pipefail
@@ -234,7 +246,11 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
       - name: Select stable Xcode (macOS)
         if: matrix.use-xcode
         run: |

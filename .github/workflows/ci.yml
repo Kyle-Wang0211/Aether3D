@@ -280,7 +280,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev pkg-config
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
 
       - name: Setup Swift (Linux)
         if: "!matrix.use-xcode"
@@ -496,7 +500,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev pkg-config
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
 
       - name: Setup Swift (Linux only)
         if: matrix.os == 'ubuntu-22.04'
@@ -894,7 +902,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev pkg-config
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
 
       - name: Setup Swift
         uses: swift-actions/setup-swift@v3
