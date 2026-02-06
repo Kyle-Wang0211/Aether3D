@@ -97,7 +97,7 @@ for commit in $COMMITS; do
 
   # Check for merge commits - skip GitHub auto-generated merge commits
   # Merge commits have multiple parents (>1) and are auto-generated when PRs are merged
-  parent_count=$(git rev-list --count --parents -n 1 "$commit" 2>/dev/null | awk '{print NF-1}' || echo "1")
+  parent_count=$(git rev-list --parents -n 1 "$commit" 2>/dev/null | awk '{print NF-1}' || echo "1")
   if [[ "$parent_count" -gt 1 ]]; then
     # Check if this is a GitHub merge commit (starts with "Merge pull request" or "Merge branch")
     first_line=$(git log -1 --format='%s' "$commit" 2>/dev/null || echo "")
