@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         os: [macos-15, ubuntu-22.04]
-        swift-version: ["5.9"]
+        swift-version: ["6.2"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     # Note: ubuntu-22.04 is pinned because setup-swift@v1 does not support ubuntu-24.04
@@ -86,20 +86,53 @@ jobs:
           fi
           echo "✅ Swift is from selected Xcode (verified via xcrun)"
       
-      - name: Setup Swift (Linux only)
+      - name: Import Swift GPG key (Linux)
         if: matrix.os == 'ubuntu-22.04'
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: ${{ matrix.swift-version }}
-          skip-verify-signature: true
-      
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            if curl -fsSL --compressed --retry 3 --retry-delay 5 https://swift.org/keys/all-keys.asc | gpg --import - 2>&1; then
+              echo "✅ Swift GPG key imported successfully"
+              exit 0
+            fi
+            echo "⚠️ Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "❌ Failed to import Swift GPG key after 3 attempts"
+          exit 1
+
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev pkg-config
-      
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
+
+      - name: Setup Swift (Linux only)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          SWIFT_VERSION="6.2.3"
+          SWIFT_PLATFORM="ubuntu22.04"
+          SWIFT_TARBALL="swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}.tar.gz"
+          SWIFT_URL="https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2204/swift-${SWIFT_VERSION}-RELEASE/${SWIFT_TARBALL}"
+          echo "Downloading Swift ${SWIFT_VERSION}..."
+          curl -fsSL --retry 3 --retry-delay 5 "${SWIFT_URL}" -o "/tmp/${SWIFT_TARBALL}"
+          echo "Verifying GPG signature..."
+          curl -fsSL --retry 3 --retry-delay 5 "${SWIFT_URL}.sig" -o "/tmp/${SWIFT_TARBALL}.sig"
+          gpg --verify "/tmp/${SWIFT_TARBALL}.sig" "/tmp/${SWIFT_TARBALL}" || echo "⚠️ GPG verification failed (non-fatal)"
+          echo "Extracting Swift toolchain..."
+          sudo tar -xzf "/tmp/${SWIFT_TARBALL}" -C /opt
+          SWIFT_PATH="/opt/swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}/usr/bin"
+          echo "${SWIFT_PATH}" >> $GITHUB_PATH
+          export PATH="${SWIFT_PATH}:${PATH}"
+          echo "✅ Swift ${SWIFT_VERSION} installed"
+          swift --version
+
       - name: Platform Diagnostics
         run: |
           set -euo pipefail

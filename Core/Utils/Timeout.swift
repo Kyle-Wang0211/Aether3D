@@ -24,8 +24,10 @@ enum Timeout {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 throw TimeoutError.timeout
             }
-            
-            let result = try await group.next()!
+
+            guard let result = try await group.next() else {
+                throw TimeoutError.timeout
+            }
             group.cancelAll()
             return result
         }

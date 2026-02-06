@@ -106,6 +106,11 @@ final class TraceMetricsCapacityMetricsContractTests: XCTestCase {
         let candidateId = UUID()
         let timestamp = Date()
         
+        // Create a test DecisionHash (32 bytes = 64 hex chars)
+        // Use a valid SHA-256 sized hex string (64 chars)
+        let testHashHex = "abc1234567890abcdef01234567890abcdef01234567890abcdef01234567890"
+        let testHash = try DecisionHash(hexString: testHashHex)
+        
         let capacityMetrics = CapacityMetrics(
             candidateId: candidateId,
             patchCountShadow: 5000,
@@ -119,7 +124,7 @@ final class TraceMetricsCapacityMetricsContractTests: XCTestCase {
             capacitySaturatedLatchedAtPatchCount: nil,
             capacitySaturatedLatchedAtTimestamp: timestamp,
             flushFailure: false,
-            decisionHash: "abc123"
+            decisionHash: testHash
         )
         
         let original = TraceMetrics(
@@ -149,6 +154,6 @@ final class TraceMetricsCapacityMetricsContractTests: XCTestCase {
         XCTAssertEqual(decodedCapacity.buildMode, .DAMPING)
         XCTAssertEqual(decodedCapacity.rejectReason, .LOW_GAIN_SOFT)
         XCTAssertEqual(decodedCapacity.rejectReasonDistribution["LOW_GAIN_SOFT"], 10)
-        XCTAssertEqual(decodedCapacity.decisionHash, "abc123")
+        XCTAssertEqual(decodedCapacity.decisionHash?.hexString, testHash.hexString)
     }
 }

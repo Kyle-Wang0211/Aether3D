@@ -41,9 +41,120 @@ public struct AdmissionDecision: Codable {
     
     /// Deterministic decision hash (computed from stable fields)
     /// 
+    /// **v2.4+:** Changed to DecisionHash (32 bytes, byte-stable)
     /// **MUST:** Hash MUST be deterministic across runs, platforms, and locales
     /// Used for audit/replay validation
-    public let decisionHash: String
+    public let decisionHash: DecisionHash
+    
+    /// Decision hash bytes (32 bytes, internal)
+    public var decisionHashBytes: Data {
+        return Data(decisionHash.bytes)
+    }
+    
+    /// Decision hash hex string (64 lowercase hex chars, no prefix)
+    /// 
+    /// **P0 Contract:**
+    /// - Exactly 64 characters
+    /// - Lowercase hex only
+    /// - No "0x" prefix
+    /// - Stable formatting for logging/audit
+    public var decisionHashHexLower: String {
+        return decisionHash.hexString
+    }
+    
+    /// Legacy decision hash string (for backward compatibility)
+    @available(*, deprecated, message: "Use decisionHashHexLower instead")
+    public var decisionHashString: String {
+        return decisionHashHexLower
+    }
+    
+    /// Generate canonical admission record bytes (AdmissionDecisionBytesLayout_v1)
+    /// 
+    /// **P0 Contract:**
+    /// - Uses CanonicalBytesWriter for deterministic encoding
+    /// - Follows AdmissionDecisionBytesLayout_v1 table order
+    /// - Cross-platform deterministic (macOS + Linux produce identical bytes)
+    /// - Used for audit/fixture comparison (not just JSON fields)
+    /// 
+    /// **Fail-closed:** Throws FailClosedError on encoding failure
+    public func admissionRecordBytes(
+        schemaVersion: UInt16,
+        policyHash: UInt64,
+        sessionStableId: UInt64,
+        candidateStableId: UInt64,
+        degradationLevel: UInt8,
+        degradationReasonCode: DegradationReasonCode?,
+        valueScore: Int64
+    ) throws -> Data {
+        let writer = CanonicalBytesWriter()
+        
+        // Layout version (fixed as 1 for v1)
+        writer.writeUInt8(1) // layoutVersion = 1
+        
+        // Schema version
+        writer.writeUInt16BE(schemaVersion)
+        
+        // Policy hash
+        writer.writeUInt64BE(policyHash)
+        
+        // Stable IDs
+        writer.writeUInt64BE(sessionStableId)
+        writer.writeUInt64BE(candidateStableId)
+        
+        // Decision hash algorithm ID (BLAKE3_256 = 1)
+        writer.writeUInt8(1) // decisionHashAlgoId = BLAKE3_256
+        
+        // Decision hash (32 bytes)
+        writer.writeBytes(Array(decisionHash.bytes))
+        
+        // Classification (map from PatchClassification)
+        let classificationUInt8: UInt8 = {
+            switch classification {
+            case .REJECTED, .DUPLICATE_REJECTED:
+                return reason == .HARD_CAP ? 0 : 1 // REJECTED_HARD_CAP : REJECTED_SOFT
+            case .ACCEPTED:
+                return 2 // ACCEPTED
+            case .DISPLAY_ONLY:
+                return 2 // Treat as ACCEPTED for classification purposes
+            }
+        }()
+        writer.writeUInt8(classificationUInt8)
+        
+        // Reject reason (optional, presenceTag encoding)
+        if let reasonValue = reason {
+            writer.writeUInt8(1) // present
+            writer.writeUInt8(reasonValue.rawValueUInt8)
+        } else {
+            writer.writeUInt8(0) // absent (no payload bytes)
+        }
+        
+        // Shed decision (optional, presenceTag encoding)
+        // For now, always absent (not implemented yet)
+        writer.writeUInt8(0) // absent (no payload bytes)
+        
+        // Shed reason (optional, presenceTag encoding)
+        // For now, always absent (not implemented yet)
+        writer.writeUInt8(0) // absent (no payload bytes)
+        
+        // Degradation level
+        writer.writeUInt8(degradationLevel)
+        
+        // Degradation reason code (optional, presenceTag encoding)
+        if let reasonCode = degradationReasonCode {
+            writer.writeUInt8(1) // present
+            writer.writeUInt8(reasonCode.rawValue)
+        } else {
+            writer.writeUInt8(0) // absent (no payload bytes)
+        }
+        
+        // Value score
+        writer.writeInt64BE(valueScore)
+        
+        // Reserved padding (4 bytes, must be zeros)
+        writer.writeZeroBytes(count: 4)
+        
+        return writer.toData()
+    }
     
     public init(
         candidateId: UUID,
@@ -62,18 +173,122 @@ public struct AdmissionDecision: Codable {
         self.guidanceSignal = guidanceSignal
         self.hardFuseTrigger = hardFuseTrigger
         
-        // Compute deterministic hash from canonical string representation
-        let canonicalString = [
-            candidateId.uuidString.lowercased(),
-            classification.rawValue,
-            reason?.rawValue ?? "none",
-            DeterministicHash.formatDouble(eebDelta),
-            buildMode.rawValue,
-            guidanceSignal.rawValue,
-            hardFuseTrigger?.rawValue ?? "none"
-        ].joined(separator: "|")
+        // Compute decision hash from CapacityMetrics canonical bytes (v2.4+)
+        // TODO: Get actual values from CapacityMetrics when available
+        let metrics = CapacityMetrics(
+            candidateId: candidateId,
+            patchCountShadow: 0, // TODO: Get from tracker
+            eebRemaining: 0, // TODO: Get from tracker
+            eebDelta: eebDelta,
+            buildMode: buildMode,
+            rejectReason: reason,
+            hardFuseTrigger: hardFuseTrigger,
+            rejectReasonDistribution: [:],
+            capacityInvariantViolation: false,
+            capacitySaturatedLatchedAtPatchCount: nil,
+            capacitySaturatedLatchedAtTimestamp: nil,
+            flushFailure: false,
+            decisionHash: nil
+        )
         
-        self.decisionHash = DeterministicHash.sha256Hex(canonicalString)
+        // Compute decision hash (v2.4+)
+        // TODO: Pass actual policyHash, stable IDs, valueScore, etc. when available
+        // For now, compute candidateStableId from candidateId to ensure different candidates produce different hashes
+        do {
+            // Default flowBucketCount and perFlowCounters for v2.4+
+            let defaultFlowBucketCount = 4
+            let defaultPerFlowCounters = Array(repeating: UInt16(0), count: defaultFlowBucketCount)
+            
+            // Compute candidateStableId from candidateId (temporary: should use CandidateStableIdOpaqueBytesLayout_v1)
+            let candidateIdBytes = try UUIDRFC4122.uuidRFC4122Bytes(candidateId)
+            let candidateStableId = try Blake3Facade.blake3_64(data: Data(candidateIdBytes))
+            
+            // Compute sessionStableId (temporary: should use session UUID + policyHash)
+            // For now, use a hash of candidateId to ensure uniqueness
+            let sessionStableId = try Blake3Facade.blake3_64(data: Data(candidateIdBytes + [0x00]))
+            
+            self.decisionHash = try metrics.computeDecisionHashV1(
+                policyHash: 0, // TODO: Get from CapacityTier
+                sessionStableId: sessionStableId,
+                candidateStableId: candidateStableId,
+                valueScore: 0, // TODO: Compute ValueScore
+                perFlowCounters: defaultPerFlowCounters, // Default for now
+                flowBucketCount: defaultFlowBucketCount,
+                throttleStats: nil, // TODO: Get from limiter
+                degradationLevel: 0, // TODO: Map from BuildMode
+                degradationReasonCode: nil, // TODO: Get from degradation controller
+                schemaVersion: 0x0204
+            )
+        } catch {
+            // Fail-closed for v2.4+: decisionHash computation must succeed
+            // In v2.4+, this should never happen - fail closed
+            fatalError("Failed to compute decisionHash (v2.4+): \(error)")
+        }
+    }
+    
+    // MARK: - Codable
+    
+    enum CodingKeys: String, CodingKey {
+        case candidateId
+        case classification
+        case reason
+        case eebDelta
+        case buildMode
+        case guidanceSignal
+        case hardFuseTrigger
+        case decisionHash
+        case decisionHashString // Legacy support
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        candidateId = try container.decode(UUID.self, forKey: .candidateId)
+        classification = try container.decode(PatchClassification.self, forKey: .classification)
+        reason = try container.decodeIfPresent(RejectReason.self, forKey: .reason)
+        eebDelta = try container.decode(Double.self, forKey: .eebDelta)
+        buildMode = try container.decode(BuildMode.self, forKey: .buildMode)
+        guidanceSignal = try container.decode(GuidanceSignal.self, forKey: .guidanceSignal)
+        hardFuseTrigger = try container.decodeIfPresent(HardFuseTrigger.self, forKey: .hardFuseTrigger)
+        
+        // Try to decode DecisionHash (v2.4+), fallback to legacy string
+        if let decisionHashValue = try? container.decode(DecisionHash.self, forKey: .decisionHash) {
+            decisionHash = decisionHashValue
+        } else if let legacyHashString = try? container.decode(String.self, forKey: .decisionHashString) {
+            // Convert legacy hex string to DecisionHash
+            decisionHash = try DecisionHash(hexString: legacyHashString)
+        } else {
+            // Compute from other fields (backward compatibility)
+            let metrics = CapacityMetrics(
+                candidateId: candidateId,
+                patchCountShadow: 0,
+                eebRemaining: 0,
+                eebDelta: eebDelta,
+                buildMode: buildMode,
+                rejectReason: reason,
+                hardFuseTrigger: hardFuseTrigger,
+                rejectReasonDistribution: [:],
+                capacityInvariantViolation: false,
+                capacitySaturatedLatchedAtPatchCount: nil,
+                capacitySaturatedLatchedAtTimestamp: nil,
+                flushFailure: false,
+                decisionHash: nil
+            )
+            decisionHash = try metrics.computeDecisionHashV1()
+        }
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(candidateId, forKey: .candidateId)
+        try container.encode(classification, forKey: .classification)
+        try container.encodeIfPresent(reason, forKey: .reason)
+        try container.encode(eebDelta, forKey: .eebDelta)
+        try container.encode(buildMode, forKey: .buildMode)
+        try container.encode(guidanceSignal, forKey: .guidanceSignal)
+        try container.encodeIfPresent(hardFuseTrigger, forKey: .hardFuseTrigger)
+        try container.encode(decisionHash, forKey: .decisionHash)
+        // Also encode legacy string for backward compatibility
+        try container.encode(decisionHash.hexString, forKey: .decisionHashString)
     }
 }
 

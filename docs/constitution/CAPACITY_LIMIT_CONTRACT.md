@@ -431,6 +431,156 @@ LEGAL_TRANSITIONS: frozenset = frozenset([
 
 ---
 
+## DecisionHashContract_v1 (PR1 v2.4 Addendum EXT+)
+
+**契约 ID:** CONTRACT_DECISION_HASH_V1  
+**文档版本:** 1.0  
+**状态:** IMMUTABLE  
+**创建日期:** 2026-02-05  
+**范围:** PR1 v2.4+ - DecisionHash as first-class, byte-stable, policy-bound, replay-deterministic contract
+
+### 概述
+
+DecisionHash 是一个一等公民、字节稳定、策略绑定、重放确定性的契约，用于确保相同输入和相同策略在所有运行和平台上产生相同的决策哈希。
+
+### 规范输入字节
+
+**规范输入字节必须**由 `CapacityMetrics.canonicalBytesForDecisionHashInput()` 使用 `CanonicalBytesWriter` 生成。
+
+**布局表**：DecisionHashInputBytesLayout_v1（参考 A2.4 表，无歧义）
+
+### 算法
+
+1. **域分离前缀**（P0 必需）：
+   - decisionHashInput 必须以固定 ASCII 标签为前缀：
+   - `"AETHER3D_DECISION_HASH_V1"` 编码为字节（ASCII，25 字节），然后单个 `0x00` 分隔符（1 字节）
+   - **DOMAIN_TAG 长度 = 26 字节**（锁定）
+   - **DOMAIN_TAG 字节序列**：ASCII("AETHER3D_DECISION_HASH_V1") || 0x00
+   - **规则**：精确字节序列，无填充，无截断，无固定长度缓冲区
+   - 然后是规范字节有效载荷
+   - 这防止跨协议哈希冲突
+
+2. **哈希计算**：
+   - `digest = BLAKE3(domainTag || canonicalBytes)`
+   - `decisionHashBytes = digest[0..<32]`（完整 32 字节，不截断）
+
+3. **输出格式**：
+   - `DecisionHash` 结构体包含恰好 32 字节的 `[UInt8]`
+   - 用于 JSON/调试时编码为十六进制字符串（不影响规范字节）
+
+### 规则
+
+1. **策略绑定**：
+   - decisionHash **必须**绑定到策略：policyHash **必须**包含在 DecisionHashInputBytesLayout_v1 中
+
+2. **重放稳定性**：
+   - decisionHash **必须**在重放下稳定：输入**不得**包含任何实时"现在"时间或墙钟字符串
+   - 如需时间，使用量化刻度值（确定性事件输入的一部分）
+
+3. **可选字段编码**：
+   - 使用 presenceTag 编码（UInt8 0/1）
+   - ❌ 禁止依赖 Codable 可选编码
+
+4. **数组编码**：
+   - 数组是固定大小，无长度前缀
+   - 不匹配 => v2.4+ 失败关闭
+
+5. **布局变更规则**：
+   - 任何布局变更 => 递增 DecisionHashInputBytesLayout 的 layoutVersion
+   - **必须**根据治理规则提升 schemaVersion 或 policyEpoch
+
+### 失败关闭规则（v2.4+）
+
+以下情况必须失败关闭（抛出错误）：
+- canonicalBytesForDecisionHashInput() 无法生成（缺少强制字段、数组大小不匹配、未知枚举）
+- decisionHash **不得**在任何发出的决策路径中缺失（accepted/rejected/shed/throttled/extension denied）
+- 每个决策都有一个哈希
+
+## QuantizedLimiter 语义和溢出规则（PR1 v2.4 Addendum）
+
+**窗口定义**：
+
+- 窗口是 `[startTick, startTick + windowTicks)`（左闭右开）
+- startTick 是窗口起始刻度
+- windowTicks 是窗口持续时间（刻度数）
+
+**请求处理顺序**：
+
+- 每个请求：**先** `advanceTo(nowTick)`，**然后**尝试 `consume`
+- advanceTo 更新内部状态（补充、窗口滑动）
+
+**补充计算**：
+
+- refill 从 `(nowTick - lastTick)` 一步计算，**无循环**
+- refill = (nowTick - lastTick) * refillRatePerTick
+- 使用检查算术：`multipliedReportingOverflow` 检测溢出
+
+**计数时机**：
+
+- **明确指定**：attempts 在 consume **之前**递增（先计数尝试），然后执行 consume（消耗令牌）
+- 必须保持一致
+
+**溢出处理规则**：
+
+- 如果乘法溢出或任何刻度算术溢出 => 触发 HardFuse LIMITER_ARITH_OVERFLOW 并设置 DegradationLevel=TERMINAL
+- attemptsInWindow 饱和递增（UInt32.max）以避免回绕；如果达到饱和，视为重试风暴等效并升级降级
+- 所有整数算术必须使用检查或饱和操作：
+  - `multipliedReportingOverflow`
+  - `addingReportingOverflow`
+  - `subtractingReportingOverflow`
+- 禁止使用 "Int" 用于规范字段（仅使用固定宽度类型）
+
+**溢出错误映射**：
+
+- 限制器算术溢出 => FailClosedError 0x2406 (LIMITER_ARITH_OVERFLOW)
+- 触发 TERMINAL 降级级别
+- 记录 degradationReasonCode = ARITHMETIC_OVERFLOW
+- 记录 failClosedCode = 0x2406（可选审计字段）
+
+---
+
+### 溢出代码映射表（PR1 v2.4 Addendum）
+
+| 错误代码 | 错误名称 | 升级目标 | 审计字段 |
+|---------|---------|---------|---------|
+| 0x2406 | LIMITER_ARITH_OVERFLOW | TERMINAL | degradationReasonCode = ARITHMETIC_OVERFLOW, failClosedCode = 0x2406 |
+| 0x2404 | RETRY_STORM_DETECTED | SATURATED → SHEDDING（固定路径） | degradationReasonCode = RETRY_STORM_DETECTED |
+
+**规则**：
+- 所有溢出和错误必须映射到封闭世界错误代码
+- 必须指定错误代码和审计字段
+- TERMINAL 升级必须记录 failClosedCode 和 degradationReasonCode
+
+### 跨平台确定性约束（PR1 v2.4 Addendum）
+
+**规则**：
+- 相同固定装置必须在 macOS 和 Linux 上字节级通过
+- 禁止平台条件分支（无 #if os() 在规范/哈希代码中）
+- 任何平台差异 => 测试失败（视为规范化错误）
+
+**验证**：
+- CrossPlatformGoldenSmokeTests 验证 UUID RFC4122 字节向量、decision hash 向量、admission decision 固定装置
+- CI 矩阵构建强制 macOS + Linux 都通过相同固定装置
+
+### 验收标准
+
+- SSOT 包含 DecisionHashContract_v1 + 域分离标签 + 输出大小选择（32 字节）
+- CapacityMetrics 生成规范字节并使用 BLAKE3 计算 decisionHash（32 字节摘要，冻结）
+- DecisionHashInputBytesLayout_v1 包含 decisionSchemaVersion 字段
+- 规范字节长度不变量强制执行（v2.4+）
+- BLAKE3 黄金向量测试通过
+- 端序证明测试通过（所有整数类型）
+- 无字符串/无 JSON 扫描门控通过
+- Pre-v2.4 行为显式定义并测试
+- AdmissionController 输出 decisionHashBytes + decisionHashHexLower（64 字符小写）
+- 跨平台黄金测试通过（macOS + Linux）
+- AdmissionController 为每个决策输出 decisionHash
+- 黄金固定装置重放测试通过并在运行间稳定
+- 更改任何策略字段会更改 policyHash => decisionHash 更改（证明策略绑定）
+- 无墙钟/无实时时间进入 decisionHash 输入字节
+
+---
+
 **文档状态**: IMMUTABLE  
-**最后更新**: 2026-01-26  
+**最后更新**: 2026-02-05  
 **维护者**: PR1 C-Class Implementation Team

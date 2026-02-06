@@ -66,3 +66,31 @@ public enum CapacityLimitConstants {
     /// Radiance binning for duplicate detection (SSOT constant)
     public static let RADIANCE_BINNING: Int = 16
 }
+
+/// Degradation reason code (closed-world enum)
+/// 
+/// **P0 Contract:**
+/// - UInt8 closed-world enum
+/// - All degradation transitions must record reasonCode
+/// - Audit must include reasonCode
+public enum DegradationReasonCode: UInt8 {
+    /// Saturated escalation (SATURATED → SHEDDING, fixed path)
+    case SATURATED_ESCALATION = 1
+    
+    /// EEB threshold reached
+    case EEB_THRESHOLD_REACHED = 2
+    
+    /// Value score below minimum
+    case VALUE_SCORE_BELOW_MIN = 3
+    
+    /// Retry storm detected
+    case RETRY_STORM_DETECTED = 4
+    
+    /// Arithmetic overflow (limiter overflow)
+    case ARITHMETIC_OVERFLOW = 5
+    
+    /// Extensions exhausted
+    case EXTENSIONS_EXHAUSTED = 6
+    
+    // Closed-world: no unknown default
+}

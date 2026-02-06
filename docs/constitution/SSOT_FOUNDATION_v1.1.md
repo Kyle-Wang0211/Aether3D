@@ -380,6 +380,384 @@ Lab 颜色空间参考系统永久固定为：
 
 ---
 
+---
+
+## A2.1: PolicyHashCanonicalBytesLayout_v1（PR1 v2.4 Addendum）
+
+**表：PolicyHashCanonicalBytesLayout_v1**（用于 CapacityTier policyHash 输入）
+
+| 字段顺序 | 字段名                         | 类型       | 编码规则       | 字节数                 | 说明                                       |
+| ---- | --------------------------- | -------- | ---------- | ------------------- | ---------------------------------------- |
+| 1    | tierId                      | UInt16   | Big-Endian | 2                   | 层级标识符                                    |
+| 2    | schemaVersion               | UInt16   | Big-Endian | 2                   | 结构版本                                     |
+| 3    | profileId                   | UInt8    | 直接         | 1                   | 配置文件ID                                   |
+| 4    | policyEpoch                 | UInt32   | Big-Endian | 4                   | 策略纪元（单调）                                 |
+| 5    | policyFlags                 | UInt32   | Big-Endian | 4                   | 功能开关位集                                   |
+| 6    | softLimitPatchCount         | Int32    | Big-Endian | 4                   | 软限制补丁数                                   |
+| 7    | hardLimitPatchCount         | Int32    | Big-Endian | 4                   | 硬限制补丁数                                   |
+| 8    | eebBaseBudget               | Int64    | Big-Endian | 8                   | EEB基础预算（BudgetUnit）                      |
+| 9    | softBudgetThreshold         | Int64    | Big-Endian | 8                   | 软预算阈值（BudgetUnit）                        |
+| 10   | hardBudgetThreshold         | Int64    | Big-Endian | 8                   | 硬预算阈值（BudgetUnit）                        |
+| 11   | budgetEpsilon               | Int64    | Big-Endian | 8                   | 预算精度（BudgetUnit）                         |
+| 12   | maxSessionExtensions        | UInt8    | 直接         | 1                   | 最大会话扩展数                                  |
+| 13   | extensionBudgetRatio        | Int64    | Big-Endian | 8                   | 扩展预算比率（RatioUnit）                        |
+| 14   | cooldownNs                  | UInt64   | Big-Endian | 8                   | 冷却期（纳秒）                                  |
+| 15   | throttleWindowNs            | UInt64   | Big-Endian | 8                   | 节流窗口（纳秒）                                 |
+| 16   | throttleMaxAttempts         | UInt8    | 直接         | 1                   | 节流最大尝试数                                  |
+| 17   | throttleBurstTokens         | UInt8    | 直接         | 1                   | 节流突发令牌数                                  |
+| 18   | throttleRefillRateNs        | UInt64   | Big-Endian | 8                   | 节流补充速率（纳秒）                               |
+| 19   | retryStormFuseThreshold     | UInt32   | Big-Endian | 4                   | 重试风暴熔断阈值                                 |
+| 20   | costWindowK                 | UInt8    | 直接         | 1                   | 成本窗口大小                                   |
+| 21   | minValueScore               | Int64    | Big-Endian | 8                   | 最小价值分数（BudgetUnit）                       |
+| 22   | shedRateAtSaturated         | Int64    | Big-Endian | 8                   | 饱和时脱落率（RatioUnit）                        |
+| 23   | shedRateAtTerminal          | Int64    | Big-Endian | 8                   | 终端时脱落率（RatioUnit）                        |
+| 24   | deterministicSelectionSalt  | UInt64   | Big-Endian | 8                   | 确定性选择盐值                                  |
+| 25   | hashAlgoId                  | UInt8    | 直接         | 1                   | 哈希算法ID（封闭世界）                             |
+| 26   | eligibilityWindowK          | UInt8    | 直接         | 1                   | 资格窗口大小                                   |
+| 27   | minGainThreshold            | Int64    | Big-Endian | 8                   | 最小增益阈值（BudgetUnit）                       |
+| 28   | minDiversity                | Int64    | Big-Endian | 8                   | 最小多样性（RatioUnit）                         |
+| 29   | rejectDominanceMaxShare     | Int64    | Big-Endian | 8                   | 拒绝主导最大份额（RatioUnit）                      |
+| 30   | flowBucketCount             | UInt8    | 直接         | 1                   | 流桶数量（固定，例如4）                             |
+| 31   | flowWeights                 | [UInt16] | Big-Endian | flowBucketCount × 2 | 流权重数组（不编码长度，精确 flowBucketCount 个 UInt16） |
+| 32   | maxPerFlowExtensionsPerFlow | UInt16   | Big-Endian | 2                   | 每流最大扩展数                                  |
+| 33   | limiterTickNs               | UInt64   | Big-Endian | 8                   | 限制器刻度纳秒（包含在policyHash中，影响行为）             |
+| 34   | valueScoreWeightA           | Int64    | Big-Endian | 8                   | ValueScore权重A（BudgetUnit，包含在policyHash中） |
+| 35   | valueScoreWeightB           | Int64    | Big-Endian | 8                   | ValueScore权重B（BudgetUnit，包含在policyHash中） |
+| 36   | valueScoreWeightC           | Int64    | Big-Endian | 8                   | ValueScore权重C（BudgetUnit，包含在policyHash中） |
+| 37   | valueScoreWeightD           | Int64    | Big-Endian | 8                   | ValueScore权重D（BudgetUnit，包含在policyHash中） |
+| 38   | valueScoreMax               | Int64    | Big-Endian | 8                   | ValueScore最大值（BudgetUnit，包含在policyHash中） |
+
+**关键规则**：
+
+- **policyHash 字段本身不包含在用于计算 policyHash 的字节中**（避免递归）
+- flowWeights：**不编码长度**，编码恰好 flowBucketCount 个 UInt16（大端序）
+- 如果 flowWeights 长度与 flowBucketCount 不匹配 => 失败关闭
+- 所有整数固定宽度大端序
+- 无字符串、无 JSON、无变长编码（除非明确定义）
+
+**预期字节长度公式**：
+
+```
+fixedFieldsLength = 2 + 2 + 1 + 4 + 4 + 4 + 4 + 8 + 8 + 8 + 8 + 1 + 8 + 8 + 8 + 1 + 1 + 8 + 4 + 1 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 8 + 8 + 8 + 1 + 2 + 8 + 8 + 8 + 8 + 8 + 8 = 210
+flowWeightsLength = flowBucketCount * 2
+expectedLength = fixedFieldsLength + flowWeightsLength
+```
+
+---
+
+## A2.2: CandidateStableIdOpaqueBytesLayout_v1（PR1 v2.4 Addendum）
+
+**表：CandidateStableIdOpaqueBytesLayout_v1**（用于 candidateStableId 推导）
+
+| 字段顺序 | 字段名                       | 类型       | 编码规则       | 字节数 | 说明                                                 |
+| ---- | ------------------------- | -------- | ---------- | --- | -------------------------------------------------- |
+| 1    | layoutVersion             | UInt8    | 直接         | 1   | 布局版本（固定为1）                                         |
+| 2    | sessionStableIdSourceUuid | UUID     | RFC4122网络序 | 16  | 捕获会话UUID字节，不可变                                     |
+| 3    | candidateId               | UUID     | RFC4122网络序 | 16  | 候选UUID字节，不可变                                       |
+| 4    | policyHash                | UInt64   | Big-Endian | 8   | 绑定稳定ID到策略，防止跨策略冲突                                  |
+| 5    | candidateKind             | UInt8    | 直接         | 1   | 封闭世界枚举（0=patchCandidate,1=frameCandidate），如未使用则编码0 |
+| 6    | reserved                  | UInt8[3] | 直接         | 3   | 固定填充，必须为{0,0,0}                                    |
+
+**明确排除**：
+
+- ❌ 无时间戳
+- ❌ 无 patchCount
+- ❌ 无 eebRemaining
+- ❌ 无 buildMode
+- ❌ 无 degradationLevel
+- ❌ 无可选字段
+
+**稳定ID推导规则**：
+
+- `sessionStableId = blake3_64(sessionUuidBytes || policyHashBytes)`
+- `candidateStableId = blake3_64(CandidateStableIdOpaqueBytesLayout_v1 bytes)`
+
+**变更规则**：
+
+- 任何未来变更 => 递增 layoutVersion
+- 必须提升 schemaVersion 或 policyEpoch
+
+**预期字节长度**：
+
+```
+expectedLength = 1 + 16 + 16 + 8 + 1 + 3 = 45 bytes
+```
+
+---
+
+## A2.3: ExtensionRequestIdempotencySnapshotBytesLayout_v1（PR1 v2.4 Addendum）
+
+**表：ExtensionRequestIdempotencySnapshotBytesLayout_v1**（用于 ExtensionResultSnapshot 幂等性）
+
+| 字段顺序 | 字段名                | 类型       | 编码规则       | 字节数 | 说明                                           |
+| ---- | ------------------ | -------- | ---------- | --- | -------------------------------------------- |
+| 1    | layoutVersion      | UInt8    | 直接         | 1   | 布局版本（固定为1）                                   |
+| 2    | extensionRequestId | UUID     | RFC4122网络序 | 16  | 扩展请求ID                                       |
+| 3    | trigger            | UInt8    | 直接         | 1   | 触发枚举值                                        |
+| 4    | tierId             | UInt16   | Big-Endian | 2   | 层级ID                                         |
+| 5    | schemaVersion      | UInt16   | Big-Endian | 2   | 结构版本                                         |
+| 6    | policyHash         | UInt64   | Big-Endian | 8   | 策略哈希                                         |
+| 7    | extensionCount     | UInt8    | 直接         | 1   | 扩展计数                                         |
+| 8    | resultTag          | UInt8    | 直接         | 1   | 结果标签（0=extended,1=denied,2=alreadyProcessed） |
+| 9    | denialReasonTag    | UInt8    | 直接         | 1   | 拒绝原因存在标签（0=absent,1=present）                 |
+| 10   | denialReason       | UInt8    | 直接         | 0或1 | 拒绝原因（仅当denialReasonTag==1时存在）                |
+| 11   | eebCeiling         | Int64    | Big-Endian | 8   | EEB上限（BudgetUnit）                            |
+| 12   | eebAdded           | Int64    | Big-Endian | 8   | EEB添加量（BudgetUnit）                           |
+| 13   | newEebRemaining    | Int64    | Big-Endian | 8   | 新EEB剩余（BudgetUnit，仅当extended时有意义；否则编码0）      |
+| 14   | reserved           | UInt8[4] | 直接         | 4   | 固定填充，必须为{0,0,0,0}                            |
+
+**明确排除**：
+
+- ❌ 无墙钟时间
+- ❌ 无处理时间
+- ❌ 字节在重放下稳定
+
+**预期字节长度公式**：
+
+```
+baseLength = 1 + 16 + 1 + 2 + 2 + 8 + 1 + 1 + 1 + 8 + 8 + 8 + 4 = 61
+denialReasonLength = (denialReasonTag == 1) ? 1 : 0
+expectedLength = baseLength + denialReasonLength
+```
+
+---
+
+## A2.4: DecisionHashInputBytesLayout_v1（PR1 v2.4 Addendum）
+
+**表：DecisionHashInputBytesLayout_v1**（用于 CapacityMetrics decisionHash 输入）
+
+| 字段顺序 | 字段名                      | 类型       | 编码规则       | 字节数                 | 说明                                                                 |
+| ---- | ------------------------ | -------- | ---------- | ------------------- | ------------------------------------------------------------------ |
+| 1    | layoutVersion            | UInt8    | 直接         | 1                   | 布局版本（固定为1）                                                         |
+| 2    | decisionSchemaVersion    | UInt16   | Big-Endian | 2                   | 决策模式区分符（固定为0x0001用于v1，这不是全局schemaVersion）                        |
+| 3    | policyHash               | UInt64   | Big-Endian | 8                   | 策略哈希                                                               |
+| 4    | sessionStableId          | UInt64   | Big-Endian | 8                   | 会话稳定ID（blake3_64）                                                  |
+| 5    | candidateStableId        | UInt64   | Big-Endian | 8                   | 候选稳定ID（blake3_64）                                                  |
+| 6    | classification           | UInt8    | 直接         | 1                   | 分类枚举值                                                              |
+| 7    | rejectReasonTag          | UInt8    | 直接         | 1                   | 拒绝原因存在标签（0=absent,1=present）                                       |
+| 8    | rejectReason             | UInt8    | 直接         | 0或1                 | 拒绝原因（仅当rejectReasonTag==1时存在）                                      |
+| 9    | shedDecisionTag          | UInt8    | 直接         | 1                   | 脱落决策存在标签（0=absent,1=present）                                       |
+| 10   | shedDecision             | UInt8    | 直接         | 0或1                 | 脱落决策（仅当shedDecisionTag==1时存在）                                      |
+| 11   | shedReasonTag            | UInt8    | 直接         | 1                   | 脱落原因存在标签（0=absent,1=present）                                       |
+| 12   | shedReason               | UInt8    | 直接         | 0或1                 | 脱落原因（仅当shedReasonTag==1时存在）                                        |
+| 13   | degradationLevel         | UInt8    | 直接         | 1                   | 降级级别枚举值                                                            |
+| 14   | degradationReasonCodeTag | UInt8    | 直接         | 1                   | 降级原因代码存在标签（0=absent,1=present，v2.4+当degradationLevel!=NORMAL时强制为1） |
+| 15   | degradationReasonCode    | UInt8    | 直接         | 0或1                 | 降级原因代码（仅当degradationReasonCodeTag==1时存在）                           |
+| 16   | valueScore               | Int64    | Big-Endian | 8                   | 价值分数（BudgetUnit）                                                   |
+| 17   | flowBucketCount          | UInt8    | 直接         | 1                   | 流桶数量（自描述，编码在 perFlowCounters 之前）                               |
+| 18   | perFlowCounters          | [UInt16] | Big-Endian | flowBucketCount × 2 | 每流计数器数组（不编码长度，精确flowBucketCount个UInt16）                            |
+| 19   | throttleStatsTag         | UInt8    | 直接         | 1                   | 节流统计存在标签（0=absent,1=present）                                       |
+| 20   | windowStartTick          | UInt64   | Big-Endian | 0或8                 | 窗口起始刻度（仅当throttleStatsTag==1时存在）                                   |
+| 21   | windowDurationTicks     | UInt32   | Big-Endian | 0或4                 | 窗口持续时间（刻度数，仅当throttleStatsTag==1时存在）                               |
+| 22   | attemptsInWindow        | UInt32   | Big-Endian | 0或4                 | 窗口内尝试数（仅当throttleStatsTag==1时存在）                                   |
+
+**预期字节长度公式（v2.4+ 强制执行）**：
+
+```
+baseLength = 1 + 2 + 8 + 8 + 8 + 1 + 1 + 1 + 1 + 1 + 1 + 8 + 1 + 1 = 48
+// Note: shedDecision 和 shedReason 在 absent 时不写入 payload 字节（presenceTag 规则）
+rejectReasonLength = (rejectReasonTag == 1) ? 1 : 0
+degradationReasonCodeLength = (degradationReasonCodeTag == 1) ? 1 : 0
+perFlowCountersLength = flowBucketCount * 2
+throttleStatsLength = (throttleStatsTag == 1) ? (8 + 4 + 4) : 0
+
+expectedLength = baseLength + rejectReasonLength + degradationReasonCodeLength + 
+                perFlowCountersLength + throttleStatsLength
+```
+
+**关键规则**：
+
+- **decisionSchemaVersion**: 固定值 0x0001 用于 v1。这不是全局 schemaVersion；它是哈希输入模式区分符，用于未来证明。
+- **layoutVersion 和 decisionSchemaVersion 验证**: v2.4+ 必须验证 layoutVersion==1 AND decisionSchemaVersion==0x0001，否则失败关闭。
+- **flowBucketCount 自描述**: 编码在 perFlowCounters 之前，用于确定数组大小。
+- **长度不变量**: v2.4+ 必须验证实际长度匹配预期长度公式，不匹配 => FailClosedError.canonicalLengthMismatch。
+- **重放稳定性**: 输入字段必须仅从确定性事件输入派生，禁止墙钟、Date()、进程运行时间、随机、指针地址、线程时序。
+
+---
+
+## A2.5: policyEpoch 治理规则（PR1 v2.4 Addendum）
+
+**schemaVersion 变更规则**：
+
+- schemaVersion 仅在**结构布局变更**时更改
+- 例如：添加/删除字段、改变字段类型、改变字段顺序、改变字段在规范字节中的位置
+
+**policyEpoch 变更规则**：
+
+- policyEpoch 仅在**数值/阈值表变更**时递增
+- 必须按 tierId **单调**（同一 tierId 的 policyEpoch 只能递增）
+- 禁止重用已使用的 policyEpoch 值
+- 示例：如果 STANDARD tier (tierId=1) 的阈值从 8000 改为 10000，则 policyEpoch 必须递增
+
+**解码器验证规则**（P0，v2.4+强制）：
+
+- 如果解码器看到 policyEpoch 回退（对于声明的 v2.4+ 会话）=> **失败关闭**
+- 实现：在解码 CapacityTier 时，检查 policyEpoch >= 之前见过的同一 tierId 的最大 policyEpoch
+- 使用进程本地注册表（不跨应用安装持久化）
+- 使用 actor PolicyEpochRegistry 实现并发安全（单写者语义）
+
+**PolicyEpochRegistry 实现规则**：
+
+- PolicyEpochRegistry 作为 actor（单写者语义）
+- 进程本地（不跨应用安装持久化）
+- 并发安全（actor 保证单写者）
+- 错误映射到 FailClosedError 0x2405 (POLICY_EPOCH_ROLLBACK)
+
+---
+
+## A2.6: UUID RFC4122 规范字节编码规则（PR1 v2.4 Addendum）
+
+**UUID RFC4122 网络序编码规则**：
+
+- UUID 必须编码为 RFC4122 网络序的 16 字节
+- 使用显式字段级 RFC4122 网络序（不依赖内存顺序假设）
+- 在 Swift 中：从 UUID 的 uuid_t 提取字段并按 RFC4122 顺序排列：
+  - time_low (4 bytes, BE)
+  - time_mid (2 bytes, BE)
+  - time_hi_and_version (2 bytes, BE)
+  - clock_seq_hi_and_reserved (1 byte)
+  - clock_seq_low (1 byte)
+  - node (6 bytes)
+- ❌ 禁止使用 uuidString 或任何字符串表示用于哈希/幂等性
+
+**实现要求**：
+
+- 实现 `uuidRFC4122Bytes(_ uuid: UUID) -> [UInt8;16]` 方法
+- 使用显式字段提取和重新排列，不依赖内存布局
+- 错误映射到 FailClosedError 0x2404 (UUID_CANONICALIZATION_ERROR)
+
+---
+
+## A2.7: 可选字段编码跨字段约束表（PR1 v2.4 Addendum）
+
+**可选字段编码跨字段约束（v2.4+ 强制）**：
+
+| 约束                       | 规则                                                                                                    | 违规处理       |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- | ---------- |
+| rejectReasonTag          | tag==0 => rejectReason 缺失；tag==1 => rejectReason 存在                                                   | v2.4+ 失败关闭 |
+| shedDecisionTag          | tag==0 => shedDecision 缺失（不写入 payload 字节）；tag==1 => shedDecision 存在                               | v2.4+ 失败关闭 |
+| shedReasonTag            | tag==0 => shedReason 缺失（不写入 payload 字节）；tag==1 => shedReason 存在且 shedDecision 存在且为 true               | v2.4+ 失败关闭 |
+| throttleStatsTag         | tag==0 => 三个字段缺失；tag==1 => 三个字段全部存在                                                                   | v2.4+ 失败关闭 |
+| degradationReasonCodeTag | degradationLevel==NORMAL => tag==0 且 reasonCode 缺失；degradationLevel!=NORMAL => tag==1 且 reasonCode 存在 | v2.4+ 失败关闭 |
+
+**PresenceTag 编码规则**：
+
+- 任何可为 nil 的字段必须编码为：`presenceTag: UInt8` (0 = absent, 1 = present)
+- 如果 tag==0（absent），**不写入 payload 字节**
+- 如果 tag==1（present），写入 payload 字节
+- ❌ 禁止依赖 Codable 可选编码
+- ❌ 禁止在 absent 时写入零值或占位符字节
+
+**违规处理**：
+
+- 所有违规 => FailClosedError.internalContractViolation(code: FailClosedErrorCode.presenceTagViolation.rawValue, context: ...)
+- v2.4+ 强制执行，v2.3 及之前允许放宽约束
+
+---
+
+## A2.8: AdmissionDecisionBytesLayout_v1（PR1 v2.4 Addendum）
+
+**表：AdmissionDecisionBytesLayout_v1**（用于 AdmissionController 输出记录）
+
+| 字段顺序 | 字段名                | 类型       | 编码规则       | 字节数 | 说明                                           |
+| ---- | ------------------ | -------- | ---------- | --- | -------------------------------------------- |
+| 1    | layoutVersion      | UInt8    | 直接         | 1   | 布局版本（固定为1）                                   |
+| 2    | schemaVersion      | UInt16   | Big-Endian | 2   | 结构版本                                         |
+| 3    | policyHash         | UInt64   | Big-Endian | 8   | 策略哈希                                         |
+| 4    | sessionStableId    | UInt64   | Big-Endian | 8   | 会话稳定ID（blake3_64）                            |
+| 5    | candidateStableId  | UInt64   | Big-Endian | 8   | 候选稳定ID（blake3_64）                            |
+| 6    | decisionHashAlgoId | UInt8    | 直接         | 1   | 哈希算法ID（封闭世界，BLAKE3_256=1）                    |
+| 7    | decisionHash       | [UInt8;32] | 直接         | 32  | DecisionHash（32字节，BLAKE3-256摘要）                |
+| 8    | classification     | UInt8    | 直接         | 1   | 分类枚举值                                        |
+| 9    | rejectReasonTag    | UInt8    | 直接         | 1   | 拒绝原因存在标签（0=absent,1=present）                 |
+| 10   | rejectReason       | UInt8    | 直接         | 0或1 | 拒绝原因（仅当rejectReasonTag==1时存在）                |
+| 11   | shedDecisionTag    | UInt8    | 直接         | 1   | 脱落决策存在标签（0=absent,1=present）                 |
+| 12   | shedDecision       | UInt8    | 直接         | 0或1 | 脱落决策（仅当shedDecisionTag==1时存在）                |
+| 13   | shedReasonTag      | UInt8    | 直接         | 1   | 脱落原因存在标签（0=absent,1=present）                 |
+| 14   | shedReason         | UInt8    | 直接         | 0或1 | 脱落原因（仅当shedReasonTag==1时存在）                  |
+| 15   | degradationLevel   | UInt8    | 直接         | 1   | 降级级别枚举值                                     |
+| 16   | degradationReasonCodeTag | UInt8 | 直接 | 1   | 降级原因代码存在标签（0=absent,1=present）            |
+| 17   | degradationReasonCode | UInt8 | 直接 | 0或1 | 降级原因代码（仅当degradationReasonCodeTag==1时存在）   |
+| 18   | valueScore         | Int64    | Big-Endian | 8   | 价值分数（BudgetUnit）                            |
+| 19   | reserved           | UInt8[4] | 直接         | 4   | 固定填充，必须为{0,0,0,0}                            |
+
+**关键规则**：
+
+- **AdmissionController 输出合约**：必须产生 admissionRecordBytes（规范字节）和结构化输出（现有 API）
+- **decisionHashHexLower**：用于日志/审计格式化，始终小写 hex，无 "0x" 前缀，恰好 64 字符
+- **PresenceTag 约束**：重用 DecisionHashInputBytesLayout_v1 相同约束规则
+- **黄金固定装置**：必须比较 admissionRecordBytes hex + decisionHash hex（不仅 JSON 字段）
+
+**预期字节长度公式**：
+
+```
+baseLength = 1 + 2 + 8 + 8 + 8 + 1 + 32 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 8 + 4 = 79
+rejectReasonLength = (rejectReasonTag == 1) ? 1 : 0
+shedDecisionLength = (shedDecisionTag == 1) ? 1 : 0
+shedReasonLength = (shedReasonTag == 1) ? 1 : 0
+degradationReasonCodeLength = (degradationReasonCodeTag == 1) ? 1 : 0
+
+expectedLength = baseLength + rejectReasonLength + shedDecisionLength + 
+                shedReasonLength + degradationReasonCodeLength
+```
+
+---
+
+## A2.x: Hash 算法封闭世界 + BLAKE3-256 长度（PR1 v2.4 Addendum）
+
+**HashAlgoId 封闭世界规则**：
+
+- HashAlgoId 是 UInt8 封闭世界枚举
+- BLAKE3_256 = 1（固定用于 v2.4 DecisionHash V1）
+- 未知值 => 失败关闭
+- 所有 policyHash、sessionStableId、candidateStableId、decisionHash 必须使用相同的底层 BLAKE3 实现（Blake3Facade）
+
+**BLAKE3-256 输出长度**：
+
+- decisionHash 长度 = 32 字节（完整 BLAKE3-256 摘要，不截断）
+- decisionHashHex = 64 小写十六进制字符（无 "0x" 前缀）
+
+**运行时自测**：
+
+- 启动时或首次使用时验证已知测试向量（输入 "abc" => 预期 BLAKE3-256 摘要）
+- 如果不匹配 => FailClosedError.cryptoImplementationMismatch
+
+---
+
+## A2.x: 规范字节长度不变量（PR1 v2.4 Addendum）
+
+**规则**：
+
+- 每个规范布局必须定义确定性预期字节长度公式
+- 所有 canonicalBytesForX() 方法必须调用 CanonicalLayoutLengthValidator 验证长度
+- **任何不匹配 => 失败关闭（v2.4+）**: FailClosedError.canonicalLengthMismatch
+
+**适用布局**：
+
+- PolicyHashCanonicalBytesLayout_v1
+- CandidateStableIdOpaqueBytesLayout_v1
+- ExtensionRequestIdempotencySnapshotBytesLayout_v1
+- DecisionHashInputBytesLayout_v1
+
+---
+
+## A2.x: Pre-v2.4 语义（PR1 v2.4 Addendum）
+
+**选择 A（已选择）**: schemaVersion < 0x0204 => decisionHash MUST be absent/nil and never computed
+
+**规则**：
+
+- v2.4 前：decisionHash 可以为 nil，不计算 decisionHash
+- v2.4+：decisionHash 必须计算，长度验证强制执行，presence-tag 约束强制执行，PolicyEpochRegistry 强制执行
+
+**测试要求**：
+
+- 测试必须覆盖 v2.3 和 v2.4 行为差异
+- v2.3：允许 decisionHash = nil，允许放宽约束
+- v2.4+：强制 decisionHash != nil，强制严格验证
+
+---
+
 **状态：** APPROVED FOR PR#1 v1.1  
 **变更策略：** Append-only；现有规则 immutable  
 **受众：** 编译器级工程师、平台架构师、审计审查员

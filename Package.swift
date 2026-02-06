@@ -30,7 +30,8 @@ let package = Package(
   ],
   dependencies: [
     // swift-crypto: Required for Linux compatibility (replaces Apple-only CryptoKit)
-    // Used by ConstantsTests target for cross-platform SHA-256 hashing
+    // Used for cross-platform SHA-256 hashing and as BLAKE3 fallback
+    // Note: blake3-swift removed due to swift-frontend crashes in CI (macOS + Ubuntu)
     .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
   ],
   targets: [
@@ -68,6 +69,13 @@ let package = Package(
         "Aether3DCore"
       ],
       path: "Sources/PIZSealingEvidence"
+    ),
+    .executableTarget(
+      name: "FixtureGen",
+      dependencies: [
+        "Aether3DCore"
+      ],
+      path: "Sources/FixtureGen"
     ),
     .testTarget(
       name: "Aether3DCoreTests",
@@ -259,6 +267,11 @@ let package = Package(
       name: "PR4CalibrationTests",
       dependencies: ["PR4Calibration"],
       path: "Tests/PR4CalibrationTests"
+    ),
+    .testTarget(
+      name: "PR4GoldenTests",
+      dependencies: ["PR4Golden"],
+      path: "Tests/PR4GoldenTests"
     ),
     .testTarget(
       name: "PR4IntegrationTests",

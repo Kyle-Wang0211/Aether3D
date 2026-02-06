@@ -108,8 +108,10 @@ final class IntrinsicsDriftMonitorTests: XCTestCase {
             principalPointX: 1.0,
             principalPointY: 1.0
         )
-        let result = await monitor.establishBaseline(intrinsics)
-        XCTAssertNotNil(result)
+        await monitor.establishBaseline(intrinsics)
+        // Verify baseline was established by checking drift
+        let driftResult = await monitor.monitorDrift(intrinsics)
+        XCTAssertNotNil(driftResult.baseline)
     }
     
     func test_maximumInput_handled() async {
@@ -118,18 +120,22 @@ final class IntrinsicsDriftMonitorTests: XCTestCase {
             principalPointX: 10000.0,
             principalPointY: 10000.0
         )
-        let result = await monitor.establishBaseline(intrinsics)
-        XCTAssertNotNil(result)
+        await monitor.establishBaseline(intrinsics)
+        // Verify baseline was established by checking drift
+        let driftResult = await monitor.monitorDrift(intrinsics)
+        XCTAssertNotNil(driftResult.baseline)
     }
-    
+
     func test_zeroInput_handled() async {
         let intrinsics = IntrinsicsDriftMonitor.CameraIntrinsics(
             focalLength: 0.0,
             principalPointX: 0.0,
             principalPointY: 0.0
         )
-        let result = await monitor.establishBaseline(intrinsics)
-        XCTAssertNotNil(result)
+        await monitor.establishBaseline(intrinsics)
+        // Verify baseline was established by checking drift
+        let driftResult = await monitor.monitorDrift(intrinsics)
+        XCTAssertNotNil(driftResult.baseline)
     }
     
     func test_boundaryValue_processed() async {

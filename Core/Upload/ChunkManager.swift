@@ -68,8 +68,8 @@ public final class ChunkManager {
 
     /// Mark chunk upload as started.
     public func markChunkStarted(index: Int) {
-        queue.sync {
-            activeUploads.insert(index)
+        queue.sync { [self] in
+            _ = activeUploads.insert(index)
         }
         delegate?.chunkManager(self, didStartChunk: index)
     }
