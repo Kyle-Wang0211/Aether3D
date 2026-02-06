@@ -1,4 +1,5 @@
 {
+  "_comment": "v6.0: Updated to BIG-ENDIAN encoding for consistency with CanonicalBinaryCodec",
   "testCases": [
     {
       "name": "single_cell_gray",
@@ -7,8 +8,8 @@
           {"cellIndex": 100, "newState": 1}
         ]
       },
-      "expectedBytesHex": "010000006400000001",
-      "expectedSHA256": "ed11ae45e914944f118473ca52d26c0e303ef729bf1f20b22be810f5b962e494"
+      "expectedBytesHex": "000000010000006401",
+      "expectedSHA256": "a1b16aec4a00d60afc0dd754d308b2be6f63149b3249632f8190ecf08d783778"
     },
     {
       "name": "two_cells_mixed",
@@ -18,8 +19,8 @@
           {"cellIndex": 512, "newState": 1}
         ]
       },
-      "expectedBytesHex": "0200000000010000020002000001",
-      "expectedSHA256": "84e7a44038857ba5254a3edbb5917a5ca88f58facf5ab037fa321fccf1be39a0"
+      "expectedBytesHex": "0000000200000100020000020001",
+      "expectedSHA256": "0db65f91164be2739cf2c4d6942103603d97e4969ef54aef429920cacc6d04f6"
     }
   ]
 }

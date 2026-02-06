@@ -230,10 +230,8 @@ public struct CapacityMetrics: Codable, Sendable, Equatable {
                 hasDegradationReasonCode: degradationReasonCode != nil
             )
             guard data.count == expectedLength else {
-                // Debug: log actual vs expected for troubleshooting
-                #if DEBUG
-                print("DEBUG: DecisionHashInputBytesLayout_v1 length mismatch: actual=\(data.count), expected=\(expectedLength)")
-                #endif
+                // REMOVED (v6.0): Debug print statement
+                // Length mismatch details are available in the thrown error context
                 throw FailClosedError.internalContractViolation(
                     code: FailClosedErrorCode.canonicalLengthMismatch.rawValue,
                     context: "DecisionHashInputBytesLayout_v1 length mismatch"

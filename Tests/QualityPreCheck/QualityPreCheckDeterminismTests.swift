@@ -101,94 +101,99 @@ final class QualityPreCheckDeterminismTests: XCTestCase {
         }
     }
     
-    /// Test CoverageDelta encoding endianness: all integers are little-endian
+    /// Test CoverageDelta encoding endianness: all integers are big-endian (v6.0)
     func testCoverageDeltaEndianness() throws {
-        // P23: All integer fields in CoverageDelta must be LITTLE-ENDIAN
+        // v6.0: All integer fields in CoverageDelta must be BIG-ENDIAN
+        // for consistency with CanonicalBinaryCodec and project-wide standards
         // Test case: single cell change
         let delta = CoverageDelta(changes: [
             CoverageDelta.CellChange(cellIndex: 100, newState: 1)
         ])
-        
+
         let encoded = try delta.encode()
-        
-        // Validate structure: changedCount (u32 LE) + cellIndex (u32 LE) + newState (u8)
+
+        // Validate structure: changedCount (u32 BE) + cellIndex (u32 BE) + newState (u8)
         XCTAssertGreaterThanOrEqual(encoded.count, 4, "Encoded delta must have at least 4 bytes (changedCount)")
-        
-        // Read changedCount (first 4 bytes, little-endian)
+
+        // Read changedCount (first 4 bytes, big-endian)
         let changedCount = encoded.prefix(4).withUnsafeBytes { bytes in
-            UInt32(littleEndian: bytes.load(as: UInt32.self))
+            UInt32(bigEndian: bytes.load(as: UInt32.self))
         }
         XCTAssertEqual(changedCount, 1, "changedCount must be 1 for single change")
-        
+
         if encoded.count >= 9 {
-            // Read cellIndex (bytes 4-7, little-endian)
+            // Read cellIndex (bytes 4-7, big-endian)
             let cellIndex = encoded.subdata(in: 4..<8).withUnsafeBytes { bytes in
-                UInt32(littleEndian: bytes.load(as: UInt32.self))
+                UInt32(bigEndian: bytes.load(as: UInt32.self))
             }
             XCTAssertEqual(cellIndex, 100, "cellIndex must be 100")
-            
+
             // Read newState (byte 8)
             let newState = encoded[8]
             XCTAssertEqual(newState, 1, "newState must be 1")
         }
     }
     
-    /// Test CoverageDelta encoding matches fixture: single_cell_gray
+    /// Test CoverageDelta encoding matches fixture: single_cell_gray (v6.0 BE)
     func testCoverageDeltaMatchesFixtureSingleCellGray() throws {
-        // From CoverageDeltaEndiannessFixture.json: single_cell_gray
+        // v6.0: Updated to BIG-ENDIAN encoding
         let delta = CoverageDelta(changes: [
             CoverageDelta.CellChange(cellIndex: 100, newState: 1)
         ])
-        
+
         let encoded = try delta.encode()
-        let expectedHex = "010000006400000001" // changedCount=1 (LE), cellIndex=100 (LE), newState=1
-        
+        // v6.0 BE: changedCount=1 (00 00 00 01), cellIndex=100 (00 00 00 64), newState=1 (01)
+        let expectedHex = "000000010000006401"
+
         let actualHex = encoded.map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(actualHex, expectedHex, "Encoded delta must match fixture expectedBytesHex")
-        
-        // Verify SHA256 matches fixture
+
+        // Verify SHA256 matches fixture (updated for BE encoding)
         let sha256 = try delta.computeSHA256()
-        let expectedSHA256 = "ed11ae45e914944f118473ca52d26c0e303ef729bf1f20b22be810f5b962e494"
+        let expectedSHA256 = "a1b16aec4a00d60afc0dd754d308b2be6f63149b3249632f8190ecf08d783778"
         XCTAssertEqual(sha256, expectedSHA256, "SHA256 must match fixture expectedSHA256")
     }
     
-    /// Test CoverageDelta encoding matches fixture: two_cells_mixed
+    /// Test CoverageDelta encoding matches fixture: two_cells_mixed (v6.0 BE)
     func testCoverageDeltaMatchesFixtureTwoCellsMixed() throws {
-        // From CoverageDeltaEndiannessFixture.json: two_cells_mixed
+        // v6.0: Updated to BIG-ENDIAN encoding
         // Note: Changes are sorted and deduplicated, so order matters
         let delta = CoverageDelta(changes: [
             CoverageDelta.CellChange(cellIndex: 256, newState: 2),
             CoverageDelta.CellChange(cellIndex: 512, newState: 1)
         ])
-        
+
         let encoded = try delta.encode()
-        let expectedHex = "0200000000010000020002000001" // changedCount=2 (LE), cellIndex=256 (LE), newState=2, cellIndex=512 (LE), newState=1
-        
+        // v6.0 BE: changedCount=2 (00 00 00 02), cellIndex=256 (00 00 01 00), newState=2 (02),
+        //          cellIndex=512 (00 00 02 00), newState=1 (01)
+        let expectedHex = "0000000200000100020000020001"
+
         let actualHex = encoded.map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(actualHex, expectedHex, "Encoded delta must match fixture expectedBytesHex")
-        
-        // Verify SHA256 matches fixture
+
+        // Verify SHA256 matches fixture (updated for BE encoding)
         let sha256 = try delta.computeSHA256()
-        let expectedSHA256 = "84e7a44038857ba5254a3edbb5917a5ca88f58facf5ab037fa321fccf1be39a0"
+        let expectedSHA256 = "0db65f91164be2739cf2c4d6942103603d97e4969ef54aef429920cacc6d04f6"
         XCTAssertEqual(sha256, expectedSHA256, "SHA256 must match fixture expectedSHA256")
     }
     
-    /// Test CoverageDelta deduplication: last-write-wins
+    /// Test CoverageDelta deduplication: last-write-wins (v6.0 BE)
     func testCoverageDeltaDeduplication() throws {
         // H1: Deduplication uses last-write-wins
         let delta = CoverageDelta(changes: [
             CoverageDelta.CellChange(cellIndex: 100, newState: 1),
             CoverageDelta.CellChange(cellIndex: 100, newState: 2) // Duplicate cellIndex, should keep last (state=2)
         ])
-        
+
         let encoded = try delta.encode()
-        
+
         // Should have only one change (deduplicated)
+        // v6.0: Read as big-endian
         let changedCount = encoded.prefix(4).withUnsafeBytes { bytes in
-            UInt32(littleEndian: bytes.load(as: UInt32.self))
+            UInt32(bigEndian: bytes.load(as: UInt32.self))
         }
         XCTAssertEqual(changedCount, 1, "Deduplicated delta must have changedCount=1")
-        
+
         if encoded.count >= 9 {
             let newState = encoded[8]
             XCTAssertEqual(newState, 2, "Last write must win (newState=2)")
