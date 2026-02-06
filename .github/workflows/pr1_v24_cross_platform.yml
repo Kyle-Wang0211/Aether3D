@@ -87,7 +87,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
       - name: Import Swift GPG key
-        run: curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            if curl -fsSL --compressed --retry 3 --retry-delay 5 https://swift.org/keys/all-keys.asc | gpg --import - 2>&1; then
+              echo "✅ Swift GPG key imported successfully"
+              exit 0
+            fi
+            echo "⚠️ Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "❌ Failed to import Swift GPG key after 3 attempts"
+          exit 1
       - name: Set up Swift
         uses: swift-actions/setup-swift@v3
         with:
@@ -110,7 +121,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
       - name: Import Swift GPG key
-        run: curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            if curl -fsSL --compressed --retry 3 --retry-delay 5 https://swift.org/keys/all-keys.asc | gpg --import - 2>&1; then
+              echo "✅ Swift GPG key imported successfully"
+              exit 0
+            fi
+            echo "⚠️ Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "❌ Failed to import Swift GPG key after 3 attempts"
+          exit 1
       - name: Set up Swift
         uses: swift-actions/setup-swift@v3
         with:
@@ -130,7 +152,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
       - name: Import Swift GPG key
-        run: curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            if curl -fsSL --compressed --retry 3 --retry-delay 5 https://swift.org/keys/all-keys.asc | gpg --import - 2>&1; then
+              echo "✅ Swift GPG key imported successfully"
+              exit 0
+            fi
+            echo "⚠️ Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "❌ Failed to import Swift GPG key after 3 attempts"
+          exit 1
       - name: Set up Swift
         uses: swift-actions/setup-swift@v3
         with:
@@ -221,7 +254,18 @@ jobs:
           swift --version
       - name: Import Swift GPG key (Linux)
         if: "!matrix.use-xcode"
-        run: curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            if curl -fsSL --compressed --retry 3 --retry-delay 5 https://swift.org/keys/all-keys.asc | gpg --import - 2>&1; then
+              echo "✅ Swift GPG key imported successfully"
+              exit 0
+            fi
+            echo "⚠️ Attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "❌ Failed to import Swift GPG key after 3 attempts"
+          exit 1
       - name: Set up Swift (Linux)
         if: "!matrix.use-xcode"
         uses: swift-actions/setup-swift@v3
