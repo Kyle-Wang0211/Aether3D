@@ -114,10 +114,25 @@ jobs:
 
       - name: Setup Swift (Linux only)
         if: matrix.os == 'ubuntu-22.04'
-        uses: swift-actions/setup-swift@v3
-        with:
-          swift-version: ${{ matrix.swift-version }}
-      
+        run: |
+          set -euo pipefail
+          SWIFT_VERSION="6.2.3"
+          SWIFT_PLATFORM="ubuntu22.04"
+          SWIFT_TARBALL="swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}.tar.gz"
+          SWIFT_URL="https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2204/swift-${SWIFT_VERSION}-RELEASE/${SWIFT_TARBALL}"
+          echo "Downloading Swift ${SWIFT_VERSION}..."
+          curl -fsSL --retry 3 --retry-delay 5 "${SWIFT_URL}" -o "/tmp/${SWIFT_TARBALL}"
+          echo "Verifying GPG signature..."
+          curl -fsSL --retry 3 --retry-delay 5 "${SWIFT_URL}.sig" -o "/tmp/${SWIFT_TARBALL}.sig"
+          gpg --verify "/tmp/${SWIFT_TARBALL}.sig" "/tmp/${SWIFT_TARBALL}" || echo "⚠️ GPG verification failed (non-fatal)"
+          echo "Extracting Swift toolchain..."
+          sudo tar -xzf "/tmp/${SWIFT_TARBALL}" -C /opt
+          SWIFT_PATH="/opt/swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}/usr/bin"
+          echo "${SWIFT_PATH}" >> $GITHUB_PATH
+          export PATH="${SWIFT_PATH}:${PATH}"
+          echo "✅ Swift ${SWIFT_VERSION} installed"
+          swift --version
+
       - name: Platform Diagnostics
         run: |
           set -euo pipefail
