@@ -89,7 +89,7 @@ jobs:
       - name: Set up Swift
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9.2"
+          swift-version: "5.10"
           skip-verify-signature: true
       - name: Build and test (Debug)
         run: |
@@ -110,7 +110,7 @@ jobs:
       - name: Set up Swift
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9.2"
+          swift-version: "5.10"
           skip-verify-signature: true
       - name: Build and test (Release)
         run: |
@@ -128,7 +128,7 @@ jobs:
       - name: Set up Swift
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9.2"
+          swift-version: "5.10"
           skip-verify-signature: true
       - name: Regenerate fixtures
         run: |
@@ -186,7 +186,7 @@ jobs:
           - os: macos-15
             use-xcode: true
           - os: ubuntu-22.04
-            swift-version: "5.9.2"
+            swift-version: "5.10"
             use-xcode: false
       fail-fast: false
     steps:

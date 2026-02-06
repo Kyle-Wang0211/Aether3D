@@ -233,7 +233,7 @@ jobs:
           - os: macos-15
             use-xcode: true
           - os: ubuntu-22.04
-            swift-version: "5.9.2"
+            swift-version: "5.10"
             use-xcode: false
       fail-fast: false
     steps:
@@ -264,7 +264,7 @@ jobs:
         if: "!matrix.use-xcode"
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9.2"
+          swift-version: "5.10"
           skip-verify-signature: true
 
       - name: Install system deps (Ubuntu)
@@ -466,7 +466,7 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9.2"
+          swift-version: "5.10"
           skip-verify-signature: true
 
       - name: Install system deps (Ubuntu)
@@ -851,7 +851,7 @@ jobs:
       - name: Setup Swift
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9.2"
+          swift-version: "5.10"
           skip-verify-signature: true
 
       - name: Install system deps
