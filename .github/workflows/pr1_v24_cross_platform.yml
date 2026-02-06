@@ -86,6 +86,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
+      - name: Import Swift GPG key
+        run: wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
       - name: Set up Swift
         uses: swift-actions/setup-swift@v3
         with:
@@ -107,6 +109,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
+      - name: Import Swift GPG key
+        run: wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
       - name: Set up Swift
         uses: swift-actions/setup-swift@v3
         with:
@@ -125,6 +129,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
+      - name: Import Swift GPG key
+        run: wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
       - name: Set up Swift
         uses: swift-actions/setup-swift@v3
         with:
@@ -213,6 +219,9 @@ jobs:
             echo "No Xcode found"; exit 1
           }
           swift --version
+      - name: Import Swift GPG key (Linux)
+        if: "!matrix.use-xcode"
+        run: wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
       - name: Set up Swift (Linux)
         if: "!matrix.use-xcode"
         uses: swift-actions/setup-swift@v3

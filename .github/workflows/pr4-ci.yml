@@ -98,11 +98,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Import Swift GPG key
+        run: wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+
       - name: Set up Swift
         uses: swift-actions/setup-swift@v3
         with:
           swift-version: "6.2"
-
 
       - name: Install system dependencies
         run: |

@@ -260,12 +260,16 @@ jobs:
             echo "No Xcode found"; exit 1
           }
 
+      - name: Import Swift GPG key (Linux)
+        if: "!matrix.use-xcode"
+        run: |
+          wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+
       - name: Setup Swift (Linux)
         if: "!matrix.use-xcode"
         uses: swift-actions/setup-swift@v3
         with:
           swift-version: "6.2"
-
 
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
@@ -462,12 +466,16 @@ jobs:
           fi
           echo "✅ Swift is from selected Xcode (verified via xcrun)"
 
+      - name: Import Swift GPG key (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+
       - name: Setup Swift (Linux only)
         if: matrix.os == 'ubuntu-22.04'
         uses: swift-actions/setup-swift@v3
         with:
           swift-version: "6.2"
-
 
       - name: Install system deps (Ubuntu)
         if: matrix.os == 'ubuntu-22.04'
@@ -848,11 +856,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Import Swift GPG key
+        run: |
+          wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+
       - name: Setup Swift
         uses: swift-actions/setup-swift@v3
         with:
           swift-version: "6.2"
-
 
       - name: Install system deps
         run: |
