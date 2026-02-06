@@ -13,6 +13,24 @@ import Foundation
 import CoreFoundation
 #endif
 
+// MARK: - String Extension for Padding
+
+private extension String {
+    /// Left-pad string to specified length
+    ///
+    /// Used for formatting fractional part of floats with leading zeros.
+    /// Example: "123".leftPadding(toLength: 6, withPad: "0") -> "000123"
+    func leftPadding(toLength length: Int, withPad character: Character) -> String {
+        let currentLength = self.count
+        if currentLength >= length {
+            return self
+        }
+        let paddingCount = length - currentLength
+        let padding = String(repeating: character, count: paddingCount)
+        return padding + self
+    }
+}
+
 /// CanonicalJSON - canonical JSON encoder for audit records
 /// H1: All floats use fixed 6 decimal format, no exceptions
 /// H2: Integer width contracts, overflow detection, float epsilon comparison
@@ -157,36 +175,60 @@ public struct CanonicalJSON {
     }
     
     /// Format float with fixed 6 decimal places (H1)
-    /// P23: Negative zero normalization (-0.0 → "0.000000")
-    /// H1: Round half away from zero (using .halfUp as closest)
+    ///
+    /// **Rule ID:** P23, H1
+    /// **Status:** SEALED (v6.0)
+    ///
+    /// **CHANGED (v6.0):** Replaced NumberFormatter with pure arithmetic formatting
+    /// to eliminate Locale dependency and ensure cross-platform determinism.
+    ///
+    /// **Algorithm:**
+    /// 1. Check for NaN/Inf (forbidden)
+    /// 2. Normalize negative zero to positive zero
+    /// 3. Scale to 6 decimal places
+    /// 4. Round half-away-from-zero (banker's rounding alternative)
+    /// 5. Format as "[-]<int>.<6digits>"
+    ///
+    /// **P23:** Negative zero normalization (-0.0 → "0.000000")
+    /// **H1:** Round half away from zero
     private static func formatFloat(_ value: Double) throws -> String {
         // Check for NaN/Inf (forbidden per P23)
         if value.isNaN || value.isInfinite {
-            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: [], debugDescription: "NaN/Inf not allowed"))
+            throw EncodingError.invalidValue(value, EncodingError.Context(
+                codingPath: [],
+                debugDescription: "NaN/Inf not allowed in canonical JSON"
+            ))
         }
-        
+
         // Normalize negative zero (P23)
         let normalizedValue = value == -0.0 ? 0.0 : value
-        
-        // Use NumberFormatter with en_US_POSIX locale (P23/H1)
-        let formatter = NumberFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.numberStyle = .decimal
-        formatter.maximumFractionDigits = 6
-        formatter.minimumFractionDigits = 6
-        formatter.usesGroupingSeparator = false
-        formatter.roundingMode = .halfUp  // Closest to halfAwayFromZero in Swift
-        
-        guard let formatted = formatter.string(from: NSNumber(value: normalizedValue)) else {
-            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: [], debugDescription: "Failed to format float"))
+
+        // Pure arithmetic formatting (NO NumberFormatter for determinism)
+        let isNegative = normalizedValue < 0
+        let absValue = abs(normalizedValue)
+
+        // Scale to 6 decimal places
+        // Use .toNearestOrAwayFromZero for half-away-from-zero rounding
+        let scale: Double = 1_000_000.0
+        let scaled = (absValue * scale).rounded(.toNearestOrAwayFromZero)
+
+        // Check for overflow (very large numbers)
+        guard scaled < Double(UInt64.max) else {
+            throw EncodingError.invalidValue(value, EncodingError.Context(
+                codingPath: [],
+                debugDescription: "Float value too large for canonical encoding"
+            ))
         }
-        
-        // Ensure no scientific notation (P23/H1)
-        if formatted.contains("e") || formatted.contains("E") {
-            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: [], debugDescription: "Scientific notation not allowed"))
-        }
-        
-        return formatted
+
+        let scaledInt = UInt64(scaled)
+        let intPart = scaledInt / 1_000_000
+        let fracPart = scaledInt % 1_000_000
+
+        // Format with exactly 6 decimal places using pure string formatting
+        let sign = isNegative ? "-" : ""
+        let fracStr = String(fracPart).leftPadding(toLength: 6, withPad: "0")
+
+        return "\(sign)\(intPart).\(fracStr)"
     }
     
     /// Escape string for JSON
