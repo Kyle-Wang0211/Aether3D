@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         os: [macos-15, ubuntu-22.04]
-        swift-version: ["5.10"]
+        swift-version: ["6.2"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     # Note: ubuntu-22.04 is pinned because setup-swift@v1 does not support ubuntu-24.04
@@ -88,10 +88,10 @@ jobs:
       
       - name: Setup Swift (Linux only)
         if: matrix.os == 'ubuntu-22.04'
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
           swift-version: ${{ matrix.swift-version }}
-          skip-verify-signature: true
+
       
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'

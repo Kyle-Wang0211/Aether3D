@@ -233,7 +233,7 @@ jobs:
           - os: macos-15
             use-xcode: true
           - os: ubuntu-22.04
-            swift-version: "5.10"
+            swift-version: "6.2"
             use-xcode: false
       fail-fast: false
     steps:
@@ -262,10 +262,10 @@ jobs:
 
       - name: Setup Swift (Linux)
         if: "!matrix.use-xcode"
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
-          swift-version: "5.10"
-          skip-verify-signature: true
+          swift-version: "6.2"
+
 
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
@@ -464,10 +464,10 @@ jobs:
 
       - name: Setup Swift (Linux only)
         if: matrix.os == 'ubuntu-22.04'
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
-          swift-version: "5.10"
-          skip-verify-signature: true
+          swift-version: "6.2"
+
 
       - name: Install system deps (Ubuntu)
         if: matrix.os == 'ubuntu-22.04'
@@ -849,10 +849,10 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Swift
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
-          swift-version: "5.10"
-          skip-verify-signature: true
+          swift-version: "6.2"
+
 
       - name: Install system deps
         run: |

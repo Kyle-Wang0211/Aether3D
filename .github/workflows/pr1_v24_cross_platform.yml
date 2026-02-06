@@ -87,10 +87,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
       - name: Set up Swift
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
-          swift-version: "5.10"
-          skip-verify-signature: true
+          swift-version: "6.2"
+
       - name: Build and test (Debug)
         run: |
           swift test
@@ -108,10 +108,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
       - name: Set up Swift
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
-          swift-version: "5.10"
-          skip-verify-signature: true
+          swift-version: "6.2"
+
       - name: Build and test (Release)
         run: |
           swift test -c release
@@ -126,10 +126,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
       - name: Set up Swift
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
-          swift-version: "5.10"
-          skip-verify-signature: true
+          swift-version: "6.2"
+
       - name: Regenerate fixtures
         run: |
           scripts/regen_fixtures.sh
@@ -186,7 +186,7 @@ jobs:
           - os: macos-15
             use-xcode: true
           - os: ubuntu-22.04
-            swift-version: "5.10"
+            swift-version: "6.2"
             use-xcode: false
       fail-fast: false
     steps:
@@ -215,10 +215,10 @@ jobs:
           swift --version
       - name: Set up Swift (Linux)
         if: "!matrix.use-xcode"
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@v3
         with:
           swift-version: ${{ matrix.swift-version }}
-          skip-verify-signature: true
+
       - name: Build and test
         run: |
           swift test
