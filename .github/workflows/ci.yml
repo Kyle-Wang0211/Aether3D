@@ -263,7 +263,7 @@ jobs:
       - name: Import Swift GPG key (Linux)
         if: "!matrix.use-xcode"
         run: |
-          wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+          curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
 
       - name: Setup Swift (Linux)
         if: "!matrix.use-xcode"
@@ -469,7 +469,7 @@ jobs:
       - name: Import Swift GPG key (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
-          wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+          curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
 
       - name: Setup Swift (Linux only)
         if: matrix.os == 'ubuntu-22.04'
@@ -858,7 +858,7 @@ jobs:
 
       - name: Import Swift GPG key
         run: |
-          wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+          curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
 
       - name: Setup Swift
         uses: swift-actions/setup-swift@v3

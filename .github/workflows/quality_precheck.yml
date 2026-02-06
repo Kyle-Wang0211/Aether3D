@@ -88,7 +88,7 @@ jobs:
       
       - name: Import Swift GPG key (Linux)
         if: matrix.os == 'ubuntu-22.04'
-        run: wget -q -O - https://swift.org/keys/all-keys.asc | gpg --import -
+        run: curl -fsSL https://swift.org/keys/all-keys.asc | gpg --import -
 
       - name: Setup Swift (Linux only)
         if: matrix.os == 'ubuntu-22.04'
