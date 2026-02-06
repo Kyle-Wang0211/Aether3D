@@ -26,14 +26,25 @@ env:
 jobs:
   swiftpm-macos-debug:
     name: SwiftPM macOS Debug
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "5.9"
-          skip-verify-signature: true
+      - name: Select stable Xcode
+        run: |
+          set -euo pipefail
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "Selecting /Applications/$app"
+              sudo xcode-select -s "/Applications/$app/Contents/Developer"
+              return 0
+            fi
+            return 1
+          }
+          pick "Xcode_16.2.app" || pick "Xcode_16.1.app" || pick "Xcode_16.0.app" || pick "Xcode.app" || {
+            echo "No Xcode found"; exit 1
+          }
+          swift --version
       - name: Build and test (Debug)
         run: |
           swift test
@@ -43,14 +54,25 @@ jobs:
 
   swiftpm-macos-release:
     name: SwiftPM macOS Release
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "5.9"
-          skip-verify-signature: true
+      - name: Select stable Xcode
+        run: |
+          set -euo pipefail
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "Selecting /Applications/$app"
+              sudo xcode-select -s "/Applications/$app/Contents/Developer"
+              return 0
+            fi
+            return 1
+          }
+          pick "Xcode_16.2.app" || pick "Xcode_16.1.app" || pick "Xcode_16.0.app" || pick "Xcode.app" || {
+            echo "No Xcode found"; exit 1
+          }
+          swift --version
       - name: Build and test (Release)
         run: |
           swift test -c release
@@ -67,7 +89,7 @@ jobs:
       - name: Set up Swift
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9"
+          swift-version: "5.9.2"
           skip-verify-signature: true
       - name: Build and test (Debug)
         run: |
@@ -88,7 +110,7 @@ jobs:
       - name: Set up Swift
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9"
+          swift-version: "5.9.2"
           skip-verify-signature: true
       - name: Build and test (Release)
         run: |
@@ -106,7 +128,7 @@ jobs:
       - name: Set up Swift
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.9"
+          swift-version: "5.9.2"
           skip-verify-signature: true
       - name: Regenerate fixtures
         run: |
@@ -151,9 +173,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install blake3
-        run: |
-          pip install blake3
       - name: Verify DecisionHash fixtures
         run: |
           python3 scripts/verify_decisionhash_fixtures.py Tests/Fixtures/decision_hash_v1.txt
@@ -163,8 +182,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-22.04]
-        swift-version: ["5.9"]
+        include:
+          - os: macos-15
+            use-xcode: true
+          - os: ubuntu-22.04
+            swift-version: "5.9.2"
+            use-xcode: false
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -173,7 +196,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
-      - name: Set up Swift ${{ matrix.swift-version }}
+      - name: Select stable Xcode (macOS)
+        if: matrix.use-xcode
+        run: |
+          set -euo pipefail
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "Selecting /Applications/$app"
+              sudo xcode-select -s "/Applications/$app/Contents/Developer"
+              return 0
+            fi
+            return 1
+          }
+          pick "Xcode_16.2.app" || pick "Xcode_16.1.app" || pick "Xcode_16.0.app" || pick "Xcode.app" || {
+            echo "No Xcode found"; exit 1
+          }
+          swift --version
+      - name: Set up Swift (Linux)
+        if: "!matrix.use-xcode"
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: ${{ matrix.swift-version }}

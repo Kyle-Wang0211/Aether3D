@@ -269,6 +269,11 @@ let package = Package(
       path: "Tests/PR4CalibrationTests"
     ),
     .testTarget(
+      name: "PR4GoldenTests",
+      dependencies: ["PR4Golden"],
+      path: "Tests/PR4GoldenTests"
+    ),
+    .testTarget(
       name: "PR4IntegrationTests",
       dependencies: ["PR4Math", "PR4Softmax", "PR4LUT", "PR4Overflow"],
       path: "Tests/PR4IntegrationTests"

@@ -10,12 +10,6 @@ import sys
 import hashlib
 import re
 
-try:
-    import blake3
-except ImportError:
-    print("ERROR: blake3 library not found. Install with: pip install blake3", file=sys.stderr)
-    sys.exit(1)
-
 
 def parse_fixture_header(line: str) -> tuple[int, str, int]:
     """Parse header line: # v=1 sha256=<hex> len=<decimal>"""
@@ -65,9 +59,9 @@ def validate_fixture_header(filepath: str) -> None:
     version, expected_sha256, expected_len = parse_fixture_header(header_line)
     
     # Reconstruct content without header
-    content_lines = lines[1:]
-    content_string = "\n".join(content_lines) + "\n"
-    content_bytes = content_string.encode("utf-8")
+    # Use raw bytes: content after the first newline (header + \n)
+    header_end = data.index(b"\n") + 1
+    content_bytes = data[header_end:]
     
     # Compute actual hash
     actual_sha256 = compute_sha256(content_bytes)
@@ -136,11 +130,12 @@ def verify_decisionhash_fixtures(filepath: str) -> int:
                         errors += 1
                         continue
                     
-                    # Compute BLAKE3-256 hash with domain tag
+                    # Compute SHA-256 hash with domain tag
                     # DecisionHash uses: domain_tag + canonical_bytes
+                    # Note: Blake3Facade uses SHA-256 for cross-platform stability
                     domain_tag = b"AETHER3D_DECISION_HASH_V1\0"
                     input_bytes = domain_tag + preimage_bytes
-                    computed_hash = blake3.blake3(input_bytes).digest(length=32)
+                    computed_hash = hashlib.sha256(input_bytes).digest()
                     computed_hash_hex = computed_hash.hex()
                     
                     if computed_hash_hex != expected_hash_hex:

@@ -229,8 +229,12 @@ jobs:
     needs: [ssot-declaration-gate]
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-22.04]
-        swift-version: ["5.9.2"]
+        include:
+          - os: macos-15
+            use-xcode: true
+          - os: ubuntu-22.04
+            swift-version: "5.9.2"
+            use-xcode: false
       fail-fast: false
     steps:
       - name: Checkout
@@ -239,7 +243,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-      - name: Setup Swift
+      - name: Select stable Xcode (macOS)
+        if: matrix.use-xcode
+        run: |
+          set -euo pipefail
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "Selecting /Applications/$app"
+              sudo xcode-select -s "/Applications/$app/Contents/Developer"
+              return 0
+            fi
+            return 1
+          }
+          pick "Xcode_16.2.app" || pick "Xcode_16.1.app" || pick "Xcode_16.0.app" || pick "Xcode.app" || {
+            echo "No Xcode found"; exit 1
+          }
+
+      - name: Setup Swift (Linux)
+        if: "!matrix.use-xcode"
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: "5.9.2"
