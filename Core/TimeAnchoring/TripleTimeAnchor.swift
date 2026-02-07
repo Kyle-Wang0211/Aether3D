@@ -60,7 +60,7 @@ public actor TripleTimeAnchor {
         async let blockchainResult = requestBlockchain(hash: dataHash)
         
         var evidences: [TimeEvidence] = []
-        var excluded: [ExcludedEvidence] = []
+        let excluded: [ExcludedEvidence] = []
         
         // Collect TSA result
         do {

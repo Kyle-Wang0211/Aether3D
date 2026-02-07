@@ -221,3 +221,41 @@ SESSION_ANCHOR_SEARCH_MAX_FRAMES: Int = 15
 **实施**：
 - DeterministicEncoding.swift 强制执行 NFC 规范化
 - SYSTEM_CONTRACTS.md 明确每个字符串字段的规范化要求
+
+---
+
+## Job Progress Update Ownership (Phase 2)
+
+**契约 ID:** CONTRACT_JOB_PROGRESS_001  
+**状态:** Phase 2 (Planned, Not Required for Phase 1)
+
+### Phase 1 Behavior
+
+- Single worker assumption (no lease validation)
+- Progress updates written directly to `jobs` table
+- No ownership gating required
+
+### Phase 2 Requirements
+
+**Lease Token Validation:**
+- `jobs.worker_lease_token` column must exist
+- `jobs.worker_lease_expires_at` column must exist
+- Worker must acquire lease before updating progress
+- Ownership check failure → 404 (not found or unauthorized)
+
+**Lease Acquisition:**
+- Worker requests lease via API endpoint
+- Server assigns unique `worker_lease_token`
+- Lease expires after configured TTL (e.g., 5 minutes)
+- Worker must renew lease before expiration
+
+**Progress Update Authorization:**
+- Progress update requests must include `worker_lease_token`
+- Server validates token matches active lease
+- Server validates lease has not expired
+- If validation fails: return 404 (not found) or 403 (forbidden)
+
+**Rationale:**
+- Prevents concurrent worker conflicts
+- Ensures progress updates come from authorized worker
+- Enables observability of worker health (lease expiration indicates worker failure)

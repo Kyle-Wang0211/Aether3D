@@ -9,7 +9,7 @@
 import Foundation
 
 /// SaturationResult - result of exposure analysis
-public struct SaturationResult: Codable {
+public struct SaturationResult: Codable, Sendable {
     public let overexposePct: Double
     public let underexposePct: Double
     public let hasLargeBlownRegion: Bool

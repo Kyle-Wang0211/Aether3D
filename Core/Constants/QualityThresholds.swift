@@ -105,7 +105,7 @@ public enum QualityThresholds {
         category: .quality,
         min: 0.0,
         max: 100.0,
-        defaultValue: psnrMinDb,
+        defaultValue: psnrMin8BitDb,
         onExceed: .warn,
         onUnderflow: .reject,
         documentation: "Minimum Peak Signal-to-Noise Ratio in decibels for acceptable quality (本色区域最低要求)"

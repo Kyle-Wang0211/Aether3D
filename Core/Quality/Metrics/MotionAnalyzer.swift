@@ -11,7 +11,7 @@ import Foundation
 // If CoreMotion functionality is added later, use #if canImport(CoreMotion) guard
 
 /// MotionResult - result of motion analysis
-public struct MotionResult: Codable {
+public struct MotionResult: Codable, Sendable {
     public let score: Double
     public let isFastPan: Bool
     public let isHandShake: Bool

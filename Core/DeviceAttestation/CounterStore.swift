@@ -149,7 +149,7 @@ public actor SQLiteCounterStore: CounterStore {
     }
     
     /// Create tables
-    private func createTable() throws {
+    private nonisolated func createTable() throws {
         guard let db = handle.db else {
             throw AttestationVerifierError.invalidCBOR("Database not available")
         }

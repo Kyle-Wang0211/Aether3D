@@ -7,7 +7,7 @@
 import Foundation
 
 /// Source of state transition.
-public enum TransitionSource: String, Codable {
+public enum TransitionSource: String, Codable, Sendable {
     case client = "client"       // Mobile app initiated
     case server = "server"       // Backend initiated
     case system = "system"       // Automatic (timeout, heartbeat failure)
@@ -101,7 +101,7 @@ public actor JobStateMachine {
     }
     
     /// Initialize with default implementations
-    public convenience init() {
+    public init() {
         let eventStore = InMemoryJobEventStore()
         let compensationHandler = DefaultJobCompensationHandler()
         let sagaOrchestrator = JobSagaOrchestrator(compensationHandler: compensationHandler)

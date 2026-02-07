@@ -9,7 +9,7 @@
 import Foundation
 
 /// BlurResult - result of blur detection
-public struct BlurResult: Codable {
+public struct BlurResult: Codable, Sendable {
     public let variance: Double
     public let isNoisy: Bool
     public let centerVariance: Double

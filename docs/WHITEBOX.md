@@ -12,9 +12,17 @@
 
 ## Hard Constraints
 
-- 仅 B1 pipeline（不启用 D1）
-- ≤180s 硬约束（超时必须 fail-fast）
-- 不测试画质、不测试体验质量
+- Only B1 pipeline (D1 not enabled)
+- Stall-based timeout: 5 minutes without progress change → fail-fast
+- Absolute safety cap: 2 hours maximum total processing time
+- Network failure vs stall distinction: must correctly identify network errors vs processing stall
+- **Server MUST return at least one progress signal during processing** (percent OR stage)
+- No quality testing, no experience quality testing
+
+**Phase 2 Extensions (Planned, Not Required):**
+- Request-Id propagation for observability
+- Progress audit events
+- Lease token validation
 
 ## Module Definitions
 
@@ -28,7 +36,7 @@
 
 - **输入**：合规视频数据
 - **输出**：.splat / .ply 文件 或 明确失败原因
-- **验收**：≤180s 内返回成功或失败结果
+- **验收**：Pipeline returns success or failure with real-time progress reporting. Stall detection: fails if no progress for 5 minutes (not if slow but moving). Absolute max: 2 hours total time.
 
 ### Module 3: Browse
 

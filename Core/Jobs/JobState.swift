@@ -7,7 +7,7 @@
 import Foundation
 
 /// Job state enumeration (9 states, PR1 C-Class adds CAPACITY_SATURATED).
-public enum JobState: String, Codable, CaseIterable {
+public enum JobState: String, Codable, CaseIterable, Sendable {
     case pending = "pending"
     case uploading = "uploading"
     case queued = "queued"

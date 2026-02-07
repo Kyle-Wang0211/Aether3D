@@ -1,7 +1,7 @@
 # Spec Drift Registry
 
-**Last Updated**: 2026-01-28
-**Total Drifts**: 10
+**Last Updated**: 2026-02-07
+**Total Drifts**: 15
 
 ---
 
@@ -19,6 +19,11 @@
 | D008 | PR#4 | CaptureRecordingConstants.maxBytes | 2GB | 2TiB | RELAXED | Future-proofing for 8K video | Local | 2026-01-28 |
 | D009 | PR#5 | FrameQualityConstants.blurThresholdLaplacian | 100 | 200 | STRICTER | 2x industry standard for quality guarantee | Local | 2026-01-28 |
 | D010 | PR#5 | FrameQualityConstants.darkThresholdBrightness | 30 | 60 | STRICTER | Better dark scene handling | Local | 2026-01-28 |
+| D011 | PR-PROGRESS | PipelineRunner.timeout | 180s hard | stall-based (300s no-progress + 7200s absolute) | RELAXED | 180s incompatible with 900s max recording | Cross-module | 2026-02-07 |
+| D012 | PR-PROGRESS | Polling backoff for queued | Fixed 5s interval | Exponential backoff (5s → 10s → 20s) | EXTENDED | Battery optimization for queued jobs | Local | 2026-02-07 |
+| D013 | PR-PROGRESS | Worker lease token | None | `jobs.worker_lease_token` column | EXTENDED | Ownership gating for concurrent workers | Cross-module | 2026-02-07 |
+| D014 | PR-PROGRESS | Progress audit retention | No audit table | `progress_audit_events` table (7-day retention) | EXTENDED | Observability enhancement for progress tracking | Local | 2026-02-07 |
+| D015 | PR-PROGRESS | Swift 6.2 CI job | Swift 5.x only | Swift 6.2 CI job (non-blocking) | EXTENDED | Migration preparation for Swift 6.2 concurrency | Local | 2026-02-07 |
 
 ---
 
@@ -31,15 +36,16 @@
 | PR#3 | 0 | 0 | 0 | 0 | 0 | 0 |
 | PR#4 | 0 | 3 | 0 | 0 | 0 | 3 |
 | PR#5 | 2 | 0 | 0 | 0 | 0 | 2 |
-| **Total** | **4** | **4** | **1** | **1** | **0** | **10** |
+| PR-PROGRESS | 0 | 1 | 4 | 0 | 0 | 5 |
+| **Total** | **4** | **5** | **5** | **1** | **0** | **15** |
 
 ---
 
 ## Drift Statistics
 
-- **Most drifts by category**: STRICTER (4), RELAXED (4)
-- **Most drifts by PR**: PR#4 (3), PR#1 (3)
-- **Cross-platform drifts**: 1 (D004)
+- **Most drifts by category**: EXTENDED (5), STRICTER (4), RELAXED (5)
+- **Most drifts by PR**: PR-PROGRESS (5), PR#4 (3), PR#1 (3)
+- **Cross-platform drifts**: 2 (D004, D013)
 - **RFCs required**: 0
 - **Breaking changes**: 0
 

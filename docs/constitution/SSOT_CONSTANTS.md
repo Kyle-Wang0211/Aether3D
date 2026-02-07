@@ -113,6 +113,17 @@ Changes to files under these paths require `SSOT-Change: yes` in commit message.
 | RetryConstants.stallHeartbeatFailureCount | 10 | count | - | - | - | - | - | - | 连续10次心跳失败（配合30秒间隔=5分钟） |
 <!-- SSOT:RETRY_CONSTANTS:END -->
 
+<!-- SSOT:PIPELINE_TIMEOUT_CONSTANTS:BEGIN -->
+## Pipeline Timeout Constants
+
+| SSOT_ID | Value | Unit | Category | Min | Max | Default | OnExceed | OnUnderflow | Documentation |
+|---------|-------|------|----------|-----|-----|---------|----------|-------------|---------------|
+| PipelineTimeoutConstants.stallTimeoutSeconds | 300 | seconds | safety | 60.0 | 900.0 | 300 | warn | reject | 5分钟无进度变化判定卡死 |
+| PipelineTimeoutConstants.absoluteMaxTimeoutSeconds | 7200 | seconds | safety | 600.0 | 14400.0 | 7200 | warn | reject | 2小时绝对上限，覆盖最差情况 |
+| PipelineTimeoutConstants.pollIntervalSeconds | 3.0 | seconds | performance | 1.0 | 10.0 | 3.0 | warn | reject | 处理中轮询间隔，平衡网络负载与实时性 |
+| PipelineTimeoutConstants.backgroundPollIntervalSeconds | 30.0 | seconds | performance | 10.0 | 120.0 | 30.0 | warn | reject | 后台轮询间隔，节省电量 |
+<!-- SSOT:PIPELINE_TIMEOUT_CONSTANTS:END -->
+
 ---
 
 <!-- SSOT:SAMPLING_CONSTANTS:BEGIN -->
@@ -275,3 +286,171 @@ Changes to files under these paths require `SSOT-Change: yes` in commit message.
 |---------|------|----|--------|
 | 1.0.0 | 2026-01-12 | PR#1 | Initial SSOT system |
 <!-- SSOT:CHANGELOG:END -->
+
+---
+
+## Pipeline Progress Response Contract (Phase 1)
+
+### Response Fields
+
+The server `JobStatusResponse` (via `GET /v1/jobs/{id}`) MUST include progress information when `state == "processing"`:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `progress` | `float?` | Optional | Progress percentage (0.0-100.0) |
+| `progress_stage` | `string?` | Optional | Progress stage identifier (see Stage Enum below) |
+| `progress_message` | `string?` | Optional | Human-readable message (max 512 chars) |
+
+### Phase 1 Stage Enum (Closed Set)
+
+| Stage | Order | Default Percent Range | Terminal |
+|-------|-------|----------------------|----------|
+| `queued` | 0 | 0.0 | No |
+| `sfm` | 1 | 0.0-40.0 | No |
+| `train` | 2 | 40.0-95.0 | No |
+| `export` | 3 | 95.0-100.0 | No |
+| `complete` | 4 | 100.0 | Yes |
+| `failed` | 5 | N/A | Yes |
+
+**Phase 2 Extensions (Planned, Not Required):**
+- Sub-stages: `sfm_extract`, `sfm_match`, `sfm_reconstruct`
+- `packaging` (alias for export)
+
+### Monotonicity Rules
+
+1. **Stage Order:** `progress_stage` order must never decrease (0 → 1 → 2 → 3 → 4/5)
+2. **Percent:** `progress` (if present) must never decrease
+3. **Message:** `progress_message` may update independently (even if percent/stage unchanged)
+
+### Server Requirements (Phase 1)
+
+**MANDATORY:** During `processing` state, server MUST return at least ONE progress signal:
+- Either `progress` (float) is present, OR
+- `progress_stage` (string) is present
+
+**FORBIDDEN:** Server MUST NOT return `processing` state with both `progress == null` AND `progress_stage == null` for more than one poll interval (3 seconds).
+
+### Client Behavior (Phase 1)
+
+**Signal Priority Hierarchy:**
+
+1. **Priority 1:** `progress` (if present and valid)
+   - Calculate delta = `abs(new_percent - last_percent)`
+   - If `delta >= stallMinProgressDelta` (0.1%): reset stall timer
+   - If `delta < stallMinProgressDelta`: don't reset
+   - If `new_percent < last_percent`: ignore (regression)
+
+2. **Priority 2:** `progress_stage` order (if `progress` missing)
+   - Calculate `new_order = stageOrder[new_stage]` (from Phase 1 enum)
+   - If `new_order > last_order`: reset timer (stage advancement)
+   - If `new_order == last_order`: don't reset (unless percent advances)
+   - If `new_order < last_order`: ignore (stage regression)
+
+3. **Priority 3:** Fallback (if both missing)
+   - Treat as `unknown` state
+   - **DO NOT reset stall timer** (no progress signal received)
+   - Continue polling (server may be transitioning)
+
+**Stall Timer Reset Rules:**
+- Only forward movement resets timer:
+  - `progress` delta >= 0.1%, OR
+  - `stage` order increases
+- Regressions never reset timer
+- Stage advancement always resets timer (even if percent missing)
+
+### Missing Field Combinations
+
+| progress | progress_stage | Client Behavior |
+|----------|---------------|-----------------|
+| Present | Present | Use percent (Priority 1), validate stage monotonicity |
+| Present | Missing | Use percent (Priority 1) |
+| Missing | Present | Derive progress from stage order * 20.0 (Priority 2) |
+| Missing | Missing | Treat as unknown, don't reset stall timer (Priority 3) |
+
+**Exception:** First poll after job start: if both missing, initialize tracking but don't reset timer until first signal received.
+
+---
+
+## Phase 2 Non-Blocking Features Register
+
+**Purpose:** Explicitly document Phase 2 features that are NOT required for Phase 1 build-ready claim.
+
+| Feature | Affected Files | Why Phase 2 | Blocking? |
+|---------|---------------|-------------|-----------|
+| `jobs.worker_lease_token` column | `server/app/models.py`, migrations | Ownership gating is hardening feature, not core functionality | No |
+| `jobs.worker_lease_expires_at` column | `server/app/models.py`, migrations | Ownership gating is hardening feature, not core functionality | No |
+| `progress_audit_events` table | `server/app/models.py`, migrations, `server/app/services/job_service.py` | Observability enhancement, progress already written to `jobs` table | No |
+| Request-Id propagation | `Core/Pipeline/RemoteB1Client.swift`, `server/app/api/handlers/job_handlers.py` | Correlation enhancement, basic logging sufficient for Phase 1 | No |
+| Swift 6.2 CI job | `.github/workflows/ci-swift62.yml` | Migration preparation, current Swift 5.x build sufficient | No |
+| Polling backoff for queued | `Core/Constants/PipelineTimeoutConstants.swift`, `Core/Pipeline/PipelineRunner.swift` | Battery optimization, fixed 5s interval sufficient for Phase 1 | No |
+| UI update throttling | UI layer (not core pipeline) | Presentation layer optimization, not core functionality | No |
+| Sub-stage enum (sfm_extract, etc.) | `docs/constitution/SSOT_CONSTANTS.md`, `server/app/pipelines/nerfstudio.py` | Granular progress reporting, top-level stages sufficient for Phase 1 | No |
+| `packaging` stage | `docs/constitution/SSOT_CONSTANTS.md` | Alias for export, not required for Phase 1 | No |
+
+**Verification Rule:** If any feature above is missing, Phase 1 build-ready claim is still valid (these are explicitly non-blocking).
+
+---
+
+## Test-Time Control Policy (Phase 1)
+
+### Requirement
+
+Phase 1 build-ready requires deterministic time control for stall detection tests. All Phase 1 blocking tests MUST complete within CI budget (each test < 30 seconds).
+
+### Forbidden
+
+**CI tests that sleep for minutes are FORBIDDEN in Phase 1:**
+- Tests that use `Task.sleep(nanoseconds: 300_000_000_000)` (5 minutes) are NOT allowed
+- Tests that wait for real-time stall timeout (300 seconds) are NOT allowed
+- Tests that rely on actual wall-clock time for timeout verification are NOT allowed
+
+### Allowed Mechanisms
+
+**Option A (Preferred): Clock/TimeProvider Injection**
+- Inject a `Clock` protocol or `TimeProvider` into `PipelineRunner` for unit tests
+- Test code provides a controllable clock that can advance time deterministically
+- Production code uses `Date()` or system clock
+- Example: `PipelineRunner(remoteClient: client, clock: testClock)`
+
+**Option B: Test-Only Configuration**
+- Test-only configuration reduces `stallTimeoutSeconds` (e.g., from 300s to 1s) for tests
+- Only applies in test environment (guarded by `#if DEBUG` or test configuration)
+- Production code uses normal timeout values
+- Example: `PipelineTimeoutConstants.stallTimeoutSecondsForTesting = 1.0`
+
+**Option C (Not Preferred): Phase 2 Reclassification**
+- If neither Option A nor Option B exists, mark affected tests as Phase 2
+- Remove from Phase 1 blockers
+- Document as Phase 2 test infrastructure requirement
+
+### Phase 1 Test Requirements
+
+**Tests requiring time control:**
+- `testProcessingNoProgressTriggersStallAfterTimeout` — must use Option A or B
+- `testTinyProgressBelowDeltaDoesNotResetStallTimer` — must use Option A or B
+- `testProgressRegressionIsIgnoredAndDoesNotResetTimer` — must use Option A or B
+
+**Tests NOT requiring time control:**
+- `testProcessingProgressAdvancesNoStall` — completes quickly, no timeout needed
+- `testAbsoluteMaxTimeoutConstants` — constants validation, no time control needed
+- `testQueuedStateNoStallDetection` — completes quickly, no timeout needed
+
+### CI Budget
+
+- **Maximum per-test time:** 30 seconds
+- **Total Phase 1 test suite:** < 2 minutes
+- **Verification:** Run `swift test --filter StallDetectionTests` and verify all tests complete within budget
+
+### Verification Command
+
+```bash
+# Run tests with timeout to verify CI feasibility
+timeout 120 swift test --filter StallDetectionTests
+# Must complete successfully within 120 seconds (2 minutes)
+```
+
+### Implementation Status
+
+- **Phase 1 Requirement:** At least one mechanism (Option A or B) MUST be implemented
+- **If neither exists:** Affected tests are Phase 2, not Phase 1 blockers
+- **Build Gate:** Phase 1 build-ready requires all Phase 1 tests pass AND complete within CI budget
