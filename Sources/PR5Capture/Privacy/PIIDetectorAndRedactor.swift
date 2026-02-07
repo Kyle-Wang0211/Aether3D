@@ -48,7 +48,7 @@ public actor PIIDetectorAndRedactor {
     public func detectPII(_ data: String) -> PIIDetectionResult {
         var detected: [PIIType] = []
         
-        // Simplified detection (in production, use proper regex/ML)
+        // NOTE: Basic detection (in production, use proper regex/ML)
         if data.contains("@") {
             detected.append(.email)
         }

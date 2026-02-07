@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SharedSecurity
 
 /// Upload integrity guard
 ///
@@ -73,8 +74,10 @@ public actor UploadIntegrityGuard {
     }
     
     /// Compute checksum
+    /// 
+    /// 使用密码学安全的SHA256哈希，符合INV-SEC-065: 传输校验必须使用SHA256而非hashValue。
     private func computeChecksum(_ data: Data) -> String {
-        return String(data.hashValue)
+        return CryptoHasher.sha256(data)
     }
     
     // MARK: - Data Types

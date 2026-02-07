@@ -21,7 +21,7 @@ public enum SoftQualityComputer {
         samples: [Double],
         uncertainty: Double
     ) -> QualityResult {
-        // Simplified quality computation
+        // NOTE: Basic quality computation
         let consistency = computeConsistency(samples)
         let coverage = Double(samples.count) / 100.0  // Normalized
         

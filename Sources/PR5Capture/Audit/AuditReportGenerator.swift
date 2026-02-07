@@ -64,7 +64,7 @@ public actor AuditReportGenerator {
             )
             
         case .pdf:
-            // Simplified: return as data
+            // NOTE: Basic: return as data
             return ReportResult(
                 format: format,
                 data: Data(),

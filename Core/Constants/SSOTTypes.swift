@@ -28,6 +28,8 @@ public enum SSOTUnit: String, Codable, CaseIterable {
     case variance
     case brightness
     case percent
+    case stops
+    case celsius
     // PR5-QUALITY-2.0 additions
     case degreesPerSecond
 }

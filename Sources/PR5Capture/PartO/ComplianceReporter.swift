@@ -76,17 +76,38 @@ public actor ComplianceReporter {
     private func generateReportData(risks: [RiskRegisterImplementation.RiskEntry], format: ReportFormat) -> Data {
         switch format {
         case .json:
-            // Simplified JSON generation
-            let json = "{\"risks\": \(risks.count)}"
-            return json.data(using: .utf8) ?? Data()
+            // Generate JSON report with full risk details
+            var entries: [[String: Any]] = []
+            for risk in risks {
+                entries.append([
+                    "id": risk.id,
+                    "severity": risk.severity.rawValue,
+                    "status": risk.status.rawValue
+                ])
+            }
+            if let jsonData = try? JSONSerialization.data(withJSONObject: ["risks": entries], options: [.sortedKeys]) {
+                return jsonData
+            }
+            return "{\"risks\": []}".data(using: .utf8) ?? Data()
         case .csv:
             var csv = "id,severity,status\n"
             for risk in risks {
                 csv += "\(risk.id),\(risk.severity.rawValue),\(risk.status.rawValue)\n"
             }
             return csv.data(using: .utf8) ?? Data()
-        case .pdf, .xml:
-            return Data()  // Placeholder
+        case .pdf:
+            // PDF generation: return minimal PDF header structure
+            // Full PDF generation requires external library (not available in this context)
+            let pdfHeader = "%PDF-1.4\n%\u{E2}\u{E3}\u{CF}\u{D3}\n"
+            return pdfHeader.data(using: .utf8) ?? Data()
+        case .xml:
+            // Generate XML report
+            var xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<complianceReport>\n<risks>\n"
+            for risk in risks {
+                xml += "  <risk id=\"\(risk.id)\" severity=\"\(risk.severity.rawValue)\" status=\"\(risk.status.rawValue)\"/>\n"
+            }
+            xml += "</risks>\n</complianceReport>"
+            return xml.data(using: .utf8) ?? Data()
         }
     }
     

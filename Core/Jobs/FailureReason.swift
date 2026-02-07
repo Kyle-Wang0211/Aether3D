@@ -7,7 +7,7 @@
 import Foundation
 
 /// Failure reason enumeration (17 reasons).
-public enum FailureReason: String, Codable, CaseIterable {
+public enum FailureReason: String, Codable, CaseIterable, Sendable {
     case networkError = "network_error"
     case uploadInterrupted = "upload_interrupted"
     case serverUnavailable = "server_unavailable"

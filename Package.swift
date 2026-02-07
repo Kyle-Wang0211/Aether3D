@@ -26,6 +26,7 @@ let package = Package(
     .library(name: "PR4Quality", targets: ["PR4Quality"]),
     .library(name: "PR4Gate", targets: ["PR4Gate"]),
     .library(name: "PR4Fusion", targets: ["PR4Fusion"]),
+    .library(name: "SharedSecurity", targets: ["SharedSecurity"]),
     .executable(name: "PR4DigestGenerator", targets: ["PR4DigestGenerator"])
   ],
   dependencies: [
@@ -44,7 +45,8 @@ let package = Package(
       name: "Aether3DCore",
       dependencies: [
         .product(name: "Crypto", package: "swift-crypto"),
-        "CSQLite"
+        "CSQLite",
+        "SharedSecurity"
       ],
       path: "Core"
     ),
@@ -227,13 +229,21 @@ let package = Package(
     ),
     .target(
       name: "PR4Fusion",
-      dependencies: ["PR4Math", "PR4PathTrace", "PR4Ownership", "PR4Health", "PR4Quality", "PR4Gate", "PR4Softmax", "PR4Overflow", "PR4LUT", "PR4Determinism", "PR4Package"],
+      dependencies: ["PR4Math", "PR4PathTrace", "PR4Ownership", "PR4Health", "PR4Quality", "PR4Gate", "PR4Softmax", "PR4Overflow", "PR4LUT", "PR4Determinism", "PR4Package", "SharedSecurity"],
       path: "Sources/PR4Fusion"
     ),
     .executableTarget(
       name: "PR4DigestGenerator",
       dependencies: ["PR4Math", "PR4Softmax", "PR4LUT"],
       path: "Sources/PR4Tools"
+    ),
+    // Shared Security utilities - v8.2 IRONCLAD
+    .target(
+      name: "SharedSecurity",
+      dependencies: [
+        .product(name: "Crypto", package: "swift-crypto")
+      ],
+      path: "Sources/Shared/Security"
     ),
     // PR5Capture targets - v1.8.1 Complete Hardening Patch
     .target(
@@ -243,6 +253,7 @@ let package = Package(
         "PR4Ownership",
         "PR4Quality",
         "PR4Gate",
+        "SharedSecurity",
         .product(name: "Crypto", package: "swift-crypto")
       ],
       path: "Sources/PR5Capture"

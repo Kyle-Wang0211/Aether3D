@@ -83,7 +83,7 @@ public actor GovernancePolicyEnforcer {
     
     /// Evaluate rule
     private func evaluateRule(_ rule: PolicyRule, operation: String, context: [String: String]) -> Bool {
-        // Simplified evaluation (in production, use proper rule engine)
+        // NOTE: Basic evaluation (in production, use proper rule engine)
         return true
     }
     

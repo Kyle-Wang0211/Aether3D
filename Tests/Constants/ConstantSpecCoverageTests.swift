@@ -51,17 +51,30 @@ final class ConstantSpecCoverageTests: XCTestCase {
     
     func testAllQualityThresholdsHaveSpecs() {
         let specs = QualityThresholds.allSpecs
-        XCTAssertEqual(specs.count, 3, "Expected 3 quality threshold specs")
-        
-        // Verify each threshold has a spec
+        XCTAssertEqual(specs.count, 12, "Expected 12 quality threshold specs")
+
+        // Verify core thresholds have specs
         let sfmSpec = specs.first { $0.ssotId == "QualityThresholds.sfmRegistrationMinRatio" }
         XCTAssertNotNil(sfmSpec, "sfmRegistrationMinRatio missing spec")
-        
+
         let psnrSpec = specs.first { $0.ssotId == "QualityThresholds.psnrMinDb" }
         XCTAssertNotNil(psnrSpec, "psnrMinDb missing spec")
-        
+
         let psnrWarnSpec = specs.first { $0.ssotId == "QualityThresholds.psnrWarnDb" }
         XCTAssertNotNil(psnrWarnSpec, "psnrWarnDb missing spec")
+
+        // Verify new PR1-01 thresholds have specs
+        let psnr8BitSpec = specs.first { $0.ssotId == "QualityThresholds.psnrMin8BitDb" }
+        XCTAssertNotNil(psnr8BitSpec, "psnrMin8BitDb missing spec")
+
+        let psnr12BitSpec = specs.first { $0.ssotId == "QualityThresholds.psnrMin12BitDb" }
+        XCTAssertNotNil(psnr12BitSpec, "psnrMin12BitDb missing spec")
+
+        let ssimSpec = specs.first { $0.ssotId == "QualityThresholds.ssimMin" }
+        XCTAssertNotNil(ssimSpec, "ssimMin missing spec")
+
+        let lpipsSpec = specs.first { $0.ssotId == "QualityThresholds.lpipsMax" }
+        XCTAssertNotNil(lpipsSpec, "lpipsMax missing spec")
     }
     
     func testAllSpecsRegisteredInRegistry() {

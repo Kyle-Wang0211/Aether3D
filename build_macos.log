@@ -1,0 +1,10 @@
+warning: 'progect2': Source files for target PR4LUTTests should be located under 'Tests/PR4LUTTests', or a custom sources path can be set with the 'path' property in Package.swift
+warning: 'progect2': Source files for target PR4UncertaintyTests should be located under 'Tests/PR4UncertaintyTests', or a custom sources path can be set with the 'path' property in Package.swift
+warning: 'progect2': Source files for target PR4CalibrationTests should be located under 'Tests/PR4CalibrationTests', or a custom sources path can be set with the 'path' property in Package.swift
+warning: 'progect2': found 2 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/kaidongwang/Documents/progecttwo/progect2/progect2/Tests/Evidence/Fixtures/Golden/progression_standard.json
+    /Users/kaidongwang/Documents/progecttwo/progect2/progect2/Tests/Evidence/Fixtures/Golden/evidence_state_v2.1.json
+[0/1] Planning build
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'PR5Capture' complete! (1.40s)

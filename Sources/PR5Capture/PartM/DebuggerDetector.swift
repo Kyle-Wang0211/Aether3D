@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SharedSecurity
 
 /// Debugger detector
 ///
@@ -32,9 +33,10 @@ public actor DebuggerDetector {
     // MARK: - Detection
     
     /// Detect debugger
+    /// 
+    /// 使用多层调试器检测，符合INV-SEC-058: 调试器检测必须使用3+独立技术。
     public func detect() -> DetectionResult {
-        // Simplified detection (in production, use proper sysctl/ptrace checks)
-        let detected = false
+        let detected = DebuggerGuard.isDebuggerPresent()
         
         // Record detection
         detectionHistory.append((timestamp: Date(), detected: detected))

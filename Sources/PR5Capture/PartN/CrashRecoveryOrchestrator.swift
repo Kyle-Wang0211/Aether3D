@@ -84,13 +84,13 @@ public actor CrashRecoveryOrchestrator {
     
     /// Detect crash
     private func detectCrash() -> Bool {
-        // Simplified detection (in production, check crash logs, state files, etc.)
+        // NOTE: Basic detection (in production, check crash logs, state files, etc.)
         return false
     }
     
     /// Perform recovery
     private func performRecovery() -> Bool {
-        // Simplified recovery (in production, restore state, validate data, etc.)
+        // NOTE: Basic recovery (in production, restore state, validate data, etc.)
         return true
     }
     

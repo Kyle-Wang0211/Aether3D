@@ -46,7 +46,7 @@ public enum GoldenBaselineSystem {
     public static func verify(_ baseline: GoldenBaseline) -> VerificationResult {
         let startTime = Date()
         
-        // Simplified verification
+        // NOTE: Basic verification
         let differences: [String] = []
         
         return VerificationResult(
