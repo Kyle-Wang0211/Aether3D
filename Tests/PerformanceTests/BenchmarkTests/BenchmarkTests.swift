@@ -64,7 +64,7 @@ final class BenchmarkTests: XCTestCase {
         let storage = MockWALStorage()
         let wal = WriteAheadLog(storage: storage)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         for i in 0..<1000 {
             _ = try await wal.appendEntry(
@@ -74,7 +74,7 @@ final class BenchmarkTests: XCTestCase {
             )
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
 
         // 1000 appends should complete in under 1 second
         XCTAssertLessThan(elapsed, 1.0)
@@ -95,13 +95,13 @@ final class BenchmarkTests: XCTestCase {
             entries.append(entry)
         }
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         for entry in entries {
             try await wal.commitEntry(entry)
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
 
         // 100 commits should complete in under 0.5 seconds
         XCTAssertLessThan(elapsed, 0.5)
@@ -125,9 +125,9 @@ final class BenchmarkTests: XCTestCase {
 
         let wal = WriteAheadLog(storage: storage)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
         _ = try await wal.recover()
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
 
         // Recovery should complete in under 0.5 seconds
         XCTAssertLessThan(elapsed, 0.5)
@@ -138,13 +138,13 @@ final class BenchmarkTests: XCTestCase {
     func testThermalHandler_Performance() async {
         let handler = MobileThermalStateHandler()
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         for _ in 0..<10_000 {
             await handler.adaptToThermalState()
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
         let perCall = elapsed / 10_000 * 1000 // ms per call
 
         // Each call should be under 0.1ms average
@@ -154,13 +154,13 @@ final class BenchmarkTests: XCTestCase {
     func testMemoryPressureHandler_Performance() async {
         let handler = MobileMemoryPressureHandler()
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         for _ in 0..<1000 {
             await handler.handleMemoryWarning()
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
         let perCall = elapsed / 1000 * 1000 // ms per call
 
         // Each call should be under 1ms average
@@ -170,13 +170,13 @@ final class BenchmarkTests: XCTestCase {
     func testFramePacing_Performance() async {
         let controller = MobileFramePacingController()
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         for _ in 0..<100_000 {
             _ = await controller.recordFrameTime(1.0/60.0)
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
 
         // 100k frame recordings should complete in under 1 second
         XCTAssertLessThan(elapsed, 1.0)
@@ -185,13 +185,13 @@ final class BenchmarkTests: XCTestCase {
     func testBatteryScheduler_Performance() async {
         let scheduler = MobileBatteryAwareScheduler()
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         for _ in 0..<10_000 {
             _ = await scheduler.recommendedScanQuality()
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
         let perCall = elapsed / 10_000 * 1000 // ms per call
 
         // Each call should be under 0.1ms average
@@ -202,18 +202,18 @@ final class BenchmarkTests: XCTestCase {
         let optimizer = MobileTouchResponseOptimizer()
 
         let touch = TouchEvent(
-            timestamp: CFAbsoluteTimeGetCurrent(),
+            timestamp: Date().timeIntervalSinceReferenceDate,
             location: CGPoint(x: 100, y: 200),
             phase: .began
         )
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         for _ in 0..<1000 {
             await optimizer.handleTouch(touch)
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
         let perCall = elapsed / 1000 * 1000 // ms per call
 
         // Each call should be under 16ms (INV-MOBILE-014)
