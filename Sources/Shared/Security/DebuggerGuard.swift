@@ -1,6 +1,14 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+
+// ptrace constants and declaration for anti-debugging
+// These are not exposed by Darwin module, so we declare them manually
+private let PT_DENY_ATTACH: CInt = 31
+
+@_silgen_name("ptrace")
+private func ptrace(_ request: CInt, _ pid: pid_t, _ addr: UnsafeMutableRawPointer?, _ data: CInt) -> CInt
+
 #elseif os(Linux)
 import Glibc
 #endif
@@ -55,8 +63,9 @@ public enum DebuggerGuard {
         // 在Release模式下，尝试拒绝调试器附加
         // 如果已经被调试，这会失败
         let ptraceResult = ptrace(PT_DENY_ATTACH, 0, nil, 0)
-        if ptraceResult == -1 && errno == ENOTSUP {
-            // 已经被调试
+        if ptraceResult == -1 {
+            // Failed to deny attach - may already be traced
+            // Note: ENOTSUP check removed as errno may not be reliable here
             return true
         }
         #endif
