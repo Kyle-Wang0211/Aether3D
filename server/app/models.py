@@ -71,6 +71,19 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
+    # Progress tracking (PR-PROGRESS-1.0)
+    progress = Column(String, nullable=True)  # "0.0" to "100.0" as string
+    progress_percent = Column(String, nullable=True)  # Alias for progress (backward compat)
+    progress_stage = Column(String, nullable=True)  # Stage: "sfm", "train", "export", etc.
+    progress_message = Column(String, nullable=True)  # Human-readable message (max 512 chars)
+    
+    # Legacy fields (for backward compatibility with existing code)
+    asset_id = Column(String, nullable=True)  # Legacy: use artifact_id instead
+    artifact_path = Column(String, nullable=True)  # Legacy: use artifact.file_path instead
+    artifact_format = Column(String, nullable=True)  # Legacy: use artifact.format instead
+    error_message = Column(String, nullable=True)  # Legacy: use failure_reason instead
+    status = Column(String, nullable=True)  # Legacy: use state instead
+    
     # 关系
     artifact = relationship("Artifact", back_populates="job", uselist=False)
     timeline_events = relationship("TimelineEvent", back_populates="job", cascade="all, delete-orphan")
@@ -167,18 +180,35 @@ class JobStatusResponse(BaseModel):
     def from_orm_job(cls, job: Job) -> "JobStatusResponse":
         """Convert ORM Job to camelCase response."""
         progress_float = None
-        if job.progress:
+        # Try progress_percent first, fallback to progress
+        progress_str = job.progress_percent or job.progress
+        if progress_str:
             try:
-                progress_float = float(job.progress)
+                progress_float = float(progress_str)
             except (ValueError, TypeError):
                 pass
         
+        # Use state if status is not set (backward compatibility)
+        status = job.status or job.state
+        
+        # Use artifact relationship if available, fallback to legacy fields
+        artifact_path = None
+        artifact_format = None
+        if job.artifact:
+            artifact_path = job.artifact.file_path
+            artifact_format = job.artifact.format
+        else:
+            artifact_path = job.artifact_path
+            artifact_format = job.artifact_format
+        
+        error_message = job.error_message or job.failure_reason
+        
         return cls(
             jobId=job.id,
-            status=job.status,
+            status=status,
             progress=progress_float,
-            artifactPath=job.artifact_path,
-            artifactFormat=job.artifact_format,
-            errorMessage=job.error_message,
+            artifactPath=artifact_path,
+            artifactFormat=artifact_format,
+            errorMessage=error_message,
         )
 

@@ -64,7 +64,9 @@ public actor SecureEnclaveKeyManager {
         }
         
         // Load existing keys
-        try loadExistingKeys()
+        let (keys, counter) = try SecureEnclaveKeyManager.loadInitialState(keychainService: keychainService)
+        self.keyReferences = keys
+        self.appAttestCounter = counter
     }
     
     // MARK: - Key Generation
@@ -213,18 +215,20 @@ public actor SecureEnclaveKeyManager {
     
     // Note: isSecureEnclaveAvailable() is defined as a static method below
     
-    /// Load existing keys from Keychain
-    private func loadExistingKeys() throws {
+    /// Load initial state from Keychain (static to avoid actor isolation issues in init)
+    private static func loadInitialState(keychainService: String) throws -> ([String: SecKey], UInt64) {
+        var keyRefs: [String: SecKey] = [:]
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: keychainService.data(using: .utf8)!,
             kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll
         ]
-        
+
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
+
         if status == errSecSuccess, let items = result as? [[String: Any]] {
             for item in items {
                 if let keyRefValue = item[kSecValueRef as String] {
@@ -232,16 +236,25 @@ public actor SecureEnclaveKeyManager {
                     if let tagData = item[kSecAttrApplicationTag as String] as? Data,
                        let tag = String(data: tagData, encoding: .utf8),
                        let identifier = tag.components(separatedBy: ".").last {
-                        keyReferences[identifier] = keyRef
+                        keyRefs[identifier] = keyRef
                     }
                 }
             }
         } else if status != errSecItemNotFound {
             throw SecureEnclaveError.keychainError(status)
         }
-        
+
         // Load App Attest counter
-        try loadAppAttestCounter()
+        let counter = try loadInitialAppAttestCounter(keychainService: keychainService)
+
+        return (keyRefs, counter)
+    }
+
+    /// Load existing keys from Keychain
+    private func loadExistingKeys() throws {
+        let (keys, counter) = try SecureEnclaveKeyManager.loadInitialState(keychainService: keychainService)
+        self.keyReferences = keys
+        self.appAttestCounter = counter
     }
     
     /// Persist App Attest counter
@@ -270,26 +283,44 @@ public actor SecureEnclaveKeyManager {
         }
     }
     
-    /// Load App Attest counter
-    private func loadAppAttestCounter() throws {
+    /// Load App Attest counter (static version for init)
+    private static func loadInitialAppAttestCounter(keychainService: String) throws -> UInt64 {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: "appAttestCounter",
             kSecReturnData as String: true
         ]
-        
+
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
+
         if status == errSecSuccess, let data = result as? Data, data.count == 8 {
-            appAttestCounter = data.withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
+            return data.withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
         } else if status == errSecItemNotFound {
-            appAttestCounter = 0
-            try persistAppAttestCounter()
+            // Persist initial counter value
+            let counterValue: UInt64 = 0
+            let counterData = withUnsafeBytes(of: counterValue.bigEndian) { Data($0) }
+            let addQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: keychainService,
+                kSecAttrAccount as String: "appAttestCounter",
+                kSecValueData as String: counterData,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            ]
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw SecureEnclaveError.keychainError(addStatus)
+            }
+            return 0
         } else {
             throw SecureEnclaveError.keychainError(status)
         }
+    }
+
+    /// Load App Attest counter
+    private func loadAppAttestCounter() throws {
+        appAttestCounter = try SecureEnclaveKeyManager.loadInitialAppAttestCounter(keychainService: keychainService)
     }
     
     // MARK: - Recovery

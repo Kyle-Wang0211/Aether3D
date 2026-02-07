@@ -169,7 +169,7 @@ public actor SQLiteWALStorage: WALStorage {
     // MARK: - Private Methods
     
     /// Enable WAL mode
-    private func enableWALMode() throws {
+    private nonisolated func enableWALMode() throws {
         guard let db = handle.db else {
             throw WALError.ioError("Database not available")
         }
@@ -181,7 +181,7 @@ public actor SQLiteWALStorage: WALStorage {
     }
     
     /// Create WAL entries table
-    private func createTable() throws {
+    private nonisolated func createTable() throws {
         guard let db = handle.db else {
             throw WALError.ioError("Database not available")
         }

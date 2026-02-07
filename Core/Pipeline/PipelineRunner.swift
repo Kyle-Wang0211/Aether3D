@@ -11,6 +11,10 @@ import Foundation
 import AVFoundation
 #endif
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 /// JSON 转义函数，防止文件名等破坏 JSON 格式
 private func jsonEscape(_ string: String) -> String {
     var result = ""
@@ -85,12 +89,9 @@ final class PipelineRunner {
             let artifactsDir = stagingDir.appendingPathComponent("artifacts")
             try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
             
-            let (plyData, _) = try await Timeout.withTimeout(seconds: 180) {
-                let assetId = try await self.remoteClient.upload(videoURL: videoURL)
-                let jobId = try await self.remoteClient.startJob(assetId: assetId)
-                let (splatData, format) = try await self.pollAndDownload(jobId: jobId)
-                return (splatData, format)
-            }
+            let assetId = try await self.remoteClient.upload(videoURL: videoURL)
+            let jobId = try await self.remoteClient.startJob(assetId: assetId)
+            let (plyData, format) = try await self.pollAndDownload(jobId: jobId)
             
             let plyPath = artifactsDir.appendingPathComponent("model.ply")
             try plyData.write(to: plyPath, options: .atomic)
@@ -156,18 +157,16 @@ final class PipelineRunner {
             
             return .success(artifact: ArtifactRef(localPath: finalDir, format: .splatPly), elapsedMs: elapsed)
             
-        } catch is TimeoutError {
+        } catch let error as FailReason where error == .stalledProcessing {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
-            
             #if canImport(AVFoundation)
             PlainAuditLog.shared.append(AuditEntry(
                 timestamp: WallClock.now(),
                 eventType: "generate_fail",
-                detailsJson: "{\"reason\":\"timeout\",\"elapsedMs\":\(elapsed)}"
+                detailsJson: "{\"reason\":\"stalled_processing\",\"elapsedMs\":\(elapsed)}"
             ))
             #endif
-            
-            return .fail(reason: .timeout, elapsedMs: elapsed)
+            return .fail(reason: .stalledProcessing, elapsedMs: elapsed)
             
         } catch let error as FailReason {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -242,21 +241,19 @@ final class PipelineRunner {
             ))
             #endif
             
-            let artifact: ArtifactRef = try await Timeout.withTimeout(seconds: 180) {
-                // Upload video
-                let assetId = try await self.remoteClient.upload(videoURL: videoURL)
-                
-                // Start job
-                let jobId = try await self.remoteClient.startJob(assetId: assetId)
-                
-                // Poll and download
-                let (splatData, format) = try await self.pollAndDownload(jobId: jobId)
-                
-                // Write to Documents/Whitebox/
-                let url = try self.writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
-                
-                return ArtifactRef(localPath: url, format: format)
-            }
+            // Upload video
+            let assetId = try await self.remoteClient.upload(videoURL: videoURL)
+            
+            // Start job
+            let jobId = try await self.remoteClient.startJob(assetId: assetId)
+            
+            // Poll and download
+            let (splatData, format) = try await self.pollAndDownload(jobId: jobId)
+            
+            // Write to Documents/Whitebox/
+            let url = try self.writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
+            
+            let artifact = ArtifactRef(localPath: url, format: format)
             
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
             
@@ -273,19 +270,16 @@ final class PipelineRunner {
             
             return .success(artifact: artifact, elapsedMs: elapsed)
             
-        } catch is TimeoutError {
+        } catch let error as FailReason where error == .stalledProcessing {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
-            
             #if canImport(AVFoundation)
-            // 审计：generate_fail (timeout)
             PlainAuditLog.shared.append(AuditEntry(
                 timestamp: WallClock.now(),
                 eventType: "generate_fail",
-                detailsJson: "{\"reason\":\"timeout\",\"elapsedMs\":\(elapsed)}"
+                detailsJson: "{\"reason\":\"stalled_processing\",\"elapsedMs\":\(elapsed)}"
             ))
             #endif
-            
-            return .fail(reason: .timeout, elapsedMs: elapsed)
+            return .fail(reason: .stalledProcessing, elapsedMs: elapsed)
             
         } catch let error as FailReason {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -340,22 +334,91 @@ final class PipelineRunner {
     
     // MARK: - Private Helpers
     
-    private func pollAndDownload(jobId: String) async throws -> (data: Data, format: ArtifactFormat) {
-        let pollInterval: TimeInterval = 2.0
-        
+    /// Polls for job completion with stall detection.
+    /// - If progress does not change for `stallTimeoutSeconds`, throws `FailReason.stalledProcessing`
+    /// - If total elapsed exceeds `absoluteMaxTimeoutSeconds`, throws `FailReason.stalledProcessing`
+    internal func pollAndDownload(jobId: String) async throws -> (data: Data, format: ArtifactFormat) {
+        let pollInterval = PipelineTimeoutConstants.pollIntervalSeconds
+        let queuedPollInterval = PipelineTimeoutConstants.pollIntervalQueuedSeconds
+        let stallTimeout = PipelineTimeoutConstants.stallTimeoutSeconds
+        let absoluteMax = PipelineTimeoutConstants.absoluteMaxTimeoutSeconds
+        let minDelta = PipelineTimeoutConstants.stallMinProgressDelta
+
+        let startTime = Date()
+        var lastProgressValue: Double? = nil
+        var lastProgressChangeTime = Date()
+        var lastStage: String? = nil
+
+        #if canImport(UIKit)
+        var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: "PipelinePoll") {
+            // Cleanup: system is about to suspend us
+            if backgroundTaskId != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskId)
+                backgroundTaskId = .invalid
+            }
+        }
+        defer {
+            if backgroundTaskId != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskId)
+            }
+        }
+        #endif
+
         while true {
+            // 1. Absolute timeout check
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed > absoluteMax {
+                throw FailReason.stalledProcessing
+            }
+
+            // 2. Poll server
             let status = try await self.remoteClient.pollStatus(jobId: jobId)
-            
+
             switch status {
             case .completed:
                 return try await self.remoteClient.download(jobId: jobId)
-                
+
             case .failed(let reason):
                 throw RemoteB1ClientError.jobFailed(reason)
-                
-            case .pending, .processing:
-                try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+
+            case .pending(let progress):
+                // Queued — use longer poll interval, no stall detection yet
+                try await Task.sleep(nanoseconds: UInt64(queuedPollInterval * 1_000_000_000))
                 continue
+
+            case .processing(let progress):
+                let currentProgress = progress ?? 0.0
+
+                // 3. Stall detection: has progress changed?
+                if let lastProgress = lastProgressValue {
+                    let delta = abs(currentProgress - lastProgress)
+                    if delta >= minDelta {
+                        // Progress is moving — reset stall timer
+                        lastProgressValue = currentProgress
+                        lastProgressChangeTime = Date()
+                    } else {
+                        // Progress stalled — check stall timeout
+                        let stallDuration = Date().timeIntervalSince(lastProgressChangeTime)
+                        if stallDuration > stallTimeout {
+                            throw FailReason.stalledProcessing
+                        }
+                    }
+                } else {
+                    // First progress value — initialize tracking
+                    lastProgressValue = currentProgress
+                    lastProgressChangeTime = Date()
+                }
+
+                // Enforce monotonicity: never decrease progress
+                if let lastProgress = lastProgressValue, currentProgress < lastProgress {
+                    // Progress regression: ignore, don't reset timer
+                    // Continue with last known progress
+                } else {
+                    lastProgressValue = currentProgress
+                }
+
+                try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
             }
         }
     }

@@ -33,6 +33,7 @@ enum FailReason: String, Error {
     case apiNotConfigured = "api_not_configured"
     case inputInvalid = "input_invalid"
     case outOfMemory = "out_of_memory"
+    case stalledProcessing = "stalled_processing"  // PR-PROGRESS-1.0: No progress for stallTimeoutSeconds
     case unknownError = "unknown_error"
 }
 

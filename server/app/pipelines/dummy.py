@@ -1,9 +1,11 @@
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 from app.core.errors import ProcessingFailedError
 from app.core.storage import save_artifact_file
+from app.pipelines.base import ProgressUpdate
 
 
 class DummyPipeline:
@@ -11,15 +13,57 @@ class DummyPipeline:
     
     ARTIFACT_FORMAT = "ply"
     
-    async def process(self, input_path: Path, output_path: Path, job_id: str) -> Tuple[str, str]:
+    async def process(
+        self,
+        input_path: Path,
+        output_path: Path,
+        job_id: str,
+        on_progress: Optional[Callable[[ProgressUpdate], None]] = None,
+        simulate_stall: bool = False,
+    ) -> Tuple[str, str]:
         """
-        Process input and generate a valid PLY file.
+        Process input and generate a valid PLY file with simulated progress.
+        
+        Args:
+            simulate_stall: If True, simulate a stall during training (for tests)
         
         Returns:
             Tuple of (artifact_path, artifact_format)
         """
-        # Simulate processing time
-        await asyncio.sleep(2.0)
+        def report(percent: Optional[float], stage: str, msg: str) -> None:
+            if on_progress is not None:
+                update = ProgressUpdate(
+                    percent=percent,
+                    stage=stage,
+                    message=msg,
+                    ts=datetime.now(timezone.utc),
+                )
+                on_progress(update)
+        
+        # Simulate SfM (0% → 40%)
+        report(0.0, "sfm", "Starting structure from motion...")
+        for i in range(5):
+            await asyncio.sleep(0.2)
+            if on_progress:
+                pct = (i + 1) / 5 * 40.0
+                report(pct, "sfm", f"Simulated SfM: {(i+1)*20}%")
+        
+        # Simulate training (40% → 95%)
+        report(40.0, "train", "Starting Gaussian Splatting training...")
+        for i in range(10):
+            await asyncio.sleep(0.1)
+            if on_progress:
+                pct = 40.0 + (i + 1) / 10 * 55.0
+                report(pct, "train", f"Simulated training: step {(i+1)*3000}/30000")
+            
+            # Simulate stall if requested (for tests)
+            if simulate_stall and i == 5:
+                await asyncio.sleep(10.0)  # Long pause to trigger stall detection
+        
+        # Simulate export (95% → 100%)
+        report(95.0, "export", "Exporting model...")
+        await asyncio.sleep(0.2)
+        report(100.0, "export", "Complete")
         
         # Generate valid PLY file with at least 10 vertices (300 for stable 4KB+ size)
         ply_content = self._generate_ply_content(vertex_count=300)

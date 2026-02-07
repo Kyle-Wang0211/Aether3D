@@ -9,7 +9,7 @@
 import Foundation
 
 /// TextureResult - result of texture analysis
-public struct TextureResult: Codable {
+public struct TextureResult: Codable, Sendable {
     public let rawCount: Int?
     public let spatialSpread: Double?
     public let repetitivePenalty: Double?

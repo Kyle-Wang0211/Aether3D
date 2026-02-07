@@ -12,9 +12,29 @@
 
 ### Module 2: Generate — Pass
 
-- 单 pipeline 在 ≤180s 内返回
-- 返回结果（.splat / .ply）或明确失败原因（已记录）
-- 超时必须 fail-fast（不卡死）
+**Phase 1 Requirements (Mandatory):**
+
+- Pipeline returns success or failure with real-time progress reporting
+- **Server MUST return at least one progress signal during processing:**
+  - Either `progress` (float) OR `progress_stage` (string) must be present
+  - Server MUST NOT return `processing` state with both signals missing for consecutive polls
+- Stall detection: fails if no progress for 5 minutes (not if slow but moving)
+  - Only triggers when server confirms `processing` state AND progress has not advanced
+  - Network errors (timeouts, 5xx) do NOT count as stall
+- Absolute max timeout: 2 hours maximum total processing time
+- Network failure separation:
+  - `networkTimeout`: cannot fetch job status (network errors, 5xx)
+  - `stalledProcessing`: server confirms processing + no progress for 5 minutes
+- Returns result (.splat / .ply) or explicit failure reason (logged)
+- Must fail-fast (no hang)
+
+**Phase 2 Extensions (Planned, Not Required):**
+- Request-Id propagation for correlation
+- Progress audit events (separate audit table)
+- Lease token validation (ownership gating)
+- Sub-stage enum expansion (sfm_extract, sfm_match, etc.)
+- Polling backoff for queued state
+- UI update throttling
 
 ### Module 3: Browse — Pass
 

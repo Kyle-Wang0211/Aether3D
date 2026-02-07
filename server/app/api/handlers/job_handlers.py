@@ -125,14 +125,52 @@ async def get_job(
         from app.core.ownership import create_ownership_error_response
         return create_ownership_error_response("Job")
     
-    # 构建progress（根据state）
+    # 构建progress（使用数据库中的真实进度）
     progress: Optional[JobProgress] = None
     if job.state == "queued":
         progress = JobProgress(stage="queued", percentage=0, message="Waiting in queue")
     elif job.state == "processing":
-        progress = JobProgress(stage="sfm", percentage=50, message="Running structure from motion")
+        # Use real progress from database (written by pipeline)
+        pct = 0
+        stage = "processing"
+        message = "Processing..."
+        
+        # Get percent from progress_percent or progress field
+        progress_str = job.progress_percent or job.progress
+        if progress_str:
+            try:
+                pct = int(float(progress_str))
+            except (ValueError, TypeError):
+                pass
+        
+        # Get stage and message from database
+        if job.progress_stage:
+            stage = job.progress_stage
+        if job.progress_message:
+            message = job.progress_message
+        
+        progress = JobProgress(stage=stage, percentage=pct, message=message)
     elif job.state == "packaging":
-        progress = JobProgress(stage="packaging", percentage=90, message="Packaging output")
+        # Packaging: use last known progress or default to 95%
+        pct = 95
+        stage = "packaging"
+        message = "Packaging output"
+        
+        progress_str = job.progress_percent or job.progress
+        if progress_str:
+            try:
+                pct = int(float(progress_str))
+            except (ValueError, TypeError):
+                pass
+        
+        if job.progress_stage:
+            stage = job.progress_stage
+        if job.progress_message:
+            message = job.progress_message
+        
+        progress = JobProgress(stage=stage, percentage=pct, message=message)
+    elif job.state == "completed":
+        progress = JobProgress(stage="complete", percentage=100, message="Done")
     
     response_data = GetJobResponse(
         job_id=job.id,
