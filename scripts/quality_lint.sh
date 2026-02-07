@@ -116,7 +116,9 @@ fi
 
 # lintNoFrameBasedTiming - 禁止基于帧的计时 (H2)
 echo "[8/10] Checking for frame-based timing..."
-VIOLATIONS=$(find Core/Quality -name "*.swift" -type f | xargs grep -rn "frameCount\|frame.*time\|frames.*ms" 2>/dev/null | grep -v "//\|comment" || true)
+# Note: Allowlist: frameIndex (identifier), frame.timestamp (accessing timestamp property)
+# These are NOT frame-based timing, just normal frame data access
+VIOLATIONS=$(find Core/Quality -name "*.swift" -type f | xargs grep -rn "frameCount\|frame.*time\|frames.*ms" 2>/dev/null | grep -v "//\|comment\|frameIndex\|\.timestamp" || true)
 if [ -n "$VIOLATIONS" ]; then
     echo "ERROR: Found frame-based timing (should use MonotonicClock milliseconds)"
     echo "$VIOLATIONS"
