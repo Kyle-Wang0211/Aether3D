@@ -7,12 +7,14 @@
 //
 
 import Foundation
+
+// APIClient uses CertificatePinningManager which requires Security framework (Apple only)
+#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-#if canImport(Security)
 import Security
-#endif
 import SharedSecurity
 
 /// API Client
@@ -143,17 +145,17 @@ public actor APIClient {
 /// Certificate Pinning Delegate
 private class CertificatePinningDelegate: NSObject, URLSessionDelegate {
     private let certificatePinningManager: CertificatePinningManager
-    
+
     init(certificatePinningManager: CertificatePinningManager) {
         self.certificatePinningManager = certificatePinningManager
     }
-    
+
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard let serverTrust = challenge.protectionSpace.serverTrust else {
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
-        
+
         Task {
             do {
                 let isValid = try await certificatePinningManager.validateCertificateChain(serverTrust)
@@ -169,3 +171,5 @@ private class CertificatePinningDelegate: NSObject, URLSessionDelegate {
         }
     }
 }
+
+#endif // os(iOS) || os(macOS) || os(tvOS) || os(watchOS)

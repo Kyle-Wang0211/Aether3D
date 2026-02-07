@@ -7,9 +7,12 @@
 //
 
 import Foundation
-#if canImport(Security)
+
+// Certificate pinning uses Security framework APIs (SecTrust, SecCertificate)
+// which are only available on Apple platforms
+#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+
 import Security
-#endif
 import SharedSecurity
 
 /// Certificate Pinning Manager
@@ -163,3 +166,5 @@ public enum CertificatePinningError: Error, Sendable {
         }
     }
 }
+
+#endif // os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
