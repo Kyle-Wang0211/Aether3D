@@ -60,7 +60,16 @@ public actor QualityFeedback {
         // Calculate averages
         let avgBlur = recentReports.map { $0.blur.variance }.reduce(0.0, +) / Double(recentReports.count)
         let avgExposure = recentReports.map { $0.exposure.overexposePct + $0.exposure.underexposePct }.reduce(0.0, +) / Double(recentReports.count)
-        let avgTexture = recentReports.map { Double($0.texture.rawCount ?? Int($0.texture.score ?? 0)) }.reduce(0.0, +) / Double(recentReports.count)
+        // Use rawCount if available, otherwise derive from score (multiplied by a reasonable scale factor)
+        let avgTexture = recentReports.map { report -> Double in
+            if let rawCount = report.texture.rawCount {
+                return Double(rawCount)
+            } else if let score = report.texture.score {
+                // Scale score (0-1 range) to approximate feature count (0-500 range)
+                return score * 500.0
+            }
+            return 0.0  // Fallback for skipped frames
+        }.reduce(0.0, +) / Double(recentReports.count)
         let avgMotion = recentReports.map { $0.motion.score }.reduce(0.0, +) / Double(recentReports.count)
         
         // Determine overall tier

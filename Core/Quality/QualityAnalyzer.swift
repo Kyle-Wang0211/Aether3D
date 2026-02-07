@@ -94,8 +94,16 @@ public actor QualityAnalyzer {
             return .rejected
         }
         
-        // Check feature density (use rawCount if available, otherwise score)
-        let featureCount = texture.rawCount ?? Int(texture.score ?? 0)
+        // Check feature density (use rawCount if available, otherwise derive from score)
+        let featureCount: Int
+        if let rawCount = texture.rawCount {
+            featureCount = rawCount
+        } else if let score = texture.score {
+            // Scale score (0-1 range) to approximate feature count (0-500 range)
+            featureCount = Int(score * 500.0)
+        } else {
+            featureCount = 0  // No texture data available
+        }
         if featureCount < minFeatureDensity {
             return .rejected
         }
