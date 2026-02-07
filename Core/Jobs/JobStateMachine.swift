@@ -75,8 +75,38 @@ public struct TransitionLog: Codable {
     }
 }
 
-/// Job state machine (pure function implementation).
-public final class JobStateMachine {
+/// Job state machine (pure function implementation with event sourcing).
+/// 
+/// 符合 PR2-02: Event Sourcing with Snapshots
+public actor JobStateMachine {
+    
+    // MARK: - Event Store
+    
+    /// Event store for event sourcing
+    private let eventStore: JobEventStore
+    
+    /// Saga orchestrator for compensation
+    private let sagaOrchestrator: JobSagaOrchestrator
+    
+    // MARK: - Initialization
+    
+    /// Initialize Job State Machine
+    /// 
+    /// - Parameters:
+    ///   - eventStore: Event store for event sourcing
+    ///   - sagaOrchestrator: Saga orchestrator for compensation
+    public init(eventStore: JobEventStore, sagaOrchestrator: JobSagaOrchestrator) {
+        self.eventStore = eventStore
+        self.sagaOrchestrator = sagaOrchestrator
+    }
+    
+    /// Initialize with default implementations
+    public convenience init() {
+        let eventStore = InMemoryJobEventStore()
+        let compensationHandler = DefaultJobCompensationHandler()
+        let sagaOrchestrator = JobSagaOrchestrator(compensationHandler: compensationHandler)
+        self.init(eventStore: eventStore, sagaOrchestrator: sagaOrchestrator)
+    }
     
     /// Internal transition structure.
     private struct Transition: Hashable {

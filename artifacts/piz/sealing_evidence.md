@@ -1,12 +1,12 @@
 # PR1 PIZ Sealing Evidence
 
-**Generated:** 2026-02-05T21:27:06Z
+**Generated:** 2026-02-06T18:36:34Z
 
 ## Spec Document
 
 - **Path:** PR1_F_CLASS_PIZ_INDUSTRIAL_SEALING_UPGRADE_PLAN.md
 - **Git Blob Hash:** a7126ae9b3c4c7afa078dabb7c34ed86dfbe015b
-- **Commit Hash:** 4827a72b0d379e4f02bea2c7745126f547f194b3
+- **Commit Hash:** daf6c73a72a7981a104181ff0a19c2a0bd96ec1a
 
 ## Schema Version
 

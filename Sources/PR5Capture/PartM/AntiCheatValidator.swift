@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SharedSecurity
 
 /// Anti-cheat validator
 ///
@@ -72,10 +73,11 @@ public actor AntiCheatValidator {
         )
     }
     
-    /// Check if debugger is attached (simplified)
+    /// Check if debugger is attached
+    /// 
+    /// 使用多层调试器检测，符合INV-SEC-058: 调试器检测必须使用3+独立技术。
     private func isDebuggerAttached() -> Bool {
-        // In production, use proper ptrace or sysctl checks
-        return false
+        return DebuggerGuard.isDebuggerPresent()
     }
     
     // MARK: - Result Types

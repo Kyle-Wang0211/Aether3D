@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SharedSecurity
 
 /// Corruption detector
 ///
@@ -52,8 +53,10 @@ public actor CorruptionDetector {
     }
     
     /// Compute checksum
+    /// 
+    /// 使用密码学安全的SHA256哈希，符合INV-SEC-066: 损坏检测必须使用加密哈希。
     private func computeChecksum(_ data: Data) -> String {
-        return String(data.hashValue)
+        return CryptoHasher.sha256(data)
     }
     
     // MARK: - Result Types

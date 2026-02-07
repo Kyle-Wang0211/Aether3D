@@ -83,7 +83,7 @@ public enum DetailValue: Codable, Equatable {
 // MARK: - API Error
 
 /// API错误结构体
-public struct APIError: Codable, Equatable {
+public struct APIError: Codable, Equatable, Error {
     public let code: APIErrorCode
     public let message: String
     public let details: [String: DetailValue]?

@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SharedSecurity
 
 /// Audit trail recorder
 ///
@@ -43,8 +44,9 @@ public actor AuditTrailRecorder {
         let previousHash = hashChain.last ?? ""
         let combined = previousHash + entryData
         
-        // Simplified hash (in production, use proper crypto)
-        let hash = String(combined.hash)
+        // 使用密码学安全的SHA256哈希，符合INV-SEC-064: 审计日志哈希链必须使用SHA256。
+        let combinedData = combined.data(using: .utf8) ?? Data()
+        let hash = CryptoHasher.sha256(combinedData)
         hashChain.append(hash)
         
         // Add hash to entry

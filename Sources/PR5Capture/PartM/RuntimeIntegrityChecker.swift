@@ -7,6 +7,9 @@
 //
 
 import Foundation
+import CryptoKit
+import MachO
+import SharedSecurity
 
 /// Runtime integrity checker
 ///
@@ -34,18 +37,20 @@ public actor RuntimeIntegrityChecker {
     }
     
     /// Establish baseline
+    /// 
+    /// 计算__TEXT段的真实哈希作为基线，符合INV-SEC-060: 运行时完整性必须验证__TEXT段哈希。
     private func establishBaseline() {
-        // Simplified baseline (in production, hash critical memory regions)
-        baselineHash = "baseline"
+        baselineHash = computeTextSegmentHash()
     }
     
     // MARK: - Integrity Checking
     
     /// Check runtime integrity
+    /// 
+    /// 验证__TEXT段的哈希是否与基线一致，符合INV-SEC-060: 运行时完整性必须验证__TEXT段哈希。
     public func checkIntegrity() -> IntegrityResult {
-        // Simplified check (in production, verify memory regions)
-        let currentHash = "baseline"
-        let isValid = currentHash == baselineHash
+        let currentHash = computeTextSegmentHash()
+        let isValid = currentHash == baselineHash && !currentHash.isEmpty
         
         // Record check
         checks.append((timestamp: Date(), isValid: isValid))
@@ -57,8 +62,60 @@ public actor RuntimeIntegrityChecker {
         
         return IntegrityResult(
             isValid: isValid,
-            timestamp: Date()
+            timestamp: Date(),
+            expectedHash: baselineHash,
+            actualHash: currentHash
         )
+    }
+    
+    /// Compute __TEXT segment hash
+    /// 
+    /// 计算__TEXT段的SHA256哈希，符合INV-SEC-060。
+    private func computeTextSegmentHash() -> String {
+        // 获取主执行文件的mach header
+        guard let header = _dyld_get_image_header(0) else {
+            return ""
+        }
+        
+        // 查找__TEXT段
+        var segmentCommand: UnsafePointer<segment_command_64>?
+        var loadCommand = UnsafeRawPointer(header).advanced(by: MemoryLayout<mach_header_64>.size)
+        
+        for _ in 0..<header.pointee.ncmds {
+            let cmd = loadCommand.assumingMemoryBound(to: load_command.self)
+            
+            if cmd.pointee.cmd == LC_SEGMENT_64 {
+                let segment = loadCommand.assumingMemoryBound(to: segment_command_64.self)
+                let segname = withUnsafePointer(to: segment.pointee.segname) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: 16) {
+                        String(cString: $0)
+                    }
+                }
+                
+                if segname == "__TEXT" {
+                    segmentCommand = segment
+                    break
+                }
+            }
+            
+            loadCommand = loadCommand.advanced(by: Int(cmd.pointee.cmdsize))
+        }
+        
+        guard let textSegment = segmentCommand else {
+            return ""
+        }
+        
+        // 计算__TEXT段的SHA256
+        let slideOffset = _dyld_get_image_vmaddr_slide(0)
+        let textAddress = UInt(textSegment.pointee.vmaddr) + UInt(bitPattern: slideOffset)
+        let textSize = Int(textSegment.pointee.vmsize)
+        
+        guard let textPointer = UnsafeRawPointer(bitPattern: textAddress) else {
+            return ""
+        }
+        
+        let textData = Data(bytes: textPointer, count: textSize)
+        return CryptoHasher.sha256(textData)
     }
     
     // MARK: - Result Types
@@ -67,5 +124,14 @@ public actor RuntimeIntegrityChecker {
     public struct IntegrityResult: Sendable {
         public let isValid: Bool
         public let timestamp: Date
+        public let expectedHash: String
+        public let actualHash: String
+        
+        public init(isValid: Bool, timestamp: Date, expectedHash: String = "", actualHash: String = "") {
+            self.isValid = isValid
+            self.timestamp = timestamp
+            self.expectedHash = expectedHash
+            self.actualHash = actualHash
+        }
     }
 }

@@ -1,0 +1,296 @@
+warning: 'progect2': Source files for target PR4LUTTests should be located under 'Tests/PR4LUTTests', or a custom sources path can be set with the 'path' property in Package.swift
+warning: 'progect2': Source files for target PR4UncertaintyTests should be located under 'Tests/PR4UncertaintyTests', or a custom sources path can be set with the 'path' property in Package.swift
+warning: 'progect2': Source files for target PR4CalibrationTests should be located under 'Tests/PR4CalibrationTests', or a custom sources path can be set with the 'path' property in Package.swift
+warning: 'progect2': found 2 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/kaidongwang/Documents/progecttwo/progect2/progect2/Tests/Evidence/Fixtures/Golden/progression_standard.json
+    /Users/kaidongwang/Documents/progecttwo/progect2/progect2/Tests/Evidence/Fixtures/Golden/evidence_state_v2.1.json
+[0/1] Planning build
+Building for debugging...
+[0/10] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (1.34s)
+Test Suite 'Selected tests' started at 2026-02-04 16:34:56.339.
+Test Suite 'Aether3DPackageTests.xctest' started at 2026-02-04 16:34:56.340.
+Test Suite 'AdaptiveThresholdManagerTests' started at 2026-02-04 16:34:56.340.
+Test Case '-[PR5CaptureTests.AdaptiveThresholdManagerTests testGetThreshold]' started.
+Test Case '-[PR5CaptureTests.AdaptiveThresholdManagerTests testGetThreshold]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.AdaptiveThresholdManagerTests testThresholdAdaptation]' started.
+Test Case '-[PR5CaptureTests.AdaptiveThresholdManagerTests testThresholdAdaptation]' passed (0.000 seconds).
+Test Suite 'AdaptiveThresholdManagerTests' passed at 2026-02-04 16:34:56.341.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'BitExactValidatorTests' started at 2026-02-04 16:34:56.341.
+Test Case '-[PR5CaptureTests.BitExactValidatorTests testBitExactMatch]' started.
+Test Case '-[PR5CaptureTests.BitExactValidatorTests testBitExactMatch]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.BitExactValidatorTests testBitExactMismatch]' started.
+Test Case '-[PR5CaptureTests.BitExactValidatorTests testBitExactMismatch]' passed (0.000 seconds).
+Test Suite 'BitExactValidatorTests' passed at 2026-02-04 16:34:56.342.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'CapturePolicyResolverTests' started at 2026-02-04 16:34:56.342.
+Test Case '-[PR5CaptureTests.CapturePolicyResolverTests testConflictArbitration]' started.
+Test Case '-[PR5CaptureTests.CapturePolicyResolverTests testConflictArbitration]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.CapturePolicyResolverTests testISPCompensation]' started.
+Test Case '-[PR5CaptureTests.CapturePolicyResolverTests testISPCompensation]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.CapturePolicyResolverTests testPolicyRegistration]' started.
+Test Case '-[PR5CaptureTests.CapturePolicyResolverTests testPolicyRegistration]' passed (0.000 seconds).
+Test Suite 'CapturePolicyResolverTests' passed at 2026-02-04 16:34:56.343.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'ConfidenceIntervalTrackerTests' started at 2026-02-04 16:34:56.343.
+Test Case '-[PR5CaptureTests.ConfidenceIntervalTrackerTests testConfidenceInterval]' started.
+Test Case '-[PR5CaptureTests.ConfidenceIntervalTrackerTests testConfidenceInterval]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.ConfidenceIntervalTrackerTests testWithinInterval]' started.
+Test Case '-[PR5CaptureTests.ConfidenceIntervalTrackerTests testWithinInterval]' passed (0.000 seconds).
+Test Suite 'ConfidenceIntervalTrackerTests' passed at 2026-02-04 16:34:56.344.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'CrossPlatformNormalizerTests' started at 2026-02-04 16:34:56.344.
+Test Case '-[PR5CaptureTests.CrossPlatformNormalizerTests testAreEqual]' started.
+Test Case '-[PR5CaptureTests.CrossPlatformNormalizerTests testAreEqual]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.CrossPlatformNormalizerTests testNormalize]' started.
+Test Case '-[PR5CaptureTests.CrossPlatformNormalizerTests testNormalize]' passed (0.000 seconds).
+Test Suite 'CrossPlatformNormalizerTests' passed at 2026-02-04 16:34:56.345.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'DeferDecisionManagerTests' started at 2026-02-04 16:34:56.345.
+Test Case '-[PR5CaptureTests.DeferDecisionManagerTests testDeferDecision]' started.
+Test Case '-[PR5CaptureTests.DeferDecisionManagerTests testDeferDecision]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.DeferDecisionManagerTests testQueueFull]' started.
+Test Case '-[PR5CaptureTests.DeferDecisionManagerTests testQueueFull]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DeferDecisionManagerTests testResolveDecision]' started.
+Test Case '-[PR5CaptureTests.DeferDecisionManagerTests testResolveDecision]' passed (0.000 seconds).
+Test Suite 'DeferDecisionManagerTests' passed at 2026-02-04 16:34:56.346.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'DeltaBudgetTests' started at 2026-02-04 16:34:56.346.
+Test Case '-[PR5CaptureTests.DeltaBudgetTests testBudgetExceeded]' started.
+Test Case '-[PR5CaptureTests.DeltaBudgetTests testBudgetExceeded]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.DeltaBudgetTests testBudgetReset]' started.
+Test Case '-[PR5CaptureTests.DeltaBudgetTests testBudgetReset]' passed (1.141 seconds).
+Test Case '-[PR5CaptureTests.DeltaBudgetTests testDeltaApplication]' started.
+Test Case '-[PR5CaptureTests.DeltaBudgetTests testDeltaApplication]' passed (0.001 seconds).
+Test Suite 'DeltaBudgetTests' passed at 2026-02-04 16:34:57.488.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.141 (1.142) seconds
+Test Suite 'DeterministicRNGManagerTests' started at 2026-02-04 16:34:57.488.
+Test Case '-[PR5CaptureTests.DeterministicRNGManagerTests testDeterministicSequence]' started.
+Test Case '-[PR5CaptureTests.DeterministicRNGManagerTests testDeterministicSequence]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DeterministicRNGManagerTests testNextDouble]' started.
+Test Case '-[PR5CaptureTests.DeterministicRNGManagerTests testNextDouble]' passed (0.001 seconds).
+Test Suite 'DeterministicRNGManagerTests' passed at 2026-02-04 16:34:57.490.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'DomainBoundaryEnforcerTests' started at 2026-02-04 16:34:57.490.
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testAllowedFlowDecisionToLedger]' started.
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testAllowedFlowDecisionToLedger]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testAllowedFlowPerceptionToDecision]' started.
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testAllowedFlowPerceptionToDecision]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testAuditLog]' started.
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testAuditLog]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testForbiddenFlowDecisionToPerception]' started.
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testForbiddenFlowDecisionToPerception]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testForbiddenFlowLedgerToDecision]' started.
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testForbiddenFlowLedgerToDecision]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testSameDomainAccess]' started.
+Test Case '-[PR5CaptureTests.DomainBoundaryEnforcerTests testSameDomainAccess]' passed (0.000 seconds).
+Test Suite 'DomainBoundaryEnforcerTests' passed at 2026-02-04 16:34:57.494.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
+Test Suite 'DualAnchorManagerTests' started at 2026-02-04 16:34:57.494.
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testDriftDetection]' started.
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testDriftDetection]' passed (0.002 seconds).
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testSegmentAnchorUpdate]' started.
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testSegmentAnchorUpdate]' passed (0.003 seconds).
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testSessionAnchorInitialization]' started.
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testSessionAnchorInitialization]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testSessionAnchorUpdateInterval]' started.
+Test Case '-[PR5CaptureTests.DualAnchorManagerTests testSessionAnchorUpdateInterval]' passed (30.115 seconds).
+Test Suite 'DualAnchorManagerTests' passed at 2026-02-04 16:35:27.615.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 30.120 (30.121) seconds
+Test Suite 'DualTimestampRecorderTests' started at 2026-02-04 16:35:27.615.
+Test Case '-[PR5CaptureTests.DualTimestampRecorderTests testDeferredCaptureTime]' started.
+Test Case '-[PR5CaptureTests.DualTimestampRecorderTests testDeferredCaptureTime]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DualTimestampRecorderTests testDelayWarning]' started.
+Test Case '-[PR5CaptureTests.DualTimestampRecorderTests testDelayWarning]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.DualTimestampRecorderTests testTimestampRecording]' started.
+Test Case '-[PR5CaptureTests.DualTimestampRecorderTests testTimestampRecording]' passed (0.001 seconds).
+Test Suite 'DualTimestampRecorderTests' passed at 2026-02-04 16:35:27.618.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'EISRollingShutterHandlerTests' started at 2026-02-04 16:35:27.618.
+Test Case '-[PR5CaptureTests.EISRollingShutterHandlerTests testEISDetection]' started.
+Test Case '-[PR5CaptureTests.EISRollingShutterHandlerTests testEISDetection]' passed (0.002 seconds).
+Test Case '-[PR5CaptureTests.EISRollingShutterHandlerTests testKeyframeSuitability]' started.
+Test Case '-[PR5CaptureTests.EISRollingShutterHandlerTests testKeyframeSuitability]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.EISRollingShutterHandlerTests testRollingShutterCompensation]' started.
+Test Case '-[PR5CaptureTests.EISRollingShutterHandlerTests testRollingShutterCompensation]' passed (0.001 seconds).
+Test Suite 'EISRollingShutterHandlerTests' passed at 2026-02-04 16:35:27.623.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
+Test Suite 'EmergencyTransitionRateLimiterTests' started at 2026-02-04 16:35:27.623.
+Test Case '-[PR5CaptureTests.EmergencyTransitionRateLimiterTests testRateLimit]' started.
+Test Case '-[PR5CaptureTests.EmergencyTransitionRateLimiterTests testRateLimit]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.EmergencyTransitionRateLimiterTests testRateLimitReset]' started.
+Test Case '-[PR5CaptureTests.EmergencyTransitionRateLimiterTests testRateLimitReset]' passed (1.140 seconds).
+Test Suite 'EmergencyTransitionRateLimiterTests' passed at 2026-02-04 16:35:28.764.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 1.141 (1.141) seconds
+Test Suite 'ExposureLockVerifierTests' started at 2026-02-04 16:35:28.764.
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testExposureLock]' started.
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testExposureLock]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testExposureVerificationNoDrift]' started.
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testExposureVerificationNoDrift]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testExposureVerificationWithDrift]' started.
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testExposureVerificationWithDrift]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testUnlockExposure]' started.
+Test Case '-[PR5CaptureTests.ExposureLockVerifierTests testUnlockExposure]' passed (0.001 seconds).
+Test Suite 'ExposureLockVerifierTests' passed at 2026-02-04 16:35:28.769.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+Test Suite 'ExtremeProfileTests' started at 2026-02-04 16:35:28.769.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testAllConfigCategories]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testAllConfigCategories]' passed (0.004 seconds).
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testConservativeProfile]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testConservativeProfile]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testExtremeProfile]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testExtremeProfile]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testLabProfile]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testLabProfile]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testProfileHashComputation]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testProfileHashComputation]' passed (0.005 seconds).
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testProfileHashDifferentProfiles]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testProfileHashDifferentProfiles]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testProfileLevels]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testProfileLevels]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testStandardProfile]' started.
+Test Case '-[PR5CaptureTests.ExtremeProfileTests testStandardProfile]' passed (0.000 seconds).
+Test Suite 'ExtremeProfileTests' passed at 2026-02-04 16:35:28.780.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+Test Suite 'FramePacingClassifierTests' started at 2026-02-04 16:35:28.780.
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests test30FPSClassification]' started.
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests test30FPSClassification]' passed (0.003 seconds).
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests test60FPSClassification]' started.
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests test60FPSClassification]' passed (0.004 seconds).
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests testDroppedFrames]' started.
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests testDroppedFrames]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests testRegularRhythm]' started.
+Test Case '-[PR5CaptureTests.FramePacingClassifierTests testRegularRhythm]' passed (0.001 seconds).
+Test Suite 'FramePacingClassifierTests' passed at 2026-02-04 16:35:28.791.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+Test Suite 'FramePacingNormalizerTests' started at 2026-02-04 16:35:28.791.
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testDenormalizeFrameWindow]' started.
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testDenormalizeFrameWindow]' passed (0.002 seconds).
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testFPSEstimation]' started.
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testFPSEstimation]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testFrameDropDetection]' started.
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testFrameDropDetection]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testTimeWindowNormalization]' started.
+Test Case '-[PR5CaptureTests.FramePacingNormalizerTests testTimeWindowNormalization]' passed (0.001 seconds).
+Test Suite 'FramePacingNormalizerTests' passed at 2026-02-04 16:35:28.796.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.005 (0.005) seconds
+Test Suite 'HysteresisCooldownDwellControllerTests' started at 2026-02-04 16:35:28.796.
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testCooldownPeriod]' started.
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testCooldownPeriod]' passed (4.143 seconds).
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testHysteresisEnter]' started.
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testHysteresisEnter]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testHysteresisExit]' started.
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testHysteresisExit]' passed (2.173 seconds).
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testPreconfiguredControllers]' started.
+Test Case '-[PR5CaptureTests.HysteresisCooldownDwellControllerTests testPreconfiguredControllers]' passed (0.001 seconds).
+Test Suite 'HysteresisCooldownDwellControllerTests' passed at 2026-02-04 16:35:35.115.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 6.318 (6.319) seconds
+Test Suite 'HysteresisStateMachineTests' started at 2026-02-04 16:35:35.115.
+Test Case '-[PR5CaptureTests.HysteresisStateMachineTests testEmergencyTransition]' started.
+Test Case '-[PR5CaptureTests.HysteresisStateMachineTests testEmergencyTransition]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.HysteresisStateMachineTests testHysteresisEnter]' started.
+Test Case '-[PR5CaptureTests.HysteresisStateMachineTests testHysteresisEnter]' passed (0.001 seconds).
+Test Suite 'HysteresisStateMachineTests' passed at 2026-02-04 16:35:35.117.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'ISPDetectorTests' started at 2026-02-04 16:35:35.117.
+Test Case '-[PR5CaptureTests.ISPDetectorTests testAverageNoiseFloor]' started.
+Test Case '-[PR5CaptureTests.ISPDetectorTests testAverageNoiseFloor]' passed (0.004 seconds).
+Test Case '-[PR5CaptureTests.ISPDetectorTests testISPStrengthClassification]' started.
+Test Case '-[PR5CaptureTests.ISPDetectorTests testISPStrengthClassification]' passed (0.002 seconds).
+Test Case '-[PR5CaptureTests.ISPDetectorTests testNoiseFloorAnalysis]' started.
+Test Case '-[PR5CaptureTests.ISPDetectorTests testNoiseFloorAnalysis]' passed (0.002 seconds).
+Test Suite 'ISPDetectorTests' passed at 2026-02-04 16:35:35.125.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.008 (0.008) seconds
+Test Suite 'LensChangeDetectorTests' started at 2026-02-04 16:35:35.125.
+Test Case '-[PR5CaptureTests.LensChangeDetectorTests testFirstLensDetection]' started.
+Test Case '-[PR5CaptureTests.LensChangeDetectorTests testFirstLensDetection]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.LensChangeDetectorTests testLensChangeDetection]' started.
+Test Case '-[PR5CaptureTests.LensChangeDetectorTests testLensChangeDetection]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.LensChangeDetectorTests testSessionSegments]' started.
+Test Case '-[PR5CaptureTests.LensChangeDetectorTests testSessionSegments]' passed (0.000 seconds).
+Test Suite 'LensChangeDetectorTests' passed at 2026-02-04 16:35:35.128.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'MinimumProgressGuaranteeTests' started at 2026-02-04 16:35:35.128.
+Test Case '-[PR5CaptureTests.MinimumProgressGuaranteeTests testProgressRecovery]' started.
+Test Case '-[PR5CaptureTests.MinimumProgressGuaranteeTests testProgressRecovery]' passed (0.002 seconds).
+Test Case '-[PR5CaptureTests.MinimumProgressGuaranteeTests testStagnationDetection]' started.
+Test Case '-[PR5CaptureTests.MinimumProgressGuaranteeTests testStagnationDetection]' passed (0.001 seconds).
+Test Suite 'MinimumProgressGuaranteeTests' passed at 2026-02-04 16:35:35.130.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'PolicyProofTests' started at 2026-02-04 16:35:35.130.
+Test Case '-[PR5CaptureTests.PolicyProofTests testProofFiltering]' started.
+Test Case '-[PR5CaptureTests.PolicyProofTests testProofFiltering]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.PolicyProofTests testProofGeneration]' started.
+Test Case '-[PR5CaptureTests.PolicyProofTests testProofGeneration]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.PolicyProofTests testProofRetrieval]' started.
+Test Case '-[PR5CaptureTests.PolicyProofTests testProofRetrieval]' passed (0.001 seconds).
+Test Suite 'PolicyProofTests' passed at 2026-02-04 16:35:35.133.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'PoseChainPreserverTests' started at 2026-02-04 16:35:35.133.
+Test Case '-[PR5CaptureTests.PoseChainPreserverTests testAddPose]' started.
+Test Case '-[PR5CaptureTests.PoseChainPreserverTests testAddPose]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.PoseChainPreserverTests testCreateTrackingSummary]' started.
+Test Case '-[PR5CaptureTests.PoseChainPreserverTests testCreateTrackingSummary]' passed (0.001 seconds).
+Test Suite 'PoseChainPreserverTests' passed at 2026-02-04 16:35:35.135.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'QualityDegradationPredictorTests' started at 2026-02-04 16:35:35.135.
+Test Case '-[PR5CaptureTests.QualityDegradationPredictorTests testDegradationPrediction]' started.
+Test Case '-[PR5CaptureTests.QualityDegradationPredictorTests testDegradationPrediction]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.QualityDegradationPredictorTests testWarningGeneration]' started.
+Test Case '-[PR5CaptureTests.QualityDegradationPredictorTests testWarningGeneration]' passed (0.001 seconds).
+Test Suite 'QualityDegradationPredictorTests' passed at 2026-02-04 16:35:35.138.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'QualityMetricAggregatorTests' started at 2026-02-04 16:35:35.138.
+Test Case '-[PR5CaptureTests.QualityMetricAggregatorTests testAggregateMetrics]' started.
+Test Case '-[PR5CaptureTests.QualityMetricAggregatorTests testAggregateMetrics]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.QualityMetricAggregatorTests testWeightedAggregation]' started.
+Test Case '-[PR5CaptureTests.QualityMetricAggregatorTests testWeightedAggregation]' passed (0.000 seconds).
+Test Suite 'QualityMetricAggregatorTests' passed at 2026-02-04 16:35:35.138.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'RelocalizationStateManagerTests' started at 2026-02-04 16:35:35.138.
+Test Case '-[PR5CaptureTests.RelocalizationStateManagerTests testForceRelocalization]' started.
+Test Case '-[PR5CaptureTests.RelocalizationStateManagerTests testForceRelocalization]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.RelocalizationStateManagerTests testRelocalizationSuccess]' started.
+Test Case '-[PR5CaptureTests.RelocalizationStateManagerTests testRelocalizationSuccess]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.RelocalizationStateManagerTests testTrackingToRelocalizing]' started.
+Test Case '-[PR5CaptureTests.RelocalizationStateManagerTests testTrackingToRelocalizing]' passed (0.000 seconds).
+Test Suite 'RelocalizationStateManagerTests' passed at 2026-02-04 16:35:35.140.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'RobustnessScoreCalculatorTests' started at 2026-02-04 16:35:35.140.
+Test Case '-[PR5CaptureTests.RobustnessScoreCalculatorTests testRobustnessCalculation]' started.
+Test Case '-[PR5CaptureTests.RobustnessScoreCalculatorTests testRobustnessCalculation]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.RobustnessScoreCalculatorTests testStability]' started.
+Test Case '-[PR5CaptureTests.RobustnessScoreCalculatorTests testStability]' passed (0.001 seconds).
+Test Suite 'RobustnessScoreCalculatorTests' passed at 2026-02-04 16:35:35.141.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'TimestampJitterAnalyzerTests' started at 2026-02-04 16:35:35.141.
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testCameraTimestampRecording]' started.
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testCameraTimestampRecording]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testIMUTimestampRecording]' started.
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testIMUTimestampRecording]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testJitterAnalysis]' started.
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testJitterAnalysis]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testTimestampPairRecording]' started.
+Test Case '-[PR5CaptureTests.TimestampJitterAnalyzerTests testTimestampPairRecording]' passed (0.000 seconds).
+Test Suite 'TimestampJitterAnalyzerTests' passed at 2026-02-04 16:35:35.143.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'TwoPhaseQualityGateTests' started at 2026-02-04 16:35:35.143.
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testFrameGateFail]' started.
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testFrameGateFail]' passed (0.001 seconds).
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testFrameGatePass]' started.
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testFrameGatePass]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testPatchGateConfirmation]' started.
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testPatchGateConfirmation]' passed (0.000 seconds).
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testPatchGateRejection]' started.
+Test Case '-[PR5CaptureTests.TwoPhaseQualityGateTests testPatchGateRejection]' passed (0.000 seconds).
+Test Suite 'TwoPhaseQualityGateTests' passed at 2026-02-04 16:35:35.145.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'Aether3DPackageTests.xctest' passed at 2026-02-04 16:35:35.145.
+	 Executed 93 tests, with 0 failures (0 unexpected) in 38.791 (38.805) seconds
+Test Suite 'Selected tests' passed at 2026-02-04 16:35:35.145.
+	 Executed 93 tests, with 0 failures (0 unexpected) in 38.791 (38.806) seconds
+◇ Test run started.
+↳ Testing Library Version: 1501
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

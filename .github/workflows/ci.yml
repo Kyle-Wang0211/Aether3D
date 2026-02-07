@@ -48,6 +48,10 @@ jobs:
         run: |
           bash scripts/ci/ssot_consistency_verify.sh
 
+      - name: Security Quality Gate (v8.2 IRONCLAD)
+        run: |
+          bash .github/scripts/quality_gate_security.sh
+
       - name: Verify CI integrity
         run: |
           bash scripts/ci/ci_integrity_verify.sh

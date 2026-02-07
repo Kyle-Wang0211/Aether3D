@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SharedSecurity
 
 /// Integrity hash chain
 ///
@@ -88,8 +89,10 @@ public actor IntegrityHashChain {
     }
     
     /// Compute hash
+    /// 
+    /// 使用密码学安全的SHA256哈希，符合INV-SEC-057。
     private func computeHash(_ data: Data) -> String {
-        return String(data.hashValue)
+        return CryptoHasher.sha256(data)
     }
     
     /// Compute Merkle root
@@ -104,7 +107,9 @@ public actor IntegrityHashChain {
             for i in stride(from: 0, to: hashes.count, by: 2) {
                 if i + 1 < hashes.count {
                     let combined = hashes[i] + hashes[i+1]
-                    nextLevel.append(String(combined.hash))
+                    // 使用密码学安全的SHA256哈希，符合INV-SEC-057
+                    let combinedData = combined.data(using: .utf8) ?? Data()
+                    nextLevel.append(CryptoHasher.sha256(combinedData))
                 } else {
                     nextLevel.append(hashes[i])
                 }
