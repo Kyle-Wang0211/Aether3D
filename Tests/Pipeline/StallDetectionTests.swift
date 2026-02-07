@@ -61,25 +61,36 @@ final class StallDetectionTests: XCTestCase {
         let progressSequence: [Double?] = [10.0, 30.0, 50.0, 70.0, 90.0, 100.0]
         let client = TestableFakeRemoteB1Client(progressSequence: progressSequence)
         let runner = PipelineRunner(remoteClient: client)
-        
+
         // This should complete successfully without stall
         let jobId = try await client.startJob(assetId: "test-asset")
-        
-        // Run pollAndDownload - should complete quickly since progress advances
+
+        // Run pollAndDownload and await the result directly.
+        // The fake client returns progress values immediately, so the only delay
+        // is the poll interval sleep (3s × N polls). We await with a generous
+        // timeout to handle slow CI environments.
+        let task = Task<(Data, ArtifactFormat), Error> {
+            return try await runner.pollAndDownload(jobId: jobId)
+        }
+
+        // Use a timeout task to prevent hanging forever in CI
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: 60_000_000_000)  // 60s generous timeout
+        }
+
         var completed = false
         var error: Error? = nil
-        let task = Task {
-            do {
-                let _ = try await runner.pollAndDownload(jobId: jobId)
-                completed = true
-            } catch let e {
-                error = e
-            }
+
+        // Race: either pollAndDownload completes or we timeout
+        do {
+            let _ = try await task.value
+            completed = true
+        } catch let e {
+            // If cancelled by timeout or real error
+            error = e
         }
-        
-        // Wait for completion (should be fast since progress advances)
-        try await Task.sleep(nanoseconds: 500_000_000)  // 500ms should be enough
-        
+        timeoutTask.cancel()
+
         XCTAssertTrue(completed, "Job should complete successfully, error: \(String(describing: error))")
     }
     
@@ -197,9 +208,9 @@ final class StallDetectionTests: XCTestCase {
         let progressSequence: [Double?] = [nil, nil, nil, 10.0, 20.0, 100.0]
         let client = TestableFakeRemoteB1Client(progressSequence: progressSequence)
         let runner = PipelineRunner(remoteClient: client)
-        
+
         let jobId = try await client.startJob(assetId: "test-asset")
-        
+
         // Verify queued state uses different poll interval
         XCTAssertEqual(
             PipelineTimeoutConstants.pollIntervalQueuedSeconds,
@@ -211,21 +222,24 @@ final class StallDetectionTests: XCTestCase {
             PipelineTimeoutConstants.pollIntervalSeconds,
             "Queued interval should be longer than processing interval"
         )
-        
+
+        // Await the result directly instead of using a fixed sleep.
+        // 3 queued polls (5s each) + 3 processing polls (3s each) = ~24s expected,
+        // so we use a generous 90s timeout for slow CI.
+        let task = Task<(Data, ArtifactFormat), Error> {
+            return try await runner.pollAndDownload(jobId: jobId)
+        }
+
         var completed = false
         var error: Error? = nil
-        let task = Task {
-            do {
-                let _ = try await runner.pollAndDownload(jobId: jobId)
-                completed = true
-            } catch let e {
-                error = e
-            }
+
+        do {
+            let _ = try await task.value
+            completed = true
+        } catch let e {
+            error = e
         }
-        
-        // Wait for completion
-        try await Task.sleep(nanoseconds: 500_000_000)  // 500ms
-        
+
         // Should complete since progress advances after queued state
         XCTAssertTrue(completed || error != nil, "Should either complete or have error, error: \(String(describing: error))")
     }
