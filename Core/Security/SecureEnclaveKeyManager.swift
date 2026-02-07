@@ -7,12 +7,12 @@
 //
 
 import Foundation
-#if canImport(Security)
+
+// Secure Enclave is only available on Apple platforms
+#if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
+
 import Security
-#endif
-#if canImport(LocalAuthentication)
 import LocalAuthentication
-#endif
 import SharedSecurity
 
 /// Secure Enclave Key Manager
@@ -372,3 +372,5 @@ public enum SecureEnclaveError: Error, Sendable {
         }
     }
 }
+
+#endif // os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
