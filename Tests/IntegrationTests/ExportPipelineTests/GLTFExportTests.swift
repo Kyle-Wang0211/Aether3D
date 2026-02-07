@@ -66,20 +66,8 @@ final class GLTFExportTests: XCTestCase {
             vertices: [],
             indices: []
         )
-        let provenance = ProvenanceBundle(
-            manifest: ProvenanceManifest(
-                format: .gltf,
-                version: "1.0",
-                exportedAt: Date(),
-                exporterVersion: "1.0"
-            ),
-            sth: nil,
-            timeProof: nil,
-            merkleProof: nil,
-            deviceAttestation: nil
-        )
-        var options = GLTFExportOptions()
-        options.embedProvenanceBundle = true
+        // Note: ProvenanceBundle is for documentation, export uses options only
+        let options = GLTFExportOptions()
 
         let outputData = try exporter.export(
             mesh: mesh,
@@ -91,7 +79,7 @@ final class GLTFExportTests: XCTestCase {
         )
 
         XCTAssertGreaterThan(outputData.count, 0)
-        
+
         // Verify GLB format (starts with "glTF" magic)
         let magic = outputData.prefix(4)
         XCTAssertEqual(magic, Data([0x67, 0x6C, 0x54, 0x46])) // "glTF"
@@ -100,17 +88,17 @@ final class GLTFExportTests: XCTestCase {
     func testGLTFExport_WithVertices() throws {
         let exporter = GLTFExporter()
 
-        // Create mesh with vertices
-        var vertices: [SIMD3<Float>] = []
+        // Create mesh with vertices (flat array format: x, y, z, x, y, z, ...)
+        var vertices: [Float] = []
         for i in 0..<100 {
-            vertices.append(SIMD3<Float>(Float(i), Float(i * 2), Float(i * 3)))
+            vertices.append(Float(i))
+            vertices.append(Float(i * 2))
+            vertices.append(Float(i * 3))
         }
 
         let mesh = MeshData(
             vertices: vertices,
-            indices: [],
-            normals: nil,
-            uvs: nil
+            indices: []
         )
         let options = GLTFExportOptions()
 
@@ -272,20 +260,8 @@ final class GLTFExportTests: XCTestCase {
             vertices: [],
             indices: []
         )
-        let provenance = ProvenanceBundle(
-            manifest: ProvenanceManifest(
-                format: .gltf,
-                version: "1.0",
-                exportedAt: Date(),
-                exporterVersion: "1.0"
-            ),
-            sth: nil,
-            timeProof: nil,
-            merkleProof: nil,
-            deviceAttestation: nil
-        )
-        var options = GLTFExportOptions()
-        options.embedProvenanceBundle = true
+        // Note: ProvenanceBundle is for documentation, export uses options only
+        let options = GLTFExportOptions()
 
         let outputData = try exporter.export(
             mesh: mesh,
@@ -359,8 +335,7 @@ final class GLTFExportTests: XCTestCase {
             merkleProof: nil,
             deviceAttestation: nil
         )
-        var options = GLTFGaussianSplattingExportOptions()
-        // embedProvenanceBundle defaults to true
+        let options = GLTFGaussianSplattingExportOptions()
 
         let outputData = try exporter.export(
             splatData: splats,
