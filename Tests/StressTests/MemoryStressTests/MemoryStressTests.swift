@@ -18,9 +18,9 @@ final class MemoryStressTests: XCTestCase {
         // Hash 100 MB of data
         let largeData = Data(repeating: 0xAB, count: 100_000_000)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
         let hash = CryptoHasher.sha256(largeData)
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
 
         XCTAssertEqual(hash.count, 64)
         XCTAssertLessThan(elapsed, 5.0, "Should hash 100MB in under 5 seconds")

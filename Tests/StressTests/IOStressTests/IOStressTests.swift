@@ -76,14 +76,14 @@ final class IOStressTests: XCTestCase {
         let path = tempDirectory.appendingPathComponent("stress.db").path
         let store = try SQLiteCounterStore(dbPath: path)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         // 10,000 writes
         for i in 0..<10_000 {
             try await store.setCounter(keyId: "key\(i)", counter: UInt64(i))
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
 
         // Should complete in reasonable time
         XCTAssertLessThan(elapsed, 30.0, "10k SQLite writes should complete in under 30s")
@@ -98,14 +98,14 @@ final class IOStressTests: XCTestCase {
             try await store.setCounter(keyId: "key\(i)", counter: UInt64(i))
         }
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
 
         // 10,000 reads
         for i in 0..<10_000 {
             _ = try await store.getCounter(keyId: "key\(i % 1000)")
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date().timeIntervalSinceReferenceDate - start
 
         // Should complete in reasonable time
         XCTAssertLessThan(elapsed, 10.0, "10k SQLite reads should complete in under 10s")

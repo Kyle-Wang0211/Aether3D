@@ -21,9 +21,9 @@ final class AllMobileInvariantsTests: XCTestCase {
         var totalTime: Double = 0
 
         for _ in 0..<iterations {
-            let start = CFAbsoluteTimeGetCurrent()
+            let start = Date().timeIntervalSinceReferenceDate
             await handler.adaptToThermalState()
-            totalTime += CFAbsoluteTimeGetCurrent() - start
+            totalTime += Date().timeIntervalSinceReferenceDate - start
         }
 
         let averageMs = (totalTime / Double(iterations)) * 1000
@@ -62,9 +62,9 @@ final class AllMobileInvariantsTests: XCTestCase {
     func testINV_MOBILE_004_MemoryWarningResponseTime() async {
         let handler = MobileMemoryPressureHandler()
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
         await handler.handleMemoryWarning()
-        let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let elapsed = (Date().timeIntervalSinceReferenceDate - start) * 1000
 
         XCTAssertLessThan(elapsed, 50,
                           "INV-MOBILE-004: Memory warning response should be < 50ms")
@@ -186,14 +186,14 @@ final class AllMobileInvariantsTests: XCTestCase {
 
         for _ in 0..<iterations {
             let touch = TouchEvent(
-                timestamp: CFAbsoluteTimeGetCurrent(),
+                timestamp: Date().timeIntervalSinceReferenceDate,
                 location: CGPoint(x: 100, y: 100),
                 phase: .began
             )
 
-            let start = CFAbsoluteTimeGetCurrent()
+            let start = Date().timeIntervalSinceReferenceDate
             await optimizer.handleTouch(touch)
-            totalTime += CFAbsoluteTimeGetCurrent() - start
+            totalTime += Date().timeIntervalSinceReferenceDate - start
         }
 
         let averageMs = (totalTime / Double(iterations)) * 1000
@@ -205,18 +205,18 @@ final class AllMobileInvariantsTests: XCTestCase {
         let optimizer = MobileTouchResponseOptimizer()
 
         // Simulate gesture sequence
-        let gestureStart = CFAbsoluteTimeGetCurrent()
+        let gestureStart = Date().timeIntervalSinceReferenceDate
 
         for i in 0..<10 {
             let touch = TouchEvent(
-                timestamp: CFAbsoluteTimeGetCurrent(),
+                timestamp: Date().timeIntervalSinceReferenceDate,
                 location: CGPoint(x: 100 + Double(i * 10), y: 100),
                 phase: i == 0 ? .began : (i == 9 ? .ended : .moved)
             )
             await optimizer.handleTouch(touch)
         }
 
-        let elapsed = (CFAbsoluteTimeGetCurrent() - gestureStart) * 1000
+        let elapsed = (Date().timeIntervalSinceReferenceDate - gestureStart) * 1000
         XCTAssertLessThan(elapsed, 32,
                           "INV-MOBILE-015: Gesture recognition should be < 32ms")
     }
@@ -229,7 +229,7 @@ final class AllMobileInvariantsTests: XCTestCase {
             for i in 0..<100 {
                 group.addTask {
                     let touch = TouchEvent(
-                        timestamp: CFAbsoluteTimeGetCurrent(),
+                        timestamp: Date().timeIntervalSinceReferenceDate,
                         location: CGPoint(x: Double(i), y: Double(i)),
                         phase: .moved
                     )
@@ -256,7 +256,7 @@ final class AllMobileInvariantsTests: XCTestCase {
         let testURL = tempDir.appendingPathComponent("test_scan.ply")
         try Data().write(to: testURL)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date().timeIntervalSinceReferenceDate
         var gotInitialRender = false
 
         for await progress in try await loader.loadScan(from: testURL) {
@@ -266,7 +266,7 @@ final class AllMobileInvariantsTests: XCTestCase {
             }
         }
 
-        let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let elapsed = (Date().timeIntervalSinceReferenceDate - start) * 1000
 
         XCTAssertTrue(gotInitialRender)
         XCTAssertLessThan(elapsed, 500,
@@ -286,11 +286,11 @@ final class AllMobileInvariantsTests: XCTestCase {
         try Data().write(to: testURL)
 
         var stepTimes: [Double] = []
-        var lastTime = CFAbsoluteTimeGetCurrent()
+        var lastTime = Date().timeIntervalSinceReferenceDate
 
         for await progress in try await loader.loadScan(from: testURL) {
             if case .chunk = progress {
-                let now = CFAbsoluteTimeGetCurrent()
+                let now = Date().timeIntervalSinceReferenceDate
                 stepTimes.append((now - lastTime) * 1000)
                 lastTime = now
             }
