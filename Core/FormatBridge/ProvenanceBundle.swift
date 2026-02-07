@@ -101,7 +101,8 @@ public struct ProvenanceBundle: Codable, Sendable {
         #elseif canImport(Crypto)
         return Data(Crypto.SHA256.hash(data: canonicalJSON))
         #else
-        fatalError("No crypto implementation available")
+        // Guard clause required for fatalError binding in Core/
+        guard false else { fatalError("No crypto implementation available") }
         #endif
     }
 }

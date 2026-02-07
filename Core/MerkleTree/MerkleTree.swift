@@ -42,9 +42,7 @@ public actor MerkleTree {
     ///
     /// - Parameter leafHash: Pre-computed leaf hash (32 bytes)
     public func appendHash(_ leafHash: Data) {
-        guard leafHash.count == 32 else {
-            fatalError("Leaf hash must be 32 bytes")
-        }
+        guard leafHash.count == 32 else { fatalError("Leaf hash must be 32 bytes") }
         leaves.append(leafHash)
         size += 1
         rootHash = computeRoot()

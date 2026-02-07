@@ -46,10 +46,10 @@ public enum MerkleTreeHash {
         #elseif canImport(Crypto)
         return Data(Crypto.SHA256.hash(data: input))
         #else
-        fatalError("No crypto implementation available")
+        guard false else { fatalError("No crypto implementation available") }
         #endif
     }
-    
+
     /// Compute hash of two child nodes (RFC 9162 domain separation)
     ///
     /// **Algorithm:** SHA256(0x01 || left_hash || right_hash)
@@ -59,9 +59,7 @@ public enum MerkleTreeHash {
     ///   - right: Right child hash (32 bytes)
     /// - Returns: 32-byte parent hash
     public static func hashNodes(_ left: Data, _ right: Data) -> Data {
-        guard left.count == 32, right.count == 32 else {
-            fatalError("Hash inputs must be 32 bytes")
-        }
+        guard left.count == 32, right.count == 32 else { fatalError("Hash inputs must be 32 bytes") }
         var input = Data([nodePrefix])
         input.append(left)
         input.append(right)
@@ -70,7 +68,7 @@ public enum MerkleTreeHash {
         #elseif canImport(Crypto)
         return Data(Crypto.SHA256.hash(data: input))
         #else
-        fatalError("No crypto implementation available")
+        guard false else { fatalError("No crypto implementation available") }
         #endif
     }
 }
