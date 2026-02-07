@@ -10,6 +10,8 @@
 import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
 #endif
 
 /// Signed Tree Head (STH) for Merkle audit tree

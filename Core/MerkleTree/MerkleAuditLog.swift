@@ -8,6 +8,8 @@
 import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
 #endif
 
 // Import MonotonicClock from Quality module
