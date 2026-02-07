@@ -114,23 +114,25 @@ public actor WriteAheadLog {
     }
     
     /// Commit entry
-    /// 
+    ///
     /// - Parameter entry: WAL entry to commit
     /// - Throws: WALError if commit fails
     public func commitEntry(_ entry: WALEntry) async throws {
-        guard let index = uncommittedEntries.firstIndex(where: { $0.entryId == entry.entryId }) else {
+        // Check entry exists before async operations
+        guard uncommittedEntries.contains(where: { $0.entryId == entry.entryId }) else {
             throw WALError.entryNotFound(entry.entryId)
         }
-        
+
         var committedEntry = entry
         committedEntry.committed = true
-        
+
         // Update entry in storage
         try await storage.writeEntry(committedEntry)
         try await storage.fsync()
-        
-        // Remove from uncommitted
-        uncommittedEntries.remove(at: index)
+
+        // Remove from uncommitted by entryId (not index) to handle concurrent mutations
+        // After await, array state may have changed, so we need to find the index again
+        uncommittedEntries.removeAll { $0.entryId == entry.entryId }
     }
     
     /// Get uncommitted entries
