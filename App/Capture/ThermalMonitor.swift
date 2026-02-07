@@ -18,10 +18,10 @@ import IOKit
 public actor ThermalMonitor {
     
     // MARK: - State
-    
+
     private var currentTemperature: Double?
     private var thermalState: ThermalState = .normal
-    private var monitoringTimer: Timer?
+    private var monitoringTask: Task<Void, Never>?
     private var isMonitoring: Bool = false
     
     // MARK: - Configuration
@@ -51,27 +51,28 @@ public actor ThermalMonitor {
         guard !isMonitoring else {
             return
         }
-        
+
         isMonitoring = true
-        
-        // Start periodic monitoring
-        monitoringTimer = Timer.scheduledTimer(withTimeInterval: monitoringInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+
+        // Start periodic monitoring using Task-based loop (符合 Swift 6 concurrency)
+        monitoringTask = Task { [weak self] in
+            // Initial check
+            await self?.checkThermalState()
+
+            // Periodic monitoring loop
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(self?.monitoringInterval ?? 5.0))
+                guard !Task.isCancelled else { break }
                 await self?.checkThermalState()
             }
-        }
-        
-        // Initial check
-        Task { @MainActor in
-            await checkThermalState()
         }
     }
     
     /// Stop thermal monitoring
     public func stopMonitoring() {
         isMonitoring = false
-        monitoringTimer?.invalidate()
-        monitoringTimer = nil
+        monitoringTask?.cancel()
+        monitoringTask = nil
     }
     
     /// Check thermal state

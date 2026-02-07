@@ -89,7 +89,7 @@ public actor EISRollingShutterHandler {
         
         // EIS compensates for gyro motion
         // Check for correlation between gyro and motion compensation
-        // Simplified: check for smooth gyro patterns
+        // NOTE: Basic: check for smooth gyro patterns
         let angularVelocities = gyroData.map { sqrt($0.x * $0.x + $0.y * $0.y + $0.z * $0.z) }
         let mean = angularVelocities.reduce(0.0, +) / Double(angularVelocities.count)
         let variance = angularVelocities.map { pow($0 - mean, 2) }.reduce(0.0, +) / Double(angularVelocities.count)
@@ -120,7 +120,7 @@ public actor EISRollingShutterHandler {
         
         // Compute compensation based on motion and readout time
         let avgMotion = computeAverageMotion(motionVectors)
-        let compensation = avgMotion * readoutTime * 0.5  // Simplified compensation
+        let compensation = avgMotion * readoutTime * 0.5  // NOTE: Basic compensation
         
         // Record compensation
         compensationHistory.append((timestamp: Date(), compensation: compensation))

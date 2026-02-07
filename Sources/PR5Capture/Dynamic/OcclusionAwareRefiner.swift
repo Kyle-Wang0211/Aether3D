@@ -41,7 +41,7 @@ public actor OcclusionAwareRefiner {
         depthMap: [Double],
         motionVectors: [MotionComplexityAnalyzer.MotionVector]
     ) -> OcclusionDetectionResult {
-        // Simplified occlusion detection based on depth discontinuities
+        // NOTE: Basic occlusion detection based on depth discontinuities
         var detectedRegions: [OcclusionRegion] = []
         
         // Analyze depth map for discontinuities

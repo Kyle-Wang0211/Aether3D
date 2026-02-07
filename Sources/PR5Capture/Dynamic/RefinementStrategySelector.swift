@@ -68,8 +68,18 @@ public actor RefinementStrategySelector {
             strategy = .adaptive
         }
         
+        // Encode scene type as numeric value for context
+        let sceneTypeValue: Double
+        switch sceneType {
+        case .staticScene: sceneTypeValue = 0.0
+        case .slowMotion: sceneTypeValue = 0.25
+        case .moderateMotion: sceneTypeValue = 0.50
+        case .fastMotion: sceneTypeValue = 0.75
+        case .complex: sceneTypeValue = 1.0
+        }
+
         let context = [
-            "sceneType": Double(sceneType.rawValue.hashValue % 100) / 100.0,
+            "sceneType": sceneTypeValue,
             "complexity": complexity,
             "quality": quality
         ]

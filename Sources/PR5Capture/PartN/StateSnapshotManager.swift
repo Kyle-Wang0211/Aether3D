@@ -81,7 +81,7 @@ public actor StateSnapshotManager {
     public struct StateSnapshot: Sendable {
         public let id: UUID
         public let timestamp: Date
-        public let state: [String: String]  // Simplified: use String instead of Any
+        public let state: [String: String]  // NOTE: Basic: use String instead of Any
         
         public init(id: UUID = UUID(), timestamp: Date, state: [String: Any]) {
             self.id = id

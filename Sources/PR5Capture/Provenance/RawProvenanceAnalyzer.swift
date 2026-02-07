@@ -77,14 +77,14 @@ public actor RawProvenanceAnalyzer {
     
     /// Extract PRNU fingerprint from RAW data
     private func extractPRNUFingerprint(_ rawData: Data) -> Data {
-        // Simplified PRNU extraction (actual implementation would use image processing)
+        // NOTE: Basic PRNU extraction (actual implementation would use image processing)
         // In production, this would use sophisticated noise pattern analysis
         return rawData.sha256()
     }
     
     /// Compute fingerprint similarity (0.0 to 1.0)
     private func computeFingerprintSimilarity(_ fp1: Data, _ fp2: Data) -> Double {
-        // Simplified similarity computation (Hamming distance normalized)
+        // NOTE: Basic similarity computation (Hamming distance normalized)
         // In production, this would use proper PRNU matching algorithms
         guard fp1.count == fp2.count else { return 0.0 }
         

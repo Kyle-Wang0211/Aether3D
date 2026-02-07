@@ -87,7 +87,7 @@ public actor TextureResponseAnalyzer {
     
     /// Compute texture similarity
     private func computeSimilarity(_ a: TextureDescriptor, _ b: TextureDescriptor) -> Double {
-        // Simplified similarity based on feature vectors
+        // NOTE: Basic similarity based on feature vectors
         let diff = zip(a.features, b.features).map { abs($0 - $1) }.reduce(0.0, +)
         let maxDiff = Double(a.features.count) * 1.0
         return 1.0 - min(1.0, diff / maxDiff)

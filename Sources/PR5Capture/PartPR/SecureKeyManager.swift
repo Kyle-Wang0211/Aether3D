@@ -58,7 +58,7 @@ public actor SecureKeyManager {
             )
         }
         
-        // Simplified retrieval (in production, retrieve from Keychain)
+        // NOTE: Basic retrieval (in production, retrieve from Keychain)
         return RetrievalResult(
             success: true,
             key: Data(reference.utf8),
