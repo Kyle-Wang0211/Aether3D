@@ -1,0 +1,27 @@
+{
+  "empty_grid": {
+    "coverage": 0.0,
+    "cell_count": 0
+  },
+  "all_l0": {
+    "coverage": 0.0,
+    "cell_count": 1000,
+    "level_breakdown": [1000, 0, 0, 0, 0, 0, 0]
+  },
+  "mixed_l1_l3": {
+    "coverage": 0.5,
+    "cell_count": 1000,
+    "level_breakdown": [0, 500, 300, 200, 0, 0, 0]
+  },
+  "all_l5": {
+    "coverage": 0.95,
+    "cell_count": 1000,
+    "level_breakdown": [0, 0, 0, 0, 0, 1000, 0]
+  },
+  "with_piz": {
+    "coverage": 0.3,
+    "cell_count": 1000,
+    "piz_count": 5,
+    "level_breakdown": [200, 300, 200, 200, 100, 0, 0]
+  }
+}

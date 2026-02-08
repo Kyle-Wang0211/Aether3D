@@ -74,4 +74,38 @@ public enum DynamicWeights {
         let progress = max(0.0, min(1.0, currentTotal))
         return weights(progress: progress)
     }
+    
+    /// **Rule ID:** PR6_GRID_WEIGHTS_001
+    /// Compute 4-way weights (Gate, Soft, Provenance, Advanced)
+    ///
+    /// - Parameter progress: Normalized progress [0, 1]
+    /// - Returns: Tuple (gate, soft, provenance, advanced) where sum ≈ 1.0
+    public static func weights4(progress: Double) -> (gate: Double, soft: Double, provenance: Double, advanced: Double) {
+        // Clamp progress to [0, 1]
+        let clampedProgress = max(0.0, min(1.0, progress))
+        
+        // Get 2-way weights first
+        let (gate, soft) = weights(progress: clampedProgress)
+        
+        // Split gate weight between gate and provenance
+        // Split soft weight between soft and advanced
+        // Early stage: gate dominates, late stage: soft dominates
+        let gateWeight = gate * 0.7  // 70% gate, 30% provenance
+        let provenanceWeight = gate * 0.3
+        let softWeight = soft * 0.7  // 70% soft, 30% advanced
+        let advancedWeight = soft * 0.3
+        
+        // Normalize to ensure sum ≈ 1.0
+        let sum = gateWeight + provenanceWeight + softWeight + advancedWeight
+        guard sum > 1e-9 else {
+            return (0.25, 0.25, 0.25, 0.25)  // Equal weights if sum is too small
+        }
+        
+        return (
+            gate: gateWeight / sum,
+            soft: softWeight / sum,
+            provenance: provenanceWeight / sum,
+            advanced: advancedWeight / sum
+        )
+    }
 }

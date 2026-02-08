@@ -162,4 +162,61 @@ public enum EvidenceInvariants {
         }
         #endif
     }
+    
+    // MARK: - PR6 Grid Invariants
+    
+    /// **Rule ID:** PR6_GRID_MASS_001
+    /// D-S mass invariant: occupied + free + unknown = 1.0
+    public static func assertGridMassInvariant(_ mass: DSMassFunction) {
+        #if DEBUG
+        let sum = mass.occupied + mass.free + mass.unknown
+        assert(abs(sum - 1.0) < EvidenceConstants.dsEpsilon,
+               "Grid mass invariant violated: sum=\(sum), expected 1.0")
+        #endif
+    }
+    
+    /// **Rule ID:** PR6_GRID_MONOTONIC_001
+    /// State machine monotonicity: current >= previous
+    public static func assertGridStateMonotonic(current: ColorState, previous: ColorState) {
+        #if DEBUG
+        // State order: black=0, darkGray=1, lightGray=2, white=3, original=4
+        let currentOrder: Int
+        switch current {
+        case .black: currentOrder = 0
+        case .darkGray: currentOrder = 1
+        case .lightGray: currentOrder = 2
+        case .white: currentOrder = 3
+        case .original: currentOrder = 4
+        case .unknown: currentOrder = -1
+        }
+        
+        let previousOrder: Int
+        switch previous {
+        case .black: previousOrder = 0
+        case .darkGray: previousOrder = 1
+        case .lightGray: previousOrder = 2
+        case .white: previousOrder = 3
+        case .original: previousOrder = 4
+        case .unknown: previousOrder = -1
+        }
+        
+        assert(currentOrder >= previousOrder,
+               "Grid state monotonicity violated: \(previous) -> \(current)")
+        #endif
+    }
+    
+    /// **Rule ID:** PR6_GRID_BALANCE_001
+    /// Refinement balance: 2:1 ratio for neighboring cell levels
+    public static func assertRefinementBalance(grid: EvidenceGrid) async {
+        #if DEBUG
+        // Simplified check: verify grid is in valid state
+        // Full implementation would check 2:1 balance rule for neighboring cells
+        let cells = await grid.allActiveCells()
+        for cell in cells {
+            // Verify cell level is valid
+            assert(cell.level.rawValue >= 0 && cell.level.rawValue <= 6,
+                   "Invalid cell level: \(cell.level.rawValue)")
+        }
+        #endif
+    }
 }

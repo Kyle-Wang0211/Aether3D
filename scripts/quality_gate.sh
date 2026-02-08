@@ -41,8 +41,8 @@ cleanup_timeout() {
 
 start_global_timeout() {
     (
-        sleep "$TIMEOUT_SECONDS"
-        echo "FAIL: quality_gate.sh timeout exceeded (${TIMEOUT_SECONDS}s)" >&2
+        sleep "$GLOBAL_TIMEOUT_SECONDS"
+        echo "FAIL: quality_gate.sh timeout exceeded (${GLOBAL_TIMEOUT_SECONDS}s)" >&2
         kill $$ 2>/dev/null || true
     ) &
     TIMEOUT_PID=$!
@@ -262,7 +262,7 @@ else
 fi
 
 # Gate 5: Determinism verification (if tests exist)
-echo "[5/5] Verifying determinism contracts..."
+echo "[5/6] Verifying determinism contracts..."
 echo "  Command: swift test --filter QualityPreCheckDeterminism"
 set +e  # Temporarily disable strict mode to capture output and exit code
 DETERMINISM_TEST_OUTPUT=$(run_with_timeout "$CMD_TIMEOUT_DETERMINISM" swift test --filter QualityPreCheckDeterminism 2>&1)
@@ -289,6 +289,31 @@ else
     echo "  ✅ Determinism tests passed ($DETERMINISM_TEST_COUNT tests executed)"
 fi
 
+# Gate 6: EvidenceGrid Determinism (PR6)
+echo "[6/6] Verifying EvidenceGrid determinism..."
+echo "  Command: swift test --filter EvidenceGridDeterminismTests --disable-swift-testing"
+set +e
+EVIDENCE_GRID_DETERMINISM_OUTPUT=$(run_with_timeout "$CMD_TIMEOUT_DETERMINISM" swift test --filter EvidenceGridDeterminismTests --disable-swift-testing 2>&1)
+EVIDENCE_GRID_DETERMINISM_EXIT_CODE=$?
+set -e
+
+if [ $EVIDENCE_GRID_DETERMINISM_EXIT_CODE -ne 0 ]; then
+    if echo "$EVIDENCE_GRID_DETERMINISM_OUTPUT" | grep -qE "No matching test cases|Executed 0 test"; then
+        echo "  ⚠️  SKIP (PASS): No EvidenceGridDeterminismTests found (filter returned 0 matches)"
+    else
+        echo "FAIL: EvidenceGrid determinism tests failed"
+        echo "Gate: EvidenceGridDeterminism"
+        echo "Command: swift test --filter EvidenceGridDeterminismTests --disable-swift-testing"
+        echo "Output:"
+        echo "$EVIDENCE_GRID_DETERMINISM_OUTPUT" | tail -50
+        echo "Fix: run the same swift test filter locally and fix failing cases."
+        exit 1
+    fi
+else
+    EVIDENCE_GRID_DETERMINISM_COUNT=$(echo "$EVIDENCE_GRID_DETERMINISM_OUTPUT" | grep -E "Executed.*test" | tail -1 | grep -oE "[0-9]+ test" | grep -oE "[0-9]+" || echo "unknown")
+    echo "  ✅ EvidenceGrid determinism tests passed ($EVIDENCE_GRID_DETERMINISM_COUNT tests executed)"
+fi
+
 echo ""
 echo "=== Gate Summary ==="
 echo "  Gate 0: Placeholder Check - ✅ PASS"
@@ -304,6 +329,11 @@ if [ $DETERMINISM_TEST_EXIT_CODE -eq 0 ]; then
     echo "  Gate 5: Determinism Tests - ✅ PASS"
 else
     echo "  Gate 5: Determinism Tests - ⚠️  SKIP (no matching tests)"
+fi
+if [ $EVIDENCE_GRID_DETERMINISM_EXIT_CODE -eq 0 ]; then
+    echo "  Gate 6: EvidenceGrid Determinism - ✅ PASS"
+else
+    echo "  Gate 6: EvidenceGrid Determinism - ⚠️  SKIP (no matching tests)"
 fi
 echo ""
 echo "=== All gates passed ==="

@@ -83,13 +83,17 @@ final class ClosedSetTests: XCTestCase {
     }
     
     func testEvidenceConfidenceLevelOrder() {
-        // Verify levels are ordered (L0 < L1 < L2 < L3)
+        // Verify levels are ordered (L0 < L1 < L2 < L3 < L4 < L5 < L6)
+        // PR6 added L4, L5, L6 levels for Evidence Grid System
         let levels = EvidenceConfidenceLevel.allCases.sorted { $0.rawValue < $1.rawValue }
-        XCTAssertEqual(levels.count, 4, "Must have 4 confidence levels")
+        XCTAssertEqual(levels.count, 7, "Must have 7 confidence levels (L0-L6)")
         XCTAssertEqual(levels[0], .L0)
         XCTAssertEqual(levels[1], .L1)
         XCTAssertEqual(levels[2], .L2)
         XCTAssertEqual(levels[3], .L3)
+        XCTAssertEqual(levels[4], .L4)
+        XCTAssertEqual(levels[5], .L5)
+        XCTAssertEqual(levels[6], .L6)
     }
     
     // MARK: - DisplayRefreshPolicy Closed Set Tests

@@ -303,6 +303,125 @@ public enum EvidenceConstants {
     
     /// Soft penalty for low novelty
     public static let lowNoveltyPenalty: Double = 0.7
+    
+    // MARK: - PR6 Evidence Grid Constants
+    
+    /// **Rule ID:** PR6_GRID_CONSTANTS_001
+    /// D-S Mass Fusion Constants
+    
+    /// D-S conflict switch threshold (MUST-FIX A)
+    /// If conflict K >= this value, switch to Yager rule
+    public static let dsConflictSwitch: Double = 0.85
+    
+    /// D-S epsilon for invariant checks
+    public static let dsEpsilon: Double = 1e-9
+    
+    /// Default occupied mass for good observation
+    public static let dsDefaultOccupiedGood: Double = 0.8
+    
+    /// Default unknown mass for good observation
+    public static let dsDefaultUnknownGood: Double = 0.2
+    
+    /// Default free mass for bad observation
+    public static let dsDefaultFreeBad: Double = 0.3
+    
+    /// **Rule ID:** PR6_GRID_CONSTANTS_002
+    /// EvidenceGrid Constants
+    
+    /// Maximum refinements per frame (including refinements + promotions)
+    public static let maxRefinementsPerFrame: Int = 16
+    
+    /// Batch maximum capacity (MUST-FIX V)
+    public static let batchMaxCapacity: Int = 1024
+    
+    /// Compaction trigger frame count
+    public static let compactionTriggerFrameCount: Int = 100
+    
+    /// Compaction trigger tombstone ratio
+    public static let compactionTriggerTombstoneRatio: Double = 0.3
+    
+    /// Initial map capacity (power of 2, MUST-FIX U)
+    public static let initialMapCapacity: Int = 1024
+    
+    /// Maximum load factor for open-addressing map (MUST-FIX U)
+    public static let maxLoadFactor: Double = 0.75
+    
+    /// Maximum probe attempts (MUST-FIX U)
+    public static let maxProbeAttempts: Int = 1024
+    
+    /// **Rule ID:** PR6_GRID_CONSTANTS_003
+    /// Memory Tier Constants (MUST-FIX Q)
+    
+    /// Memory tier thresholds (bytes)
+    public static let memoryTierThresholds: [UInt64] = [
+        2_000_000_000,  // 2GB
+        6_000_000_000   // 6GB
+    ]
+    
+    /// Minimum cells
+    public static let minCells: Int = 1000
+    
+    /// Hard cap cells
+    public static let hardCapCells: Int = 1_000_000
+    
+    /// Maximum cells by tier [low, mid, high]
+    public static let maxCellsByTier: [Int] = [
+        50_000,   // Low tier
+        200_000,  // Mid tier
+        500_000   // High tier
+    ]
+    
+    /// **Rule ID:** PR6_GRID_CONSTANTS_004
+    /// Evidence Aging Constants (MUST-FIX O + T)
+    
+    /// Aging half-life by level (seconds) [L0..L6]
+    public static let agingHalfLifeSecByLevel: [Double] = [
+        300,      // L0: 5 minutes
+        600,      // L1: 10 minutes
+        1200,     // L2: 20 minutes
+        3600,     // L3: 1 hour
+        7200,     // L4: 2 hours
+        14400,    // L5: 4 hours
+        28800     // L6: 8 hours
+    ]
+    
+    /// Aging table maximum delta (seconds, 24 hours)
+    public static let agingTableMaxDeltaSec: Double = 86400.0
+    
+    /// Aging table bin size (seconds, 1 minute)
+    public static let agingTableBinSizeSec: Double = 60.0
+    
+    /// **Rule ID:** PR6_GRID_CONSTANTS_005
+    /// PIZ Occlusion Exclusion Constants (MUST-FIX H)
+    
+    /// Minimum occlusion view directions
+    public static let minOcclusionViewDirections: Int = 3
+    
+    /// Occlusion freeze window (seconds)
+    public static let occlusionFreezeSec: Double = 60.0
+    
+    /// Maximum exclusion delta per second
+    public static let maxExclusionDeltaPerSec: Double = 0.05
+    
+    /// **Rule ID:** PR6_GRID_CONSTANTS_006
+    /// Coverage Estimator Constants
+    
+    /// Coverage level weights [L0..L6]
+    public static let coverageLevelWeights: [Double] = [
+        0.00,  // L0
+        0.20,  // L1
+        0.50,  // L2
+        0.80,  // L3
+        0.90,  // L4
+        0.95,  // L5
+        1.00   // L6
+    ]
+    
+    /// Coverage EMA alpha
+    public static let coverageEmaAlpha: Double = 0.15
+    
+    /// Maximum coverage delta per second (MUST-FIX R)
+    public static let maxCoverageDeltaPerSec: Double = 0.10
 }
 
 /// Allowed window sizes for median smoothing
