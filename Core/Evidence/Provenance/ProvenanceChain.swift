@@ -62,8 +62,8 @@ public final class ProvenanceChain: @unchecked Sendable {
         // Field order: timestampMillis|fromState|toState|coverageQuantized|levelBreakdownDigest|pizSummaryDigest|gridDigest|policyDigest|prevHash
         let canonicalString = [
             String(timestampMillis),                    // Int64 → decimal ASCII
-            String(fromState.rawValue.hashValue),      // ColorState → decimal ASCII (simplified)
-            String(toState.rawValue.hashValue),        // ColorState → decimal ASCII (simplified)
+            fromState.rawValue,                         // ColorState rawValue string (deterministic)
+            toState.rawValue,                           // ColorState rawValue string (deterministic)
             String(coverageQuantized),                  // Int32 → decimal ASCII
             levelBreakdownDigest,                       // String → UTF-8
             pizSummaryDigest,                          // String → UTF-8
@@ -108,8 +108,8 @@ public final class ProvenanceChain: @unchecked Sendable {
             // Recompute canonical string
             let canonicalString = [
                 String(entry.timestampMillis),
-                String(entry.fromState.rawValue.hashValue),
-                String(entry.toState.rawValue.hashValue),
+                entry.fromState.rawValue,
+                entry.toState.rawValue,
                 String(entry.coverageQuantized),
                 entry.levelBreakdownDigest,
                 entry.pizSummaryDigest,
