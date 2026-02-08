@@ -42,11 +42,14 @@ struct EvidenceGridCanonicalOutput {
         
         var results: [Result] = []
         
+        // Use fixed timestamps for cross-platform determinism
+        var fixedTimestamp: Int64 = 1000000
+
         for obs in observations {
             var batch = EvidenceGrid.EvidenceGridDeltaBatch()
             let mortonCode = await grid.quantizer.mortonCode(from: obs.worldPos)
             let key = SpatialKey(mortonCode: mortonCode, level: obs.level)
-            
+
             let cell = GridCell(
                 patchId: obs.patchId,
                 quantizedPosition: await grid.quantizer.quantize(obs.worldPos),
@@ -54,20 +57,20 @@ struct EvidenceGridCanonicalOutput {
                 dsMass: DSMassFunction.vacuous,
                 level: obs.level,
                 directionalMask: 0,
-                lastUpdatedMillis: MonotonicClock.nowMs()
+                lastUpdatedMillis: fixedTimestamp
             )
             batch.add(EvidenceGrid.GridCellUpdate.insert(key: key, cell: cell))
             await grid.apply(batch)
-            
+
             // Compute coverage
             let coverageResult = await estimator.update(grid: grid)
-            
+
             // Evaluate state
             let state = stateMachine.evaluate(coverage: coverageResult)
-            
-            // Append to provenance chain
+
+            // Append to provenance chain with fixed timestamp
             let hash = chain.appendTransition(
-                timestampMillis: MonotonicClock.nowMs(),
+                timestampMillis: fixedTimestamp,
                 fromState: stateMachine.getCurrentState(),
                 toState: state,
                 coverage: coverageResult.coveragePercentage,
@@ -76,6 +79,8 @@ struct EvidenceGridCanonicalOutput {
                 gridDigest: "test-digest",
                 policyDigest: "test-policy"
             )
+
+            fixedTimestamp += 1000
             
             results.append(Result(
                 patchId: obs.patchId,

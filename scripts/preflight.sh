@@ -194,9 +194,9 @@ echo "----------------------------------------"
 RULES_KEYWORDS=("Policy Hash" "Decision Hash" "Gate" "Determinism" "Audit Schema" "Invariant" "Signing" "Non-deterministic")
 SPILL_ERROR=0
 
-# Search in docs/ excluding constitution, rfcs, _archive, pr (prompts), implementation, and tasks
-# Implementation and tasks directories contain technical documentation that legitimately
-# uses these keywords in describing system architecture and task specifications
+# Search in docs/ excluding constitution, rfcs, _archive, pr (prompts), implementation, tasks, and adr
+# Implementation, tasks, and ADR directories contain technical documentation that legitimately
+# uses these keywords in describing system architecture, task specifications, and design decisions
 while IFS= read -r file; do
     if [ -f "$file" ]; then
         for keyword in "${RULES_KEYWORDS[@]}"; do
@@ -207,7 +207,7 @@ while IFS= read -r file; do
             fi
         done
     fi
-done < <(find docs -type f \( -name "*.md" -o -name "*.txt" \) ! -path "docs/constitution/*" ! -path "docs/rfcs/*" ! -path "docs/_archive/*" ! -path "docs/pr/*" ! -path "docs/implementation/*" ! -path "docs/tasks/*" 2>/dev/null || true)
+done < <(find docs -type f \( -name "*.md" -o -name "*.txt" \) ! -path "docs/constitution/*" ! -path "docs/rfcs/*" ! -path "docs/_archive/*" ! -path "docs/pr/*" ! -path "docs/implementation/*" ! -path "docs/tasks/*" ! -path "docs/adr/*" 2>/dev/null || true)
 
 # Also check README.md
 if [ -f "README.md" ]; then

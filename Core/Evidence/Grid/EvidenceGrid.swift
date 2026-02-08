@@ -29,7 +29,7 @@ public final class EvidenceGrid: @unchecked Sendable {
         public var updates: [GridCellUpdate]
         public let maxCapacity: Int
         
-        public init(maxCapacity: Int = 1024) {
+        public init(maxCapacity: Int = EvidenceConstants.batchMaxCapacity) {
             self.updates = []
             self.maxCapacity = maxCapacity
         }
@@ -84,7 +84,7 @@ public final class EvidenceGrid: @unchecked Sendable {
     
     // MARK: - Initialization
     
-    public init(cellSize: LengthQ, maxCells: Int = 50000) {
+    public init(cellSize: LengthQ, maxCells: Int = EvidenceConstants.maxCellsByTier[0]) {
         self.quantizer = SpatialQuantizer(cellSize: cellSize)
         self.maxCells = maxCells
     }
