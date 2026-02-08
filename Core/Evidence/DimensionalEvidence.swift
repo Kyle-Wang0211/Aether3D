@@ -7,7 +7,6 @@
 //
 
 import Foundation
-import CryptoKit
 
 /// **Rule ID:** PR6_DIMENSIONAL_001
 /// Dimensional evidence score set (15 dimensions)

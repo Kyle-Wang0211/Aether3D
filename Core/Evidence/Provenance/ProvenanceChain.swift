@@ -7,7 +7,11 @@
 //
 
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 
 /// **Rule ID:** PR6_GRID_PROVENANCE_001
 /// Provenance Chain: maintains SHA-256 hash chain for state transitions
