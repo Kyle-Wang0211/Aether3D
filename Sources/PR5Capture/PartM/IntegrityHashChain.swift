@@ -95,28 +95,51 @@ public actor IntegrityHashChain {
         return CryptoHasher.sha256(data)
     }
     
-    /// Compute Merkle root
+    /// Compute Merkle root with RFC 9162 domain separation.
+    ///
+    /// **SECURITY FIX**: Previous implementation lacked domain separation prefixes,
+    /// which creates a second-preimage vulnerability where an attacker could craft
+    /// a different tree structure producing the same Merkle root.
+    ///
+    /// RFC 9162 Section 2.1.1 requires:
+    /// - 0x00 prefix for leaf nodes (first level hashing)
+    /// - 0x01 prefix for internal/parent nodes (combining two children)
+    ///
+    /// This prevents node-as-leaf substitution attacks.
     private func computeMerkleRoot() -> String {
         guard !chain.isEmpty else { return "" }
-        
-        var hashes = chain.map { $0.hash }
-        
-        // Build Merkle tree
+
+        // First level: apply leaf domain separation (0x00 prefix)
+        var hashes: [String] = chain.map { node in
+            var leafData = Data([0x00])  // RFC 9162 leaf prefix
+            if let hashBytes = node.hash.data(using: .utf8) {
+                leafData.append(hashBytes)
+            }
+            return CryptoHasher.sha256(leafData)
+        }
+
+        // Build Merkle tree with internal node domain separation (0x01 prefix)
         while hashes.count > 1 {
             var nextLevel: [String] = []
             for i in stride(from: 0, to: hashes.count, by: 2) {
                 if i + 1 < hashes.count {
-                    let combined = hashes[i] + hashes[i+1]
-                    // 使用密码学安全的SHA256哈希，符合INV-SEC-057
-                    let combinedData = combined.data(using: .utf8) ?? Data()
-                    nextLevel.append(CryptoHasher.sha256(combinedData))
+                    // RFC 9162: internal node = SHA256(0x01 || left || right)
+                    var nodeData = Data([0x01])  // RFC 9162 internal node prefix
+                    if let leftBytes = hashes[i].data(using: .utf8) {
+                        nodeData.append(leftBytes)
+                    }
+                    if let rightBytes = hashes[i+1].data(using: .utf8) {
+                        nodeData.append(rightBytes)
+                    }
+                    nextLevel.append(CryptoHasher.sha256(nodeData))
                 } else {
+                    // Odd node: promote to next level unchanged
                     nextLevel.append(hashes[i])
                 }
             }
             hashes = nextLevel
         }
-        
+
         return hashes.first ?? ""
     }
     
