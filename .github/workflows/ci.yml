@@ -1088,3 +1088,270 @@ jobs:
             exit 1
           fi
           echo "✅ PIZ Final Gate passed"
+
+  # PR6 Evidence Grid System CI Jobs
+  evidence-grid-matrix:
+    name: EvidenceGrid Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [ssot-declaration-gate]
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-22.04]
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Select stable Xcode on macOS
+        if: matrix.os == 'macos-15'
+        run: |
+          set -euo pipefail
+          pick() {
+            local app="$1"
+            if [ -d "/Applications/$app/Contents/Developer" ]; then
+              echo "✅ Selecting /Applications/$app"
+              export DEVELOPER_DIR="/Applications/$app/Contents/Developer"
+              sudo xcode-select -s "$DEVELOPER_DIR"
+              return 0
+            fi
+            return 1
+          }
+          pick "Xcode_16.2.app" || pick "Xcode_16.1.app" || pick "Xcode_16.0.app" || pick "Xcode.app" || {
+            echo "[PR6_SPEC_VIOLATION] No Xcode found"
+            exit 1
+          }
+          export DEVELOPER_DIR="$(xcode-select -p)"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+
+      - name: Import Swift GPG key (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            if curl -fsSL --compressed --retry 3 --retry-delay 5 https://swift.org/keys/all-keys.asc | gpg --import - 2>&1; then
+              echo "✅ Swift GPG key imported"
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Install system deps (Ubuntu)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
+
+      - name: Setup Swift (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          SWIFT_VERSION="6.2.3"
+          SWIFT_PLATFORM="ubuntu22.04"
+          SWIFT_TARBALL="swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}.tar.gz"
+          SWIFT_URL="https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2204/swift-${SWIFT_VERSION}-RELEASE/${SWIFT_TARBALL}"
+          curl -fsSL --retry 3 --retry-delay 5 "${SWIFT_URL}" -o "/tmp/${SWIFT_TARBALL}"
+          curl -fsSL --retry 3 --retry-delay 5 "${SWIFT_URL}.sig" -o "/tmp/${SWIFT_TARBALL}.sig"
+          gpg --verify "/tmp/${SWIFT_TARBALL}.sig" "/tmp/${SWIFT_TARBALL}" || echo "⚠️ GPG verification failed"
+          sudo tar -xzf "/tmp/${SWIFT_TARBALL}" -C /opt
+          SWIFT_PATH="/opt/swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}/usr/bin"
+          echo "${SWIFT_PATH}" >> $GITHUB_PATH
+          export PATH="${SWIFT_PATH}:${PATH}"
+
+      - name: Build
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          swift build
+
+      - name: Run EvidenceGrid Tests
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          swift test --filter EvidenceGridTests --disable-swift-testing || {
+            echo "[PR6_SPEC_VIOLATION] EvidenceGrid tests failed"
+            exit 1
+          }
+
+      - name: Generate Canonical Output
+        env:
+          LC_ALL: C
+          LANG: C
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/evidence-grid
+          swift run EvidenceGridCanonicalOutput > artifacts/evidence-grid/grid_canonical.json || {
+            echo "[PR6_SPEC_VIOLATION] EvidenceGridCanonicalOutput failed"
+            exit 1
+          }
+
+      - name: Verify Canonical JSON Exists
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/evidence-grid/grid_canonical.json ]; then
+            echo "[PR6_SPEC_VIOLATION] Canonical JSON not found"
+            exit 1
+          fi
+          echo "✅ Canonical JSON generated"
+          echo "File size: $(wc -c < artifacts/evidence-grid/grid_canonical.json) bytes"
+
+      - name: Upload Canonical JSON Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-grid-canon-${{ matrix.os }}
+          path: artifacts/evidence-grid/grid_canonical.json
+
+  evidence-grid-compare:
+    name: EvidenceGrid Cross-Platform Comparison
+    runs-on: ubuntu-22.04
+    needs: evidence-grid-matrix
+    if: always()
+    env:
+      EVIDENCE_GRID_MACOS_ARTIFACT: evidence-grid-canon-macos-15
+      EVIDENCE_GRID_LINUX_ARTIFACT: evidence-grid-canon-ubuntu-22.04
+    steps:
+      - name: "Guard: Assert evidence-grid-matrix success"
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.evidence-grid-matrix.result }}" != "success" ]; then
+            echo "[PR6_SPEC_VIOLATION] evidence-grid-matrix not successful"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.EVIDENCE_GRID_MACOS_ARTIFACT }}
+          path: artifacts/macos-evidence-grid
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.EVIDENCE_GRID_LINUX_ARTIFACT }}
+          path: artifacts/linux-evidence-grid
+
+      - name: Compare Canonical JSON (Byte-Identical)
+        run: |
+          set -euo pipefail
+          MACOS_FILE="artifacts/macos-evidence-grid/grid_canonical.json"
+          LINUX_FILE="artifacts/linux-evidence-grid/grid_canonical.json"
+          
+          if [ ! -f "$MACOS_FILE" ] || [ ! -f "$LINUX_FILE" ]; then
+            echo "[PR6_SPEC_VIOLATION] Artifact files not found"
+            exit 1
+          fi
+          
+          if cmp -s "$MACOS_FILE" "$LINUX_FILE"; then
+            echo "✅ Canonical JSON is byte-identical between macOS and Linux"
+          else
+            echo "[PR6_NUMERIC_DRIFT] Canonical JSON differs between platforms"
+            diff -u "$MACOS_FILE" "$LINUX_FILE" | head -100 || true
+            exit 1
+          fi
+
+  evidence-grid-determinism:
+    name: EvidenceGrid Determinism Tests
+    runs-on: ubuntu-22.04
+    needs: [ssot-declaration-gate]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Import Swift GPG key
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            if curl -fsSL --compressed --retry 3 --retry-delay 5 https://swift.org/keys/all-keys.asc | gpg --import - 2>&1; then
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Install system deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils git unzip gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-11-dev libpython3-dev libsqlite3-0 \
+            libstdc++-11-dev libxml2-dev libz3-dev pkg-config tzdata \
+            zlib1g-dev libsqlite3-dev
+
+      - name: Setup Swift
+        run: |
+          set -euo pipefail
+          SWIFT_VERSION="6.2.3"
+          SWIFT_PLATFORM="ubuntu22.04"
+          SWIFT_TARBALL="swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}.tar.gz"
+          SWIFT_URL="https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2204/swift-${SWIFT_VERSION}-RELEASE/${SWIFT_TARBALL}"
+          curl -fsSL --retry 3 --retry-delay 5 "${SWIFT_URL}" -o "/tmp/${SWIFT_TARBALL}"
+          sudo tar -xzf "/tmp/${SWIFT_TARBALL}" -C /opt
+          SWIFT_PATH="/opt/swift-${SWIFT_VERSION}-RELEASE-${SWIFT_PLATFORM}/usr/bin"
+          echo "${SWIFT_PATH}" >> $GITHUB_PATH
+
+      - name: Build
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          swift build
+
+      - name: Run Determinism Tests
+        env:
+          LC_ALL: en_US.UTF-8
+          LANG: en_US.UTF-8
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          swift test --filter EvidenceGridDeterminismTests --disable-swift-testing || {
+            echo "[PR6_SPEC_VIOLATION] Determinism tests failed"
+            exit 1
+          }
+
+  evidence-grid-gate:
+    name: EvidenceGrid Final Gate (no-skip policy)
+    runs-on: ubuntu-22.04
+    needs: [evidence-grid-matrix, evidence-grid-compare, evidence-grid-determinism]
+    if: always()
+    steps:
+      - name: Assert all EvidenceGrid jobs succeeded
+        run: |
+          set -euo pipefail
+          echo "evidence-grid-matrix result: ${{ needs.evidence-grid-matrix.result }}"
+          echo "evidence-grid-compare result: ${{ needs.evidence-grid-compare.result }}"
+          echo "evidence-grid-determinism result: ${{ needs.evidence-grid-determinism.result }}"
+          if [ "${{ needs.evidence-grid-matrix.result }}" != "success" ]; then
+            echo "[PR6_SPEC_VIOLATION] evidence-grid-matrix is not success"
+            exit 1
+          fi
+          if [ "${{ needs.evidence-grid-compare.result }}" != "success" ]; then
+            echo "[PR6_SPEC_VIOLATION] evidence-grid-compare is not success"
+            exit 1
+          fi
+          if [ "${{ needs.evidence-grid-determinism.result }}" != "success" ]; then
+            echo "[PR6_SPEC_VIOLATION] evidence-grid-determinism is not success"
+            exit 1
+          fi
+          echo "✅ EvidenceGrid Final Gate passed"

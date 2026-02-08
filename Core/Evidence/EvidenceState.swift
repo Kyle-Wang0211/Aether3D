@@ -71,7 +71,20 @@ public struct EvidenceState: Codable, Sendable {
     /// Export timestamp (milliseconds)
     public let exportedAtMs: Int64
     
-    public static let currentSchemaVersion = "2.1"
+    /// **Rule ID:** PR6_GRID_STATE_007
+    /// PR6 Extension: Dimensional snapshots (v3.0)
+    public let dimensionalSnapshots: [String: DimensionalScoreSet]?
+    
+    /// PR6 Extension: Coverage percentage (v3.0)
+    public let coveragePercentage: Double?
+    
+    /// PR6 Extension: State machine state (v3.0)
+    public let stateMachineState: ColorState?
+    
+    /// PR6 Extension: PIZ region count (v3.0)
+    public let pizRegionCount: Int?
+    
+    public static let currentSchemaVersion = "3.0"  // PR6: Bumped to v3.0
     
     /// Minimum compatible schema version
     public static let minCompatibleVersion = "2.0"
@@ -82,7 +95,11 @@ public struct EvidenceState: Codable, Sendable {
         softDisplay: Double,
         lastTotalDisplay: Double,
         exportedAtMs: Int64,
-        schemaVersion: String = Self.currentSchemaVersion
+        schemaVersion: String = Self.currentSchemaVersion,
+        dimensionalSnapshots: [String: DimensionalScoreSet]? = nil,
+        coveragePercentage: Double? = nil,
+        stateMachineState: ColorState? = nil,
+        pizRegionCount: Int? = nil
     ) {
         self.patches = patches
         self.gateDisplay = gateDisplay
@@ -90,6 +107,57 @@ public struct EvidenceState: Codable, Sendable {
         self.lastTotalDisplay = lastTotalDisplay
         self.schemaVersion = schemaVersion
         self.exportedAtMs = exportedAtMs
+        self.dimensionalSnapshots = dimensionalSnapshots
+        self.coveragePercentage = coveragePercentage
+        self.stateMachineState = stateMachineState
+        self.pizRegionCount = pizRegionCount
+    }
+    
+    /// **Rule ID:** PR6_GRID_STATE_008
+    /// Backward compatible decoding: v2.x loads with dimensional fields == nil
+    enum CodingKeys: String, CodingKey {
+        case patches
+        case gateDisplay
+        case softDisplay
+        case lastTotalDisplay
+        case schemaVersion
+        case exportedAtMs
+        case dimensionalSnapshots
+        case coveragePercentage
+        case stateMachineState
+        case pizRegionCount
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.patches = try container.decode([String: PatchEntrySnapshot].self, forKey: .patches)
+        self.gateDisplay = try container.decode(Double.self, forKey: .gateDisplay)
+        self.softDisplay = try container.decode(Double.self, forKey: .softDisplay)
+        self.lastTotalDisplay = try container.decode(Double.self, forKey: .lastTotalDisplay)
+        self.schemaVersion = try container.decode(String.self, forKey: .schemaVersion)
+        self.exportedAtMs = try container.decode(Int64.self, forKey: .exportedAtMs)
+        
+        // PR6 v3.0 fields (optional for backward compatibility)
+        self.dimensionalSnapshots = try container.decodeIfPresent([String: DimensionalScoreSet].self, forKey: .dimensionalSnapshots)
+        self.coveragePercentage = try container.decodeIfPresent(Double.self, forKey: .coveragePercentage)
+        self.stateMachineState = try container.decodeIfPresent(ColorState.self, forKey: .stateMachineState)
+        self.pizRegionCount = try container.decodeIfPresent(Int.self, forKey: .pizRegionCount)
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(patches, forKey: .patches)
+        try container.encode(gateDisplay, forKey: .gateDisplay)
+        try container.encode(softDisplay, forKey: .softDisplay)
+        try container.encode(lastTotalDisplay, forKey: .lastTotalDisplay)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(exportedAtMs, forKey: .exportedAtMs)
+        
+        // PR6 v3.0 fields
+        try container.encodeIfPresent(dimensionalSnapshots, forKey: .dimensionalSnapshots)
+        try container.encodeIfPresent(coveragePercentage, forKey: .coveragePercentage)
+        try container.encodeIfPresent(stateMachineState, forKey: .stateMachineState)
+        try container.encodeIfPresent(pizRegionCount, forKey: .pizRegionCount)
     }
     
     /// Check if version is compatible

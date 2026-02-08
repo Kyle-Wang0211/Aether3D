@@ -1,0 +1,8 @@
+{
+  "scenario_1_empty": {"coverage": 0.0},
+  "scenario_2_all_l0": {"coverage": 0.0},
+  "scenario_3_mixed_l1_l3": {"coverage": 0.5},
+  "scenario_4_all_l5": {"coverage": 0.95},
+  "scenario_5_with_piz": {"coverage": 0.3},
+  "scenario_6_all_l6": {"coverage": 1.0}
+}

@@ -44,6 +44,26 @@ public final class IsolatedEvidenceEngine {
     /// Computes gateQuality from view coverage, geometry, and basic quality metrics
     private let gateComputer: GateQualityComputer
     
+    // MARK: - PR6 Evidence Grid Components
+    
+    /// Evidence grid (PR6)
+    private var evidenceGrid: EvidenceGrid?
+    
+    /// Multi-ledger (PR6)
+    private var multiLedger: MultiLedger?
+    
+    /// Coverage estimator (PR6)
+    private var coverageEstimator: CoverageEstimator?
+    
+    /// PIZ grid analyzer (PR6)
+    private var pizGridAnalyzer: PIZGridAnalyzer?
+    
+    /// PIZ occlusion filter (PR6)
+    private var pizOcclusionFilter: PIZOcclusionFilter?
+    
+    /// State machine (PR6)
+    private var stateMachine: EvidenceStateMachine?
+    
     // MARK: - Initialization
     
     public init() {
@@ -138,6 +158,115 @@ public final class IsolatedEvidenceEngine {
         )
     }
     
+    /// **Rule ID:** PR6_GRID_ENGINE_001
+    /// Process frame with Evidence Grid (PR6 extension)
+    ///
+    /// This method:
+    /// 1. Calls existing processObservation() (unchanged)
+    /// 2. Runs PR6 post-processing (collected to batch)
+    /// 3. Applies batch: await evidenceGrid.apply(batch)
+    ///
+    /// - Parameters:
+    ///   - observation: Evidence observation
+    ///   - gateQuality: Gate quality
+    ///   - softQuality: Soft quality (from dimensional evidence)
+    ///   - verdict: Observation verdict
+    ///   - dimensionalScores: Dimensional scores (PR6)
+    ///   - worldPosition: World position for grid quantization
+    public func processFrameWithGrid(
+        observation: EvidenceObservation,
+        gateQuality: Double,
+        softQuality: Double,
+        verdict: ObservationVerdict,
+        dimensionalScores: DimensionalScoreSet? = nil,
+        worldPosition: EvidenceVector3? = nil
+    ) async {
+        // Step 1: Call existing processObservation() (unchanged)
+        processObservation(
+            observation,
+            gateQuality: gateQuality,
+            softQuality: softQuality,
+            verdict: verdict
+        )
+        
+        // Step 2: Initialize PR6 components if needed
+        if evidenceGrid == nil {
+            let cellSize = GridResolutionPolicy.recommendedCaptureFloor(for: .standard)
+            evidenceGrid = EvidenceGrid(cellSize: cellSize)
+            multiLedger = MultiLedger()
+            coverageEstimator = CoverageEstimator()
+            pizGridAnalyzer = PIZGridAnalyzer()
+            pizOcclusionFilter = PIZOcclusionFilter()
+            stateMachine = EvidenceStateMachine()
+        }
+        
+        guard let grid = evidenceGrid,
+              let ledger = multiLedger,
+              let estimator = coverageEstimator,
+              let analyzer = pizGridAnalyzer,
+              let filter = pizOcclusionFilter,
+              let machine = stateMachine else {
+            return
+        }
+        
+        // Step 3: Create batch for PR6 updates
+        var batch = EvidenceGrid.EvidenceGridDeltaBatch(maxCapacity: EvidenceConstants.batchMaxCapacity)
+        
+        // Step 4: PR6 post-processing (collect to batch)
+        // DimensionalComputer → EvidenceGrid.update (add to batch)
+        if let worldPos = worldPosition, let dimScores = dimensionalScores {
+            // Create spatial key from world position
+            let quantizer = SpatialQuantizer(cellSize: grid.quantizer.cellSize)
+            let mortonCode = quantizer.mortonCode(from: worldPos)
+            let key = SpatialKey(mortonCode: mortonCode, level: .L3)  // Default level
+            
+            // Create grid cell
+            let quantizedPos = quantizer.quantize(worldPos)
+            let cell = GridCell(
+                patchId: observation.patchId,
+                quantizedPosition: quantizedPos,
+                dimScores: dimScores,
+                dsMass: DSMassFusion.fromDeltaMultiplier(verdict.deltaMultiplier),
+                level: .L3,
+                directionalMask: 0,  // Will be computed from view direction
+                lastUpdatedMillis: MonotonicClock.nowMs()
+            )
+            
+            batch.add(.insert(key: key, cell: cell))
+        }
+        
+        // MultiLedger.update* (add to batch)
+        ledger.updateCore(
+            observation: observation,
+            gateQuality: gateQuality,
+            softQuality: softQuality,
+            verdict: verdict,
+            frameId: observation.frameId,
+            timestamp: observation.timestamp
+        )
+        
+        // Step 5: Apply batch (single await)
+        await grid.apply(batch)
+        
+        // Step 6: CoverageEstimator.update (async)
+        let coverageResult = await estimator.update(grid: grid)
+        
+        // Step 7: PIZGridAnalyzer.update (async)
+        let pizRegions = await analyzer.update(grid: grid)
+        
+        // Step 8: PIZOcclusionFilter.update
+        let filteredRegions = filter.filter(regions: pizRegions)
+        
+        // Step 9: EvidenceStateMachine.evaluate
+        let newState = machine.evaluate(
+            coverage: coverageResult,
+            pizRegions: filteredRegions,
+            evidenceSnapshot: nil  // TODO: Convert snapshot to EvidenceState
+        )
+        
+        // State is stored in stateMachine, can be retrieved via snapshot()
+    }
+    
     /// Export state as JSON Data
     /// - Parameter timestampMs: Optional fixed timestamp for determinism (defaults to current time)
     public func exportStateJSON(timestampMs: Int64? = nil) throws -> Data {
@@ -183,6 +312,14 @@ public final class IsolatedEvidenceEngine {
         gateDeltaTracker.reset()
         softDeltaTracker.reset()
         gateComputer.reset()
+        
+        // Reset PR6 components
+        evidenceGrid?.reset()
+        multiLedger = MultiLedger()
+        coverageEstimator?.reset()
+        pizGridAnalyzer = PIZGridAnalyzer()
+        pizOcclusionFilter?.reset()
+        stateMachine?.reset()
     }
     
     // MARK: - PR3 Gate Processing

@@ -230,6 +230,12 @@ public enum ColorState: String, Codable, Sendable {
     /// Unknown value for forward compatibility
     case unknown
     
+    /// **Rule ID:** PR6_GRID_STATE_009
+    /// PR6 Extension: Check if state is S5 (original)
+    public var isS5: Bool {
+        return self == .original
+    }
+    
     // MARK: - Codable with Forward Compatibility
     
     public init(from decoder: Decoder) throws {

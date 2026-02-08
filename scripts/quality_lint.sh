@@ -133,10 +133,55 @@ echo "[9/10] Checking for shared mutable state..."
 echo "  (Structural check - manual review recommended)"
 
 # lintNoLocaleSensitiveComparisons - 禁止区域敏感比较 (H2)
-echo "[10/10] Checking for locale-sensitive comparisons..."
+echo "[10/15] Checking for locale-sensitive comparisons..."
 VIOLATIONS=$(find Core/Quality -name "*.swift" -type f | xargs grep -rn "\.localizedCompare\|Locale\|localizedString" 2>/dev/null | grep -v "en_US_POSIX\|//\|comment" || true)
 if [ -n "$VIOLATIONS" ]; then
     echo "ERROR: Found locale-sensitive comparisons (should use bytewise UTF-8)"
+    echo "$VIOLATIONS"
+    ERRORS=1
+fi
+
+# Rule 11: No Set/Dictionary iteration in Core/Evidence/Grid/
+echo "[11/15] Checking for Set/Dictionary iteration in Evidence/Grid..."
+VIOLATIONS=$(find Core/Evidence/Grid -name "*.swift" -type f | xargs grep -rn "for .* in .*\bSet\b\|for .* in .*\bDictionary\b" 2>/dev/null | grep -v "//\|comment" || true)
+if [ -n "$VIOLATIONS" ]; then
+    echo "ERROR: Found Set/Dictionary iteration in Core/Evidence/Grid/ (should use stable key list)"
+    echo "$VIOLATIONS"
+    ERRORS=1
+fi
+
+# Rule 12: No float keys in Evidence/Grid/
+echo "[12/15] Checking for float keys in Evidence/Grid..."
+VIOLATIONS=$(find Core/Evidence/Grid -name "*.swift" -type f | xargs grep -rn "Dictionary<.*Double\|Dictionary<.*Float" 2>/dev/null | grep -v "//\|comment" || true)
+if [ -n "$VIOLATIONS" ]; then
+    echo "ERROR: Found float keys in Evidence/Grid/ (should use integer keys)"
+    echo "$VIOLATIONS"
+    ERRORS=1
+fi
+
+# Rule 13: No UUID() in Evidence/Grid/
+echo "[13/15] Checking for UUID() in Evidence/Grid..."
+VIOLATIONS=$(find Core/Evidence/Grid -name "*.swift" -type f | xargs grep -rn "UUID()" 2>/dev/null | grep -v "//\|comment" || true)
+if [ -n "$VIOLATIONS" ]; then
+    echo "ERROR: Found UUID() in Evidence/Grid/ (should use deterministic IDs)"
+    echo "$VIOLATIONS"
+    ERRORS=1
+fi
+
+# Rule 14: No exp( in Evidence/Grid/
+echo "[14/15] Checking for exp( in Evidence/Grid..."
+VIOLATIONS=$(find Core/Evidence/Grid -name "*.swift" -type f | xargs grep -rn "[^a-zA-Z]exp(" 2>/dev/null | grep -v "//\|comment\|explicit\|expect" || true)
+if [ -n "$VIOLATIONS" ]; then
+    echo "ERROR: Found exp( in Evidence/Grid/ (should use Q15 LUT)"
+    echo "$VIOLATIONS"
+    ERRORS=1
+fi
+
+# Rule 15: No bare await.*evidenceGrid outside batch pattern
+echo "[15/15] Checking for bare await.*evidenceGrid calls..."
+VIOLATIONS=$(find Core/Evidence -name "*.swift" -type f | xargs grep -rn "await.*evidenceGrid\|await.*grid\." 2>/dev/null | grep -v "apply(batch\|allActiveCells\|get(key:" | grep -v "//\|comment" || true)
+if [ -n "$VIOLATIONS" ]; then
+    echo "ERROR: Found bare await.*evidenceGrid calls outside batch pattern"
     echo "$VIOLATIONS"
     ERRORS=1
 fi

@@ -13,11 +13,16 @@ import Foundation
 // MARK: - Evidence Confidence Level (Closed Set)
 
 /// Evidence confidence level (closed set, append-only)
+/// **Rule ID:** PR6_GRID_CONFIDENCE_001
+/// PR6 Extension: Added L4, L5, L6 levels for Evidence Grid System
 public enum EvidenceConfidenceLevel: UInt8, Codable, CaseIterable {
     case L0 = 0  // Lowest confidence
     case L1 = 1  // Medium confidence
     case L2 = 2  // High confidence
     case L3 = 3  // Highest confidence (asset-grade)
+    case L4 = 4  // PR6: Extended confidence level
+    case L5 = 5  // PR6: Extended confidence level
+    case L6 = 6  // PR6: Extended confidence level
     
     public var name: String {
         switch self {
@@ -25,6 +30,9 @@ public enum EvidenceConfidenceLevel: UInt8, Codable, CaseIterable {
         case .L1: return "L1"
         case .L2: return "L2"
         case .L3: return "L3"
+        case .L4: return "L4"
+        case .L5: return "L5"
+        case .L6: return "L6"
         }
     }
 }
