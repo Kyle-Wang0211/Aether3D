@@ -13,10 +13,25 @@ import CryptoKit
 import Crypto
 #endif
 
+/// Thread-safe signed audit log with chain integrity.
+///
+/// **SECURITY FIX**: Added NSLock to protect `lastSignature` and `writer` from
+/// concurrent access. Previous implementation had a TOCTOU race condition:
+///
+///   Thread A: read lastSignature (nil)
+///   Thread B: read lastSignature (nil)     ← both see same stale value
+///   Thread A: write entry (prevSig=nil), update lastSignature to sig_A
+///   Thread B: write entry (prevSig=nil), update lastSignature to sig_B
+///   Result: Chain is BROKEN — entry B has wrong prevSignature
+///
+/// The lock serializes all append() calls, ensuring each entry correctly
+/// chains from the previous one. The lock also protects writer.appendRawLine()
+/// from interleaved writes.
 final class SignedAuditLog {
     private let writer: AuditFileWriter
     private let keyStore: SigningKeyStore
     private var lastSignature: String?
+    private let lock = NSLock()  // SECURITY FIX: protects lastSignature + writer
 
     init(fileURL: URL, keyStore: SigningKeyStore) throws {
         do {
@@ -38,6 +53,11 @@ final class SignedAuditLog {
     }
 
     func append(eventType: String, detailsJson: String?, detailsSchemaVersion: String) throws {
+        // SECURITY FIX: Lock serializes all append() calls to prevent TOCTOU on lastSignature.
+        // The entire read-compute-write sequence must be atomic.
+        lock.lock()
+        defer { lock.unlock() }
+
         do {
             try SignedAuditEntry.validateInput(
                 eventType: eventType,
