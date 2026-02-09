@@ -108,6 +108,16 @@ public actor ConsentStorage {
         self.dbPath = dbPath
         self.encryptionKey = encryptionKey
 
+        // Ensure parent directory exists (WAL mode creates .db-wal and .db-shm siblings)
+        let parentDir = (dbPath as NSString).deletingLastPathComponent
+        if !parentDir.isEmpty && !FileManager.default.fileExists(atPath: parentDir) {
+            try FileManager.default.createDirectory(
+                atPath: parentDir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+        }
+
         var db: OpaquePointer?
         let result = sqlite3_open(dbPath, &db)
         guard result == SQLITE_OK else {
@@ -164,13 +174,19 @@ public actor ConsentStorage {
         }
         defer { sqlite3_finalize(statement) }
 
-        let idCStr = record.id.cString(using: .utf8)!
-        let opCStr = operation.cString(using: .utf8)!
+        // Use SQLITE_TRANSIENT to ensure SQLite copies string data immediately.
+        // With nil (SQLITE_STATIC), Release mode optimizations may reuse the
+        // stack memory before sqlite3_step executes, corrupting the data.
+        let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-        sqlite3_bind_text(statement, 1, idCStr, -1, nil)
-        sqlite3_bind_text(statement, 2, opCStr, -1, nil)
+        record.id.withCString { idPtr in
+            sqlite3_bind_text(statement, 1, idPtr, Int32(record.id.utf8.count), SQLITE_TRANSIENT)
+        }
+        operation.withCString { opPtr in
+            sqlite3_bind_text(statement, 2, opPtr, Int32(operation.utf8.count), SQLITE_TRANSIENT)
+        }
         encryptedData.withUnsafeBytes { ptr in
-            sqlite3_bind_blob(statement, 3, ptr.baseAddress, Int32(encryptedData.count), nil)
+            sqlite3_bind_blob(statement, 3, ptr.baseAddress, Int32(encryptedData.count), SQLITE_TRANSIENT)
         }
         sqlite3_bind_int64(statement, 4, timestampNs)
         sqlite3_bind_int64(statement, 5, expirationNs)
@@ -206,8 +222,10 @@ public actor ConsentStorage {
         }
         defer { sqlite3_finalize(statement) }
 
-        let opCStr = operation.cString(using: .utf8)!
-        sqlite3_bind_text(statement, 1, opCStr, -1, nil)
+        let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        operation.withCString { opPtr in
+            sqlite3_bind_text(statement, 1, opPtr, Int32(operation.utf8.count), SQLITE_TRANSIENT)
+        }
 
         guard sqlite3_step(statement) == SQLITE_ROW else {
             return nil
