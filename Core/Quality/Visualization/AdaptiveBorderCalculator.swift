@@ -35,7 +35,12 @@ public final class AdaptiveBorderCalculator {
         var widths: [Float] = []
         
         for triangle in triangles {
-            let display = displayValues[triangle.patchId] ?? 0.0
+            let display: Double
+            if let knownDisplay = displayValues[triangle.patchId] {
+                display = knownDisplay
+            } else {
+                display = 0.0  // Default: unseen patch
+            }
             let width = calculate(
                 display: display,
                 areaSqM: triangle.areaSqM,

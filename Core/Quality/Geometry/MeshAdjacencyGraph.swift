@@ -87,7 +87,7 @@ public final class MeshAdjacencyGraph {
     /// Check if two vertices are equal (within epsilon tolerance)
     private func verticesEqual(_ v1: SIMD3<Float>, _ v2: SIMD3<Float>) -> Bool {
         let diff = v1 - v2
-        let distSq = dot(diff, diff)
+        let distSq = simdDot(diff, diff)
         return distSq < epsilon * epsilon
     }
     
@@ -158,9 +158,9 @@ public final class MeshAdjacencyGraph {
     public func longestEdge(of triangle: ScanTriangle) -> (SIMD3<Float>, SIMD3<Float>) {
         let (v0, v1, v2) = triangle.vertices
         
-        let edge0Len = length_squared(v1 - v0)
-        let edge1Len = length_squared(v2 - v1)
-        let edge2Len = length_squared(v0 - v2)
+        let edge0Len = simdLengthSquared(v1 - v0)
+        let edge1Len = simdLengthSquared(v2 - v1)
+        let edge2Len = simdLengthSquared(v0 - v2)
         
         if edge0Len >= edge1Len && edge0Len >= edge2Len {
             return (v0, v1)

@@ -86,8 +86,10 @@ public final class FlipAnimationController {
         
         for (triIndex, triangle) in triangles.enumerated() {
             let patchId = triangle.patchId
-            let prevValue = previousDisplay[patchId] ?? 0.0
-            let currValue = currentDisplay[patchId] ?? 0.0
+            let prevValue: Double
+            if let known = previousDisplay[patchId] { prevValue = known } else { prevValue = 0.0 }
+            let currValue: Double
+            if let known = currentDisplay[patchId] { currValue = known } else { currValue = 0.0 }
             
             // Check if display increased enough to trigger flip
             let delta = currValue - prevValue
@@ -113,7 +115,7 @@ public final class FlipAnimationController {
                 // Find flip axis (longest edge)
                 let (axisStart, axisEnd) = adjacencyGraph.longestEdge(of: triangle)
                 let edgeVec = axisEnd - axisStart
-                let edgeLen = length(edgeVec)
+                let edgeLen = simdLength(edgeVec)
                 let axisDir = edgeLen > 1e-6 ? edgeVec / edgeLen : SIMD3<Float>(1, 0, 0)
                 let axisOrigin = axisStart
                 

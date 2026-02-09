@@ -63,8 +63,8 @@ public final class ThermalQualityAdapter {
         ProcessInfo.processInfo.systemUptime
     }
 
+    #if os(iOS) || os(macOS)
     public func updateThermalState(_ state: ProcessInfo.ThermalState) {
-        #if os(iOS) || os(macOS)
         let targetTier: RenderTier
         switch state {
         case .nominal:  targetTier = .nominal
@@ -78,8 +78,8 @@ public final class ThermalQualityAdapter {
             currentTier = targetTier
             lastTierChangeTime = now
         }
-        #endif
     }
+    #endif
 
     public func updateFrameTiming(gpuDurationMs: Double) {
         frameTimeSamples.append(gpuDurationMs)

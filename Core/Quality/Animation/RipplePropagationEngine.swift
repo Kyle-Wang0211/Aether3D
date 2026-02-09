@@ -124,7 +124,8 @@ public final class RipplePropagationEngine {
             }
             
             // Check if wave is complete (all triangles have been reached and decayed)
-            let maxHop = wave.hopDistances.values.max() ?? 0
+            let maxHop: Int
+            if let maxVal = wave.hopDistances.values.max() { maxHop = maxVal } else { maxHop = 0 }
             let wavePeriod = ScanGuidanceConstants.rippleDelayPerHopS * 2.0
             let maxWaveTime = Double(maxHop) * ScanGuidanceConstants.rippleDelayPerHopS + wavePeriod
             if elapsed > maxWaveTime {
@@ -183,7 +184,9 @@ public final class RipplePropagationEngine {
             }
         }
         
-        return triangleIndices.map { amplitudes[$0] ?? 0.0 }
+        return triangleIndices.map { idx in
+            if let amp = amplitudes[idx] { return amp } else { return 0.0 }
+        }
     }
     
     /// Clear all active waves

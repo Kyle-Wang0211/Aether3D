@@ -79,7 +79,12 @@ public final class WedgeGeometryGenerator {
         let medianArea = sortedAreas.isEmpty ? 1.0 : sortedAreas[sortedAreas.count / 2]
         
         for (triIndex, triangle) in triangles.enumerated() {
-            let display = displayValues[triangle.patchId] ?? 0.0
+            let display: Double
+            if let knownDisplay = displayValues[triangle.patchId] {
+                display = knownDisplay
+            } else {
+                display = 0.0  // Default: unseen patch
+            }
             let clampedDisplay = min(max(display, 0.0), 1.0)
             
             // Calculate metallic and roughness based on display
@@ -376,7 +381,7 @@ public final class WedgeGeometryGenerator {
         ))
         
         // Top bevel segments (3 edges × 1 segment = 3 quads = 6 triangles)
-        let topBevelNormals = bevelNormals(topFaceNormal: normal, sideFaceNormal: normalize(cross(normal, top1 - top0)), segments: bevelSegments)
+        let topBevelNormals = bevelNormals(topFaceNormal: normal, sideFaceNormal: simdNormalize(simdCross(normal, top1 - top0)), segments: bevelSegments)
         // Edge 0-1 bevel
         vertices.append(WedgeVertexCPU(position: top0, normal: topBevelNormals[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: topBevel0, normal: topBevelNormals[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
@@ -384,14 +389,14 @@ public final class WedgeGeometryGenerator {
         vertices.append(WedgeVertexCPU(position: topBevel1, normal: topBevelNormals[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         
         // Edge 1-2 bevel
-        let topBevelNormals12 = bevelNormals(topFaceNormal: normal, sideFaceNormal: normalize(cross(normal, top2 - top1)), segments: bevelSegments)
+        let topBevelNormals12 = bevelNormals(topFaceNormal: normal, sideFaceNormal: simdNormalize(simdCross(normal, top2 - top1)), segments: bevelSegments)
         vertices.append(WedgeVertexCPU(position: top1, normal: topBevelNormals12[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: topBevel1, normal: topBevelNormals12[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: top2, normal: topBevelNormals12[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: topBevel2, normal: topBevelNormals12[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         
         // Edge 2-0 bevel
-        let topBevelNormals20 = bevelNormals(topFaceNormal: normal, sideFaceNormal: normalize(cross(normal, top0 - top2)), segments: bevelSegments)
+        let topBevelNormals20 = bevelNormals(topFaceNormal: normal, sideFaceNormal: simdNormalize(simdCross(normal, top0 - top2)), segments: bevelSegments)
         vertices.append(WedgeVertexCPU(position: top2, normal: topBevelNormals20[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: topBevel2, normal: topBevelNormals20[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: top0, normal: topBevelNormals20[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
@@ -412,7 +417,7 @@ public final class WedgeGeometryGenerator {
         ))
         
         // Bottom bevel segments (3 edges × 1 segment = 3 quads = 6 triangles)
-        let bottomBevelNormals = bevelNormals(topFaceNormal: -normal, sideFaceNormal: normalize(cross(-normal, bottom1 - bottom0)), segments: bevelSegments)
+        let bottomBevelNormals = bevelNormals(topFaceNormal: -normal, sideFaceNormal: simdNormalize(simdCross(-normal, bottom1 - bottom0)), segments: bevelSegments)
         // Edge 0-1 bevel
         vertices.append(WedgeVertexCPU(position: bottom0, normal: bottomBevelNormals[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel0, normal: bottomBevelNormals[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
@@ -420,14 +425,14 @@ public final class WedgeGeometryGenerator {
         vertices.append(WedgeVertexCPU(position: bottomBevel1, normal: bottomBevelNormals[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         
         // Edge 1-2 bevel
-        let bottomBevelNormals12 = bevelNormals(topFaceNormal: -normal, sideFaceNormal: normalize(cross(-normal, bottom2 - bottom1)), segments: bevelSegments)
+        let bottomBevelNormals12 = bevelNormals(topFaceNormal: -normal, sideFaceNormal: simdNormalize(simdCross(-normal, bottom2 - bottom1)), segments: bevelSegments)
         vertices.append(WedgeVertexCPU(position: bottom1, normal: bottomBevelNormals12[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel1, normal: bottomBevelNormals12[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottom2, normal: bottomBevelNormals12[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel2, normal: bottomBevelNormals12[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         
         // Edge 2-0 bevel
-        let bottomBevelNormals20 = bevelNormals(topFaceNormal: -normal, sideFaceNormal: normalize(cross(-normal, bottom0 - bottom2)), segments: bevelSegments)
+        let bottomBevelNormals20 = bevelNormals(topFaceNormal: -normal, sideFaceNormal: simdNormalize(simdCross(-normal, bottom0 - bottom2)), segments: bevelSegments)
         vertices.append(WedgeVertexCPU(position: bottom2, normal: bottomBevelNormals20[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel2, normal: bottomBevelNormals20[1], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottom0, normal: bottomBevelNormals20[0], metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
@@ -435,21 +440,21 @@ public final class WedgeGeometryGenerator {
         
         // Side faces (3 edges connecting top and bottom bevels)
         // Edge 0-1 side
-        let sideNormal01 = normalize(cross(normal, top1 - top0))
+        let sideNormal01 = simdNormalize(simdCross(normal, top1 - top0))
         vertices.append(WedgeVertexCPU(position: topBevel0, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel0, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: topBevel1, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel1, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         
         // Edge 1-2 side
-        let sideNormal12 = normalize(cross(normal, top2 - top1))
+        let sideNormal12 = simdNormalize(simdCross(normal, top2 - top1))
         vertices.append(WedgeVertexCPU(position: topBevel1, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel1, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: topBevel2, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel2, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         
         // Edge 2-0 side
-        let sideNormal20 = normalize(cross(normal, top0 - top2))
+        let sideNormal20 = simdNormalize(simdCross(normal, top0 - top2))
         vertices.append(WedgeVertexCPU(position: topBevel2, normal: sideNormal20, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: bottomBevel2, normal: sideNormal20, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
         vertices.append(WedgeVertexCPU(position: topBevel0, normal: sideNormal20, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
