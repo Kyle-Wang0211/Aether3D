@@ -135,7 +135,7 @@ internal func _hexLowercase(_ bytes: some Sequence<UInt8>) -> String {
 
 // MARK: - Content Type and Role Whitelists
 
-private let allowedContentTypes: Set<String> = [
+let allowedContentTypes: Set<String> = [
     "application/octet-stream",
     "application/x-aether-splat",
     "application/x-aether-ply",
@@ -145,7 +145,7 @@ private let allowedContentTypes: Set<String> = [
     "video/mp4"
 ]
 
-private let allowedRoles: Set<String> = [
+let allowedRoles: Set<String> = [
     "lod_entry",
     "asset",
     "thumbnail",
