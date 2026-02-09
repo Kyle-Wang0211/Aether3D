@@ -21,6 +21,7 @@ public enum SSOTRegistry {
         all.append(contentsOf: ContinuityConstants.allSpecs)
         all.append(contentsOf: CoverageVisualizationConstants.allSpecs)
         all.append(contentsOf: StorageConstants.allSpecs)
+        all.append(contentsOf: ScanGuidanceConstants.allSpecs)
         // Note: Ultra-Granular Capture policies (CaptureProfile, GridResolutionPolicy, etc.)
         // are not registered as AnyConstantSpec because they use LengthQ and custom types.
         // They are validated through their own digest and validation methods.
@@ -95,6 +96,7 @@ public enum SSOTRegistry {
         // Validate cross-constant relationships
         errors.append(contentsOf: SystemConstants.validateRelationships())
         errors.append(contentsOf: QualityThresholds.validateRelationships())
+        errors.append(contentsOf: ScanGuidanceConstants.validateRelationships())
         
         return errors
     }

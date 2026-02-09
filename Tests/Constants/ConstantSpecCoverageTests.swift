@@ -88,6 +88,7 @@ final class ConstantSpecCoverageTests: XCTestCase {
             + ContinuityConstants.allSpecs
             + CoverageVisualizationConstants.allSpecs
             + StorageConstants.allSpecs
+            + ScanGuidanceConstants.allSpecs
         
         XCTAssertEqual(registrySpecs.count, allSpecs.count, "Registry should contain all specs")
         
