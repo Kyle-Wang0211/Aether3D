@@ -11,7 +11,10 @@ import SwiftUI
 struct Aether3DApp: App {
     var body: some Scene {
         WindowGroup {
-            PipelineDemoView()
+            NavigationStack {
+                HomePage()
+            }
+            .preferredColorScheme(.dark)
         }
     }
 }

@@ -71,7 +71,7 @@ public final class FlipAnimationController {
         previousDisplay: [String: Double],
         currentDisplay: [String: Double],
         triangles: [ScanTriangle],
-        adjacencyGraph: MeshAdjacencyGraph
+        adjacencyGraph: any AdjacencyProvider
     ) -> [Int] {
         let thresholds = [
             ScanGuidanceConstants.s0ToS1Threshold,

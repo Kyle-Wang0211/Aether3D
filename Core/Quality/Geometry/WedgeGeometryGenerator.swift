@@ -521,20 +521,175 @@ public final class WedgeGeometryGenerator {
         indices: inout [UInt32],
         vertexIndex: inout UInt32
     ) {
-        // LOD0: 2-segment bevel (simplified - uses low LOD for now)
-        // Phase 2: Simplified implementation, full bevel in Phase 3
-        generateLowLODWedge(
-            v0: v0, v1: v1, v2: v2,
-            normal: normal,
-            thickness: thickness,
-            metallic: metallic,
-            roughness: roughness,
-            display: display,
-            triangleId: triangleId,
-            vertices: &vertices,
-            indices: &indices,
-            vertexIndex: &vertexIndex
-        )
+        let bevelSegments = ScanGuidanceConstants.bevelSegmentsLOD0  // 2
+        let bevelRadius = Float(ScanGuidanceConstants.bevelRadiusRatio) * thickness
+        
+        let baseIndex = vertexIndex
+        
+        // ── Face positions ──
+        let top0 = v0, top1 = v1, top2 = v2
+        let bottom0 = v0 - normal * thickness
+        let bottom1 = v1 - normal * thickness
+        let bottom2 = v2 - normal * thickness
+        
+        // ── Bevel inset positions ──
+        let bevelOffset = normal * bevelRadius
+        let topBevel0 = top0 - bevelOffset
+        let topBevel1 = top1 - bevelOffset
+        let topBevel2 = top2 - bevelOffset
+        let bottomBevel0 = bottom0 + bevelOffset
+        let bottomBevel1 = bottom1 + bevelOffset
+        let bottomBevel2 = bottom2 + bevelOffset
+        
+        // Helper: generate bevel strip vertices for one edge with 2 segments
+        func bevelStrip(
+            outerStart: SIMD3<Float>, outerEnd: SIMD3<Float>,
+            innerStart: SIMD3<Float>, innerEnd: SIMD3<Float>,
+            faceNormal: SIMD3<Float>,
+            edgeDirection: SIMD3<Float>
+        ) {
+            let sideNormal = simdNormalize(simdCross(faceNormal, edgeDirection))
+            let bNormals = bevelNormals(topFaceNormal: faceNormal, sideFaceNormal: sideNormal, segments: bevelSegments)
+            
+            // 2-segment bevel: 3 rows of 2 vertices each = 6 vertices
+            let midStart = (outerStart + innerStart) * 0.5
+            let midEnd = (outerEnd + innerEnd) * 0.5
+            
+            // Normals for each row
+            let n0 = bNormals[0]
+            let n1 = bNormals.count > 1 ? bNormals[1] : simdNormalize(faceNormal + sideNormal)
+            let n2 = bNormals.count > 2 ? bNormals[2] : sideNormal
+            
+            // Row 0 (outer edge)
+            vertices.append(WedgeVertexCPU(position: outerStart, normal: n0, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+            vertices.append(WedgeVertexCPU(position: outerEnd, normal: n0, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+            
+            // Row 1 (mid-bevel)
+            vertices.append(WedgeVertexCPU(position: midStart, normal: n1, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+            vertices.append(WedgeVertexCPU(position: midEnd, normal: n1, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+            
+            // Row 2 (inner/bevel inset)
+            vertices.append(WedgeVertexCPU(position: innerStart, normal: n2, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+            vertices.append(WedgeVertexCPU(position: innerEnd, normal: n2, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        }
+        
+        // ── Top face center triangle (3 vertices, 1 triangle) ──
+        vertices.append(WedgeVertexCPU(position: topBevel0, normal: normal, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: topBevel1, normal: normal, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: topBevel2, normal: normal, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        
+        // Top face triangle
+        indices.append(baseIndex)
+        indices.append(baseIndex + 1)
+        indices.append(baseIndex + 2)
+        
+        // ── Top bevel strips (3 edges × 6 vertices = 18 vertices, 3 edges × 4 triangles = 12 triangles) ──
+        var currentVertex = baseIndex + 3
+        
+        // Edge 0→1 top bevel
+        bevelStrip(outerStart: top0, outerEnd: top1, innerStart: topBevel0, innerEnd: topBevel1,
+                   faceNormal: normal, edgeDirection: simdNormalize(top1 - top0))
+        // 2 quads = 4 triangles from 6 vertices
+        for seg in 0..<bevelSegments {
+            let row = currentVertex + UInt32(seg * 2)
+            indices.append(row); indices.append(row + 2); indices.append(row + 1)
+            indices.append(row + 1); indices.append(row + 2); indices.append(row + 3)
+        }
+        currentVertex += 6
+        
+        // Edge 1→2 top bevel
+        bevelStrip(outerStart: top1, outerEnd: top2, innerStart: topBevel1, innerEnd: topBevel2,
+                   faceNormal: normal, edgeDirection: simdNormalize(top2 - top1))
+        for seg in 0..<bevelSegments {
+            let row = currentVertex + UInt32(seg * 2)
+            indices.append(row); indices.append(row + 2); indices.append(row + 1)
+            indices.append(row + 1); indices.append(row + 2); indices.append(row + 3)
+        }
+        currentVertex += 6
+        
+        // Edge 2→0 top bevel
+        bevelStrip(outerStart: top2, outerEnd: top0, innerStart: topBevel2, innerEnd: topBevel0,
+                   faceNormal: normal, edgeDirection: simdNormalize(top0 - top2))
+        for seg in 0..<bevelSegments {
+            let row = currentVertex + UInt32(seg * 2)
+            indices.append(row); indices.append(row + 2); indices.append(row + 1)
+            indices.append(row + 1); indices.append(row + 2); indices.append(row + 3)
+        }
+        currentVertex += 6
+        
+        // ── Bottom face center triangle (3 vertices, 1 triangle) ──
+        vertices.append(WedgeVertexCPU(position: bottomBevel0, normal: -normal, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel1, normal: -normal, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel2, normal: -normal, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        
+        // Bottom face (reverse winding)
+        indices.append(currentVertex + 2)
+        indices.append(currentVertex + 1)
+        indices.append(currentVertex)
+        currentVertex += 3
+        
+        // ── Bottom bevel strips (3 edges × 6 vertices = 18 vertices, 12 triangles) ──
+        // Edge 0→1 bottom bevel
+        bevelStrip(outerStart: bottom0, outerEnd: bottom1, innerStart: bottomBevel0, innerEnd: bottomBevel1,
+                   faceNormal: -normal, edgeDirection: simdNormalize(bottom1 - bottom0))
+        for seg in 0..<bevelSegments {
+            let row = currentVertex + UInt32(seg * 2)
+            indices.append(row); indices.append(row + 1); indices.append(row + 2)
+            indices.append(row + 1); indices.append(row + 3); indices.append(row + 2)
+        }
+        currentVertex += 6
+        
+        // Edge 1→2 bottom bevel
+        bevelStrip(outerStart: bottom1, outerEnd: bottom2, innerStart: bottomBevel1, innerEnd: bottomBevel2,
+                   faceNormal: -normal, edgeDirection: simdNormalize(bottom2 - bottom1))
+        for seg in 0..<bevelSegments {
+            let row = currentVertex + UInt32(seg * 2)
+            indices.append(row); indices.append(row + 1); indices.append(row + 2)
+            indices.append(row + 1); indices.append(row + 3); indices.append(row + 2)
+        }
+        currentVertex += 6
+        
+        // Edge 2→0 bottom bevel
+        bevelStrip(outerStart: bottom2, outerEnd: bottom0, innerStart: bottomBevel2, innerEnd: bottomBevel0,
+                   faceNormal: -normal, edgeDirection: simdNormalize(bottom0 - bottom2))
+        for seg in 0..<bevelSegments {
+            let row = currentVertex + UInt32(seg * 2)
+            indices.append(row); indices.append(row + 1); indices.append(row + 2)
+            indices.append(row + 1); indices.append(row + 3); indices.append(row + 2)
+        }
+        currentVertex += 6
+        
+        // ── Side walls (3 edges × 4 vertices × 2 triangles = 6 triangles) ──
+        let sideNormal01 = simdNormalize(simdCross(normal, top1 - top0))
+        vertices.append(WedgeVertexCPU(position: topBevel0, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel0, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: topBevel1, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel1, normal: sideNormal01, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        indices.append(currentVertex); indices.append(currentVertex + 1); indices.append(currentVertex + 2)
+        indices.append(currentVertex + 2); indices.append(currentVertex + 1); indices.append(currentVertex + 3)
+        currentVertex += 4
+        
+        let sideNormal12 = simdNormalize(simdCross(normal, top2 - top1))
+        vertices.append(WedgeVertexCPU(position: topBevel1, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel1, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: topBevel2, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel2, normal: sideNormal12, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        indices.append(currentVertex); indices.append(currentVertex + 1); indices.append(currentVertex + 2)
+        indices.append(currentVertex + 2); indices.append(currentVertex + 1); indices.append(currentVertex + 3)
+        currentVertex += 4
+        
+        let sideNormal20 = simdNormalize(simdCross(normal, top0 - top2))
+        vertices.append(WedgeVertexCPU(position: topBevel2, normal: sideNormal20, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel2, normal: sideNormal20, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: topBevel0, normal: sideNormal20, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        vertices.append(WedgeVertexCPU(position: bottomBevel0, normal: sideNormal20, metallic: metallic, roughness: roughness, display: display, thickness: thickness, triangleId: triangleId))
+        indices.append(currentVertex); indices.append(currentVertex + 1); indices.append(currentVertex + 2)
+        indices.append(currentVertex + 2); indices.append(currentVertex + 1); indices.append(currentVertex + 3)
+        currentVertex += 4
+        
+        // ── Final vertex count ──
+        // 3 (top face) + 18 (top bevels) + 3 (bottom face) + 18 (bottom bevels) + 12 (sides) = 54
+        vertexIndex = currentVertex
     }
 
     /// Calculate wedge thickness based on display value and area
