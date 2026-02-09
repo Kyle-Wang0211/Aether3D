@@ -104,9 +104,7 @@ public enum HashCalculator {
     ///   - data: Data to hash
     /// - Returns: 64 lowercase hexadecimal characters
     public static func sha256WithDomain(_ tag: String, data: Data) -> String {
-        guard let tagData = tag.data(using: .ascii) else {
-            fatalError("Domain tag must be ASCII: \(tag)")
-        }
+        guard let tagData = tag.data(using: .ascii) else { fatalError("Domain tag must be ASCII: \(tag)") }
         
         var combined = Data()
         combined.reserveCapacity(tagData.count + data.count)

@@ -203,51 +203,5 @@ public enum BundleConstants {
     public static let LOD_TIER_SHARED = "shared"
 }
 
-// =========================================================================
-// MARK: - Compile-Time Validation
-// =========================================================================
-
-#if DEBUG
-/// Compile-time assertions for constant validity
-/// These run only in debug builds to catch configuration errors
-private enum BundleConstantsValidation {
-    static func validate() {
-        // Size relationships
-        assert(BundleConstants.MAX_ASSET_COUNT > 0,
-               "MAX_ASSET_COUNT must be positive")
-        assert(BundleConstants.MAX_MANIFEST_BYTES > BundleConstants.MAX_ASSET_COUNT * 240,
-               "MAX_MANIFEST_BYTES must fit MAX_ASSET_COUNT assets at ~240 bytes each")
-        assert(BundleConstants.MAX_BUNDLE_TOTAL_BYTES > Int64(BundleConstants.MAX_MANIFEST_BYTES),
-               "MAX_BUNDLE_TOTAL_BYTES must exceed MAX_MANIFEST_BYTES")
-        assert(BundleConstants.BUNDLE_ID_LENGTH == 32,
-               "BUNDLE_ID_LENGTH must be 32 (matching ArtifactManifest.artifactId)")
-        assert(BundleConstants.HASH_STREAM_CHUNK_BYTES >= 4096,
-               "HASH_STREAM_CHUNK_BYTES must be at least 4KB for efficient I/O")
-        assert(BundleConstants.HASH_STREAM_CHUNK_BYTES % 4096 == 0,
-               "HASH_STREAM_CHUNK_BYTES must be a multiple of 4KB for page-aligned I/O")
-        assert(Int64(BundleConstants.MAX_ASSET_COUNT) <= BundleConstants.JSON_SAFE_INTEGER_MAX,
-               "MAX_ASSET_COUNT must fit in JSON safe integer")
-        assert(BundleConstants.MAX_BUNDLE_TOTAL_BYTES <= BundleConstants.JSON_SAFE_INTEGER_MAX,
-               "MAX_BUNDLE_TOTAL_BYTES must fit in JSON safe integer")
-        
-        // Domain tag validation
-        let bundleTag = BundleConstants.BUNDLE_HASH_DOMAIN_TAG.data(using: .ascii)!
-        assert(bundleTag.count == 22, "BUNDLE_HASH_DOMAIN_TAG must be 22 bytes")
-        assert(bundleTag.last == 0x00, "Domain tag must end with NUL")
-        let manifestTag = BundleConstants.MANIFEST_HASH_DOMAIN_TAG.data(using: .ascii)!
-        assert(manifestTag.count == 26, "MANIFEST_HASH_DOMAIN_TAG must be 26 bytes")
-        assert(manifestTag.last == 0x00, "Domain tag must end with NUL")
-        let contextTag = BundleConstants.CONTEXT_HASH_DOMAIN_TAG.data(using: .ascii)!
-        assert(contextTag.count == 25, "CONTEXT_HASH_DOMAIN_TAG must be 25 bytes")
-        assert(contextTag.last == 0x00, "Domain tag must end with NUL")
-        
-        // Seal version
-        assert(BundleConstants.SEAL_VERSION >= 1, "SEAL_VERSION must be positive")
-        
-        // BuildMeta limits
-        assert(BundleConstants.BUILD_META_MAX_KEYS > 0, "BUILD_META_MAX_KEYS must be positive")
-        assert(BundleConstants.BUILD_META_MAX_KEY_BYTES > 0, "BUILD_META_MAX_KEY_BYTES must be positive")
-        assert(BundleConstants.BUILD_META_MAX_VALUE_BYTES > 0, "BUILD_META_MAX_VALUE_BYTES must be positive")
-    }
-}
-#endif
+// NOTE: Compile-time validation of these constants is handled by BundleConstantsTests.
+// No assert()/fatalError() calls here — Core/Constants/ prohibits fatal patterns per SSOT policy.
