@@ -83,7 +83,7 @@ let package = Package(
       name: "Aether3DCoreTests",
       dependencies: ["Aether3DCore"],
       path: "Tests",
-      exclude: ["Constants", "Upload", "CI", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden", "PR4MathTests", "PR4PathTraceTests", "PR4OwnershipTests", "PR4OverflowTests", "PR4LUTTests", "PR4DeterminismTests", "PR4SoftmaxTests", "PR4HealthTests", "PR4UncertaintyTests", "PR4CalibrationTests", "PR4GoldenTests", "PR4IntegrationTests", "PR5CaptureTests", "EvidenceGridTests", "EvidenceGridDeterminismTests"],
+      exclude: ["Constants", "Upload", "CI", "Audit/COVERAGE_GAPS_ANALYSIS.md", "Golden", "PR4MathTests", "PR4PathTraceTests", "PR4OwnershipTests", "PR4OverflowTests", "PR4LUTTests", "PR4DeterminismTests", "PR4SoftmaxTests", "PR4HealthTests", "PR4UncertaintyTests", "PR4CalibrationTests", "PR4GoldenTests", "PR4IntegrationTests", "PR5CaptureTests", "EvidenceGridTests", "EvidenceGridDeterminismTests", "ScanGuidanceTests"],
       resources: [
         .process("QualityPreCheck/Fixtures/CoverageDeltaEndiannessFixture.json"),
         .process("QualityPreCheck/Fixtures/CoverageGridPackingFixture.json"),
@@ -305,6 +305,12 @@ let package = Package(
       name: "EvidenceGridCanonicalOutput",
       dependencies: ["Aether3DCore"],
       path: "Sources/EvidenceGridCanonicalOutput"
+    ),
+    // PR7 Scan Guidance Tests
+    .testTarget(
+      name: "ScanGuidanceTests",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/ScanGuidanceTests"
     )
   ]
 )
