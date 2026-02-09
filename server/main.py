@@ -29,6 +29,19 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Create database tables
     Base.metadata.create_all(bind=engine)
+    
+    # PR#10: Run global cleanup on startup
+    from app.database import SessionLocal
+    from app.services.cleanup_handler import cleanup_global
+    import logging
+    logger = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        result = cleanup_global(db)
+        logger.info("Startup cleanup completed: %s", result.to_dict())
+    finally:
+        db.close()
+    
     yield
     # Cleanup (if needed)
 
