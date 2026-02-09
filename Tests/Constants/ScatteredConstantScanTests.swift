@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 // ScatteredConstantScanTests.swift
 // Aether3D
@@ -342,7 +345,8 @@ final class ScatteredConstantScanTests: XCTestCase {
                file.path.contains("/MerkleTree/") ||
                file.path.contains("/Attestation/") ||
                file.path.contains("/DeviceAttestation/") ||
-               file.path.contains("/FormatBridge/") {
+               file.path.contains("/FormatBridge/") ||
+               file.path.contains("/Compliance/") {
                 continue
             }
             

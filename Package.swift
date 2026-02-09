@@ -1,4 +1,7 @@
 // swift-tools-version: 5.9
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 import PackageDescription
 
 let package = Package(

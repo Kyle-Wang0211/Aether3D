@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 // CoordinateNormalizer.swift
 // Aether3D
@@ -117,7 +120,7 @@ public struct CoordinateNormalizer {
 
 #if canImport(UIKit)
 import UIKit
-typealias UIDeviceOrientation = UIKit.UIDeviceOrientation
+public typealias UIDeviceOrientation = UIKit.UIDeviceOrientation
 #else
 // Stub for non-UIKit platforms
 public enum UIDeviceOrientation {

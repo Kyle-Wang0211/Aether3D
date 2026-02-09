@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 //  GenerateResult.swift
 //  progect2
@@ -7,22 +10,22 @@
 
 import Foundation
 
-enum GenerateResult {
+public enum GenerateResult {
     case success(artifact: ArtifactRef, elapsedMs: Int)
     case fail(reason: FailReason, elapsedMs: Int)
 }
 
-struct ArtifactRef {
-    let localPath: URL
-    let format: ArtifactFormat
+public struct ArtifactRef {
+    public let localPath: URL
+    public let format: ArtifactFormat
 }
 
-enum ArtifactFormat {
+public enum ArtifactFormat {
     case splat        // .splat binary 3DGS
     case splatPly     // .ply container with Gaussian Splatting data
 }
 
-enum FailReason: String, Error {
+public enum FailReason: String, Error {
     case timeout = "timeout"
     case networkTimeout = "network_timeout"
     case uploadFailed = "upload_failed"

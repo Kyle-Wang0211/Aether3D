@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 // PR1 C-Class v2.3b — FROZEN SEMANTICS
 // Any change here requires SSOT-Change: yes and full deterministic replay validation.
 //

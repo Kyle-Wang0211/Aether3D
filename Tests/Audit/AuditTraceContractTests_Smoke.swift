@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 // AuditTraceContractTests_Smoke.swift
 // PR#8.5 / v0.0.1
 // Minimal smoke tests to isolate runtime failures

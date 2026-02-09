@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 //  DeviceTier.swift
 //  progect2
@@ -8,7 +11,7 @@
 import Foundation
 
 /// 设备层级（按能力不按机型）
-enum DeviceTier {
+public enum DeviceTier {
     case low      // L
     case medium   // M
     case high     // H
@@ -50,7 +53,7 @@ extension DeviceTier {
     }
     
     /// 获取当前设备层级（Pipeline 使用的便捷方法）
-    static func current() -> DeviceTier {
+    public static func current() -> DeviceTier {
         return detect()
     }
 }
