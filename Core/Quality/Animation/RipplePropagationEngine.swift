@@ -50,7 +50,7 @@ public final class RipplePropagationEngine {
     ///   - timestamp: Current timestamp
     public func spawn(
         sourceTriangle: Int,
-        adjacencyGraph: MeshAdjacencyGraph,
+        adjacencyGraph: any AdjacencyProvider,
         timestamp: TimeInterval
     ) {
         // Check max concurrent waves

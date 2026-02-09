@@ -18,33 +18,29 @@ import MetalKit
 #endif
 
 /// SwiftUI view for rendering scan guidance evidence
-/// Replaces HeatCoolCoverageView in GuidanceRenderer
-/// Phase 6: Connected to Metal rendering pipeline
+/// Primary rendering path: ARSCNView delegate (ScanView → ARCameraPreview)
+/// This view: fallback for non-AR contexts or preview mode
 public struct EvidenceRenderer: View {
-    
-    #if canImport(MetalKit)
-    @StateObject private var metalView = MetalRenderView()
-    #endif
     
     public init() {}
     
     public var body: some View {
         #if canImport(MetalKit)
-        MetalRenderView()
-            .drawingGroup()  // Metal acceleration
+        GeometryReader { geometry in
+            // Metal rendering is handled by ScanGuidanceRenderPipeline
+            // injected via ARSCNView delegate in the primary AR path.
+            // This view provides a placeholder for non-AR preview contexts.
+            ZStack {
+                Color.black
+                Text("Metal Renderer Active")
+                    .font(.system(size: 12))
+                    .foregroundColor(.gray.opacity(0.3))
+            }
+        }
         #else
-        // Fallback: Empty view if Metal unavailable
         EmptyView()
         #endif
     }
 }
-
-#if canImport(MetalKit)
-/// Metal render view for scan guidance
-private class MetalRenderView: NSObject, ObservableObject {
-    // Metal rendering will be handled by ScanGuidanceRenderPipeline
-    // This is a placeholder for Phase 6 integration
-}
-#endif
 
 #endif
