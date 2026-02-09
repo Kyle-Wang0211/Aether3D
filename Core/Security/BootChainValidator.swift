@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 // BootChainValidator.swift
 // Aether3D
@@ -114,7 +117,7 @@ public actor BootChainValidator {
         // For now, verify basic device capabilities
         
         // Check if device supports Secure Enclave
-        guard isSecureEnclaveAvailable() else {
+        guard SecureEnclaveKeyManager.isSecureEnclaveAvailable() else {
             throw BootChainError.deviceAttestationFailed("Secure Enclave not available")
         }
         

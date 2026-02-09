@@ -1,4 +1,6 @@
 #!/usr/bin/env swift
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
 // Test script to compute BLAKE3-256("abc") using our implementation
 
 import Foundation
