@@ -161,7 +161,7 @@ public actor HybridIOEngine {
         
         // Map window (max 64MB on macOS, 32MB on iOS)
         let mapSize = min(length, getMMapWindowSize())
-        let ptr = mmap(nil, mapSize, PROT_READ, MAP_PRIVATE, fd, offset)
+        let ptr = mmap(nil, mapSize, PROT_READ, MAP_PRIVATE, fd, off_t(offset))
         guard ptr != MAP_FAILED else {
             throw IOError.mmapFailed
         }

@@ -115,7 +115,7 @@ public actor ConnectionPrewarmer {
         let resolved = CFHostStartInfoResolution(host, .addresses, &error)
         
         if resolved {
-            let addresses = CFHostGetAddressing(host, nil)?.takeRetainedValue()
+            let addresses = CFHostGetAddressing(host, nil)?.takeUnretainedValue()
             
             if let addressArray = addresses as? [Data] {
                 var ipv4: String?

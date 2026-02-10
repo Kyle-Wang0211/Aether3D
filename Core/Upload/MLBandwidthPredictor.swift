@@ -97,7 +97,12 @@ public actor MLBandwidthPredictor: BandwidthEstimator {
     /// Predict bandwidth.
     public func predict() async -> BandwidthPrediction {
         // Use Kalman fallback if ML model unavailable or warmup period
-        if model == nil || totalSamples < UploadConstants.ML_WARMUP_SAMPLES {
+        #if canImport(CoreML)
+        let hasModel = model != nil
+        #else
+        let hasModel = false
+        #endif
+        if !hasModel || totalSamples < UploadConstants.ML_WARMUP_SAMPLES {
             return await kalmanFallback.predict()
         }
         
