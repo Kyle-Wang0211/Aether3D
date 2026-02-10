@@ -41,13 +41,19 @@ public actor ARKitSessionManager {
         
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravity
-        
+
         // Enable 4K ARKit if available (iOS 18+)
         if #available(iOS 18.0, *) {
             // Configure for high-resolution tracking
             configuration.planeDetection = [.horizontal, .vertical]
         }
-        
+
+        // Enable per-frame depth map for TSDF fusion (PR#6 dependency)
+        // sceneDepth provides 256×192 depth CVPixelBuffer at 60fps on LiDAR devices
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
+
         let session = ARSession()
         session.run(configuration)
         
