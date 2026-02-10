@@ -67,7 +67,7 @@ public final class UploadProgressTracker {
 
             // Check throttle
             let timeSinceLastReport = now.timeIntervalSince(self.lastReportTime)
-            if timeSinceLastReport < UploadConstants.PROGRESS_THROTTLE_INTERVAL_SECONDS {
+            if timeSinceLastReport < UploadConstants.PROGRESS_THROTTLE_INTERVAL {
                 return
             }
 

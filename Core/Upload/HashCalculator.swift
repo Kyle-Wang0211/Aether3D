@@ -13,6 +13,8 @@ import CryptoKit
 import Crypto
 #endif
 
+// _SHA256 typealias defined in CryptoHelpers.swift
+
 /// Relationship to CryptoHashFacade: This module provides bundle-specific
 /// hash operations (streaming file hash, domain-separated hash, OCI digest format).
 /// For raw SHA-256 byte output, see CryptoHashFacade.sha256(data:).
