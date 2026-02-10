@@ -69,7 +69,7 @@ public actor ByzantineVerifier {
         }
         
         // Check coverage
-        let coverage = Double(verifiedCount) / Double(sampleCount)
+        let coverage = sampleCount > 0 ? Double(verifiedCount) / Double(sampleCount) : 1.0
         let meetsCoverage = coverage >= UploadConstants.BYZANTINE_COVERAGE_TARGET
         
         if !failedChunks.isEmpty || !meetsCoverage {
@@ -83,23 +83,26 @@ public actor ByzantineVerifier {
     
     /// Calculate sample count: max(ceil(log2(n)), ceil(sqrt(n/10))).
     private func calculateSampleCount(totalChunks: Int) -> Int {
+        guard totalChunks > 0 else { return 0 }
         let log2Count = Int(ceil(log2(Double(totalChunks))))
         let sqrtCount = Int(ceil(sqrt(Double(totalChunks) / 10.0)))
-        return max(log2Count, sqrtCount)
+        return max(1, max(log2Count, sqrtCount))
     }
     
     /// Fisher-Yates shuffle to select random chunks.
     private func fisherYatesShuffle(count: Int, sampleCount: Int) -> [Int] {
+        guard count > 0, sampleCount > 0 else { return [] }
+        let effectiveSample = min(sampleCount, count)
         var indices = Array(0..<count)
-        
+
         // Shuffle using Fisher-Yates
-        for i in stride(from: count - 1, through: count - sampleCount, by: -1) {
+        for i in stride(from: count - 1, through: count - effectiveSample, by: -1) {
             let j = Int.random(in: 0...i)
             indices.swapAt(i, j)
         }
-        
+
         // Return last sampleCount elements
-        return Array(indices[(count - sampleCount)...])
+        return Array(indices[(count - effectiveSample)...])
     }
     
     /// Check if endpoint should be marked as untrusted.

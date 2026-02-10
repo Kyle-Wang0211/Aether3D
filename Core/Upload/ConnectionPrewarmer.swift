@@ -163,11 +163,13 @@ public actor ConnectionPrewarmer {
         config.timeoutIntervalForRequest = UploadConstants.CONNECTION_TIMEOUT_SECONDS
         config.timeoutIntervalForResource = 3600.0
         config.httpMaximumConnectionsPerHost = UploadConstants.MAX_PARALLEL_CHUNK_UPLOADS
-            #if os(iOS) || os(tvOS) || os(watchOS)
-            config.multipathServiceType = .aggregate
-            #endif  // WiFi+5G bonded
+        #if os(iOS) || os(tvOS) || os(watchOS)
+        config.multipathServiceType = .aggregate
+        #endif  // WiFi+5G bonded
+        #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
         config.allowsConstrainedNetworkAccess = false  // Respect Low Data Mode
         config.waitsForConnectivity = true
+        #endif
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.urlCache = nil  // No disk caching of chunks
         

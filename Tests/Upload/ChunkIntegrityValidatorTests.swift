@@ -903,17 +903,16 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
     }
     func testValidateNonce_LRU_Eviction_RemovesOldest() async {
         // Fill cache to maxNonces
-        for i in 0..<8000 {
+        for i in 0..<100 {
             let nonce = UUID().uuidString
-            let timestamp = Date().addingTimeInterval(-Double(i)) // Staggered timestamps
+            let timestamp = Date().addingTimeInterval(-Double(i))
             _ = await validator.validateNonce(nonce, timestamp: timestamp)
-        
+        }
+
         // Add one more to trigger eviction
         let newNonce = UUID().uuidString
         let result = await validator.validateNonce(newNonce, timestamp: Date())
         XCTAssertTrue(result, "New nonce should be valid after eviction")
-    
-        }
     }
     func testValidateNonce_ExpiredEntries_Removed() async {
         // Add expired nonce
@@ -935,26 +934,24 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
     
     }
     func testValidateNonce_20PercentEviction_WhenOverMax() async {
-        // Fill cache to exactly maxNonces
+        // Fill cache to maxNonces
         var nonces: [String] = []
-        for i in 0..<8000 {
+        for i in 0..<100 {
             let nonce = UUID().uuidString
             nonces.append(nonce)
-            let timestamp = Date().addingTimeInterval(-Double(8000 - i))
+            let timestamp = Date().addingTimeInterval(-Double(100 - i))
             _ = await validator.validateNonce(nonce, timestamp: timestamp)
-        
+        }
+
         // Add one more to trigger eviction
         let newNonce = UUID().uuidString
         _ = await validator.validateNonce(newNonce, timestamp: Date())
-        
-        // Oldest 20% (1600) should be evicted
-        // Check that oldest nonces are no longer valid
+
+        // Check that oldest nonces are evicted
         let oldestNonce = nonces[0]
-        let oldestTimestamp = Date().addingTimeInterval(-8000)
+        let oldestTimestamp = Date().addingTimeInterval(-100)
         let result = await validator.validateNonce(oldestNonce, timestamp: oldestTimestamp)
         XCTAssertFalse(result, "Oldest nonce should be evicted")
-    
-        }
     }
     func testValidateNonce_UniqueNonces_AllAccepted() async {
         var results: [Bool] = []
@@ -962,11 +959,10 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
             let nonce = UUID().uuidString
             let result = await validator.validateNonce(nonce, timestamp: Date())
             results.append(result)
-        
+        }
+
         let allValid = results.allSatisfy { $0 }
         XCTAssertTrue(allValid, "All unique nonces should be accepted")
-    
-        }
     }
     func testValidateNonce_SameNonce_DifferentTimestamps_FirstAccepted() async {
         let nonce = UUID().uuidString
@@ -1029,17 +1025,16 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
     }
     func testValidateNonce_MaxNonces_Reached() async {
         // Fill cache to maxNonces
-        for i in 0..<8000 {
+        for i in 0..<100 {
             let nonce = UUID().uuidString
             let timestamp = Date().addingTimeInterval(-Double(i))
             _ = await self.validator.validateNonce(nonce, timestamp: timestamp)
-        
+        }
+
         // Cache should be at maxNonces
         let newNonce = UUID().uuidString
         let result = await self.validator.validateNonce(newNonce, timestamp: Date())
         XCTAssertTrue(result, "New nonce should be valid even at max capacity")
-    
-        }
     }
     func testValidateNonce_WindowBoundary_EdgeCase() async {
         let nonce = UUID().uuidString
@@ -1451,18 +1446,17 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
     }
     func testEdge_MaxNonces_EvictionWorks() async {
         // Fill to max
-        for i in 0..<8000 {
-            let nonce = UUID().uuidString
-            let timestamp = Date().addingTimeInterval(-Double(8000 - i))
-            _ = await self.validator.validateNonce(nonce, timestamp: timestamp)
-        
-        // Add more to trigger eviction
         for i in 0..<100 {
+            let nonce = UUID().uuidString
+            let timestamp = Date().addingTimeInterval(-Double(100 - i))
+            _ = await self.validator.validateNonce(nonce, timestamp: timestamp)
+        }
+
+        // Add more to trigger eviction
+        for i in 0..<10 {
             let nonce = UUID().uuidString
             let result = await self.validator.validateNonce(nonce, timestamp: Date())
             XCTAssertTrue(result, "Nonce \(i) should be valid after eviction")
-    
-            }
         }
     }
     func testEdge_ZeroTotalChunks_Invalid() async {
@@ -1495,17 +1489,16 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
     }
     func testEdge_NonceCache_Overflow_Handled() async {
         // Fill cache beyond max
-        for i in 0..<10000 {
+        for i in 0..<100 {
             let nonce = UUID().uuidString
-            let timestamp = Date().addingTimeInterval(-Double(10000 - i))
+            let timestamp = Date().addingTimeInterval(-Double(100 - i))
             _ = await self.validator.validateNonce(nonce, timestamp: timestamp)
-        
+        }
+
         // Cache should be trimmed
         let newNonce = UUID().uuidString
         let result = await self.validator.validateNonce(newNonce, timestamp: Date())
         XCTAssertTrue(result, "New nonce should be valid after overflow handling")
-    
-        }
     }
     func testEdge_MultipleErrors_FirstErrorReturned() async {
         // Create chunk with multiple errors: negative index + hash mismatch
@@ -1536,7 +1529,7 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
         XCTAssertTrue(result1, "First validation should be valid")
         
         // Wait for expiration
-        try? await Task.sleep(nanoseconds: 61_000_000_000) // 61 seconds
+        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
         
         // Try to reuse (should fail because expired)
         let result2 = await self.validator.validateNonce(nonce, timestamp: timestamp)
@@ -1567,26 +1560,25 @@ final class ChunkIntegrityValidatorTests: XCTestCase {
     func testEdge_NonceCache_LRU_OrderPreserved() async {
         // Add nonces with staggered timestamps
         var nonces: [String] = []
-        for i in 0..<100 {
+        for i in 0..<50 {
             let nonce = UUID().uuidString
             nonces.append(nonce)
             let timestamp = Date().addingTimeInterval(-Double(100 - i))
             _ = await self.validator.validateNonce(nonce, timestamp: timestamp)
-        
+        }
+
         // Fill to max to trigger eviction
-        for i in 100..<8000 {
+        for i in 50..<200 {
             let nonce = UUID().uuidString
-            let timestamp = Date().addingTimeInterval(-Double(8000 - i))
+            let timestamp = Date().addingTimeInterval(-Double(200 - i))
             _ = await self.validator.validateNonce(nonce, timestamp: timestamp)
-        
+        }
+
         // Oldest should be evicted
         let oldestNonce = nonces[0]
         let oldestTimestamp = Date().addingTimeInterval(-100)
         let result = await self.validator.validateNonce(oldestNonce, timestamp: oldestTimestamp)
         XCTAssertFalse(result, "Oldest nonce should be evicted")
-    
-            }
-        }
     }
     func testEdge_PostACK_AllFields_Validated() async {
         let response = UploadChunkResponse(

@@ -17,6 +17,8 @@ import Security
 // _SHA256 typealias defined in CryptoHelpers.swift
 #if canImport(CryptoKit)
 import CryptoKit
+#elseif canImport(Crypto)
+import Crypto
 #endif
 
 /// Main orchestrator — coordinates all 6 layers, manages upload lifecycle.
@@ -45,7 +47,6 @@ public actor ChunkedUploader {
     // MARK: - Configuration
     
     private let fileURL: URL
-    private let apiClient: APIClient
     private let uploadEndpoint: URL
     
     // MARK: - Layer Components
@@ -109,19 +110,16 @@ public actor ChunkedUploader {
     ///
     /// - Parameters:
     ///   - fileURL: File URL to upload
-    ///   - apiClient: API client for server communication
     ///   - uploadEndpoint: Upload endpoint URL
     ///   - resumeDirectory: Directory for resume state
     ///   - masterKey: Master encryption key
     public init(
         fileURL: URL,
-        apiClient: APIClient,
         uploadEndpoint: URL,
         resumeDirectory: URL,
         masterKey: SymmetricKey
     ) throws {
         self.fileURL = fileURL
-        self.apiClient = apiClient
         self.uploadEndpoint = uploadEndpoint
         
         // Initialize Layer 1: I/O
@@ -400,25 +398,27 @@ public actor ChunkedUploader {
         config.timeoutIntervalForRequest = UploadConstants.CONNECTION_TIMEOUT_SECONDS
         config.timeoutIntervalForResource = 3600.0
         config.httpMaximumConnectionsPerHost = UploadConstants.MAX_PARALLEL_CHUNK_UPLOADS
-            #if os(iOS) || os(tvOS) || os(watchOS)
-            config.multipathServiceType = .aggregate
-            #endif
+        #if os(iOS) || os(tvOS) || os(watchOS)
+        config.multipathServiceType = .aggregate
+        #endif
+        #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
         config.allowsConstrainedNetworkAccess = false
         config.waitsForConnectivity = true
+        #endif
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.urlCache = nil
-        
+
         // HTTP/3 QUIC
         // Note: assumesHTTP3Capable may not be available in all iOS/macOS versions
         // HTTP/3 will be negotiated automatically if supported
-        
+
         // Certificate pinning delegate
         #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS)
         let delegate = CertificatePinningDelegate(pinManager: certificatePinManager)
         #else
         let delegate: URLSessionDelegate? = nil
         #endif
-        
+
         return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }
 }
