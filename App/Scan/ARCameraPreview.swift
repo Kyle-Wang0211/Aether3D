@@ -47,6 +47,12 @@ struct ARCameraPreview: UIViewRepresentable {
         configuration.environmentTexturing = .automatic
         configuration.isLightEstimationEnabled = true
 
+        // Enable per-frame depth map for TSDF fusion (PR#6 dependency)
+        // sceneDepth provides 256×192 depth CVPixelBuffer at 60fps on LiDAR devices
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
+
         // Start session
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
 
