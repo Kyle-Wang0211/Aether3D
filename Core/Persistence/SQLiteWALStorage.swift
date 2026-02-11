@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 // SQLiteWALStorage.swift
 // Aether3D
@@ -156,6 +159,93 @@ public actor SQLiteWALStorage: WALStorage {
         }
     }
     
+    // MARK: - Retention Purge Support
+
+    /// Read entries with timestamp before a cutoff date
+    ///
+    /// Used by RetentionPurgeEngine to audit entries before deletion.
+    /// - Parameter before: Cutoff date
+    /// - Returns: Entries older than the cutoff
+    public func readEntriesBefore(_ before: Date) async throws -> [WALEntry] {
+        guard let db = handle.db else {
+            throw WALError.ioError("Database not available")
+        }
+
+        let cutoffNs = Int64(before.timeIntervalSince1970 * 1_000_000_000)
+        let sql = "SELECT entry_id, hash, signed_entry_bytes, merkle_state, committed, timestamp FROM wal_entries WHERE timestamp < ? ORDER BY entry_id"
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw WALError.ioError("Failed to prepare readEntriesBefore statement")
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int64(statement, 1, cutoffNs)
+
+        var entries: [WALEntry] = []
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let entryId = UInt64(sqlite3_column_int64(statement, 0))
+
+            let hashLength = sqlite3_column_bytes(statement, 1)
+            let hashData = sqlite3_column_blob(statement, 1)
+            let hash = Data(bytes: hashData!, count: Int(hashLength))
+
+            let signedEntryLength = sqlite3_column_bytes(statement, 2)
+            let signedEntryData = sqlite3_column_blob(statement, 2)
+            let signedEntryBytes = Data(bytes: signedEntryData!, count: Int(signedEntryLength))
+
+            let merkleStateLength = sqlite3_column_bytes(statement, 3)
+            let merkleStateData = sqlite3_column_blob(statement, 3)
+            let merkleState = Data(bytes: merkleStateData!, count: Int(merkleStateLength))
+
+            let committed = sqlite3_column_int(statement, 4) != 0
+
+            let timestampNs = UInt64(sqlite3_column_int64(statement, 5))
+            let timestamp = Date(timeIntervalSince1970: Double(timestampNs) / 1_000_000_000)
+
+            entries.append(WALEntry(
+                entryId: entryId,
+                hash: hash,
+                signedEntryBytes: signedEntryBytes,
+                merkleState: merkleState,
+                committed: committed,
+                timestamp: timestamp
+            ))
+        }
+
+        return entries
+    }
+
+    /// Delete entries with timestamp before a cutoff date
+    ///
+    /// Used by RetentionPurgeEngine for data retention compliance.
+    /// - Parameter before: Cutoff date
+    /// - Returns: Number of entries deleted
+    @discardableResult
+    public func purgeEntriesBefore(_ before: Date) async throws -> Int {
+        guard let db = handle.db else {
+            throw WALError.ioError("Database not available")
+        }
+
+        let cutoffNs = Int64(before.timeIntervalSince1970 * 1_000_000_000)
+        let sql = "DELETE FROM wal_entries WHERE timestamp < ?"
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw WALError.ioError("Failed to prepare purge statement")
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int64(statement, 1, cutoffNs)
+
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw WALError.ioError("Failed to execute purge")
+        }
+
+        return Int(sqlite3_changes(db))
+    }
+
     /// Close storage
     public func close() async throws {
         guard let db = handle.db else {

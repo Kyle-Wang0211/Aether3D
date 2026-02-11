@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 // ConstantSpecCoverageTests.swift
 // Aether3D
@@ -88,6 +91,7 @@ final class ConstantSpecCoverageTests: XCTestCase {
             + ContinuityConstants.allSpecs
             + CoverageVisualizationConstants.allSpecs
             + StorageConstants.allSpecs
+            + ScanGuidanceConstants.allSpecs
         
         XCTAssertEqual(registrySpecs.count, allSpecs.count, "Registry should contain all specs")
         

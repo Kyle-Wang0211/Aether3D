@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 // PR#3 — API Contract v2.0
 // Stage: WHITEBOX | Camera-only
 // Endpoints: 12 | HTTP Codes: 10 (3 success + 7 error) | Business Errors: 7

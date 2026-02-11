@@ -131,6 +131,7 @@ jobs:
 
       - name: Build and test (Debug)
         run: |
+ pr9/chunked-upload-v3
           # On Linux, swift test --skip PR5CaptureTests still links PR5Capture types
           # into the test binary. @MainActor + async setUp/tearDown crashes the binary
           # at load time (xctest #504). Using --filter with explicit targets avoids
@@ -140,6 +141,19 @@ jobs:
       - name: Extract CHECKS_TOTAL
         run: |
           swift test --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid' 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+
+          # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
+          # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
+          # --disable-swift-testing avoids dual-runner overhead on Linux.
+          # Run tests in two batches to avoid posix_spawn ARG_MAX overflow
+          # (3000+ test names exceed Linux argument list limit).
+          swift build --build-tests
+          swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
+          swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing
+      - name: Extract CHECKS_TOTAL
+        run: |
+          swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+ main
 
   swiftpm-ubuntu-release:
     name: SwiftPM Ubuntu Release
@@ -189,9 +203,21 @@ jobs:
 
       - name: Build and test (Release)
         run: |
+ pr9/chunked-upload-v3
           # On Linux, --skip still links PR5Capture types → crash at load time.
           # Use --filter to select only non-PR5Capture test targets.
           swift test -c release --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid'
+
+          # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
+          # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
+          # Run tests in two batches to avoid posix_spawn ARG_MAX overflow.
+          # NOTE: Do NOT use `swift build -c release --build-tests` + `--skip-build` —
+          # `--build-tests` in release mode does NOT pass `-enable-testing`, causing
+          # `@testable import` to fail. Let `swift test -c release` handle the build
+          # (it passes `-enable-testing` automatically).
+          swift test -c release --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
+          swift test -c release --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing
+ main
 
   fixtures-no-diff:
     name: Fixtures No-Diff
@@ -368,14 +394,27 @@ jobs:
           # Linux: --skip still links PR5Capture types → crash at load time.
           #        Use --filter to select only non-PR5Capture test targets.
           if [ "$RUNNER_OS" = "Linux" ]; then
+ pr9/chunked-upload-v3
             swift test --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid'
+
+            # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
+            # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
+            # Run tests in two batches to avoid posix_spawn ARG_MAX overflow.
+            swift build --build-tests
+            swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
+            swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing
+ main
           else
             swift test --skip PR5CaptureTests --disable-swift-testing
           fi
       - name: Extract CHECKS_TOTAL
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
+ pr9/chunked-upload-v3
             swift test --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid' 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+
+            swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+ main
           else
             swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
           fi

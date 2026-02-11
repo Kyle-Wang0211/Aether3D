@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 //  PipelineRunner.swift
 //  progect2
@@ -36,9 +39,13 @@ private func jsonEscape(_ string: String) -> String {
     return result
 }
 
-final class PipelineRunner {
+public final class PipelineRunner {
     private let remoteClient: RemoteB1Client
-    
+
+    public convenience init() {
+        self.init(remoteClient: NotConfiguredRemoteB1Client())
+    }
+
     init(remoteClient: RemoteB1Client = NotConfiguredRemoteB1Client()) {
         self.remoteClient = remoteClient
     }
@@ -213,7 +220,7 @@ final class PipelineRunner {
         }
     }
     
-    func runGenerate(request: BuildRequest) async -> GenerateResult {
+    public func runGenerate(request: BuildRequest) async -> GenerateResult {
         #if canImport(AVFoundation)
         let startTime = Date()
         

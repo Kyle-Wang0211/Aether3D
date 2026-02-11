@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
 //
 //  Aether3DApp.swift
 //  progect2
@@ -11,7 +14,10 @@ import SwiftUI
 struct Aether3DApp: App {
     var body: some Scene {
         WindowGroup {
-            PipelineDemoView()
+            NavigationStack {
+                HomePage()
+            }
+            .preferredColorScheme(.dark)
         }
     }
 }
