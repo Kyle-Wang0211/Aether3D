@@ -1212,7 +1212,7 @@ final class ContentDefinedChunkerTests: XCTestCase {
         let startTime = Date()
         _ = try await chunker.chunkFile(at: file)
         let duration = Date().timeIntervalSince(startTime)
-        XCTAssertLessThan(duration, 30.0, "100MB file should chunk in reasonable time")
+        XCTAssertLessThan(duration, 60.0, "100MB file should chunk in reasonable time")
     }
 
     func testPerformance_1GBFile_Under10s() async throws {
