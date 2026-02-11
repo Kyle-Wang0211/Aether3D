@@ -375,8 +375,10 @@ jobs:
           # Run tests in two batches on Linux to avoid posix_spawn ARG_MAX overflow.
           if [ "$RUNNER_OS" = "Linux" ]; then
             VERIFICATION_OUTPUT=$(swift test --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
-            VERIFICATION_OUTPUT2=$(swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
-            VERIFICATION_OUTPUT="${VERIFICATION_OUTPUT}"$'\n'"${VERIFICATION_OUTPUT2}"
+            VERIFICATION_OUTPUT2=$(swift test --skip-build --filter TSDFTests --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT3=$(swift test --skip-build --filter ScanGuidanceTests --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT4=$(swift test --skip-build --filter UploadTests --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT="${VERIFICATION_OUTPUT}"$'\n'"${VERIFICATION_OUTPUT2}"$'\n'"${VERIFICATION_OUTPUT3}"$'\n'"${VERIFICATION_OUTPUT4}"
           else
             VERIFICATION_OUTPUT=$(swift test 2>&1) || echo "Some tests failed (check logs)"
           fi
