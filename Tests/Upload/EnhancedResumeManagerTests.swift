@@ -104,10 +104,17 @@ final class EnhancedResumeManagerTests: XCTestCase {
     }
     
     func testComputeFingerprint_DifferentFiles_DifferentFingerprint() async throws {
-        let file1 = try createTestFile(size: 1024, content: 0x01)
-        let file2 = try createTestFile(size: 1024, content: 0x02)
-        let fingerprint1 = try await manager.computeFingerprint(fileURL: file1)
-        let fingerprint2 = try await manager.computeFingerprint(fileURL: file2)
+        // Use separate file URLs since createTestFile overwrites the same testFileURL
+        let url1 = FileManager.default.temporaryDirectory.appendingPathComponent("fp-diff1-\(UUID().uuidString)")
+        let url2 = FileManager.default.temporaryDirectory.appendingPathComponent("fp-diff2-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: url1)
+            try? FileManager.default.removeItem(at: url2)
+        }
+        try Data(repeating: 0x01, count: 1024).write(to: url1)
+        try Data(repeating: 0x02, count: 1024).write(to: url2)
+        let fingerprint1 = try await manager.computeFingerprint(fileURL: url1)
+        let fingerprint2 = try await manager.computeFingerprint(fileURL: url2)
         XCTAssertNotEqual(fingerprint1.sha256Hex, fingerprint2.sha256Hex, "Different files should produce different fingerprints")
     }
     
@@ -1154,13 +1161,21 @@ final class EnhancedResumeManagerTests: XCTestCase {
     }
     
     func testEdge_MultipleFiles_SameSession_Handles() async throws {
-        let file1 = try createTestFile(size: 1024, content: 0x01)
-        let file2 = try createTestFile(size: 1024, content: 0x02)
+        // Use separate file URLs so file1 content is not overwritten by file2
+        let file1URL = FileManager.default.temporaryDirectory.appendingPathComponent("file1-\(UUID().uuidString)")
+        let file2URL = FileManager.default.temporaryDirectory.appendingPathComponent("file2-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: file1URL)
+            try? FileManager.default.removeItem(at: file2URL)
+        }
+        try Data(repeating: 0x01, count: 1024).write(to: file1URL)
+        try Data(repeating: 0x02, count: 1024).write(to: file2URL)
         let sessionId = UUID().uuidString
-        let state1 = try await createResumeState(sessionId: sessionId, fileURL: file1)
+        let fingerprint1 = try await manager.computeFingerprint(fileURL: file1URL)
+        let state1 = ResumeState(sessionId: sessionId, fileFingerprint: fingerprint1, ackedChunks: [], merkleRoot: nil, commitmentTip: nil, uploadPosition: 0, version: 2)
         try await manager.persistResumeState(state1)
         // Different file, same session - should fail fingerprint check
-        let resumed = try await manager.resumeLevel1(sessionId: sessionId, fileURL: file2)
+        let resumed = try await manager.resumeLevel1(sessionId: sessionId, fileURL: file2URL)
         XCTAssertNil(resumed, "Different file should fail fingerprint check")
     }
     

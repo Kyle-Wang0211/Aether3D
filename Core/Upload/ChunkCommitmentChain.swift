@@ -40,6 +40,7 @@ public actor ChunkCommitmentChain {
     
     /// Jump chain (every sqrt(n) chunks)
     private var jumpChain: [Data] = []
+    private var jumpChainIndices: [Int] = []
     private var jumpStride: Int = 1
     
     // MARK: - Initialization
@@ -82,6 +83,7 @@ public actor ChunkCommitmentChain {
         if currentIndex % jumpStride == 0 {
             let jumpHash = computeJumpHash(commitment: commitment)
             jumpChain.append(jumpHash)
+            jumpChainIndices.append(currentIndex)
         }
         
         // Update jump stride: sqrt(n)
@@ -172,21 +174,25 @@ public actor ChunkCommitmentChain {
         guard !jumpChain.isEmpty else {
             return true
         }
-        
+
+        guard jumpChain.count == jumpChainIndices.count else {
+            return false
+        }
+
         for (jumpIndex, jumpHash) in jumpChain.enumerated() {
-            let chainIndex = jumpIndex * jumpStride
+            let chainIndex = jumpChainIndices[jumpIndex]
             guard chainIndex < forwardChain.count else {
                 continue
             }
-            
+
             let commitment = forwardChain[chainIndex]
             let expectedJumpHash = computeJumpHash(commitment: commitment)
-            
+
             if expectedJumpHash != jumpHash {
                 return false
             }
         }
-        
+
         return true
     }
     

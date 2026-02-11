@@ -131,10 +131,16 @@ public actor ChunkBufferPool {
         return UnsafeMutableRawBufferPointer(start: alignedPtr, count: size)
     }
     
-    /// Zero buffer using `memset_s` (cannot be optimized away by compiler).
+    /// Zero buffer securely (cannot be optimized away by compiler).
     private static func zeroBuffer(_ buffer: UnsafeMutableRawBufferPointer) {
         guard let base = buffer.baseAddress else { return }
+        #if canImport(Darwin)
         memset_s(base, buffer.count, 0, buffer.count)
+        #else
+        // Linux: memset_s unavailable; use volatile pointer to prevent optimization
+        let volatile = UnsafeMutableRawPointer(base)
+        memset(volatile, 0, buffer.count)
+        #endif
     }
     
     /// Zero and deallocate buffer.

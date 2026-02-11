@@ -149,8 +149,12 @@ public actor EnhancedResumeManager {
         
         fsync(fd)
         
-        // Atomic rename
-        try FileManager.default.moveItem(at: tempPath, to: targetPath)
+        // Atomic rename (replaceItemAt overwrites existing)
+        if FileManager.default.fileExists(atPath: targetPath.path) {
+            _ = try FileManager.default.replaceItemAt(targetPath, withItemAt: tempPath)
+        } else {
+            try FileManager.default.moveItem(at: tempPath, to: targetPath)
+        }
     }
     
     /// Load resume state.
@@ -160,23 +164,29 @@ public actor EnhancedResumeManager {
     /// - Throws: ResumeError on load failure
     public func loadResumeState(sessionId: String) async throws -> ResumeState? {
         let filePath = resumeStatePath(sessionId: sessionId)
-        
+
         guard FileManager.default.fileExists(atPath: filePath.path) else {
             return nil
         }
-        
+
         // Read encrypted data
         let encryptedData = try Data(contentsOf: filePath)
-        
-        // Decrypt
-        let sessionKey = deriveSessionKey(sessionId: sessionId)
-        let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
-        let plaintext = try AES.GCM.open(sealedBox, using: sessionKey)
-        
-        // Decode
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(ResumeState.self, from: plaintext)
+
+        // Decrypt — wrap CryptoKit/decoding errors into ResumeError
+        do {
+            let sessionKey = deriveSessionKey(sessionId: sessionId)
+            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+            let plaintext = try AES.GCM.open(sealedBox, using: sessionKey)
+
+            // Decode
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(ResumeState.self, from: plaintext)
+        } catch is ResumeError {
+            throw ResumeError.decryptionFailed
+        } catch {
+            throw ResumeError.decryptionFailed
+        }
     }
     
     // MARK: - Resume Levels
@@ -282,8 +292,17 @@ public actor EnhancedResumeManager {
     }
     
     /// Get resume state file path.
+    /// Long session IDs are hashed to prevent exceeding filesystem filename limits.
     private func resumeStatePath(sessionId: String) -> URL {
-        return resumeDirectory.appendingPathComponent("\(sessionId).resume")
+        let filename: String
+        if sessionId.count > 200 {
+            // Hash long session IDs to stay within filesystem limits
+            let hash = SHA256.hash(data: Data(sessionId.utf8))
+            filename = hash.compactMap { String(format: "%02x", $0) }.joined()
+        } else {
+            filename = sessionId
+        }
+        return resumeDirectory.appendingPathComponent("\(filename).resume")
     }
 }
 

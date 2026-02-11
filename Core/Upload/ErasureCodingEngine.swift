@@ -109,6 +109,16 @@ public actor ErasureCodingEngine: ErasureCoder {
     /// - Returns: Recovered data blocks
     /// - Throws: ErasureCodingError if decoding fails
     public func decode(blocks: [Data?], originalCount: Int) async throws -> [Data] {
+        guard !blocks.isEmpty else {
+            throw ErasureCodingError.insufficientBlocks
+        }
+        guard originalCount <= blocks.count else {
+            throw ErasureCodingError.insufficientBlocks
+        }
+        guard originalCount > 0 else {
+            return []
+        }
+
         // Try RS first (faster for systematic codes)
         if originalCount <= 255 {
             do {
@@ -117,7 +127,7 @@ public actor ErasureCodingEngine: ErasureCoder {
                 // Fall back to RaptorQ
             }
         }
-        
+
         // Use RaptorQ
         if raptorQEngine == nil {
             raptorQEngine = RaptorQEngine()

@@ -137,32 +137,30 @@ public actor ContentDefinedChunker {
     /// - Returns: Array of CDC boundaries with hashes
     /// - Throws: IOError on read failure
     public func chunkFile(at fileURL: URL) async throws -> [CDCBoundary] {
-        let ioEngine = try HybridIOEngine(fileURL: fileURL)
+        let fileData = try Data(contentsOf: fileURL)
+        let fileSize = Int64(fileData.count)
+
+        guard fileSize > 0 else {
+            return []
+        }
+
         var boundaries: [CDCBoundary] = []
         var offset: Int64 = 0
-        var chunkIndex = 0
-        
-        while true {
-            // Read chunk using HybridIOEngine
-            let chunkSize = avgChunkSize
-            let result = try await ioEngine.readChunk(offset: offset, length: chunkSize)
-            
-            // Find CDC boundary within chunk
+
+        while offset < fileSize {
+            let remaining = Int(fileSize - offset)
+            let chunkMaxSize = min(maxChunkSize, remaining)
+
             let boundary = try await findCDCBoundary(
-                data: try Data(contentsOf: fileURL),
+                data: fileData,
                 startOffset: offset,
-                maxSize: chunkSize
+                maxSize: chunkMaxSize
             )
-            
+
             boundaries.append(boundary)
             offset += Int64(boundary.size)
-            chunkIndex += 1
-            
-            if offset >= result.byteCount {
-                break
-            }
         }
-        
+
         return boundaries
     }
     
