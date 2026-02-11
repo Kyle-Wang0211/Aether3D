@@ -1277,3 +1277,4 @@ final class KalmanBandwidthPredictorTests: XCTestCase {
         XCTAssertFalse(prediction.predictedBps.isNaN, "Should not produce NaN")
     }
 }
+// CI trigger: workflow path filter requires Tests/ change
