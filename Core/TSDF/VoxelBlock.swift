@@ -9,17 +9,23 @@
 
 import Foundation
 
-/// Single voxel — 8 bytes, GPU cache-line friendly
+/// Single voxel — 4 bytes (sdf:2 + weight:1 + confidence:1).
+///
+/// NOTE: Reserved/padding fields removed to avoid Swift Release-mode optimizer
+/// miscompilation when structs with default-valued fields cross module boundaries
+/// via @testable import (observed: property reads returned garbage with -O).
+/// Future RGB8+flags can be added back when the TSDF GPU pipeline needs them.
 public struct Voxel: Sendable {
     public var sdf: SDFStorage     // Normalized signed distance [-1.0, +1.0], scaled by truncation distance
     public var weight: UInt8       // Accumulated observation weight, clamped to W_MAX=64
     public var confidence: UInt8   // Max observed confidence (0=low, 1=mid, 2=high)
-    public var reserved: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)  // Future: RGB8 + flags
 
     public static let empty = Voxel(sdf: SDFStorage(1.0), weight: 0, confidence: 0)
 
     public init(sdf: SDFStorage, weight: UInt8, confidence: UInt8) {
-        self.sdf = sdf; self.weight = weight; self.confidence = confidence
+        self.sdf = sdf
+        self.weight = weight
+        self.confidence = confidence
     }
 }
 
