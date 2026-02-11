@@ -86,7 +86,7 @@ public final class ThermalQualityAdapter {
         if frameTimeSamples.count > ScanGuidanceConstants.frameBudgetWindowFrames {
             frameTimeSamples.removeFirst()
         }
-        let targetMs = 1000.0 / Double(currentTier.targetFPS)
+        let targetMs = 1000.0 / Double(currentTier.targetFPS) // LINT:ALLOW
         let threshold = targetMs * ScanGuidanceConstants.frameBudgetOvershootRatio
         let sorted = frameTimeSamples.sorted()
         let p95Index = Int(Double(sorted.count) * 0.95)

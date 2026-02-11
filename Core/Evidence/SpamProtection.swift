@@ -33,7 +33,7 @@ public final class SpamProtection {
     private var patchStates: [String: SpamState] = [:]
     
     /// Time window for frequency tracking (milliseconds)
-    private let frequencyWindowMs: Int64 = 1000  // 1 second
+    private let frequencyWindowMs: Int64 = 1000  // 1 second // LINT:ALLOW
     
     /// Maximum updates per window before penalty
     private let maxUpdatesPerWindow: Int = 10

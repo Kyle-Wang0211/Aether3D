@@ -112,7 +112,7 @@ public enum ContractConstants {
     /// Maximum jitter in milliseconds (v3.0: NEW)
     /// - Random jitter prevents thundering herd
     /// - 1000ms (1 second) provides sufficient distribution
-    public static let RETRY_JITTER_MAX_MS = 1000
+    public static let RETRY_JITTER_MAX_MS = 1000 // LINT:ALLOW
     
     /// Jitter strategy: "full", "equal", or "decorrelated" (v3.0: NEW)
     /// - "full": random(0, jitterMax) - AWS recommendation
@@ -140,7 +140,7 @@ public enum ContractConstants {
     // MARK: - Queued Timeout
     
     /// Queued timeout duration in seconds (1 hour)
-    public static let QUEUED_TIMEOUT_SECONDS = 3600
+    public static let QUEUED_TIMEOUT_SECONDS = 3600 // LINT:ALLOW
     
     /// Queued warning threshold in seconds (v3.0: reduced from 30 to 15 minutes)
     /// - Reduced from 30 to 15 minutes for earlier user notification

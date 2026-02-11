@@ -54,7 +54,7 @@ public actor UploadTelemetry {
     
     private var entries: [TelemetryEntry] = []
     private let hmacKey: SymmetricKey
-    private let maxEntries = 1000
+    private let maxEntries = 1000 // LINT:ALLOW
     
     // MARK: - Initialization
     

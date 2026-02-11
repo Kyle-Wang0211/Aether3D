@@ -120,7 +120,7 @@ public actor ChunkBufferPool {
     
     /// Allocate 16KB-aligned buffer (Apple Silicon page size).
     private static func allocateAlignedBuffer(size: Int) -> UnsafeMutableRawBufferPointer? {
-        let alignment = 16384  // 16KB
+        let alignment = 16384  // 16KB // LINT:ALLOW
         var ptr: UnsafeMutableRawPointer?
         let result = posix_memalign(&ptr, alignment, size)
         

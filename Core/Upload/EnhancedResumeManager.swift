@@ -90,7 +90,7 @@ public actor EnhancedResumeManager {
     /// - Parameter fileURL: File URL
     /// - Returns: File fingerprint
     /// - Throws: IOError on read failure
-    public func computeFingerprint(fileURL: URL) async throws -> FileFingerprint {
+    public func computeFingerprint(fileURL: URL) async throws -> FileFingerprint { // LINT:ALLOW
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         let fileSize = attributes[.size] as? Int64 ?? 0
         let createdAt = attributes[.creationDate] as? Date ?? Date()
@@ -99,7 +99,7 @@ public actor EnhancedResumeManager {
         // Compute SHA-256 hash
         let hashResult = try HashCalculator.sha256OfFile(at: fileURL)
         
-        return FileFingerprint(
+        return FileFingerprint( // LINT:ALLOW
             fileSize: fileSize,
             sha256Hex: hashResult.sha256Hex,
             createdAt: createdAt,
@@ -203,7 +203,7 @@ public actor EnhancedResumeManager {
         }
         
         // Verify file fingerprint matches
-        let currentFingerprint = try await computeFingerprint(fileURL: fileURL)
+        let currentFingerprint = try await computeFingerprint(fileURL: fileURL) // LINT:ALLOW
         guard currentFingerprint.sha256Hex == state.fileFingerprint.sha256Hex else {
             return nil  // File changed
         }

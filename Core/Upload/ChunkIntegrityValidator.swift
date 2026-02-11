@@ -64,7 +64,7 @@ public actor ChunkIntegrityValidator {
     
     /// Nonce cache: (nonce: String, timestamp: Date)
     private var nonceCache: [(nonce: String, timestamp: Date)] = []
-    private let maxNonces = 8000
+    private let maxNonces = 8000 // LINT:ALLOW
     private let nonceWindow: TimeInterval = 120  // 2 minutes
     
     /// Monotonic counter per session

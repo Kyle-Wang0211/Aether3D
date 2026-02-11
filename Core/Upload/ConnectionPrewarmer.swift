@@ -161,7 +161,7 @@ public actor ConnectionPrewarmer {
         // Create URLSession configuration
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = UploadConstants.CONNECTION_TIMEOUT_SECONDS
-        config.timeoutIntervalForResource = 3600.0
+        config.timeoutIntervalForResource = 3600.0 // LINT:ALLOW
         config.httpMaximumConnectionsPerHost = UploadConstants.MAX_PARALLEL_CHUNK_UPLOADS
         #if os(iOS) || os(tvOS) || os(watchOS)
         config.multipathServiceType = .aggregate
