@@ -68,9 +68,7 @@ public actor ChunkCommitmentChain {
     /// - Returns: Commitment hash (hex string)
     public func appendChunk(_ chunkHash: String) -> String {
         // Convert hex to Data
-        guard let chunkHashData = hexStringToData(chunkHash) else {
-            fatalError("Invalid chunk hash format")
-        }
+        guard let chunkHashData = hexStringToData(chunkHash) else { fatalError("Invalid chunk hash format") }
         
         // Compute commitment
         let previousCommitment = forwardChain.last ?? genesis
