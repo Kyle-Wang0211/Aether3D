@@ -47,12 +47,13 @@ jobs:
           swift --version
       - name: Build and test (Debug)
         run: |
-          # Skip PR5CaptureTests on macOS: @MainActor + async setUp/tearDown
-          # crashes test runner with SIGTRAP (signal code 5) in LinearColorSpaceConverterTests.
-          swift test --skip PR5CaptureTests
+          # Skip PR5CaptureTests: @MainActor + async setUp/tearDown crashes test runner
+          # with SIGTRAP (signal code 5). --disable-swift-testing prevents Swift Testing
+          # framework from discovering @MainActor types during test enumeration.
+          swift test --skip PR5CaptureTests --disable-swift-testing
       - name: Extract CHECKS_TOTAL
         run: |
-          swift test --skip PR5CaptureTests 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+          swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
 
   swiftpm-macos-release:
     name: SwiftPM macOS Release
@@ -77,9 +78,10 @@ jobs:
           swift --version
       - name: Build and test (Release)
         run: |
-          # Skip PR5CaptureTests on macOS: @MainActor + async setUp/tearDown
-          # crashes test runner with SIGTRAP (signal code 5) in LinearColorSpaceConverterTests.
-          swift test -c release --skip PR5CaptureTests
+          # Skip PR5CaptureTests: @MainActor + async setUp/tearDown crashes test runner
+          # with SIGTRAP (signal code 5). --disable-swift-testing prevents Swift Testing
+          # framework from discovering @MainActor types during test enumeration.
+          swift test -c release --skip PR5CaptureTests --disable-swift-testing
 
   swiftpm-ubuntu-debug:
     name: SwiftPM Ubuntu Debug
@@ -129,13 +131,15 @@ jobs:
 
       - name: Build and test (Debug)
         run: |
-          # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
-          # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
-          # --disable-swift-testing avoids dual-runner overhead on Linux.
-          swift test --skip PR5CaptureTests --disable-swift-testing
+          # On Linux, swift test --skip PR5CaptureTests still links PR5Capture types
+          # into the test binary. @MainActor + async setUp/tearDown crashes the binary
+          # at load time (xctest #504). Using --filter with explicit targets avoids
+          # loading PR5CaptureTests during test enumeration.
+          # Note: --disable-swift-testing omitted — --filter handles test selection.
+          swift test --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid'
       - name: Extract CHECKS_TOTAL
         run: |
-          swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+          swift test --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid' 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
 
   swiftpm-ubuntu-release:
     name: SwiftPM Ubuntu Release
@@ -185,9 +189,9 @@ jobs:
 
       - name: Build and test (Release)
         run: |
-          # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
-          # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
-          swift test -c release --skip PR5CaptureTests --disable-swift-testing
+          # On Linux, --skip still links PR5Capture types → crash at load time.
+          # Use --filter to select only non-PR5Capture test targets.
+          swift test -c release --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid'
 
   fixtures-no-diff:
     name: Fixtures No-Diff
@@ -359,19 +363,21 @@ jobs:
 
       - name: Build and test
         run: |
-          # Skip PR5CaptureTests on all platforms: @MainActor + async setUp/tearDown
-          # crashes test runner — SIGABRT on Linux (xctest #504), SIGTRAP on macOS.
+          # PR5CaptureTests: @MainActor + async setUp/tearDown crashes test runner.
+          # macOS: --skip + --disable-swift-testing prevents SIGTRAP during type enumeration.
+          # Linux: --skip still links PR5Capture types → crash at load time.
+          #        Use --filter to select only non-PR5Capture test targets.
           if [ "$RUNNER_OS" = "Linux" ]; then
-            swift test --skip PR5CaptureTests --disable-swift-testing
+            swift test --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid'
           else
-            swift test --skip PR5CaptureTests
+            swift test --skip PR5CaptureTests --disable-swift-testing
           fi
       - name: Extract CHECKS_TOTAL
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+            swift test --filter 'Aether3DCoreTests|ConstantsTests|UploadTests|CITests|PR4|EvidenceGrid' 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
           else
-            swift test --skip PR5CaptureTests 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+            swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
           fi
 
   generate-verification-matrix:
