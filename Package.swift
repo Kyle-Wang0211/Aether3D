@@ -101,10 +101,73 @@ let package = Package(
       ],
       path: "Tests/Constants"
     ),
+    // UploadTests split into 3 targets to stay under Linux MAX_ARG_STRLEN (128KB).
+    // SwiftPM enumerates all test method names as a single posix_spawn argument;
+    // the original 2409 tests = 177KB exceeds the kernel limit.
     .testTarget(
       name: "UploadTests",
       dependencies: ["Aether3DCore"],
-      path: "Tests/Upload"
+      path: "Tests/Upload",
+      exclude: [
+        // UploadTestsB files (D-N)
+        "DeviceInfoTests.swift", "EnhancedResumeManagerTests.swift",
+        "ErasureCodingEngineTests.swift", "FusionSchedulerTests.swift",
+        "HashCalculatorTests.swift", "HybridIOEngineTests.swift",
+        "ImmutableBundleTests.swift", "KalmanBandwidthPredictorTests.swift",
+        "MLBandwidthPredictorTests.swift", "MultiLayerProgressTrackerTests.swift",
+        "MultipathUploadManagerTests.swift", "NetworkPathObserverTests.swift",
+        "NetworkSpeedMonitorTests.swift", "PR9CertificatePinManagerTests.swift",
+        // UploadTestsC files (P-U)
+        "PR9PerformanceTests.swift", "PR9SecurityTests.swift",
+        "ProofOfPossessionTests.swift", "RaptorQEngineTests.swift",
+        "StreamingMerkleTreeTests.swift", "UnifiedResourceManagerTests.swift",
+        "UploadCircuitBreakerTests.swift", "UploadResumeManagerTests.swift",
+        "UploadSessionTests.swift", "UploadTelemetryTests.swift"
+      ]
+    ),
+    .testTarget(
+      name: "UploadTestsB",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/Upload",
+      exclude: [
+        // UploadTests files (A-C)
+        "AdaptiveChunkSizerTests.swift", "BundleConstantsTests.swift",
+        "BundleManifestTests.swift", "ByzantineVerifierTests.swift",
+        "CAMARAQoDClientTests.swift", "CIDMapperTests.swift",
+        "ChunkBufferPoolTests.swift", "ChunkCommitmentChainTests.swift",
+        "ChunkIdempotencyManagerTests.swift", "ChunkIntegrityValidatorTests.swift",
+        "ChunkManagerTests.swift", "ConnectionPrewarmerTests.swift",
+        "ContentDefinedChunkerTests.swift",
+        // UploadTestsC files (P-U)
+        "PR9PerformanceTests.swift", "PR9SecurityTests.swift",
+        "ProofOfPossessionTests.swift", "RaptorQEngineTests.swift",
+        "StreamingMerkleTreeTests.swift", "UnifiedResourceManagerTests.swift",
+        "UploadCircuitBreakerTests.swift", "UploadResumeManagerTests.swift",
+        "UploadSessionTests.swift", "UploadTelemetryTests.swift"
+      ]
+    ),
+    .testTarget(
+      name: "UploadTestsC",
+      dependencies: ["Aether3DCore"],
+      path: "Tests/Upload",
+      exclude: [
+        // UploadTests files (A-C)
+        "AdaptiveChunkSizerTests.swift", "BundleConstantsTests.swift",
+        "BundleManifestTests.swift", "ByzantineVerifierTests.swift",
+        "CAMARAQoDClientTests.swift", "CIDMapperTests.swift",
+        "ChunkBufferPoolTests.swift", "ChunkCommitmentChainTests.swift",
+        "ChunkIdempotencyManagerTests.swift", "ChunkIntegrityValidatorTests.swift",
+        "ChunkManagerTests.swift", "ConnectionPrewarmerTests.swift",
+        "ContentDefinedChunkerTests.swift",
+        // UploadTestsB files (D-N)
+        "DeviceInfoTests.swift", "EnhancedResumeManagerTests.swift",
+        "ErasureCodingEngineTests.swift", "FusionSchedulerTests.swift",
+        "HashCalculatorTests.swift", "HybridIOEngineTests.swift",
+        "ImmutableBundleTests.swift", "KalmanBandwidthPredictorTests.swift",
+        "MLBandwidthPredictorTests.swift", "MultiLayerProgressTrackerTests.swift",
+        "MultipathUploadManagerTests.swift", "NetworkPathObserverTests.swift",
+        "NetworkSpeedMonitorTests.swift", "PR9CertificatePinManagerTests.swift"
+      ]
     ),
     .testTarget(
       name: "CITests",
