@@ -155,13 +155,22 @@ jobs:
         run: |
           # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
           # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
-          # Run tests in multiple batches to avoid posix_spawn ARG_MAX overflow
-          # (combined test names exceed Linux argument list limit).
+          # Run tests in 4 batches using --skip (NOT --filter) to avoid
+          # posix_spawn ARG_MAX overflow (--filter expands test names into args).
+          SKIP_COMMON="--skip PR5CaptureTests --disable-swift-testing"
+          SKIP_BIG3="--skip TSDFTests --skip ScanGuidanceTests --skip UploadTests"
+          SKIP_NON_TSDF="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip ScanGuidanceTests --skip UploadTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+          SKIP_NON_SCANGUIDANCE="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip TSDFTests --skip UploadTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+          SKIP_NON_UPLOAD="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip TSDFTests --skip ScanGuidanceTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
           swift build --build-tests
-          swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
-          swift test --skip-build --filter TSDFTests --disable-swift-testing
-          swift test --skip-build --filter ScanGuidanceTests --disable-swift-testing
-          swift test --skip-build --filter UploadTests --disable-swift-testing
+          echo "=== Batch 1/4: Core + Constants + CI + PR4 + Evidence ==="
+          swift test --skip-build $SKIP_COMMON $SKIP_BIG3
+          echo "=== Batch 2/4: TSDFTests ==="
+          swift test --skip-build $SKIP_COMMON $SKIP_NON_TSDF
+          echo "=== Batch 3/4: ScanGuidanceTests ==="
+          swift test --skip-build $SKIP_COMMON $SKIP_NON_SCANGUIDANCE
+          echo "=== Batch 4/4: UploadTests ==="
+          swift test --skip-build $SKIP_COMMON $SKIP_NON_UPLOAD
       - name: Extract CHECKS_TOTAL
         run: |
           swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
@@ -221,10 +230,19 @@ jobs:
           # `--build-tests` in release mode does NOT pass `-enable-testing`, causing
           # `@testable import` to fail. Let `swift test -c release` handle the build
           # (it passes `-enable-testing` automatically).
-          swift test -c release --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
-          swift test -c release --skip-build --filter TSDFTests --disable-swift-testing
-          swift test -c release --skip-build --filter ScanGuidanceTests --disable-swift-testing
-          swift test -c release --skip-build --filter UploadTests --disable-swift-testing
+          SKIP_COMMON="--skip PR5CaptureTests --disable-swift-testing"
+          SKIP_BIG3="--skip TSDFTests --skip ScanGuidanceTests --skip UploadTests"
+          SKIP_NON_TSDF="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip ScanGuidanceTests --skip UploadTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+          SKIP_NON_SCANGUIDANCE="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip TSDFTests --skip UploadTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+          SKIP_NON_UPLOAD="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip TSDFTests --skip ScanGuidanceTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+          echo "=== Batch 1/4: Core + Constants + CI + PR4 + Evidence ==="
+          swift test -c release $SKIP_COMMON $SKIP_BIG3
+          echo "=== Batch 2/4: TSDFTests ==="
+          swift test -c release --skip-build $SKIP_COMMON $SKIP_NON_TSDF
+          echo "=== Batch 3/4: ScanGuidanceTests ==="
+          swift test -c release --skip-build $SKIP_COMMON $SKIP_NON_SCANGUIDANCE
+          echo "=== Batch 4/4: UploadTests ==="
+          swift test -c release --skip-build $SKIP_COMMON $SKIP_NON_UPLOAD
 
   fixtures-no-diff:
     name: Fixtures No-Diff
@@ -401,11 +419,16 @@ jobs:
           #   Swift Testing + XCTest concurrent runner can exit 1 even when all tests pass.
           # Linux: multi-batch strategy to avoid posix_spawn ARG_MAX overflow.
           if [ "$RUNNER_OS" = "Linux" ]; then
+            SKIP_COMMON="--skip PR5CaptureTests --disable-swift-testing"
+            SKIP_BIG3="--skip TSDFTests --skip ScanGuidanceTests --skip UploadTests"
+            SKIP_NON_TSDF="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip ScanGuidanceTests --skip UploadTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+            SKIP_NON_SCANGUIDANCE="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip TSDFTests --skip UploadTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+            SKIP_NON_UPLOAD="--skip Aether3DCoreTests --skip ConstantsTests --skip CITests --skip TSDFTests --skip ScanGuidanceTests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
             swift build --build-tests
-            swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
-            swift test --skip-build --filter TSDFTests --disable-swift-testing
-            swift test --skip-build --filter ScanGuidanceTests --disable-swift-testing
-            swift test --skip-build --filter UploadTests --disable-swift-testing
+            swift test --skip-build $SKIP_COMMON $SKIP_BIG3
+            swift test --skip-build $SKIP_COMMON $SKIP_NON_TSDF
+            swift test --skip-build $SKIP_COMMON $SKIP_NON_SCANGUIDANCE
+            swift test --skip-build $SKIP_COMMON $SKIP_NON_UPLOAD
           else
             set +e
             OUTPUT=$(swift test --skip PR5CaptureTests 2>&1)
