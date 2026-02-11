@@ -128,10 +128,14 @@ jobs:
           # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
           # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
           # --disable-swift-testing avoids dual-runner overhead on Linux.
-          swift test --skip PR5CaptureTests --disable-swift-testing
+          # Run tests in two batches to avoid posix_spawn ARG_MAX overflow
+          # (3000+ test names exceed Linux argument list limit).
+          swift build --build-tests
+          swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
+          swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing
       - name: Extract CHECKS_TOTAL
         run: |
-          swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+          swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
 
   swiftpm-ubuntu-release:
     name: SwiftPM Ubuntu Release
@@ -183,7 +187,10 @@ jobs:
         run: |
           # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
           # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
-          swift test -c release --skip PR5CaptureTests --disable-swift-testing
+          # Run tests in two batches to avoid posix_spawn ARG_MAX overflow.
+          swift build -c release --build-tests
+          swift test -c release --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
+          swift test -c release --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing
 
   fixtures-no-diff:
     name: Fixtures No-Diff
@@ -358,14 +365,17 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
             # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
-            swift test --skip PR5CaptureTests --disable-swift-testing
+            # Run tests in two batches to avoid posix_spawn ARG_MAX overflow.
+            swift build --build-tests
+            swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing
+            swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing
           else
             swift test
           fi
       - name: Extract CHECKS_TOTAL
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
+            swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
           else
             swift test 2>&1 | grep -E "CHECKS_TOTAL=|VERIFICATION SUITE SUMMARY" || echo "CHECKS_TOTAL not found"
           fi

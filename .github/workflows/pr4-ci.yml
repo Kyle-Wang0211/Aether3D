@@ -154,9 +154,16 @@ jobs:
           # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
           # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
           # --disable-swift-testing avoids dual-runner overhead on Linux.
-          swift test --skip PR5CaptureTests --disable-swift-testing 2>&1 || {
-            echo "❌ Tests failed. Checking for platform-specific issues..."
-            swift test --skip PR5CaptureTests --disable-swift-testing --verbose 2>&1 | tail -100
+          # Run tests in two batches to avoid posix_spawn ARG_MAX overflow.
+          swift build --build-tests
+          swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1 || {
+            echo "❌ Tests failed (batch 1). Checking for platform-specific issues..."
+            swift test --skip-build --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing --verbose 2>&1 | tail -100
+            exit 1
+          }
+          swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing 2>&1 || {
+            echo "❌ Tests failed (batch 2). Checking for platform-specific issues..."
+            swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing --verbose 2>&1 | tail -100
             exit 1
           }
 

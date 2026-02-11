@@ -372,8 +372,11 @@ jobs:
           # The ChecksTotalSmokeTest will verify >=1000 checks at the end
           # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
           # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
+          # Run tests in two batches on Linux to avoid posix_spawn ARG_MAX overflow.
           if [ "$RUNNER_OS" = "Linux" ]; then
-            VERIFICATION_OUTPUT=$(swift test --skip PR5CaptureTests --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT=$(swift test --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT2=$(swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT="${VERIFICATION_OUTPUT}"$'\n'"${VERIFICATION_OUTPUT2}"
           else
             VERIFICATION_OUTPUT=$(swift test 2>&1) || echo "Some tests failed (check logs)"
           fi
