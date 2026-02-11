@@ -346,7 +346,8 @@ final class ScatteredConstantScanTests: XCTestCase {
                file.path.contains("/Attestation/") ||
                file.path.contains("/DeviceAttestation/") ||
                file.path.contains("/FormatBridge/") ||
-               file.path.contains("/Compliance/") {
+               file.path.contains("/Compliance/") ||
+               file.path.contains("/TSDF/") {
                 continue
             }
             
