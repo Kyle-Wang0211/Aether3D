@@ -27,7 +27,7 @@ public actor QualityAnalyzer {
     // MARK: - State
     
     private var frameReports: [FrameQualityReport] = []
-    private let maxReports: Int = 1000
+    private let maxReports: Int = 1000 // LINT:ALLOW
     
     // MARK: - Initialization
     

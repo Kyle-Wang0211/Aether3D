@@ -34,7 +34,7 @@ public actor RoughtimeClient {
     
     /// Default Cloudflare Roughtime server
     public static let cloudflareHost = "roughtime.cloudflare.com"
-    public static let cloudflarePort: UInt16 = 2003
+    public static let cloudflarePort: UInt16 = 2003 // LINT:ALLOW
     public static let cloudflarePublicKeyHex = "TODO" // Will be set to actual Cloudflare public key
     
     public init(

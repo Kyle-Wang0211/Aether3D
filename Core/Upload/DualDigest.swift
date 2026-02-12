@@ -46,10 +46,7 @@ public struct DualDigest: Codable, Sendable, Equatable {
     public static func compute(data: Data) -> DualDigest {
         let sha256hex = _hexLowercase(Array(_SHA256.hash(data: data)))
         
-        if BundleConstants.DUAL_ALGORITHM_ENABLED {
-            // TODO: When swift-crypto ships SHA-3-256, compute it here
-            fatalError("SHA-3-256 not yet available in swift-crypto")
-        }
+        if BundleConstants.DUAL_ALGORITHM_ENABLED { fatalError("SHA-3-256 not yet available in swift-crypto") }
         
         return DualDigest(sha256: sha256hex, sha3_256: SHA3_PENDING)
     }

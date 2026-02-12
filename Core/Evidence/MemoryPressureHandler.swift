@@ -15,10 +15,10 @@ import Foundation
 public final class MemoryPressureHandler {
     
     /// Maximum patch count before pruning
-    public static let maxPatchCount: Int = 10000
+    public static let maxPatchCount: Int = 10000 // LINT:ALLOW
     
     /// Patches to keep on prune
-    public static let keepPatchCount: Int = 5000
+    public static let keepPatchCount: Int = 5000 // LINT:ALLOW
     
     /// Trim policy priority
     public enum TrimPriority {

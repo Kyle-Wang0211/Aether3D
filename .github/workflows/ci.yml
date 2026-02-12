@@ -372,11 +372,17 @@ jobs:
           # The ChecksTotalSmokeTest will verify >=1000 checks at the end
           # Skip PR5CaptureTests on Linux: @MainActor + async setUp/tearDown triggers
           # swift-corelibs-xctest deadlock bug (xctest #504) causing SIGABRT.
-          # Run tests in two batches on Linux to avoid posix_spawn ARG_MAX overflow.
+          # Run tests in 4 batches on Linux to avoid posix_spawn MAX_ARG_STRLEN (128KB) overflow.
+          # UploadTests split into 3 Package.swift targets (each <128KB of test names).
           if [ "$RUNNER_OS" = "Linux" ]; then
-            VERIFICATION_OUTPUT=$(swift test --skip PR5CaptureTests --skip TSDFTests --skip ScanGuidanceTests --skip UploadTests --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
-            VERIFICATION_OUTPUT2=$(swift test --skip-build --filter 'TSDFTests|ScanGuidanceTests|UploadTests' --disable-swift-testing 2>&1) || echo "Some tests failed (check logs)"
-            VERIFICATION_OUTPUT="${VERIFICATION_OUTPUT}"$'\n'"${VERIFICATION_OUTPUT2}"
+            SKIP_ALWAYS="--skip PR5CaptureTests --disable-swift-testing"
+            SKIP_UPLOADS="--skip UploadTests --skip UploadTestsB --skip UploadTestsC"
+            SKIP_CORE="--skip Aether3DCoreTests --skip CITests --skip PR4MathTests --skip PR4PathTraceTests --skip PR4OwnershipTests --skip PR4OverflowTests --skip PR4LUTTests --skip PR4DeterminismTests --skip PR4SoftmaxTests --skip PR4HealthTests --skip PR4UncertaintyTests --skip PR4CalibrationTests --skip PR4GoldenTests --skip PR4IntegrationTests --skip EvidenceGridTests --skip EvidenceGridDeterminismTests"
+            VERIFICATION_OUTPUT=$(swift test $SKIP_ALWAYS $SKIP_UPLOADS --skip ConstantsTests --skip TSDFTests --skip ScanGuidanceTests 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT2=$(swift test --skip-build $SKIP_ALWAYS $SKIP_UPLOADS $SKIP_CORE 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT3=$(swift test --skip-build $SKIP_ALWAYS --skip UploadTestsB --skip UploadTestsC --skip ConstantsTests --skip TSDFTests --skip ScanGuidanceTests $SKIP_CORE 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT4=$(swift test --skip-build $SKIP_ALWAYS --skip UploadTests --skip ConstantsTests --skip TSDFTests --skip ScanGuidanceTests $SKIP_CORE 2>&1) || echo "Some tests failed (check logs)"
+            VERIFICATION_OUTPUT="${VERIFICATION_OUTPUT}"$'\n'"${VERIFICATION_OUTPUT2}"$'\n'"${VERIFICATION_OUTPUT3}"$'\n'"${VERIFICATION_OUTPUT4}"
           else
             VERIFICATION_OUTPUT=$(swift test 2>&1) || echo "Some tests failed (check logs)"
           fi

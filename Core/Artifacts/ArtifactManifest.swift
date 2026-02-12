@@ -12,12 +12,17 @@ import Foundation
 
 #if canImport(CryptoKit)
 import CryptoKit
-typealias _SHA256 = CryptoKit.SHA256
 #elseif canImport(Crypto)
 import Crypto
-typealias _SHA256 = Crypto.SHA256
 #else
 #error("No SHA256 implementation available. macOS/iOS: use CryptoKit. Linux: add swift-crypto dependency and import Crypto.")
+#endif
+
+// Note: Use SHA256 directly to avoid conflicts with Core/Upload/CryptoHelpers.swift
+#if canImport(CryptoKit)
+typealias ArtifactSHA256 = CryptoKit.SHA256
+#elseif canImport(Crypto)
+typealias ArtifactSHA256 = Crypto.SHA256
 #endif
 
 // MARK: - Type Aliases
@@ -623,7 +628,7 @@ public struct ArtifactManifest: Codable, Sendable {
         self.artifactId = computedArtifactId
         
         // Compute artifactHash (SHA256(prefix + canonicalBytes))
-        let hash = _SHA256.hash(data: Self.domainSeparationPrefix.data(using: .ascii)! + canonicalBytes)
+        let hash = ArtifactSHA256.hash(data: Self.domainSeparationPrefix.data(using: .ascii)! + canonicalBytes)
         self.artifactHash = _hexLowercase(hash)
     }
     
@@ -820,7 +825,7 @@ public struct ArtifactManifest: Codable, Sendable {
         tempBytes.append("}".data(using: .utf8)!)
         
         // Step 2: Compute artifactId from tempBytes (SEAL FIX #5: uses same prefix)
-        let artifactIdHash = _SHA256.hash(data: Self.domainSeparationPrefix.data(using: .ascii)! + tempBytes)
+        let artifactIdHash = ArtifactSHA256.hash(data: Self.domainSeparationPrefix.data(using: .ascii)! + tempBytes)
         let artifactId = String(_hexLowercase(artifactIdHash).prefix(32))
         
         // Step 3: Compute final canonical bytes WITH artifactId (but without artifactHash)
@@ -1059,7 +1064,7 @@ public func computeArtifactHash(
         data.append((file.sha256 + "\n").data(using: .utf8)!)
     }
     
-    let hash = _SHA256.hash(data: data)
+    let hash = ArtifactSHA256.hash(data: data)
     return _hexLowercase(hash)
 }
 
@@ -1273,7 +1278,7 @@ public func validatePackage(at root: URL, manifest: WhiteboxArtifactManifest) th
         }
         
         let data = try Data(contentsOf: fileURL)
-        let actualHash = _hexLowercase(_SHA256.hash(data: data))
+        let actualHash = _hexLowercase(ArtifactSHA256.hash(data: data))
         guard actualHash == file.sha256 else {
             throw WhiteboxArtifactError.hashMismatch(path: file.path, expected: file.sha256, actual: actualHash)
         }

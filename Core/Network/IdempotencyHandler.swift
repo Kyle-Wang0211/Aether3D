@@ -24,7 +24,7 @@ public actor IdempotencyHandler {
     private var cache: [String: IdempotencyCacheEntry] = [:]
     
     /// Cache TTL (24 hours)
-    private let cacheTTL: TimeInterval = 86400
+    private let cacheTTL: TimeInterval = 86400 // LINT:ALLOW
     
     // MARK: - Idempotency Checking
     

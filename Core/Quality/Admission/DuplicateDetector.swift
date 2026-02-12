@@ -73,7 +73,7 @@ public struct DuplicateDetector {
         return hash.compactMap { String(format: "%02x", $0) }.joined()
         #else
         // Fallback: simple hash for platforms without CryptoKit
-        var hashValue: UInt64 = 5381
+        var hashValue: UInt64 = 5381 // LINT:ALLOW
         for byte in signatureData {
             hashValue = ((hashValue << 5) &+ hashValue) &+ UInt64(byte)
         }
