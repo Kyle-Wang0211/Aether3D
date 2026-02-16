@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether3d.local/schema/phase_plan.schema.json",
+  "type": "object",
+  "required": ["metadata", "phases"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["plan_version", "last_updated", "phase_id_span"],
+      "properties": {
+        "plan_version": { "type": "string", "minLength": 1 },
+        "last_updated": { "type": "string", "minLength": 1 },
+        "source": { "type": "string" },
+        "phase_id_span": {
+          "type": "object",
+          "required": ["min", "max"],
+          "properties": {
+            "min": { "type": "integer", "minimum": 0 },
+            "max": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "phases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "track",
+          "objective",
+          "prerequisite_phase_ids",
+          "required_contract_ids",
+          "required_gate_ids",
+          "deliverables",
+          "cursor_steps"
+        ],
+        "properties": {
+          "id": { "type": "integer", "minimum": 0 },
+          "name": { "type": "string", "minLength": 1 },
+          "track": { "enum": ["P", "X", "PX"] },
+          "objective": { "type": "string", "minLength": 1 },
+          "prerequisite_phase_ids": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 }
+          },
+          "required_contract_ids": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^C-[A-Z0-9-]+$" }
+          },
+          "required_gate_ids": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^G-[A-Z0-9-]+$" }
+          },
+          "deliverables": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "cursor_steps": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

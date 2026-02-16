@@ -69,9 +69,9 @@ public enum QualityThresholds {
     
     /// Laplacian blur threshold
     /// Unit: variance
-    /// PyImageSearch + empirical: 120.0 (raised from 100)
+    /// Guidance SSOT: 100.0
     /// 符合 PR1-01: Quality Thresholds Based on Industry Research
-    public static let laplacianBlurThreshold: Double = 120.0
+    public static let laplacianBlurThreshold: Double = 100.0
     
     /// Dynamic range stops
     /// Unit: stops
@@ -277,4 +277,3 @@ public enum QualityThresholds {
         return errors
     }
 }
-

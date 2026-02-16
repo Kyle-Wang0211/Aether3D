@@ -1,0 +1,415 @@
+{
+  "metadata": {
+    "registry_id": "AETHER_PROTOCOL_GOVERNANCE",
+    "schema_version": "1.0.0",
+    "last_updated": "2026-02-16",
+    "owners": [
+      "core-architecture",
+      "platform-integration",
+      "infra-ci"
+    ],
+    "tracks": ["P", "X"],
+    "phase_span": {
+      "min": 0,
+      "max": 13
+    },
+    "long_lived_integration_branch": "codex/protocol-governance-integration"
+  },
+  "contracts": [
+    {
+      "id": "C-TRACK-P-LEGAL-BASELINE",
+      "title": "Track P parity is legal baseline",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [0, 1, 2, 3, 4, 5],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 952
+        }
+      ],
+      "enforced_by_gate_ids": ["G-CONTRACT-VALIDATOR", "G-FIXTURE-BASELINE"]
+    },
+    {
+      "id": "C-TRACK-X-FEATURE-ISOLATION",
+      "title": "Track X feature flags must not pollute Track P",
+      "status": "active",
+      "track": "X",
+      "type": "invariant",
+      "phase_scope": [6, 7, 8, 9, 10, 11, 12, 13],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 969
+        }
+      ],
+      "enforced_by_gate_ids": ["G-FLAG-DEFAULT-OFF", "G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-CORE-SYSTEM-BOUNDARY-PIXEL",
+      "title": "Pixel analysis remains in System layer unless explicitly re-scoped",
+      "status": "blocked",
+      "track": "PX",
+      "type": "boundary",
+      "phase_scope": [0, 1, 2, 3, 4, 5, 8, 9, 10],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 171
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15781
+        }
+      ],
+      "enforced_by_gate_ids": ["G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "title": "Blur-related SSOT must be singular and conflict-free",
+      "status": "active",
+      "track": "P",
+      "type": "constant",
+      "phase_scope": [0, 5],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 543
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 573
+        }
+      ],
+      "enforced_by_gate_ids": ["G-BLUR-CONSTANT-DRIFT"]
+    },
+    {
+      "id": "C-SCAN-PATCHDISPLAY-MIGRATION",
+      "title": "ScanViewModel must use PatchDisplayMap instead of local displaySnapshot dict",
+      "status": "active",
+      "track": "P",
+      "type": "procedure",
+      "phase_scope": [5],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 779
+        }
+      ],
+      "enforced_by_gate_ids": ["G-SCAN-GUIDANCE-INTEGRATION", "G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-SCAN-BLUR-HAPTIC-REMOVAL",
+      "title": "Blur haptic in ScanViewModel is removed; blur only gates frame rejection",
+      "status": "active",
+      "track": "P",
+      "type": "procedure",
+      "phase_scope": [5],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 790
+        }
+      ],
+      "enforced_by_gate_ids": ["G-SCAN-GUIDANCE-INTEGRATION", "G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-PHASE-ORDERING-LAW",
+      "title": "Phase ordering is mandatory",
+      "status": "active",
+      "track": "PX",
+      "type": "gate",
+      "phase_scope": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 14329
+        }
+      ],
+      "enforced_by_gate_ids": ["G-PHASE-ORDER", "G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-EXACT-PIPELINE-IO-CLOSED",
+      "title": "EXACT-ONLY pipeline IO closed sets are inviolable",
+      "status": "active",
+      "track": "PX",
+      "type": "invariant",
+      "phase_scope": [0, 1, 2, 3, 4, 5],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15091
+        }
+      ],
+      "enforced_by_gate_ids": ["G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-PIT1-TIMEWARP-PURITY",
+      "title": "PresentLoop timewarp is pure reprojection with constant disocclusion fill",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [4],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15349
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 47047
+        }
+      ],
+      "enforced_by_gate_ids": ["G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-PIT2-VOLUME-GATING",
+      "title": "Watertight result gates measured volume",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [1],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15471
+        }
+      ],
+      "enforced_by_gate_ids": ["G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-UPLOAD-CHUNK-HASH-VERIFY",
+      "title": "persist_chunk must verify expected_hash before durable write",
+      "status": "active",
+      "track": "P",
+      "type": "security",
+      "phase_scope": [5],
+      "normative_sources": [
+        {
+          "path": "server/app/services/upload_service.py",
+          "line": 287
+        },
+        {
+          "path": "server/tests/test_upload_service.py",
+          "line": 90
+        }
+      ],
+      "enforced_by_gate_ids": ["G-UPLOAD-CHUNK-HASH", "G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-FIXTURE-PHASE0-MANDATORY",
+      "title": "Phase 0 golden fixtures must pass before any Track P migration",
+      "status": "active",
+      "track": "P",
+      "type": "gate",
+      "phase_scope": [0],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 1651
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 7904
+        }
+      ],
+      "enforced_by_gate_ids": ["G-FIXTURE-BASELINE"]
+    },
+    {
+      "id": "C-FEATURE-FLAG-DEFAULTS",
+      "title": "Track X feature flags default OFF",
+      "status": "active",
+      "track": "X",
+      "type": "feature_flag",
+      "phase_scope": [6, 7, 8, 9, 10, 11, 12, 13],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 970
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 18562
+        }
+      ],
+      "enforced_by_gate_ids": ["G-FLAG-DEFAULT-OFF"]
+    },
+    {
+      "id": "C-FEATURE-FLAG-NAMESPACE",
+      "title": "Feature flag namespace strategy must be consistent and mapped",
+      "status": "blocked",
+      "track": "X",
+      "type": "feature_flag",
+      "phase_scope": [6, 7, 8, 9, 10, 11, 12, 13],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 969
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 17913
+        }
+      ],
+      "enforced_by_gate_ids": ["G-FLAG-NAMESPACE"]
+    },
+    {
+      "id": "C-DOC-SECTION-ORDER-MONOTONIC",
+      "title": "Section numbering for §6.x remains monotonic in normative layers",
+      "status": "active",
+      "track": "PX",
+      "type": "documentation",
+      "phase_scope": [0, 1, 2, 3, 4, 5, 6, 7],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 43236
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 43318
+        }
+      ],
+      "enforced_by_gate_ids": ["G-DOC-SECTION-ORDER"]
+    },
+    {
+      "id": "C-CORE-NO-CONCURRENCY-PRIMITIVES",
+      "title": "Core forbids mutex/thread/atomic primitives",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [1, 2, 3, 4, 5],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 14342
+        }
+      ],
+      "enforced_by_gate_ids": ["G-CONTRACT-VALIDATOR"]
+    },
+    {
+      "id": "C-LONG-LIVED-INTEGRATION-BRANCH",
+      "title": "Single long-lived integration branch with phase tags",
+      "status": "active",
+      "track": "PX",
+      "type": "procedure",
+      "phase_scope": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "normative_sources": [
+        {
+          "path": "governance/README.md",
+          "line": 1
+        }
+      ],
+      "enforced_by_gate_ids": ["G-LONG-LIVED-BRANCH"]
+    },
+    {
+      "id": "C-CURSOR-RUNBOOK-DETERMINISM",
+      "title": "Each phase has deterministic Cursor runbook generated from SSOT",
+      "status": "active",
+      "track": "PX",
+      "type": "automation",
+      "phase_scope": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "normative_sources": [
+        {
+          "path": "governance/scripts/generate_cursor_runbooks.py",
+          "line": 1
+        }
+      ],
+      "enforced_by_gate_ids": ["G-RUNBOOK-GENERATION"]
+    }
+  ],
+  "constants": [
+    {
+      "id": "K-BLUR-FRAME-REJECTION",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 200.0,
+      "description": "Frame-level rejection threshold for Laplacian variance"
+    },
+    {
+      "id": "K-BLUR-GUIDANCE-HAPTIC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 100.0,
+      "description": "Guidance threshold target defined by latest V2.11 table"
+    },
+    {
+      "id": "K-SCAN-DISPLAY-INCREMENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "Per-frame display increment defined in §6.4.10"
+    },
+    {
+      "id": "K-TIMEWARP-DISOCCLUSION-BG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.18,
+      "description": "Constant disocclusion fill luminance"
+    },
+    {
+      "id": "K-TIMEWARP-MAX-AGE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Maximum timewarp age before degraded fallback"
+    },
+    {
+      "id": "K-GATE-RELAX-MIN-FACTOR",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Minimum gate relaxation factor"
+    },
+    {
+      "id": "K-GATE-RELAX-MAX-FACTOR",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1.5,
+      "description": "Maximum gate relaxation factor"
+    }
+  ],
+  "feature_flags": [
+    {
+      "name": "AETHER_FEATURE_FLAG_*",
+      "status": "active",
+      "track": "X",
+      "default": 0,
+      "notes": "Preferred namespace for Track X compile-time isolation"
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_REALTIME_QUALITY_PIPELINE",
+      "status": "active",
+      "track": "X",
+      "default": 0
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_LODGE_RENDER",
+      "status": "active",
+      "track": "X",
+      "default": 0
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_PROGRESSIVE_DISPLAY",
+      "status": "active",
+      "track": "X",
+      "default": 0
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_VISUAL_PRIORITY",
+      "status": "active",
+      "track": "X",
+      "default": 0,
+      "actual": 0,
+      "notes": "Aligned to Track X default-OFF contract"
+    }
+  ]
+}

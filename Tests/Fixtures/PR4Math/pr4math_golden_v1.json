@@ -1,0 +1,109 @@
+{
+  "exp" : [
+    {
+      "input" : 0,
+      "name" : "exp0",
+      "output" : 65536
+    },
+    {
+      "input" : -65536,
+      "name" : "expNeg1",
+      "output" : 24109
+    },
+    {
+      "input" : -131072,
+      "name" : "expNeg2",
+      "output" : 8869
+    },
+    {
+      "input" : -655360,
+      "name" : "expNeg10",
+      "output" : 3
+    },
+    {
+      "input" : -2097152,
+      "name" : "expNeg32",
+      "output" : 0
+    }
+  ],
+  "exportedAt" : "2026-02-12T16:47:44Z",
+  "mad" : {
+    "input" : [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "output" : 2
+  },
+  "median" : {
+    "input" : [
+      5,
+      2,
+      9,
+      1,
+      7,
+      3,
+      8,
+      4,
+      6
+    ],
+    "output" : 5
+  },
+  "q16" : {
+    "add" : {
+      "a" : 98304,
+      "b" : 32768,
+      "overflow" : false,
+      "result" : 131072
+    },
+    "div" : {
+      "a" : 65536,
+      "b" : 131072,
+      "overflow" : false,
+      "result" : 32768
+    },
+    "mul" : {
+      "a" : 98304,
+      "b" : 32768,
+      "overflow" : false,
+      "result" : 49152
+    }
+  },
+  "schemaVersion" : 1,
+  "softmax3" : {
+    "input" : [
+      65536,
+      0,
+      -65536
+    ],
+    "output" : [
+      43598,
+      16038,
+      5900
+    ],
+    "sum" : 65536
+  },
+  "softmax5" : {
+    "input" : [
+      131072,
+      65536,
+      0,
+      -65536,
+      -131072
+    ],
+    "output" : [
+      41710,
+      15343,
+      5644,
+      2076,
+      763
+    ],
+    "sum" : 65536
+  }
+}

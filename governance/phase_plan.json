@@ -1,0 +1,375 @@
+{
+  "metadata": {
+    "plan_version": "1.0.0",
+    "last_updated": "2026-02-16",
+    "source": "CURSOR_MEGA_PROMPT_V2.md",
+    "phase_id_span": {
+      "min": 0,
+      "max": 13
+    }
+  },
+  "phases": [
+    {
+      "id": 0,
+      "name": "Golden Fixtures Baseline",
+      "track": "P",
+      "objective": "Generate and lock deterministic Swift golden fixtures before any C++ parity work.",
+      "prerequisite_phase_ids": [],
+      "required_contract_ids": [
+        "C-PHASE-ORDERING-LAW",
+        "C-FIXTURE-PHASE0-MANDATORY",
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-LONG-LIVED-INTEGRATION-BRANCH"
+      ],
+      "required_gate_ids": [
+        "G-LONG-LIVED-BRANCH",
+        "G-CONTRACT-VALIDATOR",
+        "G-RUNBOOK-GENERATION",
+        "G-FIXTURE-BASELINE"
+      ],
+      "deliverables": [
+        "Tests/Fixtures/*.txt",
+        "Tests/Fixtures/PR4Math/pr4math_golden_v1.json",
+        "governance/generated/governance_diagnostics.json"
+      ],
+      "cursor_steps": [
+        "Run governance validator and generation pipeline.",
+        "Generate fixture baselines from Swift tools.",
+        "Store and hash-lock fixture artifacts.",
+        "Tag integration branch checkpoint phase-0-pass."
+      ]
+    },
+    {
+      "id": 1,
+      "name": "TSDF Parity",
+      "track": "P",
+      "objective": "Complete Track P TSDF migration with deterministic behavior and no Core impurity.",
+      "prerequisite_phase_ids": [0],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-CORE-NO-CONCURRENCY-PRIMITIVES",
+        "C-PIT2-VOLUME-GATING",
+        "C-EXACT-PIPELINE-IO-CLOSED"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD"
+      ],
+      "deliverables": [
+        "aether/tsdf/*",
+        "TSDF parity test logs"
+      ],
+      "cursor_steps": [
+        "Implement TSDF modules in delivery order.",
+        "Run parity fixtures and TSDF-specific tests.",
+        "Record benchmark and determinism evidence.",
+        "Tag integration checkpoint phase-1-pass."
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Evidence Parity",
+      "track": "P",
+      "objective": "Port Evidence engine with byte-identical deterministic JSON and replay behavior.",
+      "prerequisite_phase_ids": [1],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-EXACT-PIPELINE-IO-CLOSED"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD"
+      ],
+      "deliverables": [
+        "aether/evidence/*",
+        "Evidence parity diff reports"
+      ],
+      "cursor_steps": [
+        "Migrate deterministic_json, ds_mass_function, admission_controller, replay_engine.",
+        "Replay Swift logs through C++ and compare hashes.",
+        "Archive report under governance/generated/reports/phase-2.",
+        "Tag integration checkpoint phase-2-pass."
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Merkle + Proofs",
+      "track": "P",
+      "objective": "Finish inclusion and consistency proof stack with boundary vectors.",
+      "prerequisite_phase_ids": [2],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD"
+      ],
+      "deliverables": [
+        "aether/merkle/*",
+        "RFC vector parity logs"
+      ],
+      "cursor_steps": [
+        "Implement inclusion and consistency proofs.",
+        "Run vector suites for tree-size boundaries.",
+        "Persist deterministic digest report.",
+        "Tag integration checkpoint phase-3-pass."
+      ]
+    },
+    {
+      "id": 4,
+      "name": "TimeAnchoring",
+      "track": "P",
+      "objective": "Complete pure-computation time anchoring rules without network IO in Core.",
+      "prerequisite_phase_ids": [3],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-CORE-NO-CONCURRENCY-PRIMITIVES"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD"
+      ],
+      "deliverables": [
+        "aether/time/*",
+        "Marzullo fusion verification outputs"
+      ],
+      "cursor_steps": [
+        "Implement parser/fusion/error-classification/proof assembly.",
+        "Validate deterministic outputs across platforms.",
+        "Store phase evidence in governance generated report.",
+        "Tag integration checkpoint phase-4-pass."
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Quality + System Integration Closure",
+      "track": "P",
+      "objective": "Close known platform integration drifts (blur SSOT, PatchDisplayMap migration, upload hash verification).",
+      "prerequisite_phase_ids": [4],
+      "required_contract_ids": [
+        "C-BLUR-SSOT-SINGLE-VALUE",
+        "C-SCAN-PATCHDISPLAY-MIGRATION",
+        "C-SCAN-BLUR-HAPTIC-REMOVAL",
+        "C-UPLOAD-CHUNK-HASH-VERIFY"
+      ],
+      "required_gate_ids": [
+        "G-BLUR-CONSTANT-DRIFT",
+        "G-SCAN-GUIDANCE-INTEGRATION",
+        "G-UPLOAD-CHUNK-HASH",
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "Core/Quality/*",
+        "App/Scan/ScanViewModel.swift migration",
+        "server hash verification fix"
+      ],
+      "cursor_steps": [
+        "Unify blur constants and align code to registry values.",
+        "Replace ScanViewModel local snapshot with PatchDisplayMap chain.",
+        "Remove blur haptic path and keep frame rejection semantics.",
+        "Enforce expected_hash check in persist_chunk().",
+        "Tag integration checkpoint phase-5-pass."
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Track X V3 Foundations",
+      "track": "X",
+      "objective": "Introduce V3 innovation set behind compile-time flags with default OFF.",
+      "prerequisite_phase_ids": [5],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-FEATURE-FLAG-DEFAULTS",
+        "C-FEATURE-FLAG-NAMESPACE"
+      ],
+      "required_gate_ids": [
+        "G-FLAG-DEFAULT-OFF",
+        "G-FLAG-NAMESPACE",
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "V3 feature-flagged modules",
+        "Track X fixture set"
+      ],
+      "cursor_steps": [
+        "Implement V3 modules with explicit flag guards.",
+        "Keep Track P fixtures green.",
+        "Generate Track X-specific fixtures.",
+        "Tag integration checkpoint phase-6-pass."
+      ]
+    },
+    {
+      "id": 7,
+      "name": "Track X V4 Foundations",
+      "track": "X",
+      "objective": "Integrate V4 clusters with isolated flags and schema version discipline.",
+      "prerequisite_phase_ids": [6],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-FEATURE-FLAG-DEFAULTS"
+      ],
+      "required_gate_ids": [
+        "G-FLAG-DEFAULT-OFF",
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "V4 feature implementations",
+        "schema version changelog entries"
+      ],
+      "cursor_steps": [
+        "Implement V4 cluster modules behind flags.",
+        "Run Track P regression and V4 fixtures.",
+        "Record schema bumps and migration notes.",
+        "Tag integration checkpoint phase-7-pass."
+      ]
+    },
+    {
+      "id": 8,
+      "name": "CT-VIO + Noise + FrameGate",
+      "track": "X",
+      "objective": "Enable active measurement capture path with deterministic contracts.",
+      "prerequisite_phase_ids": [7],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-CORE-SYSTEM-BOUNDARY-PIXEL"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-FLAG-DEFAULT-OFF"
+      ],
+      "deliverables": [
+        "aether/vio/*",
+        "aether/quality/frame_gate*"
+      ],
+      "cursor_steps": [
+        "Deliver ct_state/ct_optimizer/noise_classifier/frame_gate modules.",
+        "Run noise and gate acceptance benchmarks.",
+        "Archive benchmark outputs.",
+        "Tag integration checkpoint phase-8-pass."
+      ]
+    },
+    {
+      "id": 9,
+      "name": "Burst + Uncertainty + Photometric",
+      "track": "X",
+      "objective": "Integrate burst capture control with uncertainty and photometric normalization.",
+      "prerequisite_phase_ids": [8],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "aether/capture/burst_controller*",
+        "aether/quality/patch_uncertainty*",
+        "aether/quality/photometric_normalizer*"
+      ],
+      "cursor_steps": [
+        "Implement three module set with thermal tier linkage.",
+        "Run quality/uncertainty acceptance checks.",
+        "Persist diagnostics in governance reports.",
+        "Tag integration checkpoint phase-9-pass."
+      ]
+    },
+    {
+      "id": 10,
+      "name": "Coverage + IG + UI Guidance",
+      "track": "X",
+      "objective": "Close active guidance loop from uncertainty to actionable UI direction.",
+      "prerequisite_phase_ids": [9],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "coverage_stopper/info_gain/ui_guidance modules",
+        "guidance angle benchmark outputs"
+      ],
+      "cursor_steps": [
+        "Implement coverage stopper, information gain, UI guidance.",
+        "Validate completion and direction quality metrics.",
+        "Store integration report.",
+        "Tag integration checkpoint phase-10-pass."
+      ]
+    },
+    {
+      "id": 11,
+      "name": "Noise-Aware Trainer + DA3",
+      "track": "X",
+      "objective": "Integrate noise-aware training and metric depth interface with bounded resource budgets.",
+      "prerequisite_phase_ids": [10],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-CORE-SYSTEM-BOUNDARY-PIXEL"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "noise_aware_loss/da3_interface/noise_schedule modules",
+        "training delta metrics"
+      ],
+      "cursor_steps": [
+        "Build trainer + depth interface + schedule pipeline.",
+        "Run noisy-sequence quality benchmarks.",
+        "Write release readiness report.",
+        "Tag integration checkpoint phase-11-pass."
+      ]
+    },
+    {
+      "id": 12,
+      "name": "DGRUT + 8x8 Texels + Native Resolution",
+      "track": "X",
+      "objective": "Ship render architecture with memory-adaptive guarantees.",
+      "prerequisite_phase_ids": [11],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-PIT1-TIMEWARP-PURITY"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "render dgrut/texel/native-resolution modules",
+        "memory and fps benchmark evidence"
+      ],
+      "cursor_steps": [
+        "Integrate rendering path variants per device tier.",
+        "Validate fps/memory/thermal targets.",
+        "Record evidence outputs.",
+        "Tag integration checkpoint phase-12-pass."
+      ]
+    },
+    {
+      "id": 13,
+      "name": "Streaming + Overlay + Final Orchestration",
+      "track": "X",
+      "objective": "Complete E2E orchestration and certify contract closure for full pipeline.",
+      "prerequisite_phase_ids": [12],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-CURSOR-RUNBOOK-DETERMINISM",
+        "C-DOC-SECTION-ORDER-MONOTONIC"
+      ],
+      "required_gate_ids": [
+        "G-PHASE13-E2E-SMOKE",
+        "G-CONTRACT-VALIDATOR",
+        "G-DOC-SECTION-ORDER"
+      ],
+      "deliverables": [
+        "pipeline_orchestrator",
+        "phase13 scenario test report",
+        "final governance closure report"
+      ],
+      "cursor_steps": [
+        "Integrate streaming engine, evidence overlay, and orchestrator.",
+        "Run scenario A/B/C/D and capture reports.",
+        "Close all blocked contracts before release tag.",
+        "Tag integration checkpoint phase-13-pass."
+      ]
+    }
+  ]
+}

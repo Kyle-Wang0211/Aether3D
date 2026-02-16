@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-16"
+  },
+  "checks": [
+    {
+      "id": "STRUCT-SCANVIEWMODEL-NO-BLUR-HAPTIC",
+      "status": "active",
+      "contract_id": "C-SCAN-BLUR-HAPTIC-REMOVAL",
+      "path": "App/Scan/ScanViewModel.swift",
+      "must_not_contain": [
+        "pattern: \\.blurDetected",
+        "blurVariance < ScanGuidanceConstants\\.hapticBlurThreshold"
+      ]
+    },
+    {
+      "id": "STRUCT-SCANVIEWMODEL-USES-PATCHDISPLAYMAP",
+      "status": "active",
+      "contract_id": "C-SCAN-PATCHDISPLAY-MIGRATION",
+      "path": "App/Scan/ScanViewModel.swift",
+      "must_contain": [
+        "PatchDisplayMap\\(",
+        "patchDisplayMap"
+      ]
+    },
+    {
+      "id": "STRUCT-SCANVIEWMODEL-NO-LEGACY-DISPLAY-DICT",
+      "status": "active",
+      "contract_id": "C-SCAN-PATCHDISPLAY-MIGRATION",
+      "path": "App/Scan/ScanViewModel.swift",
+      "must_not_contain": [
+        "private var displaySnapshot: \\[String: Double\\] = \\[:\\]",
+        "private var previousDisplay: \\[String: Double\\] = \\[:\\]"
+      ]
+    },
+    {
+      "id": "STRUCT-BLURDETECTOR-NO-PLACEHOLDER",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Quality/Metrics/BlurDetector.swift",
+      "must_not_contain": [
+        "return QualityThresholds\\.laplacianBlurThreshold"
+      ]
+    },
+    {
+      "id": "STRUCT-BLURDETECTOR-USES-LAPLACIAN-COMPUTER",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Quality/Metrics/BlurDetector.swift",
+      "must_contain": [
+        "LaplacianVarianceComputer\\.compute"
+      ]
+    },
+    {
+      "id": "STRUCT-FRAMEDATA-HAS-WIDTH-HEIGHT",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Quality/QualityAnalyzer.swift",
+      "must_contain": [
+        "public let width: Int\\?",
+        "public let height: Int\\?"
+      ]
+    },
+    {
+      "id": "STRUCT-UPLOAD-PERSIST-CHECKS-EXPECTED-HASH",
+      "status": "active",
+      "contract_id": "C-UPLOAD-CHUNK-HASH-VERIFY",
+      "path": "server/app/services/upload_service.py",
+      "must_contain": [
+        "compare_digest\\([^\\n]*expected_hash"
+      ]
+    },
+    {
+      "id": "STRUCT-SCAN-INCREMENT-CONSTANT-DECLARED",
+      "status": "active",
+      "contract_id": "C-SCAN-PATCHDISPLAY-MIGRATION",
+      "path": "Core/Constants/ScanGuidanceConstants.swift",
+      "must_contain": [
+        "scanDisplayIncrementPerFrame"
+      ]
+    },
+    {
+      "id": "STRUCT-FLAG-VISUAL-PRIORITY-DEFAULT-OFF",
+      "status": "active",
+      "contract_id": "C-FEATURE-FLAG-DEFAULTS",
+      "path": "../CURSOR_MEGA_PROMPT_V2.md",
+        "optional": true,
+        "must_contain": [
+        "#define AETHER_FEATURE_FLAG_VISUAL_PRIORITY 0"
+        ]
+    }
+  ]
+}

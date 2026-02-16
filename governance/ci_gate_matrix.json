@@ -1,0 +1,157 @@
+{
+  "metadata": {
+    "matrix_version": "1.0.0",
+    "last_updated": "2026-02-16"
+  },
+  "gates": [
+    {
+      "id": "G-LONG-LIVED-BRANCH",
+      "name": "Long-lived integration branch is active",
+      "severity": "error",
+      "commands": [
+        "python3 governance/scripts/validate_governance.py --check-branch"
+      ],
+      "artifacts": [
+        "governance/generated/governance_diagnostics.json"
+      ]
+    },
+    {
+      "id": "G-PHASE-ORDER",
+      "name": "Phase ordering contract",
+      "severity": "error",
+      "commands": [
+        "python3 governance/scripts/validate_governance.py --strict --only phase-order"
+      ],
+      "artifacts": [
+        "governance/generated/governance_diagnostics.json"
+      ]
+    },
+    {
+      "id": "G-CONTRACT-VALIDATOR",
+      "name": "Governance registry and contract validation",
+      "severity": "error",
+      "commands": [
+        "python3 governance/scripts/validate_governance.py --strict --report governance/generated/governance_diagnostics.json"
+      ],
+      "artifacts": [
+        "governance/generated/governance_diagnostics.json"
+      ]
+    },
+    {
+      "id": "G-RUNBOOK-GENERATION",
+      "name": "Cursor runbook generation is deterministic",
+      "severity": "error",
+      "commands": [
+        "python3 governance/scripts/generate_cursor_runbooks.py --output governance/generated/phases",
+        "python3 governance/scripts/generate_cursor_runbooks.py --check --output governance/generated/phases"
+      ],
+      "artifacts": [
+        "governance/generated/phases/index.md"
+      ]
+    },
+    {
+      "id": "G-FIXTURE-BASELINE",
+      "name": "Golden fixture baseline present and reproducible",
+      "severity": "error",
+      "commands": [
+        "swift run FixtureGen",
+        "swift run PR4MathFixtureExporter"
+      ],
+      "artifacts": [
+        "Tests/Fixtures/uuid_rfc4122_vectors_v1.txt",
+        "Tests/Fixtures/decision_hash_v1.txt",
+        "Tests/Fixtures/admission_decision_v1.txt",
+        "Tests/Fixtures/PR4Math/pr4math_golden_v1.json"
+      ]
+    },
+    {
+      "id": "G-SWIFT-BUILD",
+      "name": "Swift build and target tests",
+      "severity": "error",
+      "commands": [
+        "swift build"
+      ],
+      "artifacts": [
+        ".build/"
+      ]
+    },
+    {
+      "id": "G-BLUR-CONSTANT-DRIFT",
+      "name": "Blur constant drift detection",
+      "severity": "error",
+      "commands": [
+        "python3 governance/scripts/validate_governance.py --strict --only blur"
+      ],
+      "artifacts": [
+        "governance/generated/governance_diagnostics.json"
+      ]
+    },
+    {
+      "id": "G-SCAN-GUIDANCE-INTEGRATION",
+      "name": "Scan guidance migration and monotonicity tests",
+      "severity": "error",
+      "commands": [
+        "swift test --filter PatchDisplayMapTests --filter MonotonicityStressTests --filter ScanGuidanceIntegrationTests"
+      ],
+      "artifacts": [
+        "Test logs for scan guidance suites"
+      ]
+    },
+    {
+      "id": "G-UPLOAD-CHUNK-HASH",
+      "name": "Upload chunk expected_hash verification",
+      "severity": "error",
+      "commands": [
+        "PYTHONPATH=server python3 -m pytest -q server/tests/test_upload_service.py -k persist_chunk_hash_mismatch"
+      ],
+      "artifacts": [
+        "pytest output for persist_chunk_hash_mismatch"
+      ]
+    },
+    {
+      "id": "G-FLAG-DEFAULT-OFF",
+      "name": "Track X defaults OFF policy",
+      "severity": "error",
+      "commands": [
+        "python3 governance/scripts/validate_governance.py --strict --only flags"
+      ],
+      "artifacts": [
+        "governance/generated/governance_diagnostics.json"
+      ]
+    },
+    {
+      "id": "G-FLAG-NAMESPACE",
+      "name": "Feature flag namespace consistency",
+      "severity": "warning",
+      "commands": [
+        "python3 governance/scripts/validate_governance.py --only flag-namespace --report governance/generated/governance_diagnostics.json"
+      ],
+      "artifacts": [
+        "governance/generated/governance_diagnostics.json"
+      ]
+    },
+    {
+      "id": "G-DOC-SECTION-ORDER",
+      "name": "§6.x section monotonicity",
+      "severity": "error",
+      "commands": [
+        "python3 governance/scripts/validate_governance.py --strict --only section-order"
+      ],
+      "artifacts": [
+        "governance/generated/governance_diagnostics.json"
+      ]
+    },
+    {
+      "id": "G-PHASE13-E2E-SMOKE",
+      "name": "Phase 13 end-to-end smoke gate",
+      "severity": "error",
+      "commands": [
+        "swift test --filter ScanGuidanceIntegrationTests",
+        "PYTHONPATH=server python3 -m pytest -q server/tests/test_upload_service.py"
+      ],
+      "artifacts": [
+        "phase13_e2e_smoke_report.md"
+      ]
+    }
+  ]
+}

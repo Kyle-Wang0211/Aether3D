@@ -205,10 +205,20 @@ public struct FrameData: Sendable {
     public let index: Int
     public let timestamp: Date
     public let imageData: Data
+    public let width: Int?
+    public let height: Int?
     
-    public init(index: Int, timestamp: Date, imageData: Data) {
+    public init(
+        index: Int,
+        timestamp: Date,
+        imageData: Data,
+        width: Int? = nil,
+        height: Int? = nil
+    ) {
         self.index = index
         self.timestamp = timestamp
         self.imageData = imageData
+        self.width = width
+        self.height = height
     }
 }

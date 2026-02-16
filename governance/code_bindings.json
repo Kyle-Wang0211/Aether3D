@@ -1,0 +1,133 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-16"
+  },
+  "checks": [
+    {
+      "id": "BIND-BLUR-FRAME-FRAMEQUALITY",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Constants/FrameQualityConstants.swift",
+      "regex": "public static let blurThresholdLaplacian: Double = ([0-9.]+)",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-BLUR-FRAME-REJECTION"
+      }
+    },
+    {
+      "id": "BIND-BLUR-FRAME-CORE",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Constants/CoreBlurThresholds.swift",
+      "regex": "public static let frameRejection: Double = ([0-9.]+)",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-BLUR-FRAME-REJECTION"
+      }
+    },
+    {
+      "id": "BIND-BLUR-GUIDANCE-CORE",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Constants/CoreBlurThresholds.swift",
+      "regex": "public static let guidanceHaptic: Double = ([0-9.]+)",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-BLUR-GUIDANCE-HAPTIC"
+      }
+    },
+    {
+      "id": "BIND-BLUR-GUIDANCE-QUALITYTHRESHOLDS",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Constants/QualityThresholds.swift",
+      "regex": "public static let laplacianBlurThreshold: Double = ([0-9.]+)",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-BLUR-GUIDANCE-HAPTIC"
+      }
+    },
+    {
+      "id": "BIND-BLUR-GUIDANCE-SCANGUIDANCE",
+      "status": "active",
+      "contract_id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "path": "Core/Constants/ScanGuidanceConstants.swift",
+      "regex": "public static let hapticBlurThreshold: Double = ([0-9.]+)",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-BLUR-GUIDANCE-HAPTIC"
+      }
+    },
+    {
+      "id": "BIND-SCAN-INCREMENT-CONSTANT",
+      "status": "active",
+      "contract_id": "C-SCAN-PATCHDISPLAY-MIGRATION",
+      "path": "Core/Constants/ScanGuidanceConstants.swift",
+      "regex": "public static let scanDisplayIncrementPerFrame: Double = ([0-9.]+)",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-SCAN-DISPLAY-INCREMENT"
+      }
+    },
+    {
+      "id": "BIND-SCAN-INCREMENT-USAGE",
+      "status": "active",
+      "contract_id": "C-SCAN-PATCHDISPLAY-MIGRATION",
+      "path": "App/Scan/ScanViewModel.swift",
+      "regex": "let increment = ([0-9.]+)",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-SCAN-DISPLAY-INCREMENT"
+      }
+    },
+    {
+      "id": "BIND-TIMEWARP-BG",
+      "status": "active",
+      "contract_id": "C-PIT1-TIMEWARP-PURITY",
+      "path": "../CURSOR_MEGA_PROMPT_V2.md",
+      "optional": true,
+      "regex": "DISOCCLUSION_BG_LUMINANCE = ([0-9.]+)f",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-TIMEWARP-DISOCCLUSION-BG"
+      }
+    },
+    {
+      "id": "BIND-TIMEWARP-MAX-AGE",
+      "status": "active",
+      "contract_id": "C-PIT1-TIMEWARP-PURITY",
+      "path": "../CURSOR_MEGA_PROMPT_V2.md",
+      "optional": true,
+      "regex": "MAX_TIMEWARP_AGE = ([0-9]+)",
+      "value_type": "int",
+      "expected": {
+        "constant_id": "K-TIMEWARP-MAX-AGE"
+      }
+    },
+    {
+      "id": "BIND-GATE-RELAX-MIN",
+      "status": "active",
+      "contract_id": "C-TRACK-X-FEATURE-ISOLATION",
+      "path": "../CURSOR_MEGA_PROMPT_V2.md",
+      "optional": true,
+      "regex": "GATE_RELAX_MIN_FACTOR = ([0-9.]+)f",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-GATE-RELAX-MIN-FACTOR"
+      }
+    },
+    {
+      "id": "BIND-GATE-RELAX-MAX",
+      "status": "active",
+      "contract_id": "C-TRACK-X-FEATURE-ISOLATION",
+      "path": "../CURSOR_MEGA_PROMPT_V2.md",
+      "optional": true,
+      "regex": "GATE_RELAX_MAX_FACTOR = ([0-9.]+)f",
+      "value_type": "float",
+      "expected": {
+        "constant_id": "K-GATE-RELAX-MAX-FACTOR"
+      }
+    }
+  ]
+}

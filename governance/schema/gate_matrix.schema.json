@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether3d.local/schema/gate_matrix.schema.json",
+  "type": "object",
+  "required": ["metadata", "gates"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["matrix_version", "last_updated"],
+      "properties": {
+        "matrix_version": { "type": "string", "minLength": 1 },
+        "last_updated": { "type": "string", "minLength": 1 }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "severity", "commands", "artifacts"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^G-[A-Z0-9-]+$" },
+          "name": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["error", "warning", "info"] },
+          "commands": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1
+          },
+          "artifacts": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether3d.local/schema/code_bindings.schema.json",
+  "type": "object",
+  "required": ["metadata", "checks"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["version", "last_updated"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "last_updated": { "type": "string", "minLength": 1 }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "contract_id", "path", "regex", "value_type", "expected"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^BIND-[A-Z0-9-]+$" },
+          "status": { "enum": ["active", "blocked", "planned", "deprecated"] },
+          "contract_id": { "type": "string", "pattern": "^C-[A-Z0-9-]+$" },
+          "path": { "type": "string", "minLength": 1 },
+          "optional": { "type": "boolean" },
+          "regex": { "type": "string", "minLength": 1 },
+          "value_type": { "enum": ["int", "float", "string", "bool"] },
+          "expected": {
+            "type": "object",
+            "required": ["constant_id"],
+            "properties": {
+              "constant_id": { "type": "string", "pattern": "^K-[A-Z0-9-]+$" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

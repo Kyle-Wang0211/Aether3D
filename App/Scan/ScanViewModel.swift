@@ -61,8 +61,9 @@ final class ScanViewModel: ObservableObject {
     // MARK: - State
     private var meshTriangles: [ScanTriangle] = []
     private var adjacencyGraph: (any AdjacencyProvider)?
-    private var displaySnapshot: [String: Double] = [:]
-    private var previousDisplay: [String: Double] = [:]
+    private var patchDisplayMap = PatchDisplayMap()
+    private var currentPatchDisplaySnapshot: [String: Double] = [:]
+    private var previousPatchDisplaySnapshot: [String: Double] = [:]
     private var captureStartTime: Date?
     private var elapsedTimer: Timer?
     private var frameCounter: Int = 0
@@ -202,9 +203,10 @@ final class ScanViewModel: ObservableObject {
         }
         frameCounter += 1
 
-        // Step 2: Update display snapshot
-        previousDisplay = displaySnapshot
-        updateDisplaySnapshot()
+        // Step 2: Update patch display map and snapshots
+        previousPatchDisplaySnapshot = currentPatchDisplaySnapshot
+        updatePatchDisplayMap()
+        currentPatchDisplaySnapshot = makeDisplaySnapshot()
 
         // Step 3: Thermal-aware quality control
         let tier = thermalAdapter.currentTier
@@ -214,8 +216,8 @@ final class ScanViewModel: ObservableObject {
         // Step 4: Check flip thresholds (if animation enabled for this tier)
         if tier.enableFlipAnimation, let adj = adjacencyGraph {
             let crossedIndices = flipController.checkThresholdCrossings(
-                previousDisplay: previousDisplay,
-                currentDisplay: displaySnapshot,
+                previousDisplay: previousPatchDisplaySnapshot,
+                currentDisplay: currentPatchDisplaySnapshot,
                 triangles: limitedTriangles,
                 adjacencyGraph: adj
             )
@@ -246,16 +248,6 @@ final class ScanViewModel: ObservableObject {
             )
         }
 
-        // Blur detection (using frame metadata)
-        let blurVariance = estimateBlurVariance(from: frame)
-        if blurVariance < ScanGuidanceConstants.hapticBlurThreshold {
-            _ = hapticEngine.fire(
-                pattern: .blurDetected,
-                timestamp: timestamp,
-                toastPresenter: toastPresenter
-            )
-        }
-
         // Exposure check
         if let lightEstimate = frame.lightEstimate {
             let ambientIntensity = lightEstimate.ambientIntensity
@@ -271,7 +263,7 @@ final class ScanViewModel: ObservableObject {
 
         // Step 7: Update render pipeline (if Metal is available)
         renderPipeline?.update(
-            displaySnapshot: displaySnapshot,
+            displaySnapshot: currentPatchDisplaySnapshot,
             colorStates: [:],
             meshTriangles: limitedTriangles,
             lightEstimate: frame.lightEstimate,
@@ -283,16 +275,27 @@ final class ScanViewModel: ObservableObject {
 
     // MARK: - Private Helpers
 
-    /// Update display values for visible patches
-    /// Each frame contributes a small delta based on viewing quality
-    private func updateDisplaySnapshot() {
+    /// Update display values for visible patches through PatchDisplayMap.
+    private func updatePatchDisplayMap() {
+        let timestampMs = Int64(Date().timeIntervalSince1970 * 1000.0)
         for triangle in meshTriangles {
-            let current = displaySnapshot[triangle.patchId] ?? 0.0
+            let current = patchDisplayMap.display(for: triangle.patchId)
             // Simple accumulation: each visible frame adds a small increment
-            // ~500 frames to reach 1.0 at 60fps ≈ 8.3 seconds viewing
-            let increment = 0.002
-            displaySnapshot[triangle.patchId] = min(current + increment, 1.0)
+            // ~100 frames to reach 1.0 at 60fps ≈ 1.7 seconds viewing
+            let increment = 0.01
+            let target = min(current + increment, 1.0)
+            _ = patchDisplayMap.update(
+                patchId: triangle.patchId,
+                target: target,
+                timestampMs: timestampMs,
+                isLocked: false
+            )
         }
+    }
+
+    /// Convert PatchDisplayMap entries to render/animation snapshot.
+    private func makeDisplaySnapshot() -> [String: Double] {
+        Dictionary(uniqueKeysWithValues: patchDisplayMap.snapshotSorted().map { ($0.patchId, $0.display) })
     }
 
     /// Extract motion magnitude from camera transform as velocity proxy
@@ -305,21 +308,11 @@ final class ScanViewModel: ObservableObject {
         return Double(simd_length(position))
     }
 
-    /// Simplified blur estimation using frame metadata
-    ///
-    /// Full Laplacian variance requires CVPixelBuffer processing.
-    /// For MVP, return a safe default that won't trigger false positives.
-    /// Real implementation will be added when CVPixelBuffer processing is ready.
-    private func estimateBlurVariance(from frame: ARFrame) -> Double {
-        // Default above hapticBlurThreshold (120.0) — no false triggers
-        return 200.0
-    }
-
     /// Calculate overall scan coverage [0, 1]
     private func calculateOverallCoverage() -> Double {
-        guard !displaySnapshot.isEmpty else { return 0.0 }
-        let total = displaySnapshot.values.reduce(0.0, +)
-        return total / Double(displaySnapshot.count)
+        guard !currentPatchDisplaySnapshot.isEmpty else { return 0.0 }
+        let total = currentPatchDisplaySnapshot.values.reduce(0.0, +)
+        return total / Double(currentPatchDisplaySnapshot.count)
     }
 
     /// Start elapsed time timer (0.1s resolution)
@@ -352,8 +345,9 @@ final class ScanViewModel: ObservableObject {
     private func resetSubsystems() {
         flipController.reset()
         rippleEngine.reset()
-        displaySnapshot.removeAll()
-        previousDisplay.removeAll()
+        patchDisplayMap.reset()
+        currentPatchDisplaySnapshot.removeAll()
+        previousPatchDisplaySnapshot.removeAll()
         meshTriangles.removeAll()
         adjacencyGraph = nil
         frameCounter = 0

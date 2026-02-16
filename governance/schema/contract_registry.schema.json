@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether3d.local/schema/contract_registry.schema.json",
+  "type": "object",
+  "required": ["metadata", "contracts", "constants", "feature_flags"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["registry_id", "schema_version", "last_updated", "tracks", "phase_span", "long_lived_integration_branch"],
+      "properties": {
+        "registry_id": { "type": "string", "minLength": 1 },
+        "schema_version": { "type": "string", "minLength": 1 },
+        "last_updated": { "type": "string", "minLength": 1 },
+        "owners": { "type": "array", "items": { "type": "string" } },
+        "tracks": {
+          "type": "array",
+          "items": { "enum": ["P", "X"] },
+          "minItems": 2
+        },
+        "phase_span": {
+          "type": "object",
+          "required": ["min", "max"],
+          "properties": {
+            "min": { "type": "integer", "minimum": 0 },
+            "max": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "long_lived_integration_branch": { "type": "string", "pattern": "^codex/" }
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "status", "track", "type", "phase_scope", "normative_sources", "enforced_by_gate_ids"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^C-[A-Z0-9-]+$" },
+          "title": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["active", "blocked", "planned", "deprecated"] },
+          "track": { "enum": ["P", "X", "PX"] },
+          "type": { "type": "string", "minLength": 1 },
+          "phase_scope": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 1
+          },
+          "normative_sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "line"],
+              "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "line": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "minItems": 1
+          },
+          "enforced_by_gate_ids": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^G-[A-Z0-9-]+$" },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "constants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "track", "value_type", "value", "description"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^K-[A-Z0-9-]+$" },
+          "status": { "enum": ["active", "blocked", "planned", "deprecated"] },
+          "track": { "enum": ["P", "X", "PX"] },
+          "value_type": { "enum": ["int", "float", "string", "bool"] },
+          "value": {},
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "feature_flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "track", "default"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["active", "blocked", "planned", "deprecated"] },
+          "track": { "enum": ["P", "X", "PX"] },
+          "default": { "type": "integer", "enum": [0, 1] },
+          "actual": { "type": "integer", "enum": [0, 1] },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

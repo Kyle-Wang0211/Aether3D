@@ -318,6 +318,15 @@ def persist_chunk(upload_id: str, chunk_index: int, chunk_data: bytes, expected_
     """
     # INV-U9: Validate path component BEFORE any file operations
     validate_path_component(upload_id, "upload_id")
+    validate_hash_component(expected_hash, "expected_hash")
+
+    # Contract C-UPLOAD-CHUNK-HASH-VERIFY: reject mismatched chunks before durable write.
+    calculated_hash = hashlib.sha256(chunk_data).hexdigest()
+    if not hmac.compare_digest(calculated_hash, expected_hash.lower()):
+        raise AssemblyError(
+            f"Chunk {chunk_index} hash mismatch before persist",
+            kind=UploadErrorKind.CHUNK_HASH_MISMATCH
+        )
     
     chunk_dir = settings.upload_path / upload_id / "chunks"
     chunk_dir.mkdir(parents=True, exist_ok=True)

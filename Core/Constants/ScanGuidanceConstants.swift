@@ -124,14 +124,16 @@ public enum ScanGuidanceConstants {
     /// Minimum interval between ripple spawns from same source (seconds)
     public static let rippleMinSpawnIntervalS: Double = 0.5
 
-    // MARK: - Section 7: Haptic & Toast (10 constants)
+    // MARK: - Section 7: Haptic, Display & Toast (11 constants)
 
     /// Haptic debounce interval (seconds)
     public static let hapticDebounceS: Double = 5.0
     /// Maximum haptic events per minute
     public static let hapticMaxPerMinute: Int = 4
     /// Haptic blur threshold — MUST equal QualityThresholds.laplacianBlurThreshold
-    public static let hapticBlurThreshold: Double = 120.0
+    public static let hapticBlurThreshold: Double = 100.0
+    /// Per-frame display increment for visible patches
+    public static let scanDisplayIncrementPerFrame: Double = 0.01
     /// Haptic motion threshold
     public static let hapticMotionThreshold: Double = 0.7
     /// Haptic exposure threshold
@@ -701,7 +703,7 @@ public enum ScanGuidanceConstants {
             documentation: "Minimum interval between ripple spawns from same source"
         )),
         
-        // Section 7: Haptic & Toast (10 constants - 7 Double, 3 Int)
+        // Section 7: Haptic, Display & Toast (11 constants - 8 Double, 3 Int)
         .threshold(ThresholdSpec(
             ssotId: "ScanGuidanceConstants.hapticDebounceS",
             name: "Haptic Debounce Interval",
@@ -732,6 +734,18 @@ public enum ScanGuidanceConstants {
             onExceed: .warn,
             onUnderflow: .warn,
             documentation: "Haptic blur threshold — MUST equal QualityThresholds.laplacianBlurThreshold"
+        )),
+        .threshold(ThresholdSpec(
+            ssotId: "ScanGuidanceConstants.scanDisplayIncrementPerFrame",
+            name: "Scan Display Increment Per Frame",
+            unit: .dimensionless,
+            category: .quality,
+            min: 0.001,
+            max: 0.05,
+            defaultValue: scanDisplayIncrementPerFrame,
+            onExceed: .warn,
+            onUnderflow: .warn,
+            documentation: "Per-frame display increment for visible patches"
         )),
         .threshold(ThresholdSpec(
             ssotId: "ScanGuidanceConstants.hapticMotionThreshold",
