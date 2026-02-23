@@ -1,0 +1,4 @@
+# Expected decision hashes (hex, 64 characters each)
+# Format: one hash per line, in order of decisions
+# These will be computed during test execution and compared
+# Placeholder values - actual hashes will be computed from canonical bytes

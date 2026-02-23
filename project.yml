@@ -1,0 +1,43 @@
+name: Aether3DApp
+options:
+  bundleIdPrefix: com.aether3d
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.2"
+  generateEmptyDirectories: false
+  defaultConfig: Debug
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+
+packages:
+  Aether3D:
+    path: .
+
+targets:
+  Aether3DApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        type: group
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.aether3d.app
+        PRODUCT_NAME: Aether3D
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 8N5Z34UK5Y
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_EMIT_LOC_STRINGS: "YES"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MTL_LANGUAGE_REVISION: "Metal30"
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/aether_cpp/include"]
+    dependencies:
+      - package: Aether3D
+        product: Aether3DCore
+      - package: Aether3D
+        product: SharedSecurity

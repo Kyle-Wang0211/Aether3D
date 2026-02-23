@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_surface_stability.dir/tests/tsdf/test_surface_stability.cpp.o -o test_surface_stability  libaether3d_core.a

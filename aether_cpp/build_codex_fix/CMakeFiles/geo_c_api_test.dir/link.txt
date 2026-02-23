@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/geo_c_api_test.dir/tests/geo/geo_c_api_test.cpp.o -o geo_c_api_test  libaether3d_c.a libaether3d_core.a

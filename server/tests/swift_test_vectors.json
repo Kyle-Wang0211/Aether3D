@@ -1,0 +1,11 @@
+{
+  "merkle_empty": "0000000000000000000000000000000000000000000000000000000000000000",
+  "merkle_single": "dbebd10e61bc8c28591273feafbbef95d544f874693301d8f7f8e54c6e30058e",
+  "merkle_two": "c230bcb49d86906016b29534ada0a9279a4969e5cb458e6229ca5c585aa925ed",
+  "merkle_three": "1b7f1b00466cd795f93eed6d9eba814e2036a6aa00043d3f0ce780ca7a1777e7",
+  "sample_size_1000": 7,
+  "sample_size_10000": 7,
+  "domain_tag_bundle_len": 22,
+  "domain_tag_manifest_len": 26,
+  "domain_tag_context_len": 25
+}

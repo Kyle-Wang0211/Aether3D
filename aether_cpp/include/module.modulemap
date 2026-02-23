@@ -1,0 +1,4 @@
+module CAetherNativeBridge {
+    header "aether_tsdf_c.h"
+    export *
+}

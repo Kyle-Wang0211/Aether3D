@@ -1,0 +1,46 @@
+ci(ssot-foundation): add comprehensive Linux compatibility and preventive guardrails
+
+SSOT-Change: yes
+
+## Changes
+
+### Linux Compatibility Fixes
+- Added cross-platform crypto shim (CryptoShim.swift) for SHA-256 hashing
+- Updated EnumFrozenOrderTests to use CryptoShim instead of direct CryptoKit import
+- Added swift-crypto dependency to ConstantsTests target for Linux support
+
+### Preventive Guardrails
+- Added ban_apple_only_imports.sh script to detect Apple-only imports in Linux-compiled targets
+- Integrated Apple-only import check into repo_hygiene.sh
+- Enhanced validate_ssot_gate_test_selection.sh to include CryptoShimConsistencyTests
+- Added toolchain version check to preflight_ssot_foundation.sh
+
+### Tests
+- Added CryptoShimConsistencyTests.swift (13 tests) validating cross-platform SHA-256 consistency
+- Included CryptoShimConsistencyTests in Gate 2 test selection
+- Updated workflow to include CryptoShimConsistencyTests in Gate 2 filters
+
+### Documentation
+- Updated DEVELOPER_FAILURE_TRIAGE.md with Ubuntu CryptoKit failure handling
+- Added SHA-256 output mismatch troubleshooting guide
+- Updated FINAL_LOCAL_VERIFICATION_REPORT.md with future breakage threat model
+
+## Invariants Preserved
+- No algorithms added (contracts/constants/tests/docs/scripts only)
+- Append-only + version-explicit preserved
+- All SSOT Foundation invariants (A1-A5, B1-B3, CE, CL2, etc.) unchanged
+- Cross-platform determinism maintained
+
+## Testing
+- ✅ All SSOT Foundation tests pass (101 tests, 0 failures)
+- ✅ Gate 1 tests pass (debug + release)
+- ✅ Gate 2 tests pass (debug + release, includes CryptoShimConsistencyTests)
+- ✅ Linux equivalence smoke passes
+- ✅ All guardrail scripts pass
+- ✅ Workflow validation passes
+
+## Impact
+- Fixes Linux CI failures: "no such module 'CryptoKit'"
+- Prevents future Apple-only import regressions via guardrails
+- Ensures cross-platform crypto consistency via dedicated tests
+- Improves CI reliability with comprehensive validation

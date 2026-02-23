@@ -1,0 +1,173 @@
+{
+  "metadata": {
+    "schema_version": "1.0.0",
+    "table_id": "runtime-parameter-master-v1",
+    "last_updated": "2026-02-18",
+    "owner": "Core Runtime"
+  },
+  "profiles": [
+    "forensic",
+    "balanced",
+    "speed"
+  ],
+  "objective_functions": {
+    "quality_score": "0.50*first_scan_success_rate + 0.20*replay_stable_rate + 0.20*(1-tri_tet_unknown_ratio) + 0.10*cross_validation_agreement_rate",
+    "speed_score": "0.60*(1-normalized_median_duration) + 0.20*(1-normalized_max_duration) + 0.20*normalized_upload_throughput",
+    "release_rule": "quality_score >= baseline_quality_score && speed_score >= baseline_speed_score"
+  },
+  "parameters": [
+    {
+      "id": "tri_tet.measured_min_view_count",
+      "module": "tri_tet",
+      "type": "int",
+      "bounds": { "min": 3, "max": 6 },
+      "step": 1,
+      "values": { "forensic": 5, "balanced": 4, "speed": 3 },
+      "target": "maximize_measured_precision"
+    },
+    {
+      "id": "tri_tet.estimated_min_view_count",
+      "module": "tri_tet",
+      "type": "int",
+      "bounds": { "min": 2, "max": 4 },
+      "step": 1,
+      "values": { "forensic": 3, "balanced": 2, "speed": 2 },
+      "target": "stabilize_estimated_bucket"
+    },
+    {
+      "id": "tri_tet.max_triangle_to_tet_distance",
+      "module": "tri_tet",
+      "type": "float",
+      "bounds": { "min": 0.05, "max": 0.2 },
+      "step": 0.01,
+      "values": { "forensic": 0.06, "balanced": 0.1, "speed": 0.12 },
+      "target": "minimize_false_measured_assignment"
+    },
+    {
+      "id": "tri_tet.max_unknown_ratio",
+      "module": "tri_tet",
+      "type": "float",
+      "bounds": { "min": 0.1, "max": 0.25 },
+      "step": 0.01,
+      "values": { "forensic": 0.17, "balanced": 0.18, "speed": 0.22 },
+      "target": "constrain_unknown_surface_risk"
+    },
+    {
+      "id": "first_scan.target_success_rate",
+      "module": "first_scan",
+      "type": "float",
+      "bounds": { "min": 0.9, "max": 1.0 },
+      "step": 0.01,
+      "values": { "forensic": 0.98, "balanced": 0.95, "speed": 0.92 },
+      "target": "maximize_first_scan_success"
+    },
+    {
+      "id": "first_scan.target_replay_stable_rate",
+      "module": "first_scan",
+      "type": "float",
+      "bounds": { "min": 0.98, "max": 1.0 },
+      "step": 0.01,
+      "values": { "forensic": 1.0, "balanced": 1.0, "speed": 0.99 },
+      "target": "enforce_replay_determinism"
+    },
+    {
+      "id": "first_scan.target_duration_seconds",
+      "module": "first_scan",
+      "type": "float",
+      "bounds": { "min": 140, "max": 180 },
+      "step": 5,
+      "values": { "forensic": 170, "balanced": 170, "speed": 180 },
+      "target": "minimize_time_to_first_value"
+    },
+    {
+      "id": "first_scan.hard_cap_seconds",
+      "module": "first_scan",
+      "type": "float",
+      "bounds": { "min": 900, "max": 900 },
+      "step": 1,
+      "values": { "forensic": 900, "balanced": 900, "speed": 900 },
+      "target": "hard_safety_upper_bound"
+    },
+    {
+      "id": "first_scan.max_hard_cap_violations",
+      "module": "first_scan",
+      "type": "int",
+      "bounds": { "min": 0, "max": 0 },
+      "step": 1,
+      "values": { "forensic": 0, "balanced": 0, "speed": 0 },
+      "target": "zero_tolerance"
+    },
+    {
+      "id": "cross_validation.outlier_ml_inlier_threshold",
+      "module": "cross_validation",
+      "type": "float",
+      "bounds": { "min": 0.55, "max": 0.8 },
+      "step": 0.01,
+      "values": { "forensic": 0.75, "balanced": 0.65, "speed": 0.6 },
+      "target": "reduce_false_inlier_acceptance"
+    },
+    {
+      "id": "cross_validation.calibration_max_allowed_error_cm",
+      "module": "cross_validation",
+      "type": "float",
+      "bounds": { "min": 0.6, "max": 1.5 },
+      "step": 0.05,
+      "values": { "forensic": 0.8, "balanced": 1.0, "speed": 1.2 },
+      "target": "bound_calibration_error"
+    },
+    {
+      "id": "cross_validation.calibration_max_divergence_cm",
+      "module": "cross_validation",
+      "type": "float",
+      "bounds": { "min": 0.2, "max": 0.5 },
+      "step": 0.01,
+      "values": { "forensic": 0.25, "balanced": 0.35, "speed": 0.45 },
+      "target": "control_rule_ml_disagreement"
+    },
+    {
+      "id": "upload_cdc.min_chunk_size_bytes",
+      "module": "upload_cdc",
+      "type": "int",
+      "bounds": { "min": 262144, "max": 5242880 },
+      "step": 262144,
+      "values": { "forensic": 524288, "balanced": 262144, "speed": 262144 },
+      "target": "avoid_tiny_chunks"
+    },
+    {
+      "id": "upload_cdc.avg_chunk_size_bytes",
+      "module": "upload_cdc",
+      "type": "int",
+      "bounds": { "min": 524288, "max": 5242880 },
+      "step": 524288,
+      "values": { "forensic": 2097152, "balanced": 2097152, "speed": 4194304 },
+      "target": "maximize_throughput_under_memory_budget"
+    },
+    {
+      "id": "upload_cdc.max_chunk_size_bytes",
+      "module": "upload_cdc",
+      "type": "int",
+      "bounds": { "min": 5242880, "max": 5242880 },
+      "step": 1,
+      "values": { "forensic": 5242880, "balanced": 5242880, "speed": 5242880 },
+      "target": "hard_align_with_server_limit"
+    },
+    {
+      "id": "upload_cdc.dedup_min_savings_ratio",
+      "module": "upload_cdc",
+      "type": "float",
+      "bounds": { "min": 0.1, "max": 0.3 },
+      "step": 0.01,
+      "values": { "forensic": 0.25, "balanced": 0.2, "speed": 0.15 },
+      "target": "dedup_only_when_worth_it"
+    },
+    {
+      "id": "upload_cdc.compression_min_savings_ratio",
+      "module": "upload_cdc",
+      "type": "float",
+      "bounds": { "min": 0.05, "max": 0.2 },
+      "step": 0.01,
+      "values": { "forensic": 0.15, "balanced": 0.1, "speed": 0.08 },
+      "target": "compress_only_when_cpu_tradeoff_positive"
+    }
+  ]
+}

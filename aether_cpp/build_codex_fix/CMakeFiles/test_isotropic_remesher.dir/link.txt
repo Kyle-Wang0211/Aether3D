@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_isotropic_remesher.dir/tests/tsdf/test_isotropic_remesher.cpp.o -o test_isotropic_remesher  libaether3d_core.a

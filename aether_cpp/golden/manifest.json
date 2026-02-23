@@ -1,0 +1,103 @@
+{
+  "archTag" : "A8",
+  "compilerTag" : "SWFT",
+  "constantsHashHex" : "939171ee1da13e5e",
+  "fixtures" : [
+    {
+      "fileHashHex" : "82d2406cd9c9e59a9de5457b51979dde9cdbac791e70ab83670ebd76c9f1b841",
+      "fixtureType" : 2,
+      "payloadHashHex" : "3c05e21987ff2cd13ec85657ecf0d2447e6b124e8ca5bc0e3f6b69fb28ca1bcd",
+      "payloadSize" : 157,
+      "relativePath" : "fixtures\/evidence\/admission_sequence.bin"
+    },
+    {
+      "fileHashHex" : "2205677be6c482d06a5144f28f4c443d47f4e5d345b5c1cef30ff50b4034f51a",
+      "fixtureType" : 2,
+      "payloadHashHex" : "3924a8cb409e08d289507c16090edff4ed91f21fcb95ec9918361a4bd8826eb0",
+      "payloadSize" : 171,
+      "relativePath" : "fixtures\/evidence\/ds_fusion_basic.bin"
+    },
+    {
+      "fileHashHex" : "e89dda78156e345e8a2c245bee5e2a75f060926dc58f68e39cc972cd70e15e65",
+      "fixtureType" : 2,
+      "payloadHashHex" : "2fb7dea94f85a249a008bb5be1abf2a1ddbe7a1a8876ed8e3bcf3ae8301f28be",
+      "payloadSize" : 174,
+      "relativePath" : "fixtures\/evidence\/ds_fusion_conflict.bin"
+    },
+    {
+      "fileHashHex" : "e4b785c3d25c3c24b986de411e6e162fcdc5ecf0d6ee3540423adbf0cde19a17",
+      "fixtureType" : 4,
+      "payloadHashHex" : "3480b1ce2805d7e600de39ccd282b28978a7e9bbeccf93ff863a6d8beb7714fc",
+      "payloadSize" : 175,
+      "relativePath" : "fixtures\/json\/event_serialization.bin"
+    },
+    {
+      "fileHashHex" : "81f67cbfbc9b1d811acbd5e60eaa88181aed1c3b9051ee99e923f78987c5263b",
+      "fixtureType" : 4,
+      "payloadHashHex" : "5350dc7e83236831bff84b9bdca6fa7df749769c0eaf8ee39aa8311d56d69680",
+      "payloadSize" : 91,
+      "relativePath" : "fixtures\/json\/float_encoding.bin"
+    },
+    {
+      "fileHashHex" : "04e55e18a0d42fded429dee631d5b74aa6637b140bbd3173e6c896965837e99c",
+      "fixtureType" : 3,
+      "payloadHashHex" : "5f3e9ecbf3b9b20898f792401ce3f42a7857c69683bb7579cb47bee732712e42",
+      "payloadSize" : 298,
+      "relativePath" : "fixtures\/merkle\/append_and_proof.bin"
+    },
+    {
+      "fileHashHex" : "85c505c0061fc322a9648f45fa0d3104a98c1f3b84b4caec35b257cfe68a6eb8",
+      "fixtureType" : 3,
+      "payloadHashHex" : "b80958282b6ce3bb4cbd1da538cf338029f997b97667d90c935e16e15c92054f",
+      "payloadSize" : 236,
+      "relativePath" : "fixtures\/merkle\/consistency_proof.bin"
+    },
+    {
+      "fileHashHex" : "84a60b4665db0eca622897bd57645728a6047854b8840b01d2c88fa8056a05e7",
+      "fixtureType" : 3,
+      "payloadHashHex" : "2d1ad462892cb6d284134b90472052af659e46ef20f184391fe050b2348d7235",
+      "payloadSize" : 148,
+      "relativePath" : "fixtures\/merkle\/edge_cases.bin"
+    },
+    {
+      "fileHashHex" : "fb6cc7a6f683f88733ba1563934840316a63c15f29b9119fd5400306c97abc5a",
+      "fixtureType" : 5,
+      "payloadHashHex" : "609eb7fd94fd1fe078dbadd43873b6e337fe837bee56101372a4c63780730b96",
+      "payloadSize" : 119,
+      "relativePath" : "fixtures\/scenespec\/hash_canonicalization.bin"
+    },
+    {
+      "fileHashHex" : "03161c62c991a7ee99c3fe102fbe7b84aa39af967a6ee9a8165de953b62b091b",
+      "fixtureType" : 5,
+      "payloadHashHex" : "ac3dc9327923afe7e624b1135cbd04507d775ff62e408bb9a1b4a2223b6b679c",
+      "payloadSize" : 36,
+      "relativePath" : "fixtures\/scenespec\/section_assembly.bin"
+    },
+    {
+      "fileHashHex" : "2a78f79d89a9a60641d62259081056a5707be8a37974496ba2562f3a9be2bb45",
+      "fixtureType" : 1,
+      "payloadHashHex" : "f322592a225cc5e8eaedd020bcbcdebf9a33d7b67690406212031baa216048c2",
+      "payloadSize" : 192,
+      "relativePath" : "fixtures\/tsdf\/marching_cubes_single_block.bin"
+    },
+    {
+      "fileHashHex" : "f7049991425128910dc351f6d03808e23dec40baf45e3721781790706692f5a9",
+      "fixtureType" : 1,
+      "payloadHashHex" : "fb9900969ee440bae4f5d4bee8ca8038d5350f3f764bb43455c91b900fb4d6cd",
+      "payloadSize" : 373,
+      "relativePath" : "fixtures\/tsdf\/multi_block_fusion.bin"
+    },
+    {
+      "fileHashHex" : "9d9eddefa441fd58f0416932b5c88ca02946d590619e91bf0b4d5c2bf8c86d6e",
+      "fixtureType" : 1,
+      "payloadHashHex" : "f80a88c46f657c4b5000e80815f21c9bab0ea289e3c46fb7ad1ddc045b7c32a0",
+      "payloadSize" : 373,
+      "relativePath" : "fixtures\/tsdf\/single_block_integration.bin"
+    }
+  ],
+  "generatedAtEpochNs" : 1700000000000000000,
+  "generatedAtISO8601" : "2023-11-14T22:13:20Z",
+  "operatingSystem" : "Version 26.1 (Build 25B78)",
+  "schemaVersion" : 1,
+  "swiftVersion" : "Apple Swift version 6.2.3 (swiftlang-6.2.3.3.21 clang-1700.6.3.2) Target: arm64-apple-macosx26.0"
+}

@@ -1,0 +1,20 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.xcarchive
+*\ 2*
+*\ 3*
+.cache/
+*.pcm
+*.swiftmodule
+aether3d.db
+artifacts/
+Aether3DApp.xcodeproj/

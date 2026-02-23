@@ -1,0 +1,98 @@
+name: PR3 Whitelist Enforcement
+
+on:
+  pull_request:
+    paths:
+      - 'Core/Evidence/PR3/**'
+      - 'Core/Evidence/PRMath/**'
+      - 'Core/Evidence/Smoothing/**'
+      - 'Core/Evidence/Validation/**'
+      - 'Core/Evidence/Constants/**'
+      - 'Core/Evidence/Vector/**'
+      - 'Core/Evidence/Tier/**'
+      - 'Tests/Evidence/PR3/**'
+      - 'Tests/Evidence/PRMath/**'
+      - '.github/workflows/pr3-whitelist.yml'
+
+jobs:
+  pr3-whitelist-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch full history for git diff
+
+      - name: Check PR3 allowed paths
+        run: |
+          # Allowed paths for PR3
+          ALLOWED_PATHS=(
+            "Core/Evidence/PR3/"
+            "Core/Evidence/PRMath/"
+            "Core/Evidence/Smoothing/"
+            "Core/Evidence/Validation/"
+            "Core/Evidence/Constants/"
+            "Core/Evidence/Vector/"
+            "Core/Evidence/Tier/"
+            "Core/Evidence/IsolatedEvidenceEngine.swift"
+            "Tests/Evidence/PR3/"
+            "Tests/Evidence/PRMath/"
+            "Tests/Evidence/EvidenceVector3Tests.swift"
+            "Tests/Evidence/GateIntegrationTests.swift"
+            "Tests/Evidence/HardGatesV13Tests.swift"
+            "scripts/ForbiddenPatternLint.swift"
+            "docs/pr/"
+            ".github/workflows/pr3-whitelist.yml"
+            ".github/workflows/evidence-tests.yml"
+          )
+
+          # Get changed files - use merge base for PR comparison
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          # Fallback for non-PR contexts
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA=$(git merge-base origin/main HEAD 2>/dev/null || echo "HEAD~1")
+          fi
+          if [ -z "$HEAD_SHA" ]; then
+            HEAD_SHA="HEAD"
+          fi
+
+          echo "Comparing $BASE_SHA..$HEAD_SHA"
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
+          
+          # Check each changed file
+          for file in $CHANGED_FILES; do
+            # Skip if file is in allowed paths
+            ALLOWED=false
+            for allowed_path in "${ALLOWED_PATHS[@]}"; do
+              if [[ "$file" == "$allowed_path"* ]]; then
+                ALLOWED=true
+                break
+              fi
+            done
+            
+            # Check if file is PR3-related but not in allowed paths
+            if [[ "$file" == *"PR3"* ]] || [[ "$file" == *"PRMath"* ]]; then
+              if [ "$ALLOWED" = false ]; then
+                echo "❌ PR3 file outside allowed paths: $file"
+                exit 1
+              fi
+            fi
+            
+            # Check forbidden modifications
+            FORBIDDEN_FILES=(
+              "Core/Evidence/ViewDiversityTracker.swift"
+              "Core/Constants/EvidenceConstants.swift"
+              "Core/Evidence/UnifiedAdmissionController.swift"
+              "Core/Evidence/SpamProtection.swift"
+            )
+            
+            for forbidden in "${FORBIDDEN_FILES[@]}"; do
+              if [[ "$file" == "$forbidden" ]]; then
+                echo "❌ Forbidden modification: $file (PR3 must not modify PR2 code)"
+                exit 1
+              fi
+            done
+          done
+          
+          echo "✓ PR3 whitelist check passed"

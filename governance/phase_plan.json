@@ -1,0 +1,531 @@
+{
+  "metadata": {
+    "plan_version": "1.1.0",
+    "last_updated": "2026-02-17",
+    "source": "CURSOR_MEGA_PROMPT_V2.md",
+    "phase_id_span": {
+      "min": 0,
+      "max": 14
+    }
+  },
+  "phases": [
+    {
+      "id": 0,
+      "name": "Golden Fixtures Baseline",
+      "track": "P",
+      "objective": "Generate and lock deterministic Swift golden fixtures before any C++ parity work.",
+      "prerequisite_phase_ids": [],
+      "required_contract_ids": [
+        "C-PHASE-ORDERING-LAW",
+        "C-FIXTURE-PHASE0-MANDATORY",
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-LONG-LIVED-INTEGRATION-BRANCH"
+      ],
+      "required_gate_ids": [
+        "G-LONG-LIVED-BRANCH",
+        "G-CONTRACT-VALIDATOR",
+        "G-RUNBOOK-GENERATION",
+        "G-FIXTURE-BASELINE"
+      ],
+      "deliverables": [
+        "Tests/Fixtures/*.txt",
+        "Tests/Fixtures/PR4Math/pr4math_golden_v1.json",
+        "Tests/Fixtures/tri_tet_kuhn5_replay_v1.json",
+        "fixtures/manifest.json",
+        "fixtures/tsdf/*.bin",
+        "fixtures/evidence/*.bin",
+        "fixtures/merkle/*.bin",
+        "fixtures/json/*.bin",
+        "fixtures/scenespec/*.bin",
+        "governance/generated/governance_diagnostics.json"
+      ],
+      "cursor_steps": [
+        "Run governance validator and generation pipeline.",
+        "Generate fixture baselines from Swift tools.",
+        "Replay Tri/Tet Kuhn-5 fixture and lock measured/estimated/unknown baseline cases.",
+        "Store and hash-lock fixture artifacts.",
+        "Tag integration branch checkpoint phase-0-pass."
+      ]
+    },
+    {
+      "id": 1,
+      "name": "TSDF Parity",
+      "track": "P",
+      "objective": "Complete Track P TSDF migration with deterministic behavior and no Core impurity.",
+      "prerequisite_phase_ids": [
+        0
+      ],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-CORE-NO-CONCURRENCY-PRIMITIVES",
+        "C-PIT2-VOLUME-GATING",
+        "C-EXACT-PIPELINE-IO-CLOSED"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD",
+        "G-CPP-CROSS-PLATFORM-BUILD"
+      ],
+      "deliverables": [
+        "aether/tsdf/*",
+        "Core/TSDF/TriTetTSDFMapping.swift",
+        "Tests/TSDF/TriTetTSDFMappingTests.swift",
+        "TSDF parity test logs"
+      ],
+      "cursor_steps": [
+        "Implement TSDF modules in delivery order.",
+        "Add TSDF↔Tet deterministic mapping assertions (index/decomposition parity contract).",
+        "Run parity fixtures and TSDF-specific tests.",
+        "Record benchmark and determinism evidence.",
+        "Tag integration checkpoint phase-1-pass."
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Evidence Parity",
+      "track": "P",
+      "objective": "Port Evidence engine with byte-identical deterministic JSON and replay behavior.",
+      "prerequisite_phase_ids": [
+        1
+      ],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-EXACT-PIPELINE-IO-CLOSED"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD",
+        "G-CPP-CROSS-PLATFORM-BUILD"
+      ],
+      "deliverables": [
+        "aether/evidence/*",
+        "Core/Evidence/TriTetEvidenceMetadata.swift",
+        "Tests/Evidence/TriTetEvidenceMetadataTests.swift",
+        "Evidence parity diff reports"
+      ],
+      "cursor_steps": [
+        "Migrate deterministic_json, ds_mass_function, admission_controller, replay_engine.",
+        "Extend evidence payload with Tri/Tet binding digest and cross-validation reason-code fields.",
+        "Replay Swift logs through C++ and compare hashes.",
+        "Archive report under governance/generated/reports/phase-2.",
+        "Tag integration checkpoint phase-2-pass."
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Merkle + Proofs",
+      "track": "P",
+      "objective": "Finish inclusion and consistency proof stack with boundary vectors.",
+      "prerequisite_phase_ids": [
+        2
+      ],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD",
+        "G-CPP-CROSS-PLATFORM-BUILD"
+      ],
+      "deliverables": [
+        "aether/merkle/*",
+        "aether_cpp/src/merkle/*",
+        "aether_cpp/tests/merkle/*",
+        "Core/MerkleTree/TriTetMerkleLeaf.swift",
+        "Tests/Gates/TriTetMerkleLeafTests.swift",
+        "governance/generated/reports/phase-3-merkle-proofs-log.txt",
+        "RFC vector parity logs"
+      ],
+      "cursor_steps": [
+        "Implement inclusion and consistency proofs (RFC 9162 style).",
+        "Extend Merkle leaf hashing contract to include Tri/Tet binding digest payload.",
+        "Run vector suites for tree-size boundaries.",
+        "Run cross-platform strict C++ toolchain validation.",
+        "Persist deterministic digest report.",
+        "Tag integration checkpoint phase-3-pass."
+      ]
+    },
+    {
+      "id": 4,
+      "name": "TimeAnchoring + Cost Governance",
+      "track": "P",
+      "objective": "Complete pure-computation time anchoring and deterministic cost governance (quota, pricing, rate policy) without network IO in Core.",
+      "prerequisite_phase_ids": [
+        3
+      ],
+      "required_contract_ids": [
+        "C-TRACK-P-LEGAL-BASELINE",
+        "C-CORE-NO-CONCURRENCY-PRIMITIVES",
+        "C-AETHERBILLING-RESOURCE-WALLET",
+        "C-COSTSHIELD-POLICYKERNEL-DETERMINISM",
+        "C-AUDIT-ANCHOR-CLIENT-FIRST"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD",
+        "G-AUDIT-ANCHOR-CLIENT-FIRST"
+      ],
+      "deliverables": [
+        "aether/time/*",
+        "aether/billing/*",
+        "aether/cost_policy/*",
+        "Marzullo fusion verification outputs"
+      ],
+      "cursor_steps": [
+        "Implement parser/fusion/error-classification/proof assembly.",
+        "Integrate AetherBilling resource wallet metering and quota checks.",
+        "Implement CostShield policy kernel primitives (shadow pricing, GCRA, idempotency key generation).",
+        "Enforce client-first RFC3161 anchor policy (session start/end mandatory + 60s periodic) with mobile direct TSA path.",
+        "Validate deterministic outputs across platforms.",
+        "Store phase evidence and cost-policy fixtures in governance generated report.",
+        "Tag integration checkpoint phase-4-pass."
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Quality + System Integration Closure",
+      "track": "P",
+      "objective": "Close known platform integration drifts (blur SSOT, PatchDisplayMap migration, upload hash verification).",
+      "prerequisite_phase_ids": [
+        4
+      ],
+      "required_contract_ids": [
+        "C-BLUR-SSOT-SINGLE-VALUE",
+        "C-SCAN-PATCHDISPLAY-MIGRATION",
+        "C-SCAN-BLUR-HAPTIC-REMOVAL",
+        "C-UPLOAD-CHUNK-HASH-VERIFY"
+      ],
+      "required_gate_ids": [
+        "G-BLUR-CONSTANT-DRIFT",
+        "G-SCAN-GUIDANCE-INTEGRATION",
+        "G-UPLOAD-CHUNK-HASH",
+        "G-P0-QUALITY-IMPLEMENTATION",
+        "G-UPLOAD-CONTRACT-CONSISTENCY",
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "Core/Quality/*",
+        "App/Scan/ScanViewModel.swift",
+        "server/app/services/upload_service.py"
+      ],
+      "cursor_steps": [
+        "Unify blur constants and align code to registry values.",
+        "Replace ScanViewModel local snapshot with PatchDisplayMap chain.",
+        "Remove blur haptic path and keep frame rejection semantics.",
+        "Enforce expected_hash check in persist_chunk().",
+        "Tag integration checkpoint phase-5-pass."
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Track X V3 Foundations",
+      "track": "X",
+      "objective": "Introduce V3 innovation set behind compile-time flags with default OFF.",
+      "prerequisite_phase_ids": [
+        5
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-FEATURE-FLAG-DEFAULTS",
+        "C-FEATURE-FLAG-NAMESPACE"
+      ],
+      "required_gate_ids": [
+        "G-FLAG-DEFAULT-OFF",
+        "G-FLAG-NAMESPACE",
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "V3 feature-flagged modules",
+        "Track X fixture set"
+      ],
+      "cursor_steps": [
+        "Implement V3 modules with explicit flag guards.",
+        "Keep Track P fixtures green.",
+        "Generate Track X-specific fixtures.",
+        "Tag integration checkpoint phase-6-pass."
+      ]
+    },
+    {
+      "id": 7,
+      "name": "Track X V4 Foundations",
+      "track": "X",
+      "objective": "Integrate V4 clusters and server-side cost governance enforcement (auth/rate/idempotency/runtime fuse).",
+      "prerequisite_phase_ids": [
+        6
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-FEATURE-FLAG-DEFAULTS",
+        "C-COSTSHIELD-SERVER-ENFORCEMENT"
+      ],
+      "required_gate_ids": [
+        "G-FLAG-DEFAULT-OFF",
+        "G-CONTRACT-VALIDATOR"
+      ],
+      "deliverables": [
+        "V4 feature implementations",
+        "server gateway auth/rate-limit/idempotency enforcement path",
+        "schema version changelog entries"
+      ],
+      "cursor_steps": [
+        "Implement V4 cluster modules behind flags.",
+        "Integrate three-gate server enforcement chain (Gateway + Scheduler/Worker) against shared policy contracts.",
+        "Run Track P regression and V4 fixtures.",
+        "Record schema bumps and migration notes.",
+        "Tag integration checkpoint phase-7-pass."
+      ]
+    },
+    {
+      "id": 8,
+      "name": "CT-VIO + Noise + FrameGate",
+      "track": "X",
+      "objective": "Start mobile-first offload with hard compliance and quality admission while preserving cloud final render path, and enforce first-scan success as top KPI.",
+      "prerequisite_phase_ids": [
+        7
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-CORE-SYSTEM-BOUNDARY-PIXEL",
+        "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+        "C-BATCH-FULL-GATE-ENFORCEMENT"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-FLAG-DEFAULT-OFF",
+        "G-PURE-VISION-RUNTIME-FIXTURE",
+        "G-FIRST-SCAN-SUCCESS-KPI",
+        "G-FULL-GATE-SWEEP"
+      ],
+      "deliverables": [
+        "on-device compliance admission pipeline",
+        "S5 precheck + keyframe admission pipeline",
+        "batch gate evidence logs for phase 8"
+      ],
+      "cursor_steps": [
+        "Batch 8A: implement on-device compliance/OOD/temporal vote/rule engine path with fail-closed behavior.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 8A; block progression on any failure.",
+        "Batch 8B: implement S5 precheck admission, keyframe selection, dedup, and blur/exposure admission metrics.",
+        "双通道上传策略-在线通道: 仅 S5素材 触发云端最终渲染队列优先上云，非S5留在本地继续采集.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 8B; archive diagnostics and thermal traces.",
+        "Tag integration checkpoint phase-8-pass."
+      ]
+    },
+    {
+      "id": 9,
+      "name": "Burst + Uncertainty + Photometric",
+      "track": "X",
+      "objective": "Shift geometric bootstrap to device side (VIO/local BA/scale/depth/uncertainty) to reduce cloud search space.",
+      "prerequisite_phase_ids": [
+        8
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+        "C-BATCH-FULL-GATE-ENFORCEMENT"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-PURE-VISION-RUNTIME-FIXTURE",
+        "G-FIRST-SCAN-SUCCESS-KPI",
+        "G-FULL-GATE-SWEEP"
+      ],
+      "deliverables": [
+        "on-device VIO/local BA bootstrap modules",
+        "on-device semantic scale anchor + depth prior + uncertainty maps",
+        "coarse TSDF/occupancy evidence for cloud warm start"
+      ],
+      "cursor_steps": [
+        "Batch 9A: deliver burst controller, VIO bootstrap, and local BA window optimization with deterministic replay.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 9A.",
+        "Batch 9B: deliver scale anchor, monocular depth prior, uncertainty maps, and coarse TSDF/occupancy updates.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 9B; persist diagnostics in governance reports.",
+        "Tag integration checkpoint phase-9-pass."
+      ]
+    },
+    {
+      "id": 10,
+      "name": "Coverage + IG + UI Guidance",
+      "track": "X",
+      "objective": "Complete on-device mesh/instance graph loop and evidence-only UI feedback while maintaining user intent neutrality.",
+      "prerequisite_phase_ids": [
+        9
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+        "C-BATCH-FULL-GATE-ENFORCEMENT"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-PURE-VISION-RUNTIME-FIXTURE",
+        "G-FIRST-SCAN-SUCCESS-KPI",
+        "G-FULL-GATE-SWEEP"
+      ],
+      "deliverables": [
+        "on-device MC33 coarse mesh + closure pre-estimate",
+        "TAIS instance split + incremental instance graph updates",
+        "evidence UI (black/gray/white + reveal-original-color) linkage"
+      ],
+      "cursor_steps": [
+        "Batch 10A: implement MC33 extraction, closure ratio pre-estimate, and coverage stopper/info-gain feedback loop.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 10A.",
+        "Batch 10B: implement TAIS instance separation, incremental graph updates, and evidence-only UI rendering contract.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 10B; store integration report.",
+        "Tag integration checkpoint phase-10-pass."
+      ]
+    },
+    {
+      "id": 11,
+      "name": "Noise-Aware Trainer + DA3",
+      "track": "X",
+      "objective": "Add on-device GS warm-start and bounded trainer handoff while reserving cloud for final S5 optimization/render.",
+      "prerequisite_phase_ids": [
+        10
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-CORE-SYSTEM-BOUNDARY-PIXEL",
+        "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+        "C-BATCH-FULL-GATE-ENFORCEMENT",
+        "C-CLOUD-FINAL-S5-RENDER-RESERVED"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-PURE-VISION-RUNTIME-FIXTURE",
+        "G-FIRST-SCAN-SUCCESS-KPI",
+        "G-FULL-GATE-SWEEP"
+      ],
+      "deliverables": [
+        "on-device GS init + mini warm-up + DPC pre-stats",
+        "trainer handoff package with deterministic provenance",
+        "cloud final render handshake contracts"
+      ],
+      "cursor_steps": [
+        "Batch 11A: implement GS initialization, mini-splat warm-up, and DPC pre-statistics on device.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 11A.",
+        "Batch 11B: integrate noise-aware trainer handoff and enforce cloud-final-S5-only render contract.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 11B; write release readiness report.",
+        "Tag integration checkpoint phase-11-pass."
+      ]
+    },
+    {
+      "id": 12,
+      "name": "DGRUT + 8x8 Texels + Native Resolution",
+      "track": "X",
+      "objective": "Ship device-tier render prep, scheduler, thermal and memory control loops for stable high throughput.",
+      "prerequisite_phase_ids": [
+        11
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-PIT1-TIMEWARP-PURITY",
+        "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+        "C-BATCH-FULL-GATE-ENFORCEMENT",
+        "C-CLOUD-FINAL-S5-RENDER-RESERVED"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-PURE-VISION-RUNTIME-FIXTURE",
+        "G-FIRST-SCAN-SUCCESS-KPI",
+        "G-FULL-GATE-SWEEP"
+      ],
+      "deliverables": [
+        "device-tier render hint/ROI prep modules",
+        "thermal + memory + battery scheduler control loops",
+        "performance profile evidence across supported tiers"
+      ],
+      "cursor_steps": [
+        "Batch 12A: integrate DGRUT/texel path, ROI hints, and per-tier render prep modules.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 12A.",
+        "Batch 12B: integrate thermal/memory/battery scheduler loops and adaptive fallback contracts.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 12B; record fps/memory/thermal evidence.",
+        "Tag integration checkpoint phase-12-pass."
+      ]
+    },
+    {
+      "id": 13,
+      "name": "Streaming + Overlay + Final Orchestration",
+      "track": "X",
+      "objective": "Finalize mobile-heavy streaming/audit packaging and certify cloud final S5 render + legal archive closure.",
+      "prerequisite_phase_ids": [
+        12
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-CURSOR-RUNBOOK-DETERMINISM",
+        "C-DOC-SECTION-ORDER-MONOTONIC",
+        "C-AUDIT-ANCHOR-CLIENT-FIRST",
+        "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+        "C-BATCH-FULL-GATE-ENFORCEMENT",
+        "C-CLOUD-FINAL-S5-RENDER-RESERVED"
+      ],
+      "required_gate_ids": [
+        "G-PHASE13-E2E-SMOKE",
+        "G-CONTRACT-VALIDATOR",
+        "G-DOC-SECTION-ORDER",
+        "G-AUDIT-ANCHOR-CLIENT-FIRST",
+        "G-PURE-VISION-RUNTIME-FIXTURE",
+        "G-FIRST-SCAN-SUCCESS-KPI",
+        "G-DUAL-LANE-UPLOAD-POLICY",
+        "G-FULL-GATE-SWEEP"
+      ],
+      "deliverables": [
+        "on-device CAS/delta upload + provenance package stack",
+        "cloud final S5 render/audit archive handshake",
+        "phase13 scenario + full gate sweep reports",
+        "final governance closure report"
+      ],
+      "cursor_steps": [
+        "Batch 13A: integrate CAS chunking, dedup, delta upload, and transport adaptation on device.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 13A.",
+        "Batch 13B: integrate Merkle/hash/provenance package, signature chain, and session-start/end + periodic audit anchors.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 13B.",
+        "双通道上传策略-终态通道: 最终会话提交时必须全量上传并对 S0-S5 素材全部接纳，不得因质量门禁拒绝剩余素材.",
+        "Batch 13C: integrate final orchestrator and enforce cloud final S5 render + legal archive closure path.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 13C; run scenario A/B/C/D and capture reports.",
+        "Close all blocked contracts before release tag.",
+        "Tag integration checkpoint phase-13-pass."
+      ]
+    },
+    {
+      "id": 14,
+      "name": "Zero-Fab Core + Tri/Tet Fusion",
+      "track": "X",
+      "objective": "Ship hardened zero-fabrication core policy, cross-validation fusion, fallback geometry correctness, and TRI/TET consistency layer as executable runtime contracts.",
+      "prerequisite_phase_ids": [
+        13
+      ],
+      "required_contract_ids": [
+        "C-TRACK-X-FEATURE-ISOLATION",
+        "C-CURSOR-RUNBOOK-DETERMINISM",
+        "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+        "C-BATCH-FULL-GATE-ENFORCEMENT",
+        "C-CLOUD-FINAL-S5-RENDER-RESERVED",
+        "C-TRI-TET-RUNTIME-CONSISTENCY"
+      ],
+      "required_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-PURE-VISION-RUNTIME-FIXTURE",
+        "G-FIRST-SCAN-SUCCESS-KPI",
+        "G-TRI-TET-RUNTIME-CONSISTENCY",
+        "G-FULL-GATE-SWEEP"
+      ],
+      "deliverables": [
+        "Core/Quality/PureVision/ZeroFabricationPolicyKernel.swift",
+        "Core/Quality/PureVision/CrossValidationFusion.swift",
+        "Core/Quality/Geometry/TriTetConsistencyEngine.swift",
+        "governance/generated/tri_tet_runtime_metrics.json",
+        "governance/generated/reports/phase-14-zero-fab-tritet-log.txt"
+      ],
+      "cursor_steps": [
+        "Batch 14A: replace all fallback placeholder camera transforms with validated rigid inverse + fail-closed behavior.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 14A.",
+        "Batch 14B: integrate zero-fabrication policy kernel and dual-lane cross-validation fusion rules into runtime path.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 14B.",
+        "Batch 14C: integrate TRI/TET consistency engine and expose measured/estimated/unknown bindings for audit output.",
+        "Run G-TRI-TET-RUNTIME-CONSISTENCY and archive phase-14 Tri/Tet diagnostics.",
+        "Immediately run required gates and full sweep (G-FULL-GATE-SWEEP) after Batch 14C; archive phase report and tag phase-14-pass."
+      ]
+    }
+  ]
+}

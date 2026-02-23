@@ -1,0 +1,442 @@
+{
+  "manifest_version": "1.0.0",
+  "generated_at_utc": "1970-01-01T00:00:00Z",
+  "generator": "scripts/compliance/generate_third_party_manifest.py",
+  "source_of_truth": {
+    "swift_lock": "Package.resolved",
+    "python_roots": "server/requirements.txt",
+    "python_lock": "server/requirements.lock.txt"
+  },
+  "packages": [
+    {
+      "id": "pypi:annotated-doc:0.0.4",
+      "name": "annotated-doc",
+      "normalized_name": "annotated-doc",
+      "version": "0.0.4",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/fastapi/annotated-doc",
+      "notice_required": false,
+      "purl": "pkg:pypi/annotated-doc@0.0.4",
+      "license_text_path": "compliance/third_party/licenses/pypi-annotated-doc-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-annotated-doc-NOTICE.txt"
+    },
+    {
+      "id": "pypi:annotated-types:0.7.0",
+      "name": "annotated-types",
+      "normalized_name": "annotated-types",
+      "version": "0.7.0",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/annotated-types/annotated-types",
+      "notice_required": false,
+      "purl": "pkg:pypi/annotated-types@0.7.0",
+      "license_text_path": "compliance/third_party/licenses/pypi-annotated-types-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-annotated-types-NOTICE.txt"
+    },
+    {
+      "id": "pypi:anyio:4.12.0",
+      "name": "anyio",
+      "normalized_name": "anyio",
+      "version": "4.12.0",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/agronholm/anyio",
+      "notice_required": false,
+      "purl": "pkg:pypi/anyio@4.12.0",
+      "license_text_path": "compliance/third_party/licenses/pypi-anyio-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-anyio-NOTICE.txt"
+    },
+    {
+      "id": "pypi:click:8.1.8",
+      "name": "click",
+      "normalized_name": "click",
+      "version": "8.1.8",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "source_url": "https://github.com/pallets/click/",
+      "notice_required": false,
+      "purl": "pkg:pypi/click@8.1.8",
+      "license_text_path": "compliance/third_party/licenses/pypi-click-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-click-NOTICE.txt"
+    },
+    {
+      "id": "pypi:exceptiongroup:1.3.1",
+      "name": "exceptiongroup",
+      "normalized_name": "exceptiongroup",
+      "version": "1.3.1",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/agronholm/exceptiongroup",
+      "notice_required": false,
+      "purl": "pkg:pypi/exceptiongroup@1.3.1",
+      "license_text_path": "compliance/third_party/licenses/pypi-exceptiongroup-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-exceptiongroup-NOTICE.txt"
+    },
+    {
+      "id": "pypi:fastapi:0.128.0",
+      "name": "fastapi",
+      "normalized_name": "fastapi",
+      "version": "0.128.0",
+      "ecosystem": "pypi",
+      "direct_dependency": true,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/fastapi/fastapi",
+      "notice_required": false,
+      "purl": "pkg:pypi/fastapi@0.128.0",
+      "license_text_path": "compliance/third_party/licenses/pypi-fastapi-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-fastapi-NOTICE.txt"
+    },
+    {
+      "id": "pypi:h11:0.16.0",
+      "name": "h11",
+      "normalized_name": "h11",
+      "version": "0.16.0",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/python-hyper/h11",
+      "notice_required": false,
+      "purl": "pkg:pypi/h11@0.16.0",
+      "license_text_path": "compliance/third_party/licenses/pypi-h11-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-h11-NOTICE.txt"
+    },
+    {
+      "id": "pypi:httptools:0.7.1",
+      "name": "httptools",
+      "normalized_name": "httptools",
+      "version": "0.7.1",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/MagicStack/httptools",
+      "notice_required": false,
+      "purl": "pkg:pypi/httptools@0.7.1",
+      "license_text_path": "compliance/third_party/licenses/pypi-httptools-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-httptools-NOTICE.txt"
+    },
+    {
+      "id": "pypi:idna:3.11",
+      "name": "idna",
+      "normalized_name": "idna",
+      "version": "3.11",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "source_url": "https://github.com/kjd/idna",
+      "notice_required": false,
+      "purl": "pkg:pypi/idna@3.11",
+      "license_text_path": "compliance/third_party/licenses/pypi-idna-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-idna-NOTICE.txt"
+    },
+    {
+      "id": "pypi:pydantic:2.12.5",
+      "name": "pydantic",
+      "normalized_name": "pydantic",
+      "version": "2.12.5",
+      "ecosystem": "pypi",
+      "direct_dependency": true,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/pydantic/pydantic",
+      "notice_required": false,
+      "purl": "pkg:pypi/pydantic@2.12.5",
+      "license_text_path": "compliance/third_party/licenses/pypi-pydantic-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-pydantic-NOTICE.txt"
+    },
+    {
+      "id": "pypi:pydantic-core:2.41.5",
+      "name": "pydantic_core",
+      "normalized_name": "pydantic-core",
+      "version": "2.41.5",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/pydantic/pydantic-core",
+      "notice_required": false,
+      "purl": "pkg:pypi/pydantic-core@2.41.5",
+      "license_text_path": "compliance/third_party/licenses/pypi-pydantic-core-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-pydantic-core-NOTICE.txt"
+    },
+    {
+      "id": "pypi:pydantic-settings:2.11.0",
+      "name": "pydantic-settings",
+      "normalized_name": "pydantic-settings",
+      "version": "2.11.0",
+      "ecosystem": "pypi",
+      "direct_dependency": true,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/pydantic/pydantic-settings",
+      "notice_required": false,
+      "purl": "pkg:pypi/pydantic-settings@2.11.0",
+      "license_text_path": "compliance/third_party/licenses/pypi-pydantic-settings-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-pydantic-settings-NOTICE.txt"
+    },
+    {
+      "id": "pypi:python-dotenv:1.2.1",
+      "name": "python-dotenv",
+      "normalized_name": "python-dotenv",
+      "version": "1.2.1",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "source_url": "https://github.com/theskumar/python-dotenv",
+      "notice_required": false,
+      "purl": "pkg:pypi/python-dotenv@1.2.1",
+      "license_text_path": "compliance/third_party/licenses/pypi-python-dotenv-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-python-dotenv-NOTICE.txt"
+    },
+    {
+      "id": "pypi:python-multipart:0.0.20",
+      "name": "python-multipart",
+      "normalized_name": "python-multipart",
+      "version": "0.0.20",
+      "ecosystem": "pypi",
+      "direct_dependency": true,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "Apache-2.0",
+      "source_url": "https://github.com/Kludex/python-multipart",
+      "notice_required": true,
+      "purl": "pkg:pypi/python-multipart@0.0.20",
+      "license_text_path": "compliance/third_party/licenses/pypi-python-multipart-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-python-multipart-NOTICE.txt"
+    },
+    {
+      "id": "pypi:pyyaml:6.0.3",
+      "name": "PyYAML",
+      "normalized_name": "pyyaml",
+      "version": "6.0.3",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/yaml/pyyaml",
+      "notice_required": false,
+      "purl": "pkg:pypi/pyyaml@6.0.3",
+      "license_text_path": "compliance/third_party/licenses/pypi-pyyaml-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-pyyaml-NOTICE.txt"
+    },
+    {
+      "id": "pypi:sqlalchemy:2.0.45",
+      "name": "SQLAlchemy",
+      "normalized_name": "sqlalchemy",
+      "version": "2.0.45",
+      "ecosystem": "pypi",
+      "direct_dependency": true,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://www.sqlalchemy.org",
+      "notice_required": false,
+      "purl": "pkg:pypi/sqlalchemy@2.0.45",
+      "license_text_path": "compliance/third_party/licenses/pypi-sqlalchemy-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-sqlalchemy-NOTICE.txt"
+    },
+    {
+      "id": "pypi:starlette:0.49.3",
+      "name": "starlette",
+      "normalized_name": "starlette",
+      "version": "0.49.3",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "source_url": "https://github.com/Kludex/starlette",
+      "notice_required": false,
+      "purl": "pkg:pypi/starlette@0.49.3",
+      "license_text_path": "compliance/third_party/licenses/pypi-starlette-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-starlette-NOTICE.txt"
+    },
+    {
+      "id": "pypi:typing-extensions:4.15.0",
+      "name": "typing_extensions",
+      "normalized_name": "typing-extensions",
+      "version": "4.15.0",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "PSF-2.0",
+      "source_url": "https://github.com/python/typing_extensions",
+      "notice_required": false,
+      "purl": "pkg:pypi/typing-extensions@4.15.0",
+      "license_text_path": "compliance/third_party/licenses/pypi-typing-extensions-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-typing-extensions-NOTICE.txt"
+    },
+    {
+      "id": "pypi:typing-inspection:0.4.2",
+      "name": "typing-inspection",
+      "normalized_name": "typing-inspection",
+      "version": "0.4.2",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/pydantic/typing-inspection",
+      "notice_required": false,
+      "purl": "pkg:pypi/typing-inspection@0.4.2",
+      "license_text_path": "compliance/third_party/licenses/pypi-typing-inspection-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-typing-inspection-NOTICE.txt"
+    },
+    {
+      "id": "pypi:uvicorn:0.39.0",
+      "name": "uvicorn",
+      "normalized_name": "uvicorn",
+      "version": "0.39.0",
+      "ecosystem": "pypi",
+      "direct_dependency": true,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "source_url": "https://uvicorn.dev/",
+      "notice_required": false,
+      "purl": "pkg:pypi/uvicorn@0.39.0",
+      "license_text_path": "compliance/third_party/licenses/pypi-uvicorn-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-uvicorn-NOTICE.txt"
+    },
+    {
+      "id": "pypi:uvloop:0.22.1",
+      "name": "uvloop",
+      "normalized_name": "uvloop",
+      "version": "0.22.1",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/MagicStack/uvloop",
+      "notice_required": false,
+      "purl": "pkg:pypi/uvloop@0.22.1",
+      "license_text_path": "compliance/third_party/licenses/pypi-uvloop-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-uvloop-NOTICE.txt"
+    },
+    {
+      "id": "pypi:watchfiles:1.1.1",
+      "name": "watchfiles",
+      "normalized_name": "watchfiles",
+      "version": "1.1.1",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "MIT",
+      "source_url": "https://github.com/samuelcolvin/watchfiles",
+      "notice_required": false,
+      "purl": "pkg:pypi/watchfiles@1.1.1",
+      "license_text_path": "compliance/third_party/licenses/pypi-watchfiles-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-watchfiles-NOTICE.txt"
+    },
+    {
+      "id": "pypi:websockets:15.0.1",
+      "name": "websockets",
+      "normalized_name": "websockets",
+      "version": "15.0.1",
+      "ecosystem": "pypi",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "server"
+      ],
+      "license_spdx": "BSD-3-Clause",
+      "source_url": "https://github.com/python-websockets/websockets",
+      "notice_required": false,
+      "purl": "pkg:pypi/websockets@15.0.1",
+      "license_text_path": "compliance/third_party/licenses/pypi-websockets-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/pypi-websockets-NOTICE.txt"
+    },
+    {
+      "id": "swiftpm:swift-asn1:1.5.1",
+      "name": "swift-asn1",
+      "version": "1.5.1",
+      "ecosystem": "swiftpm",
+      "direct_dependency": false,
+      "runtime_surface": [
+        "ios",
+        "macos",
+        "tooling"
+      ],
+      "license_spdx": "Apache-2.0",
+      "source_url": "https://github.com/apple/swift-asn1.git",
+      "source_revision": "810496cf121e525d660cd0ea89a758740476b85f",
+      "notice_required": true,
+      "purl": "pkg:swift/swift-asn1@1.5.1",
+      "license_text_path": "compliance/third_party/licenses/swiftpm-swift-asn1-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/swiftpm-swift-asn1-NOTICE.txt"
+    },
+    {
+      "id": "swiftpm:swift-crypto:3.15.1",
+      "name": "swift-crypto",
+      "version": "3.15.1",
+      "ecosystem": "swiftpm",
+      "direct_dependency": true,
+      "runtime_surface": [
+        "ios",
+        "macos",
+        "tooling"
+      ],
+      "license_spdx": "Apache-2.0",
+      "source_url": "https://github.com/apple/swift-crypto.git",
+      "source_revision": "95ba0316a9b733e92bb6b071255ff46263bbe7dc",
+      "notice_required": true,
+      "purl": "pkg:swift/swift-crypto@3.15.1",
+      "license_text_path": "compliance/third_party/licenses/swiftpm-swift-crypto-LICENSE.txt",
+      "notice_text_path": "compliance/third_party/notices/swiftpm-swift-crypto-NOTICE.txt"
+    }
+  ],
+  "packages_sha256": "380c5f1f3390fe74f9e69214408f5418c6e5ce44eaf5ab52c21943e6cc370666"
+}

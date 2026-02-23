@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package uvicorn 0.39.0.
+License obligations are tracked via the package LICENSE file and SPDX policy.

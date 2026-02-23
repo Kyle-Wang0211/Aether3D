@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/meshlet_builder_test.dir/tests/render/meshlet_builder_test.cpp.o -o meshlet_builder_test  libaether3d_core.a

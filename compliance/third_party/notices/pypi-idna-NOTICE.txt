@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package idna 3.11.
+License obligations are tracked via the package LICENSE file and SPDX policy.

@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package python-dotenv 1.2.1.
+License obligations are tracked via the package LICENSE file and SPDX policy.

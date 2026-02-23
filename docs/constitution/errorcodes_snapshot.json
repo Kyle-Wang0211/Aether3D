@@ -1,0 +1,255 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-01-12T00:00:00Z",
+  "generator": "PR#1 Manual",
+  "errorCodes": [
+    {
+      "globalId": "SSOT:1000",
+      "stableName": "SSOT_INVALID_SPEC",
+      "domain": "SSOT",
+      "code": 1000,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "SSOT:1001",
+      "stableName": "SSOT_EXCEEDED_MAX",
+      "domain": "SSOT",
+      "code": 1001,
+      "severity": "medium",
+      "retry": "none"
+    },
+    {
+      "globalId": "SSOT:1002",
+      "stableName": "SSOT_UNDERFLOWED_MIN",
+      "domain": "SSOT",
+      "code": 1002,
+      "severity": "medium",
+      "retry": "none"
+    },
+    {
+      "globalId": "SSOT:1003",
+      "stableName": "SSOT_ASSERTION_FAILED",
+      "domain": "SSOT",
+      "code": 1003,
+      "severity": "critical",
+      "retry": "none"
+    },
+    {
+      "globalId": "SSOT:1004",
+      "stableName": "SSOT_REGISTRY_INVALID",
+      "domain": "SSOT",
+      "code": 1004,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "SSOT:1005",
+      "stableName": "SSOT_DUPLICATE_ERROR_CODE",
+      "domain": "SSOT",
+      "code": 1005,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "SSOT:1006",
+      "stableName": "SSOT_DUPLICATE_SPEC_ID",
+      "domain": "SSOT",
+      "code": 1006,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "CAPTURE:1001",
+      "stableName": "E_FRAMES_CLAMPED",
+      "domain": "CAPTURE",
+      "code": 1001,
+      "severity": "low",
+      "retry": "none"
+    },
+    {
+      "globalId": "CAPTURE:1002",
+      "stableName": "E_FRAMES_TOO_FEW",
+      "domain": "CAPTURE",
+      "code": 1002,
+      "severity": "medium",
+      "retry": "none"
+    },
+    {
+      "globalId": "CAPTURE:1003",
+      "stableName": "E_CAPTURE_INVALID",
+      "domain": "CAPTURE",
+      "code": 1003,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "CAPTURE:1004",
+      "stableName": "E_CAPTURE_CORRUPTED",
+      "domain": "CAPTURE",
+      "code": 1004,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "STORAGE:2001",
+      "stableName": "E_STORAGE_LOW",
+      "domain": "STORAGE",
+      "code": 2001,
+      "severity": "low",
+      "retry": "none"
+    },
+    {
+      "globalId": "STORAGE:2002",
+      "stableName": "E_STORAGE_WRITE_FAILED",
+      "domain": "STORAGE",
+      "code": 2002,
+      "severity": "high",
+      "retry": "immediate"
+    },
+    {
+      "globalId": "STORAGE:2003",
+      "stableName": "E_STORAGE_READ_FAILED",
+      "domain": "STORAGE",
+      "code": 2003,
+      "severity": "high",
+      "retry": "immediate"
+    },
+    {
+      "globalId": "NETWORK:3001",
+      "stableName": "E_UPLOAD_FAILED",
+      "domain": "NETWORK",
+      "code": 3001,
+      "severity": "high",
+      "retry": "exponentialBackoff"
+    },
+    {
+      "globalId": "NETWORK:3002",
+      "stableName": "E_DOWNLOAD_FAILED",
+      "domain": "NETWORK",
+      "code": 3002,
+      "severity": "high",
+      "retry": "exponentialBackoff"
+    },
+    {
+      "globalId": "NETWORK:3003",
+      "stableName": "E_UPLOAD_TOO_LARGE",
+      "domain": "NETWORK",
+      "code": 3003,
+      "severity": "medium",
+      "retry": "none"
+    },
+    {
+      "globalId": "NETWORK:3004",
+      "stableName": "E_NETWORK_TIMEOUT",
+      "domain": "NETWORK",
+      "code": 3004,
+      "severity": "high",
+      "retry": "exponentialBackoff"
+    },
+    {
+      "globalId": "PIPELINE:4001",
+      "stableName": "C_SFM_FAILED",
+      "domain": "PIPELINE",
+      "code": 4001,
+      "severity": "high",
+      "retry": "manual"
+    },
+    {
+      "globalId": "PIPELINE:4002",
+      "stableName": "C_SFM_NO_IMAGES",
+      "domain": "PIPELINE",
+      "code": 4002,
+      "severity": "medium",
+      "retry": "none"
+    },
+    {
+      "globalId": "PIPELINE:4003",
+      "stableName": "C_GAUSSIANS_CLAMPED",
+      "domain": "PIPELINE",
+      "code": 4003,
+      "severity": "low",
+      "retry": "none"
+    },
+    {
+      "globalId": "PIPELINE:4004",
+      "stableName": "C_TRAINING_TIMEOUT",
+      "domain": "PIPELINE",
+      "code": 4004,
+      "severity": "high",
+      "retry": "manual"
+    },
+    {
+      "globalId": "PIPELINE:4005",
+      "stableName": "C_TRAINING_FAILED",
+      "domain": "PIPELINE",
+      "code": 4005,
+      "severity": "high",
+      "retry": "manual"
+    },
+    {
+      "globalId": "QUALITY:5001",
+      "stableName": "C_SFM_REGISTRATION_TOO_LOW",
+      "domain": "QUALITY",
+      "code": 5001,
+      "severity": "medium",
+      "retry": "none"
+    },
+    {
+      "globalId": "QUALITY:5002",
+      "stableName": "C_PSNR_BELOW_MIN",
+      "domain": "QUALITY",
+      "code": 5002,
+      "severity": "medium",
+      "retry": "none"
+    },
+    {
+      "globalId": "QUALITY:5003",
+      "stableName": "C_QUALITY_SCORE_BELOW_REJECT",
+      "domain": "QUALITY",
+      "code": 5003,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "QUALITY:5004",
+      "stableName": "C_QUALITY_INPUT_MISSING",
+      "domain": "QUALITY",
+      "code": 5004,
+      "severity": "high",
+      "retry": "none"
+    },
+    {
+      "globalId": "QUALITY:5005",
+      "stableName": "C_PSNR_BELOW_RECOMMENDED",
+      "domain": "QUALITY",
+      "code": 5005,
+      "severity": "low",
+      "retry": "none"
+    },
+    {
+      "globalId": "SYSTEM:6001",
+      "stableName": "S_INTERNAL_ERROR",
+      "domain": "SYSTEM",
+      "code": 6001,
+      "severity": "critical",
+      "retry": "none"
+    },
+    {
+      "globalId": "SYSTEM:6002",
+      "stableName": "S_ASSERTION_FAILED",
+      "domain": "SYSTEM",
+      "code": 6002,
+      "severity": "critical",
+      "retry": "none"
+    },
+    {
+      "globalId": "SYSTEM:6003",
+      "stableName": "S_CONFIGURATION_ERROR",
+      "domain": "SYSTEM",
+      "code": 6003,
+      "severity": "critical",
+      "retry": "none"
+    }
+  ]
+}

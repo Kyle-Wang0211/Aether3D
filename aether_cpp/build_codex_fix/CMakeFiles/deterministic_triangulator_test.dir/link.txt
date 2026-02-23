@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/deterministic_triangulator_test.dir/tests/quality/deterministic_triangulator_test.cpp.o -o deterministic_triangulator_test  libaether3d_core.a

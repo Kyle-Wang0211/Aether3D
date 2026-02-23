@@ -1,0 +1,24 @@
+{
+  "updated_at": "2026-02-17T15:51:20+00:00",
+  "completed_phase_ids": [
+    0
+  ],
+  "failed_phase_ids": [],
+  "phase_reports": [
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-00-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-01-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-02-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-03-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-04-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-05-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-06-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-07-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-08-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-09-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-10-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-11-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-12-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-13-report.json",
+    "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/governance/generated/phases/pipeline_reports/phase-14-report.json"
+  ]
+}

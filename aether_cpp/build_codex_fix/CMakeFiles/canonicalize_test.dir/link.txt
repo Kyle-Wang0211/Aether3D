@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/canonicalize_test.dir/tests/core/canonicalize_test.cpp.o -o canonicalize_test  libaether3d_core.a

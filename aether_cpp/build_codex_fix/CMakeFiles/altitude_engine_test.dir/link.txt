@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/altitude_engine_test.dir/tests/geo/altitude_engine_test.cpp.o -o altitude_engine_test  libaether3d_core.a

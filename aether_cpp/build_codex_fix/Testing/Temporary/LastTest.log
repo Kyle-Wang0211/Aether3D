@@ -1,0 +1,18 @@
+Start testing: Feb 23 02:22 EST
+----------------------------------------------------------
+2/84 Testing: c_api_tests
+2/84 Test: c_api_tests
+Command: "/Users/kaidongwang/Documents/progecttwo/progect2/progect2/aether_cpp/build_codex_fix/c_api_tests"
+Directory: /Users/kaidongwang/Documents/progecttwo/progect2/progect2/aether_cpp/build_codex_fix
+"c_api_tests" start time: Feb 23 02:22 EST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.16 sec
+----------------------------------------------------------
+Test Passed.
+"c_api_tests" end time: Feb 23 02:22 EST
+"c_api_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Feb 23 02:22 EST

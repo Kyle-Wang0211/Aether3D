@@ -1,0 +1,65 @@
+{
+  "phase_id": 3,
+  "phase_name": "Merkle + Proofs",
+  "started_at": "2026-02-17T15:38:51+00:00",
+  "prerequisites_ok": true,
+  "missing_prerequisites": [],
+  "required_gate_ids": [
+    "G-CONTRACT-VALIDATOR",
+    "G-SWIFT-BUILD"
+  ],
+  "required_contract_ids": [
+    "C-TRACK-P-LEGAL-BASELINE"
+  ],
+  "gate_exit_code": 0,
+  "gate_output": "governance-validator: errors=0 warnings=0 info=1\nBuilding for debugging...\n[0/15] Write swift-version--58304C5D6DBC2206.txt\nBuild complete! (0.24s)\n[gate:G-CONTRACT-VALIDATOR] Governance registry and contract validation\n  $ python3 governance/scripts/validate_governance.py --strict --report governance/generated/governance_diagnostics.json\n[gate:G-SWIFT-BUILD] Swift build and target tests\n  $ swift build --disable-sandbox\ngate-matrix-runner: executed=2 failed=0\nwarning: /Users/kaidongwang/Library/org.swift.swiftpm/configuration is not accessible or not writable, disabling user-level cache features.\nwarning: /Users/kaidongwang/Library/org.swift.swiftpm/security is not accessible or not writable, disabling user-level cache features.\nwarning: /Users/kaidongwang/Library/Caches/org.swift.swiftpm is not accessible or not writable, disabling user-level cache features.\nwarning: 'progect2': failed storing manifest for 'progect2' in cache: attempt to write a readonly database\n",
+  "deliverables": {
+    "matched": [],
+    "missing": [
+      "aether/merkle/*"
+    ],
+    "informational": [
+      "RFC vector parity logs"
+    ]
+  },
+  "adaptation": {
+    "governance_diagnostics": {
+      "exists": true,
+      "path": "governance/generated/governance_diagnostics.json",
+      "summary": {
+        "error": 0,
+        "warning": 0,
+        "info": 1
+      },
+      "findings": [
+        {
+          "id": "BINDING-COVERAGE-SUMMARY",
+          "severity": "info",
+          "scope": "bindings",
+          "message": "Binding coverage summary",
+          "context": {
+            "mode": "all_active_constants",
+            "active_constants": 595,
+            "bound_active_constants": 595,
+            "unbound_active_constants": 0,
+            "coverage_ratio": 1.0
+          }
+        }
+      ]
+    },
+    "first_scan_metrics": {
+      "exists": true,
+      "path": "governance/generated/first_scan_runtime_metrics.json",
+      "passesGate": true,
+      "firstScanSuccessRate": 0.9,
+      "replayStableRate": 1.0,
+      "medianDurationSeconds": 166.0,
+      "hardCapViolations": 0
+    }
+  },
+  "adaptation_ok": true,
+  "adaptation_reasons": [],
+  "status": "passed",
+  "failed_reasons": [],
+  "finished_at": "2026-02-17T15:38:53+00:00"
+}

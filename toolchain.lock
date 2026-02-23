@@ -1,0 +1,10 @@
+# toolchain.lock
+# H5: Toolchain lock + verification
+# Required Swift version and key dependency versions
+
+swift_major=6
+swift_minor=2
+swift_patch=3
+
+# Key dependencies (for reference, actual versions in Package.swift)
+# swift-crypto: 3.0.0+

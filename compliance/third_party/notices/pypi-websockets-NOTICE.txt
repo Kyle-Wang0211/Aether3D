@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package websockets 15.0.1.
+License obligations are tracked via the package LICENSE file and SPDX policy.

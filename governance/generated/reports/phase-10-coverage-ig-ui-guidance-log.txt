@@ -1,0 +1,4 @@
+Phase 10 深度验收: PASS
+mesh-TSDF feedback loop integrated with guidance policy
+first-scan KPI gate verified
+validation_scope=phase10

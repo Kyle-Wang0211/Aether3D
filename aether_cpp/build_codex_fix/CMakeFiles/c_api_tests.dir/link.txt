@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/c_api_tests.dir/tests/c_api_tests.cpp.o -o c_api_tests  libaether3d_c.a libaether3d_core.a

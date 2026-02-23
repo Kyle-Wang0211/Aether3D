@@ -1,0 +1,14 @@
+{
+  "basic_combine": {
+    "m1": {"occupied": 0.6, "free": 0.1, "unknown": 0.3},
+    "m2": {"occupied": 0.5, "free": 0.2, "unknown": 0.3},
+    "combined": {"occupied": 0.75, "free": 0.05, "unknown": 0.2},
+    "conflict": 0.17
+  },
+  "high_conflict": {
+    "m1": {"occupied": 0.9, "free": 0.05, "unknown": 0.05},
+    "m2": {"occupied": 0.05, "free": 0.9, "unknown": 0.05},
+    "combined": {"occupied": 0.0, "free": 0.0, "unknown": 1.0},
+    "conflict": 0.81
+  }
+}

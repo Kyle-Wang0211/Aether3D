@@ -1,0 +1,2 @@
+/usr/bin/ar qc libaether3d_c.a CMakeFiles/aether3d_c.dir/src/c_api.cpp.o CMakeFiles/aether3d_c.dir/src/geo_c_api.cpp.o
+/usr/bin/ranlib libaether3d_c.a

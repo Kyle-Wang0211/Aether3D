@@ -1,0 +1,4 @@
+Phase 9 深度验收: PASS
+Tri/Tet anchor driven uncertainty propagation enabled
+first-scan KPI gate verified
+validation_scope=phase9

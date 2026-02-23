@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/spatial_hash_table_test.dir/tests/tsdf/spatial_hash_table_test.cpp.o -o spatial_hash_table_test  libaether3d_core.a

@@ -1,0 +1,698 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "serialNumber": "urn:uuid:aether3d-d1e460d8c8fa1ffa33ac04565e647a70",
+  "metadata": {
+    "timestamp": "2026-02-18T16:52:58Z",
+    "tools": [
+      {
+        "vendor": "Aether3D",
+        "name": "generate_sbom_provenance.py",
+        "version": "1.0.0"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "name": "Aether3D",
+      "version": "0.0.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "annotated-doc",
+      "version": "0.0.4",
+      "purl": "pkg:pypi/annotated-doc@0.0.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/fastapi/annotated-doc"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "annotated-types",
+      "version": "0.7.0",
+      "purl": "pkg:pypi/annotated-types@0.7.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/annotated-types/annotated-types"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "anyio",
+      "version": "4.12.0",
+      "purl": "pkg:pypi/anyio@4.12.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/agronholm/anyio"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "click",
+      "version": "8.1.8",
+      "purl": "pkg:pypi/click@8.1.8",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/pallets/click/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "exceptiongroup",
+      "version": "1.3.1",
+      "purl": "pkg:pypi/exceptiongroup@1.3.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/agronholm/exceptiongroup"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "fastapi",
+      "version": "0.128.0",
+      "purl": "pkg:pypi/fastapi@0.128.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "true"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/fastapi/fastapi"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "h11",
+      "version": "0.16.0",
+      "purl": "pkg:pypi/h11@0.16.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/python-hyper/h11"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "httptools",
+      "version": "0.7.1",
+      "purl": "pkg:pypi/httptools@0.7.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/MagicStack/httptools"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "idna",
+      "version": "3.11",
+      "purl": "pkg:pypi/idna@3.11",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/kjd/idna"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pydantic",
+      "version": "2.12.5",
+      "purl": "pkg:pypi/pydantic@2.12.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "true"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/pydantic/pydantic"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pydantic-core",
+      "version": "2.41.5",
+      "purl": "pkg:pypi/pydantic-core@2.41.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/pydantic/pydantic-core"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pydantic-settings",
+      "version": "2.11.0",
+      "purl": "pkg:pypi/pydantic-settings@2.11.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "true"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/pydantic/pydantic-settings"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "python-dotenv",
+      "version": "1.2.1",
+      "purl": "pkg:pypi/python-dotenv@1.2.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/theskumar/python-dotenv"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "python-multipart",
+      "version": "0.0.20",
+      "purl": "pkg:pypi/python-multipart@0.0.20",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "true"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/Kludex/python-multipart"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pyyaml",
+      "version": "6.0.3",
+      "purl": "pkg:pypi/pyyaml@6.0.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/yaml/pyyaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "sqlalchemy",
+      "version": "2.0.45",
+      "purl": "pkg:pypi/sqlalchemy@2.0.45",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "true"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://www.sqlalchemy.org"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "starlette",
+      "version": "0.49.3",
+      "purl": "pkg:pypi/starlette@0.49.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/Kludex/starlette"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "typing-extensions",
+      "version": "4.15.0",
+      "purl": "pkg:pypi/typing-extensions@4.15.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "PSF-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/python/typing_extensions"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "typing-inspection",
+      "version": "0.4.2",
+      "purl": "pkg:pypi/typing-inspection@0.4.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/pydantic/typing-inspection"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "uvicorn",
+      "version": "0.39.0",
+      "purl": "pkg:pypi/uvicorn@0.39.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "true"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://uvicorn.dev/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "uvloop",
+      "version": "0.22.1",
+      "purl": "pkg:pypi/uvloop@0.22.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/MagicStack/uvloop"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "watchfiles",
+      "version": "1.1.1",
+      "purl": "pkg:pypi/watchfiles@1.1.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/samuelcolvin/watchfiles"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "websockets",
+      "version": "15.0.1",
+      "purl": "pkg:pypi/websockets@15.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "pypi"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/python-websockets/websockets"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "swift-asn1",
+      "version": "1.5.1",
+      "purl": "pkg:swift/swift-asn1@1.5.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "swiftpm"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "false"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/apple/swift-asn1.git"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "swift-crypto",
+      "version": "3.15.1",
+      "purl": "pkg:swift/swift-crypto@3.15.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "aether3d:ecosystem",
+          "value": "swiftpm"
+        },
+        {
+          "name": "aether3d:direct_dependency",
+          "value": "true"
+        },
+        {
+          "name": "aether3d:source_url",
+          "value": "https://github.com/apple/swift-crypto.git"
+        }
+      ]
+    }
+  ]
+}

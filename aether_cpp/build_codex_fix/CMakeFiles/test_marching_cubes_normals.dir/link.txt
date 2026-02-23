@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_marching_cubes_normals.dir/tests/tsdf/test_marching_cubes_normals.cpp.o -o test_marching_cubes_normals  libaether3d_core.a

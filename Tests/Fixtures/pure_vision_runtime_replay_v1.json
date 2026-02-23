@@ -1,0 +1,219 @@
+{
+  "gate_cases": [
+    {
+      "name": "all_pass",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": []
+    },
+    {
+      "name": "baseline_fail",
+      "metrics": {
+        "baselinePixels": 2.2,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": ["baseline_pixels"]
+    },
+    {
+      "name": "blur_fail",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 180.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": ["blur_laplacian"]
+    },
+    {
+      "name": "orb_fail",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 420,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": ["orb_feature_count"]
+    },
+    {
+      "name": "parallax_fail",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.15,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": ["parallax_ratio"]
+    },
+    {
+      "name": "depth_sigma_fail",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.021,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": ["depth_sigma"]
+    },
+    {
+      "name": "closure_fail",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.95,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": ["closure_ratio"]
+    },
+    {
+      "name": "unknown_voxel_fail",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.05,
+        "thermalCelsius": 41.0
+      },
+      "expected_failed_gates": ["unknown_voxel_ratio"]
+    },
+    {
+      "name": "thermal_fail",
+      "metrics": {
+        "baselinePixels": 3.6,
+        "blurLaplacian": 228.0,
+        "orbFeatures": 720,
+        "parallaxRatio": 0.25,
+        "depthSigmaMeters": 0.013,
+        "closureRatio": 0.985,
+        "unknownVoxelRatio": 0.02,
+        "thermalCelsius": 47.5
+      },
+      "expected_failed_gates": ["thermal_celsius"]
+    }
+  ],
+  "first_scan_samples": [
+    {
+      "sessionId": "S-001",
+      "durationSeconds": 142.0,
+      "metrics": {"baselinePixels": 3.5, "blurLaplacian": 232.0, "orbFeatures": 710, "parallaxRatio": 0.24, "depthSigmaMeters": 0.013, "closureRatio": 0.983, "unknownVoxelRatio": 0.02, "thermalCelsius": 40.5},
+      "guidanceDisplayValue": 0.91,
+      "softEvidenceValue": 0.82,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-002",
+      "durationSeconds": 155.0,
+      "metrics": {"baselinePixels": 3.4, "blurLaplacian": 229.0, "orbFeatures": 695, "parallaxRatio": 0.23, "depthSigmaMeters": 0.014, "closureRatio": 0.982, "unknownVoxelRatio": 0.02, "thermalCelsius": 41.2},
+      "guidanceDisplayValue": 0.90,
+      "softEvidenceValue": 0.80,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-003",
+      "durationSeconds": 164.0,
+      "metrics": {"baselinePixels": 3.6, "blurLaplacian": 221.0, "orbFeatures": 680, "parallaxRatio": 0.22, "depthSigmaMeters": 0.014, "closureRatio": 0.979, "unknownVoxelRatio": 0.02, "thermalCelsius": 42.0},
+      "guidanceDisplayValue": 0.89,
+      "softEvidenceValue": 0.78,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-004",
+      "durationSeconds": 167.0,
+      "metrics": {"baselinePixels": 3.8, "blurLaplacian": 240.0, "orbFeatures": 760, "parallaxRatio": 0.27, "depthSigmaMeters": 0.012, "closureRatio": 0.989, "unknownVoxelRatio": 0.018, "thermalCelsius": 40.0},
+      "guidanceDisplayValue": 0.93,
+      "softEvidenceValue": 0.85,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-005",
+      "durationSeconds": 168.0,
+      "metrics": {"baselinePixels": 3.3, "blurLaplacian": 216.0, "orbFeatures": 640, "parallaxRatio": 0.21, "depthSigmaMeters": 0.014, "closureRatio": 0.977, "unknownVoxelRatio": 0.024, "thermalCelsius": 42.7},
+      "guidanceDisplayValue": 0.89,
+      "softEvidenceValue": 0.79,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-006",
+      "durationSeconds": 166.0,
+      "metrics": {"baselinePixels": 3.7, "blurLaplacian": 234.0, "orbFeatures": 740, "parallaxRatio": 0.26, "depthSigmaMeters": 0.012, "closureRatio": 0.986, "unknownVoxelRatio": 0.017, "thermalCelsius": 41.0},
+      "guidanceDisplayValue": 0.92,
+      "softEvidenceValue": 0.84,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-007",
+      "durationSeconds": 159.0,
+      "metrics": {"baselinePixels": 3.4, "blurLaplacian": 223.0, "orbFeatures": 702, "parallaxRatio": 0.23, "depthSigmaMeters": 0.013, "closureRatio": 0.981, "unknownVoxelRatio": 0.021, "thermalCelsius": 41.6},
+      "guidanceDisplayValue": 0.90,
+      "softEvidenceValue": 0.81,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-008",
+      "durationSeconds": 149.0,
+      "metrics": {"baselinePixels": 3.6, "blurLaplacian": 227.0, "orbFeatures": 715, "parallaxRatio": 0.24, "depthSigmaMeters": 0.013, "closureRatio": 0.984, "unknownVoxelRatio": 0.019, "thermalCelsius": 40.8},
+      "guidanceDisplayValue": 0.91,
+      "softEvidenceValue": 0.83,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-009",
+      "durationSeconds": 169.0,
+      "metrics": {"baselinePixels": 3.5, "blurLaplacian": 219.0, "orbFeatures": 675, "parallaxRatio": 0.22, "depthSigmaMeters": 0.014, "closureRatio": 0.978, "unknownVoxelRatio": 0.022, "thermalCelsius": 42.3},
+      "guidanceDisplayValue": 0.89,
+      "softEvidenceValue": 0.78,
+      "replayHashStable": true
+    },
+    {
+      "sessionId": "S-010",
+      "durationSeconds": 170.0,
+      "metrics": {"baselinePixels": 3.6, "blurLaplacian": 230.0, "orbFeatures": 730, "parallaxRatio": 0.25, "depthSigmaMeters": 0.013, "closureRatio": 0.983, "unknownVoxelRatio": 0.02, "thermalCelsius": 41.5},
+      "guidanceDisplayValue": 0.91,
+      "softEvidenceValue": 0.82,
+      "replayHashStable": true
+    }
+  ],
+  "expected": {
+    "target_success_rate": 1.0,
+    "target_replay_stable_rate": 1.0,
+    "max_hard_cap_violations": 0,
+    "expected_failure_reason": "first_scan_duration_exceeded",
+    "expected_failure_count": 0
+  }
+}

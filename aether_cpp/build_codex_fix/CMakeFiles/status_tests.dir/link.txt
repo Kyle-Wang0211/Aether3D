@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/status_tests.dir/tests/status_tests.cpp.o -o status_tests  libaether3d_core.a

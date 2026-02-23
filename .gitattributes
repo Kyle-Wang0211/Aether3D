@@ -1,0 +1,6 @@
+# PR1 v2.4 Addendum - Line ending enforcement for cross-platform fixtures
+*.txt text eol=lf
+*.hex text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+Tests/Fixtures/* text eol=lf

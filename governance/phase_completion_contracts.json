@@ -1,0 +1,414 @@
+{
+  "metadata": {
+    "version": "1.1.0",
+    "last_updated": "2026-02-17",
+    "purpose": "Strict algorithm-complete phase acceptance contracts"
+  },
+  "phases": [
+    {
+      "id": 0,
+      "required_paths": [
+        "Tests/Fixtures/*.txt",
+        "Tests/Fixtures/PR4Math/pr4math_golden_v1.json",
+        "fixtures/manifest.json",
+        "fixtures/tsdf/*.bin",
+        "fixtures/evidence/*.bin",
+        "fixtures/merkle/*.bin",
+        "fixtures/json/*.bin",
+        "fixtures/scenespec/*.bin",
+        "aether_cpp/tests/fixture_replay_tests.cpp",
+        "governance/generated/governance_diagnostics.json",
+        "governance/generated/phases/phase-00-golden-fixtures-baseline.md"
+      ],
+      "required_commands": [
+        "swift run --disable-sandbox FixtureGen",
+        "swift run --disable-sandbox PR4MathFixtureExporter",
+        "cd aether_cpp && cmake -B build -S . && cmake --build build && ctest --test-dir build -R replay_fixtures --output-on-failure"
+      ],
+      "forbidden_regex_checks": []
+    },
+    {
+      "id": 1,
+      "required_paths": [
+        "aether/memory/arena.h",
+        "aether/memory/pool.h",
+        "aether/memory/span.h",
+        "aether/memory/fixed_vec.h",
+        "aether/core/status.h",
+        "aether/crypto/sha256.h",
+        "aether/core/canonicalize.h",
+        "aether/math/vec3.h",
+        "aether/math/mat4.h",
+        "aether/math/half.h",
+        "aether/tsdf/block_index.h",
+        "aether/tsdf/tsdf_constants.h",
+        "aether/tsdf/tsdf_types.h",
+        "aether/tsdf/sdf_storage.h",
+        "aether/tsdf/voxel_block.h",
+        "aether/tsdf/voxel_block_pool.h",
+        "aether/tsdf/managed_storage.h",
+        "aether/tsdf/managed_voxel_storage.h",
+        "aether/tsdf/adaptive_resolution.h",
+        "aether/tsdf/integration_backend.h",
+        "aether/tsdf/cpu_integration_backend.h",
+        "aether/tsdf/mesh_output.h",
+        "aether/tsdf/spatial_hash_table.h",
+        "aether/tsdf/tsdf_volume.h",
+        "aether/tsdf/marching_cubes.h",
+        "aether_cpp/include/aether/tsdf/*",
+        "aether_cpp/src/tsdf_volume.cpp",
+        "aether_cpp/src/tsdf/spatial_hash_table.cpp",
+        "aether_cpp/src/tsdf/marching_cubes.cpp",
+        "aether_cpp/src/memory/arena.cpp",
+        "aether_cpp/src/core/canonicalize.cpp",
+        "aether_cpp/src/crypto/sha256.cpp",
+        "aether_cpp/src/c_api.cpp",
+        "aether_cpp/tests/status_tests.cpp",
+        "aether_cpp/tests/c_api_tests.cpp",
+        "aether_cpp/tests/tsdf/spatial_hash_table_test.cpp",
+        "aether_cpp/tests/tsdf/marching_cubes_test.cpp",
+        "aether_cpp/tests/core/canonicalize_test.cpp",
+        "aether_cpp/tests/crypto/sha256_test.cpp",
+        "aether_cpp/tests/memory/arena_test.cpp",
+        "aether_cpp/tests/fixture_replay_tests.cpp",
+        "governance/generated/reports/phase-1-tsdf-parity-log.txt"
+      ],
+      "required_commands": [
+        "cd aether_cpp && cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on-failure",
+        "rg -n \"ffp-contract=off|fno-fast-math|fno-exceptions|fno-rtti\" aether_cpp/CMakeLists.txt",
+        "eval \"$(scripts/ci/setup_mobile_toolchains_env.sh)\" && bash scripts/ci/validate_cpp_cross_platform_toolchains.sh --strict"
+      ],
+      "forbidden_regex_checks": [
+        {
+          "glob": "aether/tsdf/*",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "TSDF public headers must not contain placeholder/stub markers"
+        },
+        {
+          "glob": "aether_cpp/src/**/*.cpp",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme|minimal)\\b|integrate_stub",
+          "description": "Phase 1 C++ implementation must be non-stub and non-minimal"
+        },
+        {
+          "glob": "aether_cpp/src/tsdf/**/*.cpp",
+          "regex": "\\bstd::(set|unordered_map|unordered_set|map|vector|deque|list)\\b",
+          "description": "TSDF core path must not rely on mutable STL containers"
+        },
+        {
+          "glob": "aether_cpp/src/tsdf_volume.cpp",
+          "regex": "\\bstd::set\\b",
+          "description": "TSDFVolume core path must not use std::set"
+        }
+      ],
+      "required_report_path": "governance/generated/reports/phase-1-tsdf-parity-log.txt",
+      "report_must_contain": [
+        "Phase 1 深度验收: PASS",
+        "ctest",
+        "Phase 1 完整模块覆盖: 15/15",
+        "5-Gate + AIMD",
+        "Phase 1 C++ tests: 8/8",
+        "marching_cubes"
+      ]
+    },
+    {
+      "id": 2,
+      "required_paths": [
+        "aether/evidence/evidence_constants.h",
+        "aether/evidence/deterministic_json.h",
+        "aether/evidence/ds_mass_function.h",
+        "aether/evidence/admission_controller.h",
+        "aether/evidence/replay_engine.h",
+        "aether_cpp/include/aether/evidence/*",
+        "aether_cpp/src/evidence/*.cpp",
+        "aether_cpp/tests/evidence/*.cpp",
+        "fixtures/evidence/*.bin",
+        "governance/generated/phases/phase-02-evidence-parity.md",
+        "governance/generated/reports/phase-2-evidence-parity-log.txt"
+      ],
+      "required_commands": [
+        "cd aether_cpp && cmake -B build -S . && cmake --build build && ctest --test-dir build -R \"deterministic_json|ds_mass_function|admission_controller|evidence_replay|replay_fixtures\" --output-on-failure",
+        "eval \"$(scripts/ci/setup_mobile_toolchains_env.sh)\" && bash scripts/ci/validate_cpp_cross_platform_toolchains.sh --strict"
+      ],
+      "forbidden_regex_checks": [
+        {
+          "glob": "aether/evidence/*.h",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "Evidence public headers must be implementation-complete"
+        },
+        {
+          "glob": "aether_cpp/src/evidence/*.cpp",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "Evidence C++ runtime implementation must be implementation-complete"
+        }
+      ],
+      "required_report_path": "governance/generated/reports/phase-2-evidence-parity-log.txt",
+      "report_must_contain": [
+        "Phase 2 深度验收: PASS",
+        "byte-identical",
+        "deterministic_json",
+        "ds_mass_function",
+        "admission_controller",
+        "evidence_replay"
+      ]
+    },
+    {
+      "id": 3,
+      "required_paths": [
+        "aether/merkle/merkle_constants.h",
+        "aether/merkle/merkle_tree_hash.h",
+        "aether/merkle/inclusion_proof.h",
+        "aether/merkle/consistency_proof.h",
+        "aether/merkle/merkle_tree.h",
+        "aether_cpp/include/aether/merkle/*",
+        "aether_cpp/src/merkle/*.cpp",
+        "aether_cpp/tests/merkle/*.cpp",
+        "fixtures/merkle/*.bin",
+        "governance/generated/phases/phase-03-merkle-proofs.md",
+        "governance/generated/reports/phase-3-merkle-proofs-log.txt"
+      ],
+      "required_commands": [
+        "cd aether_cpp && cmake -B build -S . && cmake --build build && ctest --test-dir build -R \"merkle_hash|merkle_inclusion|merkle_consistency|merkle_rfc_vectors|replay_fixtures\" --output-on-failure",
+        "eval \"$(scripts/ci/setup_mobile_toolchains_env.sh)\" && bash scripts/ci/validate_cpp_cross_platform_toolchains.sh --strict"
+      ],
+      "forbidden_regex_checks": [
+        {
+          "glob": "aether/merkle/*",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "Merkle/proof migration output must be implementation-complete"
+        },
+        {
+          "glob": "aether_cpp/src/merkle/*.cpp",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme|minimal)\\b",
+          "description": "Merkle C++ implementation must be implementation-complete"
+        },
+        {
+          "glob": "aether_cpp/src/merkle/*.cpp",
+          "regex": "\\bstd::(unordered_map|unordered_set|map|set|multimap|multiset)\\b",
+          "description": "Merkle core path should keep deterministic fixed-layout structures"
+        }
+      ],
+      "required_report_path": "governance/generated/reports/phase-3-merkle-proofs-log.txt",
+      "report_must_contain": [
+        "Phase 3 深度验收: PASS",
+        "RFC 9162",
+        "boundary: 0/1/2/3/4/8/16/31/32/33",
+        "consistency_proof",
+        "cross-platform strict"
+      ]
+    },
+    {
+      "id": 4,
+      "required_paths": [
+        "aether/time/*",
+        "aether/billing/*",
+        "aether/cost_policy/*",
+        "governance/generated/phases/phase-04-timeanchoring-cost-governance.md",
+        "governance/generated/reports/phase-4-time-cost-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/validate_governance.py --strict --only audit-anchor --report governance/generated/governance_diagnostics.json"
+      ],
+      "forbidden_regex_checks": [
+        {
+          "glob": "aether/time/*",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "TimeAnchoring migration output must be implementation-complete"
+        },
+        {
+          "glob": "aether/billing/*",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "Billing migration output must be implementation-complete"
+        },
+        {
+          "glob": "aether/cost_policy/*",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "Cost policy migration output must be implementation-complete"
+        }
+      ],
+      "required_report_path": "governance/generated/reports/phase-4-time-cost-log.txt",
+      "report_must_contain": [
+        "Phase 4 深度验收: PASS",
+        "deterministic"
+      ]
+    },
+    {
+      "id": 5,
+      "required_paths": [
+        "Core/Quality/*",
+        "App/Scan/ScanViewModel.swift",
+        "server/app/services/upload_service.py",
+        "governance/generated/phases/phase-05-quality-system-integration-closure.md",
+        "governance/generated/reports/phase-5-quality-integration-log.txt"
+      ],
+      "required_commands": [
+        "swift test --disable-sandbox -Xswiftc -strict-concurrency=minimal --filter 'ScanGuidanceTests\\.(PatchDisplayMapTests|MonotonicityStressTests|ScanGuidanceIntegrationTests)'",
+        "PYTHONPATH=server python3 -m pytest -q server/tests/test_upload_service.py -k persist_chunk_hash_mismatch"
+      ],
+      "forbidden_regex_checks": [
+        {
+          "glob": "Core/Quality/*",
+          "regex": "(?i)\\b(stub|placeholder|todo|fixme)\\b",
+          "description": "Quality closure phase must remove placeholder/stub markers"
+        }
+      ],
+      "required_report_path": "governance/generated/reports/phase-5-quality-integration-log.txt",
+      "report_must_contain": [
+        "Phase 5 深度验收: PASS",
+        "persist_chunk_hash_mismatch"
+      ]
+    },
+    {
+      "id": 6,
+      "required_paths": [
+        "governance/generated/phases/phase-06-track-x-v3-foundations.md",
+        "governance/generated/reports/phase-6-v3-foundations-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/validate_governance.py --strict --only flags --report governance/generated/governance_diagnostics.json"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-6-v3-foundations-log.txt",
+      "report_must_contain": [
+        "Phase 6 深度验收: PASS",
+        "default OFF"
+      ]
+    },
+    {
+      "id": 7,
+      "required_paths": [
+        "governance/generated/phases/phase-07-track-x-v4-foundations.md",
+        "governance/generated/reports/phase-7-v4-foundations-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/validate_governance.py --strict --only flags --report governance/generated/governance_diagnostics.json"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-7-v4-foundations-log.txt",
+      "report_must_contain": [
+        "Phase 7 深度验收: PASS",
+        "default OFF"
+      ]
+    },
+    {
+      "id": 8,
+      "required_paths": [
+        "governance/generated/phases/phase-08-ct-vio-noise-framegate.md",
+        "governance/generated/first_scan_runtime_metrics.json",
+        "governance/generated/reports/phase-8-ct-vio-noise-framegate-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/eval_first_scan_runtime_kpi.py"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-8-ct-vio-noise-framegate-log.txt",
+      "report_must_contain": [
+        "Phase 8 深度验收: PASS",
+        "first-scan"
+      ]
+    },
+    {
+      "id": 9,
+      "required_paths": [
+        "governance/generated/phases/phase-09-burst-uncertainty-photometric.md",
+        "governance/generated/first_scan_runtime_metrics.json",
+        "governance/generated/reports/phase-9-burst-uncertainty-photometric-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/eval_first_scan_runtime_kpi.py"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-9-burst-uncertainty-photometric-log.txt",
+      "report_must_contain": [
+        "Phase 9 深度验收: PASS",
+        "first-scan"
+      ]
+    },
+    {
+      "id": 10,
+      "required_paths": [
+        "governance/generated/phases/phase-10-coverage-ig-ui-guidance.md",
+        "governance/generated/first_scan_runtime_metrics.json",
+        "governance/generated/reports/phase-10-coverage-ig-ui-guidance-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/eval_first_scan_runtime_kpi.py"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-10-coverage-ig-ui-guidance-log.txt",
+      "report_must_contain": [
+        "Phase 10 深度验收: PASS",
+        "first-scan"
+      ]
+    },
+    {
+      "id": 11,
+      "required_paths": [
+        "governance/generated/phases/phase-11-noise-aware-trainer-da3.md",
+        "governance/generated/first_scan_runtime_metrics.json",
+        "governance/generated/reports/phase-11-noise-aware-da3-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/eval_first_scan_runtime_kpi.py"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-11-noise-aware-da3-log.txt",
+      "report_must_contain": [
+        "Phase 11 深度验收: PASS",
+        "first-scan"
+      ]
+    },
+    {
+      "id": 12,
+      "required_paths": [
+        "governance/generated/phases/phase-12-dgrut-8x8-texels-native-resolution.md",
+        "governance/generated/first_scan_runtime_metrics.json",
+        "governance/generated/reports/phase-12-dgrut-texel-native-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/eval_first_scan_runtime_kpi.py"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-12-dgrut-texel-native-log.txt",
+      "report_must_contain": [
+        "Phase 12 深度验收: PASS",
+        "first-scan"
+      ]
+    },
+    {
+      "id": 13,
+      "required_paths": [
+        "governance/generated/phases/phase-13-streaming-overlay-final-orchestration.md",
+        "governance/generated/first_scan_runtime_metrics.json",
+        "governance/generated/reports/phase-13-streaming-overlay-final-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/eval_first_scan_runtime_kpi.py",
+        "swift test --disable-sandbox -Xswiftc -strict-concurrency=minimal --filter 'ScanGuidanceTests\\.ScanGuidanceIntegrationTests'",
+        "PYTHONPATH=server python3 -m pytest -q server/tests/test_upload_service.py"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-13-streaming-overlay-final-log.txt",
+      "report_must_contain": [
+        "Phase 13 深度验收: PASS",
+        "e2e"
+      ]
+    },
+    {
+      "id": 14,
+      "required_paths": [
+        "governance/generated/phases/phase-14-zero-fab-core-tri-tet-fusion.md",
+        "governance/generated/first_scan_runtime_metrics.json",
+        "governance/generated/reports/phase-14-zero-fab-tritet-log.txt"
+      ],
+      "required_commands": [
+        "python3 governance/scripts/eval_first_scan_runtime_kpi.py"
+      ],
+      "forbidden_regex_checks": [],
+      "required_report_path": "governance/generated/reports/phase-14-zero-fab-tritet-log.txt",
+      "report_must_contain": [
+        "Phase 14 深度验收: PASS",
+        "tri"
+      ]
+    }
+  ]
+}

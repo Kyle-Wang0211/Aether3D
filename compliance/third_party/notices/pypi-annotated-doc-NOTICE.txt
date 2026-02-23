@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package annotated-doc 0.0.4.
+License obligations are tracked via the package LICENSE file and SPDX policy.

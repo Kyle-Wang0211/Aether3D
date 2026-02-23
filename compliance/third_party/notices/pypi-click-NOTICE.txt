@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package click 8.1.8.
+License obligations are tracked via the package LICENSE file and SPDX policy.

@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package pydantic 2.12.5.
+License obligations are tracked via the package LICENSE file and SPDX policy.

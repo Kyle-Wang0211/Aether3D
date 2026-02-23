@@ -1,0 +1,45 @@
+# SSOT Gate Hardening - Code Ownership Rules
+# See: docs/constitution/GATES_POLICY.md
+#
+# Format: <pattern> <owners>
+# Owners are notified and required to approve PRs touching these paths
+
+# ============================================================================
+# SSOT Core Paths - Require explicit review
+# ============================================================================
+
+# Constants and type definitions (highest priority)
+/Core/Constants/                    @Kyle-Wang0211
+/Core/SSOT/                         @Kyle-Wang0211
+
+# Constitution documents
+/docs/constitution/                 @Kyle-Wang0211
+
+# ============================================================================
+# CI/CD Security Boundaries
+# ============================================================================
+
+# GitHub workflows - prevent CI bypass
+/.github/workflows/                 @Kyle-Wang0211
+/.github/CODEOWNERS                 @Kyle-Wang0211
+
+# CI scripts
+/scripts/ci/                        @Kyle-Wang0211
+/scripts/hooks/                     @Kyle-Wang0211
+
+# Quality gate scripts
+/scripts/quality_gate.sh            @Kyle-Wang0211
+/scripts/quality_lint.sh            @Kyle-Wang0211
+
+# ============================================================================
+# Observation Model Core (PR#1 SSOT)
+# ============================================================================
+
+/Core/Models/Observation*.swift     @Kyle-Wang0211
+/Core/Models/EvidenceEscalation*.swift @Kyle-Wang0211
+
+# ============================================================================
+# Gate Policy Documents
+# ============================================================================
+
+/docs/rfcs/                         @Kyle-Wang0211

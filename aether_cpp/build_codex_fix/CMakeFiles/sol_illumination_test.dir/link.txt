@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/sol_illumination_test.dir/tests/geo/sol_illumination_test.cpp.o -o sol_illumination_test  libaether3d_core.a

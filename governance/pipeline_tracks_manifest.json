@@ -1,0 +1,39 @@
+{
+  "schema": "aether.pipeline_tracks.v1",
+  "tracks": [
+    {
+      "id": "legacy_swift_core",
+      "status": "retained",
+      "description": "Original on-device Swift core stack kept intact for migration fallback and regression comparison.",
+      "required_paths": [
+        "Core/Pipeline/PipelineRunner.swift",
+        "Core/Pipeline/RemoteB1Client.swift",
+        "Core/Quality",
+        "Core/TSDF"
+      ]
+    },
+    {
+      "id": "legacy_cloud_pipeline",
+      "status": "retained",
+      "description": "Server-side cloud rendering and orchestration pipeline retained as an independent execution path.",
+      "required_paths": [
+        "server/app/services/job_service.py",
+        "server/app/services/job_scheduler.py",
+        "server/app/pipelines/factory.py",
+        "server/app/core/config.py"
+      ]
+    },
+    {
+      "id": "mobile_local_fullchain",
+      "status": "active",
+      "description": "Current local-first mobile fullchain implementation under C++ core + local bridge.",
+      "required_paths": [
+        "aether_cpp/include/aether/innovation/core_types.h",
+        "aether_cpp/src/innovation/f1_progressive_compression.cpp",
+        "aether_cpp/src/innovation/f3_evidence_constrained_compression.cpp",
+        "aether_cpp/src/innovation/f5_delta_patch_chain.cpp",
+        "Core/Pipeline/LocalAetherRemoteB1Client.swift"
+      ]
+    }
+  ]
+}

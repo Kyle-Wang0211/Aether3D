@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/gpu_resource_test.dir/tests/render/gpu_resource_test.cpp.o -o gpu_resource_test  libaether3d_c.a libaether3d_core.a

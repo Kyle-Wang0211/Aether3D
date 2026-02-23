@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1",
+  "description": "Golden vectors for deterministic quantization validation. Must include negatives, half ties, large magnitudes, and edge boundaries.",
+  "testVectors": [
+    {
+      "name": "geomId_1mm_positive",
+      "input": 0.001,
+      "precision": 0.001,
+      "expectedQuantized": 1,
+      "description": "geomId precision (1mm) - positive value"
+    },
+    {
+      "name": "geomId_1mm_negative",
+      "input": -0.001,
+      "precision": 0.001,
+      "expectedQuantized": -1,
+      "description": "geomId precision (1mm) - negative value"
+    },
+    {
+      "name": "geomId_1mm_half_tie_positive",
+      "input": 0.0005,
+      "precision": 0.001,
+      "expectedQuantized": 1,
+      "description": "geomId precision (1mm) - half tie, rounds away from zero"
+    },
+    {
+      "name": "geomId_1mm_half_tie_negative",
+      "input": -0.0005,
+      "precision": 0.001,
+      "expectedQuantized": -1,
+      "description": "geomId precision (1mm) - half tie negative, rounds away from zero"
+    },
+    {
+      "name": "patchId_0_1mm_positive",
+      "input": 0.0001,
+      "precision": 0.0001,
+      "expectedQuantized": 1,
+      "description": "patchId precision (0.1mm) - positive value"
+    },
+    {
+      "name": "patchId_0_1mm_negative",
+      "input": -0.0001,
+      "precision": 0.0001,
+      "expectedQuantized": -1,
+      "description": "patchId precision (0.1mm) - negative value"
+    },
+    {
+      "name": "negative_zero_normalized",
+      "input": -0.0,
+      "precision": 0.001,
+      "expectedQuantized": 0,
+      "description": "Negative zero normalized to positive zero"
+    },
+    {
+      "name": "large_magnitude",
+      "input": 999.999,
+      "precision": 0.001,
+      "expectedQuantized": 999999,
+      "description": "Large magnitude value (999.999 / 0.001 = 999999, no rounding needed)"
+    },
+    {
+      "name": "edge_boundary_1000m",
+      "input": 1000.0,
+      "precision": 0.001,
+      "expectedQuantized": 1000000,
+      "description": "Edge boundary at 1000m"
+    },
+    {
+      "name": "edge_boundary_minus_1000m",
+      "input": -1000.0,
+      "precision": 0.001,
+      "expectedQuantized": -1000000,
+      "description": "Edge boundary at -1000m"
+    }
+  ],
+  "note": "These vectors validate quantization determinism and rounding mode. All values must use ROUND_HALF_AWAY_FROM_ZERO."
+}

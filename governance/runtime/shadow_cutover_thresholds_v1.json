@@ -1,0 +1,12 @@
+{
+  "tier_b_epsilon": 1e-05,
+  "p95_regression_max_ratio": 1.03,
+  "p99_regression_max_ratio": 1.05,
+  "crash_free_drop_max_abs": 0.001,
+  "positive_benefit": {
+    "p50_gain_min_ratio": 0.05,
+    "p95_gain_min_ratio": 0.03,
+    "memory_drop_min_ratio": 0.05,
+    "power_drop_min_ratio": 0.03
+  }
+}

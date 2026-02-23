@@ -1,0 +1,72 @@
+{
+  "kuhn5": {
+    "parity0": [[0, 1, 3, 7], [0, 3, 2, 7], [0, 2, 6, 7], [0, 6, 4, 7], [0, 4, 5, 7]],
+    "parity1": [[1, 0, 2, 6], [1, 2, 3, 6], [1, 3, 7, 6], [1, 7, 5, 6], [1, 5, 4, 6]]
+  },
+  "replay_samples": [
+    {
+      "name": "mixed_classification_replay",
+      "config": {
+        "measuredMinViewCount": 4,
+        "estimatedMinViewCount": 2,
+        "maxTriangleToTetDistance": 0.12
+      },
+      "vertices": [
+        {"index": 0, "position": [0.0, 0.0, 0.0], "viewCount": 4},
+        {"index": 1, "position": [1.0, 0.0, 0.0], "viewCount": 4},
+        {"index": 2, "position": [0.0, 1.0, 0.0], "viewCount": 4},
+        {"index": 3, "position": [0.0, 0.0, 1.0], "viewCount": 4},
+        {"index": 4, "position": [2.0, 2.0, 2.0], "viewCount": 1},
+        {"index": 5, "position": [3.0, 2.0, 2.0], "viewCount": 1},
+        {"index": 6, "position": [2.0, 3.0, 2.0], "viewCount": 1},
+        {"index": 7, "position": [2.0, 2.0, 3.0], "viewCount": 1}
+      ],
+      "tetrahedra": [
+        {"id": 0, "vertices": [0, 1, 2, 3]},
+        {"id": 1, "vertices": [4, 5, 6, 7]}
+      ],
+      "triangles": [
+        {
+          "patchId": "tri_measured_0",
+          "vertices": [[0.22, 0.22, 0.22], [0.28, 0.22, 0.22], [0.22, 0.28, 0.22]]
+        },
+        {
+          "patchId": "tri_measured_1",
+          "vertices": [[0.24, 0.24, 0.26], [0.30, 0.24, 0.26], [0.24, 0.30, 0.24]]
+        },
+        {
+          "patchId": "tri_measured_2",
+          "vertices": [[0.28, 0.18, 0.2], [0.34, 0.20, 0.22], [0.30, 0.26, 0.18]]
+        },
+        {
+          "patchId": "tri_measured_3",
+          "vertices": [[0.12, 0.24, 0.20], [0.18, 0.26, 0.22], [0.14, 0.30, 0.18]]
+        },
+        {
+          "patchId": "tri_estimated_0",
+          "vertices": [[0.9, 0.9, 0.9], [0.95, 0.9, 0.9], [0.9, 0.95, 0.9]]
+        },
+        {
+          "patchId": "tri_unknown_0",
+          "vertices": [[2.2, 2.2, 2.2], [2.3, 2.2, 2.2], [2.2, 2.3, 2.2]]
+        }
+      ],
+      "expected": {
+        "measuredCount": 4,
+        "estimatedCount": 1,
+        "unknownCount": 1,
+        "classificationByPatch": {
+          "tri_measured_0": "measured",
+          "tri_measured_1": "measured",
+          "tri_measured_2": "measured",
+          "tri_measured_3": "measured",
+          "tri_estimated_0": "estimated",
+          "tri_unknown_0": "unknown"
+        }
+      }
+    }
+  ],
+  "expected": {
+    "max_unknown_ratio": 0.18
+  }
+}

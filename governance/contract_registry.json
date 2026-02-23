@@ -1,0 +1,5672 @@
+{
+  "metadata": {
+    "registry_id": "AETHER_PROTOCOL_GOVERNANCE",
+    "schema_version": "2.0.0",
+    "last_updated": "2026-02-17",
+    "owners": [
+      "core-architecture",
+      "platform-integration",
+      "infra-ci"
+    ],
+    "tracks": [
+      "P",
+      "X"
+    ],
+    "phase_span": {
+      "min": 0,
+      "max": 14
+    },
+    "long_lived_integration_branch": "codex/core-cpp-migration"
+  },
+  "contracts": [
+    {
+      "id": "C-TRACK-P-LEGAL-BASELINE",
+      "title": "Track P parity is legal baseline",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 952
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-FIXTURE-BASELINE"
+      ]
+    },
+    {
+      "id": "C-TRACK-X-FEATURE-ISOLATION",
+      "title": "Track X feature flags must not pollute Track P",
+      "status": "active",
+      "track": "X",
+      "type": "invariant",
+      "phase_scope": [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 969
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-FLAG-DEFAULT-OFF",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-CORE-SYSTEM-BOUNDARY-PIXEL",
+      "title": "Pixel analysis remains in System layer unless explicitly re-scoped",
+      "status": "blocked",
+      "track": "PX",
+      "type": "boundary",
+      "phase_scope": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        10
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 171
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15781
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-BLUR-SSOT-SINGLE-VALUE",
+      "title": "Blur-related SSOT must be singular and conflict-free",
+      "status": "active",
+      "track": "P",
+      "type": "constant",
+      "phase_scope": [
+        0,
+        5
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 543
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 573
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-BLUR-CONSTANT-DRIFT"
+      ]
+    },
+    {
+      "id": "C-SCAN-PATCHDISPLAY-MIGRATION",
+      "title": "ScanViewModel must use PatchDisplayMap instead of local displaySnapshot dict",
+      "status": "active",
+      "track": "P",
+      "type": "procedure",
+      "phase_scope": [
+        5
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 779
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-SCAN-GUIDANCE-INTEGRATION",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-SCAN-BLUR-HAPTIC-REMOVAL",
+      "title": "Blur haptic in ScanViewModel is removed; blur only gates frame rejection",
+      "status": "active",
+      "track": "P",
+      "type": "procedure",
+      "phase_scope": [
+        5
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 790
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-SCAN-GUIDANCE-INTEGRATION",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-PHASE-ORDERING-LAW",
+      "title": "Phase ordering is mandatory",
+      "status": "active",
+      "track": "PX",
+      "type": "gate",
+      "phase_scope": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 14329
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-PHASE-ORDER",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-EXACT-PIPELINE-IO-CLOSED",
+      "title": "EXACT-ONLY pipeline IO closed sets are inviolable",
+      "status": "active",
+      "track": "PX",
+      "type": "invariant",
+      "phase_scope": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15091
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-PIT1-TIMEWARP-PURITY",
+      "title": "PresentLoop timewarp is pure reprojection with constant disocclusion fill",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [
+        4
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15349
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 47047
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-AUDIT-ANCHOR-CLIENT-FIRST",
+      "title": "RFC3161 audit anchoring is client-first with start/end mandatory and 60s periodic anchors",
+      "status": "active",
+      "track": "PX",
+      "type": "security",
+      "phase_scope": [
+        4,
+        13
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 50281
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 50286
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-AUDIT-ANCHOR-CLIENT-FIRST",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-AETHERBILLING-RESOURCE-WALLET",
+      "title": "Resource Wallet metering and quota charging algorithm is delivered in Phase 4 infrastructure",
+      "status": "active",
+      "track": "P",
+      "type": "economic",
+      "phase_scope": [
+        4
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 41200
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 41326
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD"
+      ]
+    },
+    {
+      "id": "C-COSTSHIELD-POLICYKERNEL-DETERMINISM",
+      "title": "CostShield quota, rate-limit, and shadow-pricing policy kernel is deterministic Core logic in Phase 4",
+      "status": "active",
+      "track": "P",
+      "type": "security",
+      "phase_scope": [
+        4
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 48180
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 48816
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-SWIFT-BUILD"
+      ]
+    },
+    {
+      "id": "C-COSTSHIELD-SERVER-ENFORCEMENT",
+      "title": "Auth, gateway rate limiting, idempotency, and runtime budget fuse are enforced server-side from Phase 7+",
+      "status": "active",
+      "track": "X",
+      "type": "security",
+      "phase_scope": [
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 48545
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 48816
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR",
+        "G-PHASE13-E2E-SMOKE"
+      ]
+    },
+    {
+      "id": "C-PIT2-VOLUME-GATING",
+      "title": "Watertight result gates measured volume",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [
+        1
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 15471
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-UPLOAD-CHUNK-HASH-VERIFY",
+      "title": "persist_chunk must verify expected_hash before durable write",
+      "status": "active",
+      "track": "P",
+      "type": "security",
+      "phase_scope": [
+        5
+      ],
+      "normative_sources": [
+        {
+          "path": "server/app/services/upload_service.py",
+          "line": 287
+        },
+        {
+          "path": "server/tests/test_upload_service.py",
+          "line": 90
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-UPLOAD-CHUNK-HASH",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-FIXTURE-PHASE0-MANDATORY",
+      "title": "Phase 0 golden fixtures must pass before any Track P migration",
+      "status": "active",
+      "track": "P",
+      "type": "gate",
+      "phase_scope": [
+        0
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 1651
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 7904
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-FIXTURE-BASELINE"
+      ]
+    },
+    {
+      "id": "C-FEATURE-FLAG-DEFAULTS",
+      "title": "Track X feature flags default OFF",
+      "status": "active",
+      "track": "X",
+      "type": "feature_flag",
+      "phase_scope": [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 970
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 18562
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-FLAG-DEFAULT-OFF"
+      ]
+    },
+    {
+      "id": "C-FEATURE-FLAG-NAMESPACE",
+      "title": "Feature flag namespace strategy must be consistent and mapped",
+      "status": "blocked",
+      "track": "X",
+      "type": "feature_flag",
+      "phase_scope": [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 969
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 17913
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-FLAG-NAMESPACE"
+      ]
+    },
+    {
+      "id": "C-DOC-SECTION-ORDER-MONOTONIC",
+      "title": "Section numbering for §6.x remains monotonic in normative layers",
+      "status": "active",
+      "track": "PX",
+      "type": "documentation",
+      "phase_scope": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 43236
+        },
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 43318
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-DOC-SECTION-ORDER"
+      ]
+    },
+    {
+      "id": "C-CORE-NO-CONCURRENCY-PRIMITIVES",
+      "title": "Core forbids mutex/thread/atomic primitives",
+      "status": "active",
+      "track": "P",
+      "type": "invariant",
+      "phase_scope": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "normative_sources": [
+        {
+          "path": "CURSOR_MEGA_PROMPT_V2.md",
+          "line": 14342
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-LONG-LIVED-INTEGRATION-BRANCH",
+      "title": "Single long-lived integration branch with phase tags",
+      "status": "active",
+      "track": "PX",
+      "type": "procedure",
+      "phase_scope": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "governance/README.md",
+          "line": 1
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-LONG-LIVED-BRANCH"
+      ]
+    },
+    {
+      "id": "C-CURSOR-RUNBOOK-DETERMINISM",
+      "title": "Each phase has deterministic Cursor runbook generated from SSOT",
+      "status": "active",
+      "track": "PX",
+      "type": "automation",
+      "phase_scope": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "governance/scripts/generate_cursor_runbooks.py",
+          "line": 1
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-RUNBOOK-GENERATION"
+      ]
+    },
+    {
+      "id": "C-MOBILE-FIRST-OFFLOAD-EXECUTION",
+      "title": "Mobile-first offload migration executes in governed batches and minimizes non-final cloud workload",
+      "status": "active",
+      "track": "X",
+      "type": "procedure",
+      "phase_scope": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "governance/phase_plan.json",
+          "line": 239
+        },
+        {
+          "path": "governance/README.md",
+          "line": 36
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-FULL-GATE-SWEEP",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-BATCH-FULL-GATE-ENFORCEMENT",
+      "title": "Every migration batch must pass full gate sweep before the next batch starts",
+      "status": "active",
+      "track": "X",
+      "type": "gate",
+      "phase_scope": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "governance/phase_plan.json",
+          "line": 257
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-FULL-GATE-SWEEP",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-CLOUD-FINAL-S5-RENDER-RESERVED",
+      "title": "Cloud compute is reserved for final S5 optimization/render and legal archive closure",
+      "status": "active",
+      "track": "X",
+      "type": "boundary",
+      "phase_scope": [
+        11,
+        12,
+        13,
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "governance/phase_plan.json",
+          "line": 311
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-PHASE13-E2E-SMOKE",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    },
+    {
+      "id": "C-TRI-TET-RUNTIME-CONSISTENCY",
+      "title": "Phase 14 must enforce Tri/Tet runtime consistency and deterministic Kuhn-5 replay",
+      "status": "active",
+      "track": "X",
+      "type": "invariant",
+      "phase_scope": [
+        14
+      ],
+      "normative_sources": [
+        {
+          "path": "governance/phase_plan.json",
+          "line": 479
+        },
+        {
+          "path": "Core/Quality/Geometry/TriTetConsistencyEngine.swift",
+          "line": 74
+        }
+      ],
+      "enforced_by_gate_ids": [
+        "G-TRI-TET-RUNTIME-CONSISTENCY",
+        "G-CONTRACT-VALIDATOR"
+      ]
+    }
+  ],
+  "constants": [
+    {
+      "id": "K-BLUR-FRAME-REJECTION",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 200.0,
+      "description": "Frame-level rejection threshold for Laplacian variance"
+    },
+    {
+      "id": "K-BLUR-GUIDANCE-HAPTIC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 100.0,
+      "description": "Guidance threshold target defined by latest V2.11 table"
+    },
+    {
+      "id": "K-SCAN-DISPLAY-INCREMENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "Per-frame display increment defined in §6.4.10"
+    },
+    {
+      "id": "K-TIMEWARP-DISOCCLUSION-BG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.18,
+      "description": "Constant disocclusion fill luminance"
+    },
+    {
+      "id": "K-TIMEWARP-MAX-AGE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Maximum timewarp age before degraded fallback"
+    },
+    {
+      "id": "K-GATE-RELAX-MIN-FACTOR",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Minimum gate relaxation factor"
+    },
+    {
+      "id": "K-GATE-RELAX-MAX-FACTOR",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1.5,
+      "description": "Maximum gate relaxation factor"
+    },
+    {
+      "id": "K-COST-GPU-SEC-USD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.000125,
+      "description": "GPU cost $/sec ($0.45/hr, vast.ai US RTX5090 on-demand median)"
+    },
+    {
+      "id": "K-COST-UPLOAD-GB-USD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.085,
+      "description": "Upload bandwidth cost $/GB (CloudFront $0.085/GB reference)"
+    },
+    {
+      "id": "K-COST-STORAGE-GB-MO-USD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.023,
+      "description": "Storage cost $/GB/month (S3 Standard $0.023/GB reference)"
+    },
+    {
+      "id": "K-COST-CIRCUIT-BREAK-USD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Single job cost kill threshold (3.2x max normal job $0.62)"
+    },
+    {
+      "id": "K-COST-MAX-COMPUTE-SEC-DAY",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10800,
+      "description": "Max GPU sec/user/day (3h = 8 jobs x 17min + 100% margin)"
+    },
+    {
+      "id": "K-COST-MAX-JOBS-DAY",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 8,
+      "description": "Max training jobs/user/day (beta: 8 x 17min = 2.27h GPU)"
+    },
+    {
+      "id": "K-COST-TOKEN-BURST",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 8,
+      "description": "GCRA burst allowance (app cold-start sends ~7 requests)"
+    },
+    {
+      "id": "K-COST-ABUSE-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.8,
+      "description": "Abuse score threshold for REJECT_HARD"
+    },
+    {
+      "id": "K-UPLOAD-CHUNK-MAX-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5242880,
+      "description": "Max chunk size bytes (5MB, = server MAX_CHUNK_SIZE_BYTES)"
+    },
+    {
+      "id": "K-UPLOAD-PARALLEL-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 6,
+      "description": "Max parallel chunk uploads (iOS default connections/host=6)"
+    },
+    {
+      "id": "K-UPLOAD-RATE-CHUNKS-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 300,
+      "description": "Rate limit chunks/min (5 chunk/sec x 5MB = 200Mbps sustained ceiling)"
+    },
+    {
+      "id": "K-EVIDENCE-PATCH-DISPLAY-ALPHA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.2,
+      "description": "EMA smoothing coefficient for display evidence [0.1-0.3]"
+    },
+    {
+      "id": "K-EVIDENCE-LOCKED-ACCELERATION",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.5,
+      "description": "Display growth multiplier for locked patches [1.2-2.0]"
+    },
+    {
+      "id": "K-EVIDENCE-COLOR-LOCAL-WEIGHT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Local patch contribution to color evidence (Rule F)"
+    },
+    {
+      "id": "K-EVIDENCE-COLOR-GLOBAL-WEIGHT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Global display contribution to color evidence (Rule F)"
+    },
+    {
+      "id": "K-EVIDENCE-BASE-PENALTY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Base penalty for error observations"
+    },
+    {
+      "id": "K-EVIDENCE-MAX-PENALTY-PER-UPDATE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.15,
+      "description": "Maximum penalty per update cycle"
+    },
+    {
+      "id": "K-EVIDENCE-ERROR-COOLDOWN-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Error cooldown period in seconds"
+    },
+    {
+      "id": "K-EVIDENCE-MAX-ERROR-STREAK",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Maximum error streak to consider"
+    },
+    {
+      "id": "K-EVIDENCE-SOFT-WRITE-GATE-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Min gate quality for soft ledger write (B1 policy) [0.25-0.35]"
+    },
+    {
+      "id": "K-EVIDENCE-WEIGHT-CAP-DENOM",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 8.0,
+      "description": "Observation count weight cap denominator"
+    },
+    {
+      "id": "K-EVIDENCE-PATCH-LOCAL-WEIGHT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Patch color blend local weight"
+    },
+    {
+      "id": "K-EVIDENCE-PATCH-GLOBAL-WEIGHT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Patch color blend global weight"
+    },
+    {
+      "id": "K-EVIDENCE-DYN-GATE-EARLY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.65,
+      "description": "Early stage gate weight (geometry dominates) [0.60-0.70]"
+    },
+    {
+      "id": "K-EVIDENCE-DYN-GATE-LATE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.35,
+      "description": "Late stage gate weight (quality dominates) [0.30-0.40]"
+    },
+    {
+      "id": "K-EVIDENCE-DYN-TRANSITION-START",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.45,
+      "description": "Weight transition start (normalized progress) [0.40-0.50]"
+    },
+    {
+      "id": "K-EVIDENCE-DYN-TRANSITION-END",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.75,
+      "description": "Weight transition end (normalized progress) [0.70-0.80]"
+    },
+    {
+      "id": "K-EVIDENCE-DYN-EPSILON",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1e-09,
+      "description": "Epsilon for weight sum validation (gate+soft≈1.0)"
+    },
+    {
+      "id": "K-EVIDENCE-BLACK-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.2,
+      "description": "S0 black threshold for grayscale mapping"
+    },
+    {
+      "id": "K-EVIDENCE-DARK-GRAY-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.45,
+      "description": "S1 dark gray threshold"
+    },
+    {
+      "id": "K-EVIDENCE-LIGHT-GRAY-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "S3 light gray threshold"
+    },
+    {
+      "id": "K-EVIDENCE-WHITE-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.88,
+      "description": "S5 total evidence requirement (white)"
+    },
+    {
+      "id": "K-EVIDENCE-S5-MIN-SOFT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.75,
+      "description": "S5 minimum soft evidence requirement"
+    },
+    {
+      "id": "K-EVIDENCE-PATCH-STALE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 300.0,
+      "description": "Stale patch threshold in seconds (5 min)"
+    },
+    {
+      "id": "K-EVIDENCE-TOKEN-REFILL-RATE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Token refill rate per second [0.5-5.0]"
+    },
+    {
+      "id": "K-EVIDENCE-TOKEN-BUCKET-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Maximum tokens per patch bucket [5.0-20.0]"
+    },
+    {
+      "id": "K-EVIDENCE-TOKEN-COST-PER-OBS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Token cost per observation [0.5-2.0]"
+    },
+    {
+      "id": "K-EVIDENCE-DIVERSITY-BUCKET-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "View angle bucket size in degrees [10-30]"
+    },
+    {
+      "id": "K-EVIDENCE-DIVERSITY-MAX-BUCKETS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 16,
+      "description": "Maximum buckets tracked per patch [8-24]"
+    },
+    {
+      "id": "K-EVIDENCE-MIN-UPDATE-INTERVAL-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 120.0,
+      "description": "Time density minimum interval (ms)"
+    },
+    {
+      "id": "K-EVIDENCE-MIN-NOVELTY-LEDGER",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Minimum novelty to write to ledger"
+    },
+    {
+      "id": "K-EVIDENCE-QUARANTINE-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Consecutive suspect frames for quarantine"
+    },
+    {
+      "id": "K-EVIDENCE-QUARANTINE-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Quarantine entry timeout (seconds)"
+    },
+    {
+      "id": "K-EVIDENCE-CONFIDENCE-HALFLIFE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 60.0,
+      "description": "Confidence decay half-life (seconds)"
+    },
+    {
+      "id": "K-EVIDENCE-LOCK-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.85,
+      "description": "Evidence threshold for locking"
+    },
+    {
+      "id": "K-EVIDENCE-MIN-OBS-FOR-LOCK",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 20,
+      "description": "Minimum observations for locking"
+    },
+    {
+      "id": "K-EVIDENCE-HUBER-DELTA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Huber loss delta for robust statistics"
+    },
+    {
+      "id": "K-EVIDENCE-DEFAULT-TILE-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 32,
+      "description": "PR2 tile size (pixels)"
+    },
+    {
+      "id": "K-EVIDENCE-DEFAULT-VOXEL-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.03,
+      "description": "PR3 voxel size (meters)"
+    },
+    {
+      "id": "K-EVIDENCE-FLOAT-PRECISION",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 4,
+      "description": "Float quantization precision"
+    },
+    {
+      "id": "K-EVIDENCE-MIN-SOFT-SCALE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.25,
+      "description": "Minimum soft penalty scale (guaranteed throughput)"
+    },
+    {
+      "id": "K-EVIDENCE-NO-TOKEN-PENALTY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.6,
+      "description": "Soft penalty when token unavailable"
+    },
+    {
+      "id": "K-EVIDENCE-LOW-NOVELTY-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.2,
+      "description": "Low novelty threshold"
+    },
+    {
+      "id": "K-EVIDENCE-LOW-NOVELTY-PENALTY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Soft penalty for low novelty"
+    },
+    {
+      "id": "K-EVIDENCE-DS-CONFLICT-SWITCH",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.85,
+      "description": "D-S conflict switch to Yager rule threshold"
+    },
+    {
+      "id": "K-EVIDENCE-DS-EPSILON",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1e-09,
+      "description": "D-S epsilon for invariant checks"
+    },
+    {
+      "id": "K-EVIDENCE-DS-OCCUPIED-GOOD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.8,
+      "description": "Default occupied mass for good observation"
+    },
+    {
+      "id": "K-EVIDENCE-DS-UNKNOWN-GOOD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.2,
+      "description": "Default unknown mass for good observation"
+    },
+    {
+      "id": "K-EVIDENCE-DS-FREE-BAD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Default free mass for bad observation"
+    },
+    {
+      "id": "K-EVIDENCE-MAX-REFINEMENTS-FRAME",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 16,
+      "description": "Maximum refinements per frame"
+    },
+    {
+      "id": "K-EVIDENCE-BATCH-MAX-CAPACITY",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1024,
+      "description": "Batch maximum capacity"
+    },
+    {
+      "id": "K-EVIDENCE-COMPACTION-TRIGGER-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100,
+      "description": "Compaction trigger frame count"
+    },
+    {
+      "id": "K-EVIDENCE-COMPACTION-TOMBSTONE-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Compaction trigger tombstone ratio"
+    },
+    {
+      "id": "K-EVIDENCE-INITIAL-MAP-CAPACITY",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1024,
+      "description": "Initial map capacity (power of 2)"
+    },
+    {
+      "id": "K-EVIDENCE-MAX-LOAD-FACTOR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.75,
+      "description": "Maximum load factor for open-addressing map"
+    },
+    {
+      "id": "K-EVIDENCE-MAX-PROBE-ATTEMPTS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1024,
+      "description": "Maximum probe attempts"
+    },
+    {
+      "id": "K-EVIDENCE-MIN-CELLS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1000,
+      "description": "Minimum evidence grid cells"
+    },
+    {
+      "id": "K-EVIDENCE-HARD-CAP-CELLS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1000000,
+      "description": "Hard cap evidence grid cells"
+    },
+    {
+      "id": "K-EVIDENCE-AGING-TABLE-MAX-DELTA-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 86400.0,
+      "description": "Aging table maximum delta (24 hours)"
+    },
+    {
+      "id": "K-EVIDENCE-AGING-TABLE-BIN-SIZE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 60.0,
+      "description": "Aging table bin size (1 minute)"
+    },
+    {
+      "id": "K-EVIDENCE-MIN-OCCLUSION-VIEWS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Minimum occlusion view directions"
+    },
+    {
+      "id": "K-EVIDENCE-OCCLUSION-FREEZE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 60.0,
+      "description": "Occlusion freeze window (seconds)"
+    },
+    {
+      "id": "K-EVIDENCE-MAX-EXCLUSION-DELTA-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Maximum exclusion delta per second"
+    },
+    {
+      "id": "K-EVIDENCE-COVERAGE-EMA-ALPHA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.15,
+      "description": "Coverage EMA alpha"
+    },
+    {
+      "id": "K-EVIDENCE-MAX-COVERAGE-DELTA-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Maximum coverage delta per second"
+    },
+    {
+      "id": "K-GUIDANCE-S0-S1-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "S0→S1 display value threshold"
+    },
+    {
+      "id": "K-GUIDANCE-S1-S2-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.25,
+      "description": "S1→S2 display value threshold"
+    },
+    {
+      "id": "K-GUIDANCE-S2-S3-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "S2→S3 display value threshold"
+    },
+    {
+      "id": "K-GUIDANCE-S3-S4-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.75,
+      "description": "S3→S4 display value threshold"
+    },
+    {
+      "id": "K-GUIDANCE-S4-S5-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.88,
+      "description": "S4→S5 display value threshold (white)"
+    },
+    {
+      "id": "K-GUIDANCE-S5-MIN-SOFT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.75,
+      "description": "S5 minimum soft evidence for guidance"
+    },
+    {
+      "id": "K-GUIDANCE-GRAYSCALE-GAMMA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Continuous grayscale interpolation gamma"
+    },
+    {
+      "id": "K-GUIDANCE-S4-TRANSPARENCY-ALPHA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0,
+      "description": "S4 transparency alpha"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-BASE-WIDTH-PX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 6.0,
+      "description": "Base border width (pixels)"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-MIN-WIDTH-PX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Minimum border width (pixels)"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-MAX-WIDTH-PX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 12.0,
+      "description": "Maximum border width (pixels)"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-DISPLAY-WEIGHT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.6,
+      "description": "Display factor weight in border calc"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-AREA-WEIGHT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.4,
+      "description": "Area factor weight in border calc"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-GAMMA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.4,
+      "description": "Stevens Power Law gamma for border brightness"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-COLOR-R",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 255,
+      "description": "Border color red component (white)"
+    },
+    {
+      "id": "K-GUIDANCE-BORDER-ALPHA-S0",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Border alpha at S0 (fully opaque)"
+    },
+    {
+      "id": "K-GUIDANCE-WEDGE-BASE-THICKNESS-M",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.008,
+      "description": "Base wedge thickness at display=0 (m)"
+    },
+    {
+      "id": "K-GUIDANCE-WEDGE-MIN-THICKNESS-M",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0005,
+      "description": "Min wedge thickness at display≈1 (m)"
+    },
+    {
+      "id": "K-GUIDANCE-THICKNESS-DECAY-EXP",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Thickness decay exponent"
+    },
+    {
+      "id": "K-GUIDANCE-AREA-FACTOR-REF",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Area factor reference (median normalization)"
+    },
+    {
+      "id": "K-GUIDANCE-BEVEL-SEGMENTS-LOD0",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2,
+      "description": "Bevel segments for LOD0"
+    },
+    {
+      "id": "K-GUIDANCE-BEVEL-SEGMENTS-LOD1",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1,
+      "description": "Bevel segments for LOD1"
+    },
+    {
+      "id": "K-GUIDANCE-BEVEL-RADIUS-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.15,
+      "description": "Bevel radius as fraction of thickness"
+    },
+    {
+      "id": "K-GUIDANCE-LOD0-TRI-PER-PRISM",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 44,
+      "description": "LOD0 triangles per prism"
+    },
+    {
+      "id": "K-GUIDANCE-METALLIC-BASE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Base metallic value for PBR"
+    },
+    {
+      "id": "K-GUIDANCE-METALLIC-S3-BONUS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.4,
+      "description": "Metallic increase at S3+"
+    },
+    {
+      "id": "K-GUIDANCE-ROUGHNESS-BASE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.6,
+      "description": "Base roughness for PBR"
+    },
+    {
+      "id": "K-GUIDANCE-ROUGHNESS-S3-REDUCTION",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Roughness decrease at S3+"
+    },
+    {
+      "id": "K-GUIDANCE-FRESNEL-F0",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.04,
+      "description": "Fresnel F0 for dielectric"
+    },
+    {
+      "id": "K-GUIDANCE-FRESNEL-F0-METALLIC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Fresnel F0 for metallic"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-DURATION-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Flip animation duration (seconds)"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-CP1X",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.34,
+      "description": "Flip easing control point 1 X"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-CP1Y",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.56,
+      "description": "Flip easing control point 1 Y (overshoot)"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-CP2X",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.64,
+      "description": "Flip easing control point 2 X"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-CP2Y",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Flip easing control point 2 Y"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-MAX-CONCURRENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 20,
+      "description": "Maximum concurrent flip animations"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-STAGGER-DELAY-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.03,
+      "description": "Flip stagger delay between triangles (s)"
+    },
+    {
+      "id": "K-GUIDANCE-FLIP-MIN-DISPLAY-DELTA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Min display delta to trigger flip"
+    },
+    {
+      "id": "K-GUIDANCE-RIPPLE-DELAY-PER-HOP-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.06,
+      "description": "Delay per BFS hop (seconds)"
+    },
+    {
+      "id": "K-GUIDANCE-RIPPLE-MAX-HOPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 8,
+      "description": "Maximum BFS hops"
+    },
+    {
+      "id": "K-GUIDANCE-RIPPLE-DAMPING-PER-HOP",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.85,
+      "description": "Amplitude damping per hop"
+    },
+    {
+      "id": "K-GUIDANCE-RIPPLE-INITIAL-AMPLITUDE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Initial ripple amplitude"
+    },
+    {
+      "id": "K-GUIDANCE-RIPPLE-THICKNESS-MULT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Ripple thickness multiplier"
+    },
+    {
+      "id": "K-GUIDANCE-RIPPLE-MAX-WAVES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Maximum concurrent ripple waves"
+    },
+    {
+      "id": "K-GUIDANCE-RIPPLE-MIN-SPAWN-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Min interval between ripple spawns (s)"
+    },
+    {
+      "id": "K-GUIDANCE-HAPTIC-DEBOUNCE-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Haptic debounce interval (seconds)"
+    },
+    {
+      "id": "K-GUIDANCE-HAPTIC-MAX-PER-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 4,
+      "description": "Maximum haptic events per minute"
+    },
+    {
+      "id": "K-GUIDANCE-HAPTIC-BLUR-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 200.0,
+      "description": "Haptic blur threshold (Laplacian variance; equals QualityThresholds.laplacianBlurThreshold)"
+    },
+    {
+      "id": "K-GUIDANCE-HAPTIC-MOTION-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Haptic motion threshold"
+    },
+    {
+      "id": "K-GUIDANCE-HAPTIC-EXPOSURE-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.2,
+      "description": "Haptic exposure threshold"
+    },
+    {
+      "id": "K-GUIDANCE-TOAST-DURATION-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Toast display duration (seconds)"
+    },
+    {
+      "id": "K-GUIDANCE-TOAST-A11Y-DURATION-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Toast accessibility duration (seconds)"
+    },
+    {
+      "id": "K-GUIDANCE-TOAST-BG-ALPHA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.85,
+      "description": "Toast background color alpha"
+    },
+    {
+      "id": "K-GUIDANCE-TOAST-CORNER-RADIUS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 12.0,
+      "description": "Toast corner radius (points)"
+    },
+    {
+      "id": "K-GUIDANCE-TOAST-FONT-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Toast font size (points)"
+    },
+    {
+      "id": "K-GUIDANCE-MAX-INFLIGHT-BUFFERS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Maximum inflight Metal buffers"
+    },
+    {
+      "id": "K-GUIDANCE-THERMAL-NOMINAL-TRI",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5000,
+      "description": "Thermal nominal max triangles"
+    },
+    {
+      "id": "K-GUIDANCE-THERMAL-FAIR-TRI",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3000,
+      "description": "Thermal fair max triangles"
+    },
+    {
+      "id": "K-GUIDANCE-THERMAL-SERIOUS-TRI",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1500,
+      "description": "Thermal serious max triangles"
+    },
+    {
+      "id": "K-GUIDANCE-THERMAL-CRITICAL-TRI",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Thermal critical max triangles"
+    },
+    {
+      "id": "K-GUIDANCE-THERMAL-HYSTERESIS-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Thermal hysteresis duration (seconds)"
+    },
+    {
+      "id": "K-GUIDANCE-FRAME-BUDGET-OVERSHOOT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.2,
+      "description": "Frame budget overshoot ratio threshold"
+    },
+    {
+      "id": "K-GUIDANCE-FRAME-BUDGET-WINDOW",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Frame budget measurement window (frames)"
+    },
+    {
+      "id": "K-GUIDANCE-MIN-CONTRAST-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 17.4,
+      "description": "WCAG 2.1 AAA minimum contrast ratio"
+    },
+    {
+      "id": "K-GUIDANCE-VOICEOVER-DELAY-S",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "VoiceOver announcement delay (seconds)"
+    },
+    {
+      "id": "K-GUIDANCE-REDUCE-MOTION-FLIP",
+      "status": "active",
+      "track": "P",
+      "value_type": "bool",
+      "value": true,
+      "description": "Reduce motion disables flip animation"
+    },
+    {
+      "id": "K-GUIDANCE-REDUCE-MOTION-RIPPLE",
+      "status": "active",
+      "track": "P",
+      "value_type": "bool",
+      "value": true,
+      "description": "Reduce motion disables ripple animation"
+    },
+    {
+      "id": "K-TSDF-VOXEL-SIZE-NEAR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.005,
+      "description": "Near-range voxel size (m, depth<1m)"
+    },
+    {
+      "id": "K-TSDF-VOXEL-SIZE-MID",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "Mid-range voxel size (m, 1-3m)"
+    },
+    {
+      "id": "K-TSDF-VOXEL-SIZE-FAR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.02,
+      "description": "Far-range voxel size (m, depth>3m)"
+    },
+    {
+      "id": "K-TSDF-DEPTH-NEAR-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Near→mid voxel size transition (m)"
+    },
+    {
+      "id": "K-TSDF-DEPTH-FAR-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Mid→far voxel size transition (m)"
+    },
+    {
+      "id": "K-TSDF-TRUNCATION-MULTIPLIER",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Truncation band = multiplier × voxel_size"
+    },
+    {
+      "id": "K-TSDF-TRUNCATION-MINIMUM",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "Absolute minimum truncation distance (m)"
+    },
+    {
+      "id": "K-TSDF-WEIGHT-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 64,
+      "description": "Maximum accumulated weight per voxel (UInt8)"
+    },
+    {
+      "id": "K-TSDF-CONFIDENCE-WEIGHT-LOW",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "ARKit confidence level 0 weight"
+    },
+    {
+      "id": "K-TSDF-CONFIDENCE-WEIGHT-MID",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "ARKit confidence level 1 weight"
+    },
+    {
+      "id": "K-TSDF-CONFIDENCE-WEIGHT-HIGH",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "ARKit confidence level 2 weight"
+    },
+    {
+      "id": "K-TSDF-DISTANCE-DECAY-ALPHA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Quadratic depth weight decay alpha"
+    },
+    {
+      "id": "K-TSDF-VIEWING-ANGLE-WEIGHT-FLOOR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Minimum weight at grazing angles"
+    },
+    {
+      "id": "K-TSDF-CARVING-DECAY-RATE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2,
+      "description": "Weight decay per frame for space carving"
+    },
+    {
+      "id": "K-TSDF-DEPTH-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Minimum reliable depth (m, hardware floor)"
+    },
+    {
+      "id": "K-TSDF-DEPTH-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Maximum reliable depth (m)"
+    },
+    {
+      "id": "K-TSDF-MIN-VALID-PIXEL-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Min fraction valid depth pixels to accept frame"
+    },
+    {
+      "id": "K-TSDF-MAX-VOXELS-PER-FRAME",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500000,
+      "description": "Maximum voxels updated per GPU frame"
+    },
+    {
+      "id": "K-TSDF-MAX-TRIANGLES-PER-CYCLE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 50000,
+      "description": "Hard safety cap on triangles per meshing cycle"
+    },
+    {
+      "id": "K-TSDF-INTEGRATION-TIMEOUT-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Max CPU+GPU time for integration pass (ms)"
+    },
+    {
+      "id": "K-TSDF-METAL-THREADGROUP-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 8,
+      "description": "Threadgroup edge size (8x8=64 threads)"
+    },
+    {
+      "id": "K-TSDF-METAL-INFLIGHT-BUFFERS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Triple-buffer count for TSDF data"
+    },
+    {
+      "id": "K-TSDF-MAX-TOTAL-VOXEL-BLOCKS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100000,
+      "description": "Maximum voxel blocks across all resolutions"
+    },
+    {
+      "id": "K-TSDF-HASH-TABLE-INITIAL-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 65536,
+      "description": "Initial hash table capacity (power of 2)"
+    },
+    {
+      "id": "K-TSDF-HASH-TABLE-MAX-LOAD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Load factor threshold triggering rehash"
+    },
+    {
+      "id": "K-TSDF-HASH-MAX-PROBE-LENGTH",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 128,
+      "description": "Maximum linear probe before giving up"
+    },
+    {
+      "id": "K-TSDF-DIRTY-THRESHOLD-MULT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Block dirty threshold = mult × voxelSize"
+    },
+    {
+      "id": "K-TSDF-STALE-BLOCK-EVICT-AGE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Age threshold for low-priority eviction (s)"
+    },
+    {
+      "id": "K-TSDF-STALE-BLOCK-FORCE-EVICT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 60.0,
+      "description": "Age threshold for forced eviction (s)"
+    },
+    {
+      "id": "K-TSDF-BLOCK-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 8,
+      "description": "Voxels per block edge (8³=512, IMMUTABLE)"
+    },
+    {
+      "id": "K-TSDF-MAX-POSE-DELTA-PER-FRAME",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Position delta threshold for teleport rejection (m)"
+    },
+    {
+      "id": "K-TSDF-MAX-ANGULAR-VELOCITY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Angular velocity threshold for rejection (rad/s)"
+    },
+    {
+      "id": "K-TSDF-POSE-REJECT-WARN-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Consecutive rejected frames before warning"
+    },
+    {
+      "id": "K-TSDF-POSE-REJECT-FAIL-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 180,
+      "description": "Consecutive rejected frames before fail"
+    },
+    {
+      "id": "K-TSDF-LOOP-CLOSURE-DRIFT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.02,
+      "description": "Anchor shift threshold to mark blocks stale (m)"
+    },
+    {
+      "id": "K-TSDF-KEYFRAME-INTERVAL",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 6,
+      "description": "Every Nth integrated frame is keyframe candidate"
+    },
+    {
+      "id": "K-TSDF-KEYFRAME-ANGULAR-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Viewpoint angular change for keyframe (deg)"
+    },
+    {
+      "id": "K-TSDF-KEYFRAME-TRANSLATION",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Camera movement threshold for keyframe (m)"
+    },
+    {
+      "id": "K-TSDF-MAX-KEYFRAMES-SESSION",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Memory budget cap for retained keyframes"
+    },
+    {
+      "id": "K-TSDF-SEMAPHORE-WAIT-TIMEOUT-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 100.0,
+      "description": "GPU fence timeout before frame skip (ms)"
+    },
+    {
+      "id": "K-TSDF-GPU-MEM-PROACTIVE-EVICT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500000000,
+      "description": "GPU memory proactive eviction threshold (bytes)"
+    },
+    {
+      "id": "K-TSDF-GPU-MEM-AGGRESSIVE-EVICT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 800000000,
+      "description": "GPU memory aggressive eviction threshold (bytes)"
+    },
+    {
+      "id": "K-TSDF-WORLD-ORIGIN-RECENTER-DIST",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 100.0,
+      "description": "Camera distance from origin before recenter (m)"
+    },
+    {
+      "id": "K-TSDF-THERMAL-DEGRADE-HYSTERESIS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Cooldown before worse thermal ceiling (s)"
+    },
+    {
+      "id": "K-TSDF-THERMAL-RECOVER-HYSTERESIS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Cooldown before better thermal ceiling (s)"
+    },
+    {
+      "id": "K-TSDF-THERMAL-RECOVER-GOOD-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Good frames before AIMD additive-increase"
+    },
+    {
+      "id": "K-TSDF-THERMAL-GOOD-FRAME-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.8,
+      "description": "GPU time/timeout ratio for 'good' frame"
+    },
+    {
+      "id": "K-TSDF-THERMAL-MAX-INTEGRATION-SKIP",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 12,
+      "description": "Max frame skip count (floor=5fps)"
+    },
+    {
+      "id": "K-TSDF-MIN-TRIANGLE-AREA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1e-08,
+      "description": "Degenerate triangle area rejection (m²)"
+    },
+    {
+      "id": "K-TSDF-MAX-TRIANGLE-ASPECT-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 100.0,
+      "description": "Degenerate triangle needle rejection"
+    },
+    {
+      "id": "K-TSDF-INTEGRATION-RECORD-CAPACITY",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 300,
+      "description": "Ring buffer size for IntegrationRecord"
+    },
+    {
+      "id": "K-TSDF-SDF-DEADZONE-BASE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "SDF update dead zone for fresh voxels (m)"
+    },
+    {
+      "id": "K-TSDF-SDF-DEADZONE-WEIGHT-SCALE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.004,
+      "description": "Additional dead zone at max weight (m)"
+    },
+    {
+      "id": "K-TSDF-VERTEX-QUANTIZATION-STEP",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0005,
+      "description": "Grid snap step for vertices (m)"
+    },
+    {
+      "id": "K-TSDF-MESH-EXTRACTION-TARGET-HZ",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Target mesh extraction rate (Hz)"
+    },
+    {
+      "id": "K-TSDF-MESH-EXTRACTION-BUDGET-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Max wall-clock time per meshing cycle (ms)"
+    },
+    {
+      "id": "K-TSDF-MC-INTERPOLATION-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Lower clamp for MC zero-crossing t"
+    },
+    {
+      "id": "K-TSDF-MC-INTERPOLATION-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.9,
+      "description": "Upper clamp for MC zero-crossing t"
+    },
+    {
+      "id": "K-TSDF-POSE-JITTER-GATE-TRANS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "Min camera movement to trigger integration (m)"
+    },
+    {
+      "id": "K-TSDF-POSE-JITTER-GATE-ROT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.002,
+      "description": "Min camera rotation to trigger integration (rad)"
+    },
+    {
+      "id": "K-TSDF-MIN-OBS-BEFORE-MESH",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Min integration touches before mesh extraction"
+    },
+    {
+      "id": "K-TSDF-MESH-FADE-IN-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 7,
+      "description": "Fade-in duration after min observations met"
+    },
+    {
+      "id": "K-TSDF-MESH-BUDGET-TARGET-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 4.0,
+      "description": "Target meshing cycle time for congestion ctrl (ms)"
+    },
+    {
+      "id": "K-TSDF-MESH-BUDGET-GOOD-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Good cycle threshold for additive increase (ms)"
+    },
+    {
+      "id": "K-TSDF-MESH-BUDGET-OVERRUN-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Overrun threshold for multiplicative decrease (ms)"
+    },
+    {
+      "id": "K-TSDF-MIN-BLOCKS-PER-EXTRACT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 50,
+      "description": "Floor: always make meshing progress"
+    },
+    {
+      "id": "K-TSDF-MAX-BLOCKS-PER-EXTRACT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 250,
+      "description": "Ceiling: per-device max blocks per cycle"
+    },
+    {
+      "id": "K-TSDF-BLOCK-RAMP-PER-CYCLE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 15,
+      "description": "Additive increase per good meshing cycle"
+    },
+    {
+      "id": "K-TSDF-GOOD-CYCLES-BEFORE-RAMP",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Good cycles required before block count increase"
+    },
+    {
+      "id": "K-TSDF-FORGIVENESS-WINDOW-CYCLES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Cooldown cycles after overrun"
+    },
+    {
+      "id": "K-TSDF-SLOW-START-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.25,
+      "description": "Recovery start ratio after overrun"
+    },
+    {
+      "id": "K-TSDF-NORMAL-AVG-BOUNDARY-DIST",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "Distance from block edge for normal averaging (m)"
+    },
+    {
+      "id": "K-TSDF-MOTION-DEFER-TRANS-SPEED",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Translation speed above which meshing defers (m/s)"
+    },
+    {
+      "id": "K-TSDF-MOTION-DEFER-ANGULAR-SPEED",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Angular speed above which meshing defers (rad/s)"
+    },
+    {
+      "id": "K-TSDF-IDLE-TRANS-SPEED",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "Speed below which camera is idle (m/s)"
+    },
+    {
+      "id": "K-TSDF-IDLE-ANGULAR-SPEED",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Angular speed below which camera is idle (rad/s)"
+    },
+    {
+      "id": "K-TSDF-ANTICIPATORY-PREALLOC-DIST",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Look-ahead distance for idle preallocation (m)"
+    },
+    {
+      "id": "K-FRAME-DARK-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 60.0,
+      "description": "Dark threshold (brightness 0-255)"
+    },
+    {
+      "id": "K-FRAME-BRIGHT-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 200.0,
+      "description": "Bright threshold (brightness 0-255)"
+    },
+    {
+      "id": "K-FRAME-MAX-SIMILARITY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.92,
+      "description": "Max frame similarity (redundant frame)"
+    },
+    {
+      "id": "K-FRAME-MIN-SIMILARITY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Min frame similarity (jump frame)"
+    },
+    {
+      "id": "K-FRAME-TENENGRAD-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 50.0,
+      "description": "Tenengrad (Sobel) backup sharpness threshold"
+    },
+    {
+      "id": "K-FRAME-TENENGRAD-WARN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 40.0,
+      "description": "Tenengrad warning threshold"
+    },
+    {
+      "id": "K-FRAME-MIN-ORB-FEATURES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Minimum ORB features for SfM"
+    },
+    {
+      "id": "K-FRAME-WARN-ORB-FEATURES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 800,
+      "description": "Warning ORB features for SfM"
+    },
+    {
+      "id": "K-FRAME-OPTIMAL-ORB-FEATURES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1500,
+      "description": "Optimal ORB features for SfM"
+    },
+    {
+      "id": "K-FRAME-MIN-FEATURE-SPATIAL-DIST",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Min feature spatial distribution"
+    },
+    {
+      "id": "K-FRAME-WARN-FEATURE-SPATIAL-DIST",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.45,
+      "description": "Warning feature spatial distribution"
+    },
+    {
+      "id": "K-FRAME-SPECULAR-MAX-PERCENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Specular highlight max percent"
+    },
+    {
+      "id": "K-FRAME-SPECULAR-WARN-PERCENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Specular highlight warning percent"
+    },
+    {
+      "id": "K-FRAME-SPECULAR-MIN-PIXELS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Specular region minimum pixels"
+    },
+    {
+      "id": "K-FRAME-TRANSPARENT-WARN-PERCENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Transparent region warning percent"
+    },
+    {
+      "id": "K-FRAME-TEXTURELESS-MAX-PERCENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 25.0,
+      "description": "Textureless region max percent"
+    },
+    {
+      "id": "K-FRAME-TEXTURELESS-WARN-PERCENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Textureless region warning percent"
+    },
+    {
+      "id": "K-FRAME-MIN-LOCAL-VARIANCE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Min local variance for texture"
+    },
+    {
+      "id": "K-FRAME-MAX-ANGULAR-VEL-DEG-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Max angular velocity (deg/s)"
+    },
+    {
+      "id": "K-FRAME-WARN-ANGULAR-VEL-DEG-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 20.0,
+      "description": "Warning angular velocity (deg/s)"
+    },
+    {
+      "id": "K-FRAME-MOTION-BLUR-RISK",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.6,
+      "description": "Motion blur risk threshold"
+    },
+    {
+      "id": "K-FRAME-MOTION-BLUR-RISK-WARN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.4,
+      "description": "Motion blur risk warning threshold"
+    },
+    {
+      "id": "K-FRAME-MIN-STABLE-FRAMES-COMMIT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Min stable frames before commit"
+    },
+    {
+      "id": "K-FRAME-STABILITY-VARIANCE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Stability variance threshold"
+    },
+    {
+      "id": "K-FRAME-MAX-LUMINANCE-VAR-NERF",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.08,
+      "description": "Max luminance variance for NeRF"
+    },
+    {
+      "id": "K-FRAME-WARN-LUMINANCE-VAR-NERF",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Warning luminance variance for NeRF"
+    },
+    {
+      "id": "K-FRAME-MAX-LAB-VAR-NERF",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Max LAB variance for NeRF"
+    },
+    {
+      "id": "K-FRAME-WARN-LAB-VAR-NERF",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Warning LAB variance for NeRF"
+    },
+    {
+      "id": "K-FRAME-MIN-EXPOSURE-CONSISTENCY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.85,
+      "description": "Min exposure consistency ratio"
+    },
+    {
+      "id": "K-FRAME-WARN-EXPOSURE-CONSISTENCY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.9,
+      "description": "Warning exposure consistency ratio"
+    },
+    {
+      "id": "K-FRAME-LAPLACIAN-MULT-PRO-MACRO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.25,
+      "description": "Laplacian multiplier for pro macro profile"
+    },
+    {
+      "id": "K-FRAME-LAPLACIAN-MULT-LARGE-SCENE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.9,
+      "description": "Laplacian multiplier for large scene"
+    },
+    {
+      "id": "K-FRAME-LAPLACIAN-MULT-CINEMATIC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.9,
+      "description": "Laplacian multiplier for cinematic"
+    },
+    {
+      "id": "K-FRAME-FEATURE-MULT-CINEMATIC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Feature multiplier for cinematic"
+    },
+    {
+      "id": "K-FRAME-FEATURE-MULT-PRO-MACRO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.2,
+      "description": "Feature multiplier for pro macro"
+    },
+    {
+      "id": "K-FRAME-MIN-DEPTH-CONFIDENCE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Min depth confidence"
+    },
+    {
+      "id": "K-FRAME-MAX-DEPTH-VAR-NORMALIZED",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.15,
+      "description": "Max depth variance normalized"
+    },
+    {
+      "id": "K-JOB-STATE-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 9,
+      "description": "Total number of job states"
+    },
+    {
+      "id": "K-JOB-LEGAL-TRANSITION-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 15,
+      "description": "Number of legal state transitions"
+    },
+    {
+      "id": "K-JOB-FAILURE-REASON-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 17,
+      "description": "Total number of failure reasons"
+    },
+    {
+      "id": "K-JOB-CANCEL-REASON-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Total number of cancel reasons"
+    },
+    {
+      "id": "K-JOB-ID-MIN-LENGTH",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 15,
+      "description": "Minimum job ID length (sonyflake)"
+    },
+    {
+      "id": "K-JOB-ID-MAX-LENGTH",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 20,
+      "description": "Maximum job ID length"
+    },
+    {
+      "id": "K-JOB-CANCEL-WINDOW-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Cancel window duration (PROCESSING state)"
+    },
+    {
+      "id": "K-JOB-PROGRESS-REPORT-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Progress report interval (seconds)"
+    },
+    {
+      "id": "K-JOB-HEALTH-CHECK-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "Health check interval (seconds)"
+    },
+    {
+      "id": "K-JOB-HEARTBEAT-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Processing heartbeat interval (seconds)"
+    },
+    {
+      "id": "K-JOB-HEARTBEAT-MAX-MISSED",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Maximum missed heartbeats before auto-failure"
+    },
+    {
+      "id": "K-JOB-CHUNK-SIZE-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5242880,
+      "description": "Upload chunk size (5MB)"
+    },
+    {
+      "id": "K-JOB-MAX-VIDEO-DURATION-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 900,
+      "description": "Maximum video duration (15 min)"
+    },
+    {
+      "id": "K-JOB-MIN-VIDEO-DURATION-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Minimum video duration (5 sec)"
+    },
+    {
+      "id": "K-JOB-MAX-AUTO-RETRY-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Maximum automatic retry count"
+    },
+    {
+      "id": "K-JOB-RETRY-BASE-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2,
+      "description": "Base retry interval (seconds)"
+    },
+    {
+      "id": "K-JOB-RETRY-MAX-DELAY-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 60,
+      "description": "Maximum retry delay (seconds)"
+    },
+    {
+      "id": "K-JOB-RETRY-JITTER-MAX-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1000,
+      "description": "Maximum jitter in milliseconds"
+    },
+    {
+      "id": "K-JOB-RETRY-DECORRELATED-MULT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Decorrelated jitter multiplier"
+    },
+    {
+      "id": "K-JOB-DLQ-RETENTION-DAYS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 7,
+      "description": "DLQ retention period (days)"
+    },
+    {
+      "id": "K-JOB-DLQ-ALERT-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100,
+      "description": "DLQ entries before alert"
+    },
+    {
+      "id": "K-JOB-QUEUED-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3600,
+      "description": "Queued timeout (1 hour)"
+    },
+    {
+      "id": "K-JOB-QUEUED-WARNING-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 900,
+      "description": "Queued warning threshold (15 min)"
+    },
+    {
+      "id": "K-JOB-CB-FAILURE-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Circuit breaker failure threshold"
+    },
+    {
+      "id": "K-JOB-CB-SUCCESS-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Circuit breaker success threshold (half-open→closed)"
+    },
+    {
+      "id": "K-JOB-CB-OPEN-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Circuit breaker open timeout (seconds)"
+    },
+    {
+      "id": "K-JOB-CB-SLIDING-WINDOW",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "Circuit breaker sliding window size"
+    },
+    {
+      "id": "K-JOB-MIN-PROGRESS-INCREMENT-PCT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Min progress increment to report (%)"
+    },
+    {
+      "id": "K-JOB-INITIAL-PROGRESS-BOOST-PCT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Initial progress boost (%)"
+    },
+    {
+      "id": "K-JOB-PROGRESS-SLOWDOWN-PCT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 90.0,
+      "description": "Progress slowdown threshold (%)"
+    },
+    {
+      "id": "K-JOB-MAX-CONCURRENT-UPLOADS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Max concurrent uploads (bulkhead)"
+    },
+    {
+      "id": "K-JOB-MAX-CONCURRENT-PROCESSING",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Max concurrent processing jobs"
+    },
+    {
+      "id": "K-JOB-QUEUE-OVERFLOW-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100,
+      "description": "Queue overflow threshold (reject new)"
+    },
+    {
+      "id": "K-JOB-FALLBACK-ETA-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 120.0,
+      "description": "Default ETA when estimation unavailable (s)"
+    },
+    {
+      "id": "K-JOB-FALLBACK-STALE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Cached progress stale threshold (s)"
+    },
+    {
+      "id": "K-UPLOAD-CHUNK-MIN-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 262144,
+      "description": "Minimum chunk size (2MB)"
+    },
+    {
+      "id": "K-UPLOAD-CHUNK-DEFAULT-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2097152,
+      "description": "Default chunk size (5MB)"
+    },
+    {
+      "id": "K-UPLOAD-CHUNK-STEP-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 524288,
+      "description": "Chunk size adjustment step (1MB)"
+    },
+    {
+      "id": "K-UPLOAD-NET-SLOW-MBPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Slow network threshold (Mbps)"
+    },
+    {
+      "id": "K-UPLOAD-NET-NORMAL-MBPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Normal network threshold (Mbps)"
+    },
+    {
+      "id": "K-UPLOAD-NET-FAST-MBPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 100.0,
+      "description": "Fast network threshold (Mbps)"
+    },
+    {
+      "id": "K-UPLOAD-NET-MIN-SAMPLES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Min samples before speed estimation reliable"
+    },
+    {
+      "id": "K-UPLOAD-NET-WINDOW-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 60.0,
+      "description": "Speed measurement rolling window (s)"
+    },
+    {
+      "id": "K-UPLOAD-NET-MAX-SAMPLES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Maximum speed samples to retain"
+    },
+    {
+      "id": "K-UPLOAD-MIN-PARALLEL",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1,
+      "description": "Minimum concurrent chunk uploads"
+    },
+    {
+      "id": "K-UPLOAD-RAMP-UP-DELAY-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "Ramp-up delay between parallel requests (s)"
+    },
+    {
+      "id": "K-UPLOAD-PARALLELISM-ADJUST-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Parallelism adjustment interval (s)"
+    },
+    {
+      "id": "K-UPLOAD-SESSION-MAX-AGE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 172800.0,
+      "description": "Maximum upload session age (24h)"
+    },
+    {
+      "id": "K-UPLOAD-SESSION-CLEANUP-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1800.0,
+      "description": "Session cleanup interval (1h)"
+    },
+    {
+      "id": "K-UPLOAD-SESSION-MAX-CONCURRENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Max concurrent sessions per user"
+    },
+    {
+      "id": "K-UPLOAD-CHUNK-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 45.0,
+      "description": "Individual chunk upload timeout (s)"
+    },
+    {
+      "id": "K-UPLOAD-CONNECTION-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 8.0,
+      "description": "Connection establishment timeout (s)"
+    },
+    {
+      "id": "K-UPLOAD-STALL-DETECT-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Stall detection timeout (s)"
+    },
+    {
+      "id": "K-UPLOAD-STALL-MIN-RATE-BPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 4096,
+      "description": "Min progress rate before stall (bytes/s)"
+    },
+    {
+      "id": "K-UPLOAD-CHUNK-MAX-RETRIES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 7,
+      "description": "Maximum retries per chunk"
+    },
+    {
+      "id": "K-UPLOAD-RETRY-BASE-DELAY-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Retry base delay (seconds)"
+    },
+    {
+      "id": "K-UPLOAD-RETRY-MAX-DELAY-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Maximum retry delay (seconds)"
+    },
+    {
+      "id": "K-UPLOAD-RETRY-JITTER-FACTOR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Retry jitter range (±50%)"
+    },
+    {
+      "id": "K-UPLOAD-PROGRESS-THROTTLE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Progress update throttle interval (s)"
+    },
+    {
+      "id": "K-UPLOAD-PROGRESS-MIN-BYTES-DELTA",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 32768,
+      "description": "Min bytes delta before progress update (64KB)"
+    },
+    {
+      "id": "K-UPLOAD-PROGRESS-SMOOTHING",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.2,
+      "description": "Progress EMA smoothing factor"
+    },
+    {
+      "id": "K-UPLOAD-PROGRESS-MIN-INCREMENT-PCT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Min progress increment percentage"
+    },
+    {
+      "id": "K-UPLOAD-MAX-FILE-SIZE-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 53687091200,
+      "description": "Maximum file size for upload (10GB)"
+    },
+    {
+      "id": "K-UPLOAD-MIN-CHUNKED-SIZE-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2097152,
+      "description": "Min file size for chunked upload (5MB)"
+    },
+    {
+      "id": "K-UPLOAD-IDEMPOTENCY-MAX-AGE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 86400.0,
+      "description": "Idempotency key max age (24h)"
+    },
+    {
+      "id": "K-RETRY-MAX-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "Auto retry count maximum"
+    },
+    {
+      "id": "K-RETRY-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "Retry interval (seconds)"
+    },
+    {
+      "id": "K-RETRY-DOWNLOAD-MAX-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Download retry count maximum"
+    },
+    {
+      "id": "K-RETRY-ARTIFACT-TTL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1800.0,
+      "description": "Artifact TTL (30 min)"
+    },
+    {
+      "id": "K-RETRY-HEARTBEAT-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Heartbeat interval (seconds)"
+    },
+    {
+      "id": "K-RETRY-POLLING-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Polling interval (seconds)"
+    },
+    {
+      "id": "K-RETRY-STALL-DETECT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 300.0,
+      "description": "Stall detection seconds (5 min)"
+    },
+    {
+      "id": "K-RETRY-STALL-HEARTBEAT-FAIL-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "Stall heartbeat failure count"
+    },
+    {
+      "id": "K-BUNDLE-HASH-STREAM-CHUNK-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 262144,
+      "description": "Hash stream chunk size (256KB)"
+    },
+    {
+      "id": "K-BUNDLE-MAX-TOTAL-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5000000000,
+      "description": "Max bundle total bytes (5GB)"
+    },
+    {
+      "id": "K-BUNDLE-MAX-ASSET-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10000,
+      "description": "Max asset count per bundle"
+    },
+    {
+      "id": "K-BUNDLE-MAX-MANIFEST-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 4194304,
+      "description": "Max manifest bytes (4MB)"
+    },
+    {
+      "id": "K-BUNDLE-PROB-VERIFY-DELTA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "Probabilistic verification delta"
+    },
+    {
+      "id": "K-CAPACITY-SOFT-LIMIT-PATCHES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5000,
+      "description": "Soft limit patch count"
+    },
+    {
+      "id": "K-CAPACITY-HARD-LIMIT-PATCHES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 8000,
+      "description": "Hard limit patch count"
+    },
+    {
+      "id": "K-CAPACITY-EEB-BASE-BUDGET",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10000.0,
+      "description": "EEB base budget"
+    },
+    {
+      "id": "K-CAPACITY-EEB-MIN-QUANTUM",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "EEB minimum quantum"
+    },
+    {
+      "id": "K-CAPACITY-SOFT-BUDGET-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2000.0,
+      "description": "Soft budget threshold"
+    },
+    {
+      "id": "K-CAPACITY-HARD-BUDGET-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 500.0,
+      "description": "Hard budget threshold"
+    },
+    {
+      "id": "K-CAPACITY-POSE-EPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "Pose epsilon for duplicate detection"
+    },
+    {
+      "id": "K-CAPACITY-COVERAGE-CELL-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Coverage cell size (m)"
+    },
+    {
+      "id": "K-CAPACITY-RADIANCE-BINNING",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 16,
+      "description": "Radiance binning count"
+    },
+    {
+      "id": "K-COLOR-XYZ-WHITE-XN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.95047,
+      "description": "D65 white point XN (IMMUTABLE physics)"
+    },
+    {
+      "id": "K-COLOR-XYZ-WHITE-YN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "D65 white point YN (IMMUTABLE physics)"
+    },
+    {
+      "id": "K-COLOR-XYZ-WHITE-ZN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.08883,
+      "description": "D65 white point ZN (IMMUTABLE physics)"
+    },
+    {
+      "id": "K-COMPLIANCE-PIPL-BIOMETRIC-CONSENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "bool",
+      "value": true,
+      "description": "PIPL biometric consent required (GB/T 35273-2020)"
+    },
+    {
+      "id": "K-COMPLIANCE-SENSITIVE-PI-RETENTION-DAYS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 180,
+      "description": "Sensitive PI retention period (days)"
+    },
+    {
+      "id": "K-COMPLIANCE-SENSITIVE-PI-ENCRYPTION",
+      "status": "active",
+      "track": "P",
+      "value_type": "bool",
+      "value": true,
+      "description": "Sensitive PI encryption required (GB/T 45574-2025)"
+    },
+    {
+      "id": "K-COMPLIANCE-PHOTOGRAMMETRY-ACCURACY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.015,
+      "description": "Photogrammetry accuracy (mm/m, CH/T 1001-2005)"
+    },
+    {
+      "id": "K-COMPLIANCE-GDPR-RETENTION-DAYS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 365,
+      "description": "GDPR data retention (days)"
+    },
+    {
+      "id": "K-COMPLIANCE-GDPR-RIGHT-TO-DELETE",
+      "status": "active",
+      "track": "P",
+      "value_type": "bool",
+      "value": true,
+      "description": "GDPR right to deletion enabled"
+    },
+    {
+      "id": "K-COMPLIANCE-EIDAS-QUALIFIED-SIG",
+      "status": "active",
+      "track": "P",
+      "value_type": "bool",
+      "value": false,
+      "description": "eIDAS qualified signature required"
+    },
+    {
+      "id": "K-CONTINUITY-MAX-DELTA-THETA-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Max angular delta per frame (degrees)"
+    },
+    {
+      "id": "K-CONTINUITY-MAX-DELTA-TRANS-M",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.25,
+      "description": "Max translation delta per frame (m)"
+    },
+    {
+      "id": "K-CONTINUITY-FREEZE-WINDOW-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 20,
+      "description": "Freeze window frames"
+    },
+    {
+      "id": "K-CONTINUITY-RECOVERY-STABLE-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 15,
+      "description": "Recovery stable frames"
+    },
+    {
+      "id": "K-CONTINUITY-RECOVERY-MAX-DELTA-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Recovery max angular delta (degrees)"
+    },
+    {
+      "id": "K-COVERAGE-S4-MIN-THETA-SPAN-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 16.0,
+      "description": "S4 minimum theta span (degrees)"
+    },
+    {
+      "id": "K-COVERAGE-S4-MIN-L2-PLUS-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 7,
+      "description": "S4 minimum L2+ count"
+    },
+    {
+      "id": "K-COVERAGE-S4-MIN-L3-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "S4 minimum L3 count"
+    },
+    {
+      "id": "K-COVERAGE-S4-MAX-REPROJ-RMS-PX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "S4 max reprojection RMS (pixels)"
+    },
+    {
+      "id": "K-COVERAGE-S4-MAX-EDGE-RMS-PX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "S4 max edge RMS (pixels)"
+    },
+    {
+      "id": "K-COVERAGE-PATCH-SIZE-MIN-M",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.005,
+      "description": "Patch size minimum (m)"
+    },
+    {
+      "id": "K-COVERAGE-PATCH-SIZE-MAX-M",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Patch size maximum (m)"
+    },
+    {
+      "id": "K-COVERAGE-PATCH-SIZE-FALLBACK-M",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.05,
+      "description": "Patch size fallback (m)"
+    },
+    {
+      "id": "K-COVERAGE-L1-MIN-DELTA-THETA-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.5,
+      "description": "L1 minimum angular separation (degrees)"
+    },
+    {
+      "id": "K-COVERAGE-L2-MIN-DELTA-THETA-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "L2 minimum angular separation (degrees)"
+    },
+    {
+      "id": "K-COVERAGE-L3-MIN-DELTA-THETA-DEG",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 10.0,
+      "description": "L3 minimum angular separation (degrees)"
+    },
+    {
+      "id": "K-XPLAT-QUANT-POS-GEOM-ID",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "Quantization step for geometry ID (1mm)"
+    },
+    {
+      "id": "K-XPLAT-QUANT-POS-PATCH-ID",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0001,
+      "description": "Quantization step for patch ID (0.1mm)"
+    },
+    {
+      "id": "K-XPLAT-TOL-COVERAGE-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0001,
+      "description": "Coverage ratio relative tolerance"
+    },
+    {
+      "id": "K-XPLAT-TOL-LAB-COLOR-ABS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "LAB color absolute tolerance"
+    },
+    {
+      "id": "K-XPLAT-RELATIVE-ERROR-EPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1e-12,
+      "description": "Relative error epsilon"
+    },
+    {
+      "id": "K-MATH-RATIO-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0,
+      "description": "Ratio minimum (IMMUTABLE)"
+    },
+    {
+      "id": "K-MATH-RATIO-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Ratio maximum (IMMUTABLE)"
+    },
+    {
+      "id": "K-MATH-SCORE-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0,
+      "description": "Score minimum (IMMUTABLE)"
+    },
+    {
+      "id": "K-MATH-SCORE-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Score maximum (IMMUTABLE)"
+    },
+    {
+      "id": "K-MATH-WEIGHT-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0,
+      "description": "Weight minimum (IMMUTABLE)"
+    },
+    {
+      "id": "K-MATH-COUNT-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 0,
+      "description": "Count minimum (IMMUTABLE)"
+    },
+    {
+      "id": "K-METAL-INFLIGHT-BUFFER-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Triple-buffer count (Apple WWDC recommendation)"
+    },
+    {
+      "id": "K-METAL-DEFAULT-THREADGROUP-SIZE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 8,
+      "description": "Default compute threadgroup edge size (8x8=64)"
+    },
+    {
+      "id": "K-THERMAL-SAFE-AMBIENT-MAX-C",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 35.0,
+      "description": "Safe ambient max temperature (°C)"
+    },
+    {
+      "id": "K-THERMAL-WARNING-C",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 40.0,
+      "description": "Thermal warning temperature (°C)"
+    },
+    {
+      "id": "K-THERMAL-CRITICAL-C",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 45.0,
+      "description": "Thermal critical temperature (°C)"
+    },
+    {
+      "id": "K-THERMAL-SHUTDOWN-C",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 50.0,
+      "description": "Thermal shutdown temperature (°C)"
+    },
+    {
+      "id": "K-THERMAL-MAX-4K60-CONTINUOUS-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1800,
+      "description": "Max 4K60 continuous seconds (30 min)"
+    },
+    {
+      "id": "K-THERMAL-MAX-PRORES-CONTINUOUS-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 900,
+      "description": "Max ProRes continuous seconds (15 min)"
+    },
+    {
+      "id": "K-THERMAL-COOLDOWN-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 120,
+      "description": "Thermal cooldown seconds (2 min)"
+    },
+    {
+      "id": "K-OBSERVE-MIN-OVERLAP-AREA",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1e-06,
+      "description": "L1 minimum overlap area"
+    },
+    {
+      "id": "K-OBSERVE-MIN-PARALLAX-RATIO",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.02,
+      "description": "L2 minimum parallax ratio"
+    },
+    {
+      "id": "K-OBSERVE-MAX-REPROJ-ERROR-PX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "L2 max reprojection error (px)"
+    },
+    {
+      "id": "K-OBSERVE-MAX-GEOMETRIC-VAR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0001,
+      "description": "L2 max geometric variance"
+    },
+    {
+      "id": "K-OBSERVE-MAX-DEPTH-VAR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "L3 max depth variance"
+    },
+    {
+      "id": "K-OBSERVE-MAX-LUMINANCE-VAR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "L3 max luminance variance"
+    },
+    {
+      "id": "K-OBSERVE-MAX-LAB-VAR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "L3 max LAB variance"
+    },
+    {
+      "id": "K-OBSERVE-MIN-ANGULAR-SEP-RAD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.0872664626,
+      "description": "Min angular separation (5 degrees, rad)"
+    },
+    {
+      "id": "K-DIM-TRACKING-STABLE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.95,
+      "description": "Reliability coefficient: tracking stable"
+    },
+    {
+      "id": "K-DIM-MOTION-BLUR",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.6,
+      "description": "Reliability coefficient: motion blur"
+    },
+    {
+      "id": "K-DIM-LOW-FEATURES",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.7,
+      "description": "Reliability coefficient: low features"
+    },
+    {
+      "id": "K-DIM-HIGH-CONFIDENCE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Reliability coefficient: high confidence"
+    },
+    {
+      "id": "K-PIZ-PERSISTENCE-WINDOW-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "PIZ persistence window (seconds)"
+    },
+    {
+      "id": "K-PIZ-IMPROVEMENT-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.01,
+      "description": "PIZ improvement threshold"
+    },
+    {
+      "id": "K-PIZ-MIN-AREA-SQ-M",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.001,
+      "description": "PIZ minimum area (m²)"
+    },
+    {
+      "id": "K-SAMPLE-MIN-VIDEO-DURATION-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Min video duration (seconds)"
+    },
+    {
+      "id": "K-SAMPLE-MAX-VIDEO-DURATION-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 900.0,
+      "description": "Max video duration (15 min)"
+    },
+    {
+      "id": "K-SAMPLE-MIN-FRAME-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Min frame count"
+    },
+    {
+      "id": "K-SAMPLE-MAX-FRAME-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1800,
+      "description": "Max frame count"
+    },
+    {
+      "id": "K-SAMPLE-JPEG-QUALITY",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.85,
+      "description": "JPEG quality"
+    },
+    {
+      "id": "K-SAMPLE-MAX-IMAGE-LONG-EDGE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1920,
+      "description": "Max image long edge (px)"
+    },
+    {
+      "id": "K-SESSION-TIME-GAP-THRESHOLD-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Session time gap threshold (minutes)"
+    },
+    {
+      "id": "K-SESSION-BG-THRESHOLD-MIN",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Session background threshold (minutes)"
+    },
+    {
+      "id": "K-SESSION-ANCHOR-SEARCH-MAX-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 15,
+      "description": "Session anchor search max frames"
+    },
+    {
+      "id": "K-STORAGE-LOW-WARNING-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1610612736,
+      "description": "Low storage warning threshold (1.5GB)"
+    },
+    {
+      "id": "K-STORAGE-AUTO-CLEANUP-ENABLED",
+      "status": "active",
+      "track": "P",
+      "value_type": "bool",
+      "value": false,
+      "description": "Auto cleanup enabled"
+    },
+    {
+      "id": "K-SYSTEM-MAX-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5000,
+      "description": "System max frames"
+    },
+    {
+      "id": "K-SYSTEM-MIN-FRAMES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "System min frames"
+    },
+    {
+      "id": "K-SYSTEM-MAX-GAUSSIANS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1000000,
+      "description": "System max gaussians"
+    },
+    {
+      "id": "K-PIPELINE-STALL-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 300.0,
+      "description": "Pipeline stall timeout (5 min)"
+    },
+    {
+      "id": "K-PIPELINE-ABSOLUTE-MAX-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 7200.0,
+      "description": "Pipeline absolute max timeout (2h)"
+    },
+    {
+      "id": "K-PIPELINE-POLL-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Pipeline poll interval (seconds)"
+    },
+    {
+      "id": "K-PIPELINE-POLL-QUEUED-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Pipeline poll queued interval (seconds)"
+    },
+    {
+      "id": "K-PIPELINE-BG-POLL-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Background poll interval (seconds)"
+    },
+    {
+      "id": "K-PIPELINE-BG-GRACE-PERIOD-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 180.0,
+      "description": "Background grace period (seconds)"
+    },
+    {
+      "id": "K-CONVERT-BYTES-PER-KB",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1024,
+      "description": "Bytes per kilobyte (IMMUTABLE)"
+    },
+    {
+      "id": "K-CONVERT-BYTES-PER-MB",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1048576,
+      "description": "Bytes per megabyte (IMMUTABLE)"
+    },
+    {
+      "id": "K-PRECHECK-CONFIDENCE-FULL",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.8,
+      "description": "Confidence threshold full tier"
+    },
+    {
+      "id": "K-PRECHECK-CONFIDENCE-DEGRADED",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.9,
+      "description": "Confidence threshold degraded tier"
+    },
+    {
+      "id": "K-PRECHECK-WHITE-STABILITY-MAX",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.15,
+      "description": "Full white stability max (15% variance)"
+    },
+    {
+      "id": "K-PRECHECK-WHITE-STABILITY-DEGRADED",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.12,
+      "description": "Degraded white stability max (12%)"
+    },
+    {
+      "id": "K-PRECHECK-DIR-ENTER-STABLE-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Direction enter stable (ms)"
+    },
+    {
+      "id": "K-PRECHECK-DIR-NO-PROGRESS-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2000,
+      "description": "Direction no progress (ms)"
+    },
+    {
+      "id": "K-PRECHECK-DIR-MIN-LIFETIME-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1000,
+      "description": "Direction min lifetime (ms)"
+    },
+    {
+      "id": "K-PRECHECK-DIR-COOLDOWN-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Direction cooldown (ms)"
+    },
+    {
+      "id": "K-PRECHECK-TREND-WINDOW-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 300,
+      "description": "Trend confirmation window (ms)"
+    },
+    {
+      "id": "K-PRECHECK-MAX-FIRST-FEEDBACK-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Max time to first feedback (ms)"
+    },
+    {
+      "id": "K-PRECHECK-FREEZE-HYSTERESIS-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 200,
+      "description": "Freeze hysteresis (ms)"
+    },
+    {
+      "id": "K-PRECHECK-NO-PROGRESS-WARN-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2000,
+      "description": "No progress warning (ms)"
+    },
+    {
+      "id": "K-PRECHECK-SPEED-SMOOTH-WINDOW-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 200,
+      "description": "Speed smoothing window (ms)"
+    },
+    {
+      "id": "K-PRECHECK-SPEED-MAX-CHANGE-RATE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Speed max change rate (30% per 200ms)"
+    },
+    {
+      "id": "K-PRECHECK-HINT-COOLDOWN-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2000,
+      "description": "Hint cooldown (ms)"
+    },
+    {
+      "id": "K-PRECHECK-EDGE-PULSE-COOLDOWN-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 200,
+      "description": "Edge pulse cooldown (ms)"
+    },
+    {
+      "id": "K-PRECHECK-EDGE-PULSE-DEBOUNCE-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 50,
+      "description": "Edge pulse debounce (ms)"
+    },
+    {
+      "id": "K-PRECHECK-DEGRADE-HYSTERESIS-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Degradation hysteresis (ms)"
+    },
+    {
+      "id": "K-PRECHECK-EMERGENCY-EXIT-HYST-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1500,
+      "description": "Emergency exit hysteresis (ms)"
+    },
+    {
+      "id": "K-PRECHECK-FPS-FULL-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "FPS full tier threshold"
+    },
+    {
+      "id": "K-PRECHECK-FPS-DEGRADED-THRESHOLD",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 20.0,
+      "description": "FPS degraded tier threshold"
+    },
+    {
+      "id": "K-PRECHECK-FPS-EMERGENCY-EXIT",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 25.0,
+      "description": "FPS emergency exit threshold"
+    },
+    {
+      "id": "K-PRECHECK-PERF-BUDGET-P50-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 14.0,
+      "description": "Performance budget P50 (ms)"
+    },
+    {
+      "id": "K-PRECHECK-PERF-BUDGET-P95-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 22.0,
+      "description": "Performance budget P95 (ms)"
+    },
+    {
+      "id": "K-PRECHECK-PERF-BUDGET-EMRG-P50-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Emergency performance budget P50 (ms)"
+    },
+    {
+      "id": "K-PRECHECK-MAX-TREND-BUFFER",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100,
+      "description": "Max trend buffer size"
+    },
+    {
+      "id": "K-PRECHECK-MAX-MOTION-BUFFER",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 50,
+      "description": "Max motion buffer size"
+    },
+    {
+      "id": "K-PRECHECK-MAX-COMMIT-RETRIES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 3,
+      "description": "Max commit retries"
+    },
+    {
+      "id": "K-PRECHECK-MAX-COMMIT-RETRY-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 300,
+      "description": "Max commit retry total (ms)"
+    },
+    {
+      "id": "K-PRECHECK-COMMIT-RETRY-INIT-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "Commit retry initial delay (ms)"
+    },
+    {
+      "id": "K-PRECHECK-COMMIT-RETRY-MAX-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100,
+      "description": "Commit retry max delay (ms)"
+    },
+    {
+      "id": "K-PRECHECK-MAX-AUDIT-PAYLOAD-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 65536,
+      "description": "Max audit payload (64KB)"
+    },
+    {
+      "id": "K-PRECHECK-MAX-COVERAGE-DELTA-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 262144,
+      "description": "Max coverage delta payload (256KB)"
+    },
+    {
+      "id": "K-PRECHECK-MAX-COMMITS-PER-SESSION",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100000,
+      "description": "Max commits per session"
+    },
+    {
+      "id": "K-PRECHECK-MAX-DELTA-CHANGED-COUNT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 16384,
+      "description": "Max delta changed count"
+    },
+    {
+      "id": "K-PRECHECK-MAX-CELL-INDEX",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 16383,
+      "description": "Max cell index (128*128-1)"
+    },
+    {
+      "id": "K-PRECHECK-HINT-MAX-STRONG",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 4,
+      "description": "Hint max strong per session"
+    },
+    {
+      "id": "K-PRECHECK-HINT-MAX-SUBTLE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1,
+      "description": "Hint max subtle per direction"
+    },
+    {
+      "id": "K-PRECHECK-MIN-PROGRESS-INCREMENT",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "Min progress increment (cells)"
+    },
+    {
+      "id": "K-PRECHECK-MIN-VISIBLE-PROGRESS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Min visible progress increment (cells)"
+    },
+    {
+      "id": "K-PRECHECK-FLOAT-EPSILON",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1e-06,
+      "description": "Float comparison epsilon"
+    },
+    {
+      "id": "K-PRECHECK-STOPPED-ANIM-HZ",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Stopped animation frequency (Hz)"
+    },
+    {
+      "id": "K-CAPTURE-MIN-DURATION-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Min recording duration (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-MAX-DURATION-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 900.0,
+      "description": "Max recording duration (15 min)"
+    },
+    {
+      "id": "K-CAPTURE-DURATION-TOLERANCE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "Duration validation tolerance (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-MIN-RECOMMENDED-3D-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Min recommended 3D duration (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-OPTIMAL-3D-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 60.0,
+      "description": "Optimal 3D scanning duration (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-MAX-RECOMMENDED-3D-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 300.0,
+      "description": "Max recommended 3D duration (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-CMTIME-TIMESCALE",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 600,
+      "description": "CMTime preferred timescale"
+    },
+    {
+      "id": "K-CAPTURE-MIN-FREE-SPACE-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 2147483648,
+      "description": "Min free space (2GB)"
+    },
+    {
+      "id": "K-CAPTURE-MIN-FREE-SPACE-BUFFER-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 30.0,
+      "description": "Min free space seconds buffer"
+    },
+    {
+      "id": "K-CAPTURE-LOW-STORAGE-WARN-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5368709120,
+      "description": "Low storage warning (5GB)"
+    },
+    {
+      "id": "K-CAPTURE-CRITICAL-STORAGE-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1073741824,
+      "description": "Critical storage (1GB)"
+    },
+    {
+      "id": "K-CAPTURE-MIN-BITRATE-3D-BPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 50000000,
+      "description": "Min bitrate for 3D (50 Mbps)"
+    },
+    {
+      "id": "K-CAPTURE-FINALIZE-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 15.0,
+      "description": "Finalize timeout (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-ASSET-CHECK-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.5,
+      "description": "Asset check timeout budget (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-RECONFIGURE-DELAY-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Reconfigure delay (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-RECONFIGURE-DEBOUNCE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Reconfigure debounce (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-SESSION-START-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 5.0,
+      "description": "Session start timeout (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-DEVICE-LOCK-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 2.0,
+      "description": "Device lock timeout (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-FORMAT-VALIDATION-TIMEOUT-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 3.0,
+      "description": "Format validation timeout (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-FPS-MATCH-TOLERANCE",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.1,
+      "description": "FPS matching tolerance"
+    },
+    {
+      "id": "K-CAPTURE-MAX-FORMAT-ATTEMPTS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 5,
+      "description": "Max format attempts"
+    },
+    {
+      "id": "K-CAPTURE-FORMAT-WARMUP-DELAY-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Format warmup delay (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-SCORE-WEIGHT-FPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1000,
+      "description": "Format scoring FPS weight"
+    },
+    {
+      "id": "K-CAPTURE-SCORE-WEIGHT-RESOLUTION",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 100,
+      "description": "Format scoring resolution weight"
+    },
+    {
+      "id": "K-CAPTURE-SCORE-WEIGHT-HDR",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Format scoring HDR weight"
+    },
+    {
+      "id": "K-CAPTURE-SCORE-WEIGHT-HEVC",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 200,
+      "description": "Format scoring HEVC weight"
+    },
+    {
+      "id": "K-CAPTURE-SCORE-WEIGHT-PRORES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 800,
+      "description": "Format scoring ProRes weight"
+    },
+    {
+      "id": "K-CAPTURE-MAX-FILENAME-LENGTH",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 120,
+      "description": "Max filename length"
+    },
+    {
+      "id": "K-CAPTURE-ORPHAN-TMP-MAX-AGE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 14400.0,
+      "description": "Orphan tmp max age (4h)"
+    },
+    {
+      "id": "K-CAPTURE-MAX-RETAINED-FAILURE-FILES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 10,
+      "description": "Max retained failure files"
+    },
+    {
+      "id": "K-CAPTURE-MAX-RETAINED-FAILURE-BYTES",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 524288000,
+      "description": "Max retained failure bytes (500MB)"
+    },
+    {
+      "id": "K-CAPTURE-MAX-RETAINED-FAILURE-DAYS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 7,
+      "description": "Max retained failure age (days)"
+    },
+    {
+      "id": "K-CAPTURE-UPDATE-INTERVAL-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 1.0,
+      "description": "Recording update interval (seconds)"
+    },
+    {
+      "id": "K-CAPTURE-HDR-MAX-CONTENT-LIGHT-NITS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 1000,
+      "description": "HDR max content light level (nits)"
+    },
+    {
+      "id": "K-CAPTURE-HDR-MAX-FRAME-AVG-NITS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 200,
+      "description": "HDR max frame average light level (nits)"
+    },
+    {
+      "id": "K-CAPTURE-PRORES-MIN-WRITE-SPEED-MBPS",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 220,
+      "description": "ProRes min storage write speed (MB/s)"
+    },
+    {
+      "id": "K-CAPTURE-MIN-FRAMES-3D",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 30,
+      "description": "Min frames for 3D reconstruction"
+    },
+    {
+      "id": "K-CAPTURE-RECOMMENDED-FRAMES-3D",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 200,
+      "description": "Recommended frames for 3D"
+    },
+    {
+      "id": "K-CAPTURE-OPTIMAL-FRAMES-3D",
+      "status": "active",
+      "track": "P",
+      "value_type": "int",
+      "value": 500,
+      "description": "Optimal frames for 3D"
+    },
+    {
+      "id": "K-CAPTURE-MAX-MOTION-BLUR-MS",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 16.67,
+      "description": "Max acceptable motion blur (ms)"
+    },
+    {
+      "id": "K-CAPTURE-FOCUS-HYSTERESIS-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.5,
+      "description": "Focus hysteresis seconds"
+    },
+    {
+      "id": "K-CAPTURE-EXPOSURE-STABILIZE-SEC",
+      "status": "active",
+      "track": "P",
+      "value_type": "float",
+      "value": 0.3,
+      "description": "Exposure stabilization delay (seconds)"
+    },
+    {
+      "id": "K-INST-MAX-INSTANCES",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 1024,
+      "tier": 1,
+      "description": "Max instance count per scene; §6.63.2 TAIS. Derived: 10-bit instance_id in TriangleSemanticBinding, 2^10=1024 covers indoor (typ. 50-200 objects) with 5× headroom.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-INST-BOUNDARY-NORMAL-DOT",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.8,
+      "tier": 1,
+      "description": "Instance boundary split threshold; §6.63.2 TAIS triangle boundary detection. cos(36.87°)=0.8: MC triangle normal precision at TSDF 2cm resolution. Tighter >0.95 misses curved contacts; looser <0.7 false-splits planar surfaces.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-INST-CONTACT-DISTANCE-M",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.01,
+      "tier": 1,
+      "description": "Instance contact/coplanar distance (meters); §6.63.3 InstanceEdge CONTACT detection. = TSDF resolution (0.02m) / 2 = MC zero-crossing max error. Two surfaces closer than this are physically touching.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-GRAPH-MAX-EDGES",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 2048,
+      "tier": 2,
+      "description": "Max edges in InstanceGraph; §6.63.3. Worst-case: 1024 instances × d95=3 / 2 = 1536 undirected edges. 2048 = 33% headroom over worst case. Capacity limits must cover worst case, not average — exceeding silently drops edges and breaks scene graph. Memory: 2048×24B = 48KB (negligible).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-GRAPH-SUPPORT-DOT",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.8,
+      "tier": 1,
+      "description": "Support relation detection threshold; §6.63.3 InstanceEdge SUPPORT type. cos(36.87°)=0.8: contact normal must be within 37° of gravity-up to qualify as support (object resting on surface). Same physical basis as K-INST-BOUNDARY-NORMAL-DOT.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-GRAPH-CONTACT-COPLANAR-M",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.01,
+      "tier": 1,
+      "description": "Graph edge coplanar distance (meters); §6.63.3. Same derivation as K-INST-CONTACT-DISTANCE-M: half TSDF voxel = MC surface max error. Edges are added when two instance surfaces are within this distance.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-BGCACHE-ALPHA-DOMINANT",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.6,
+      "tier": 2,
+      "description": "Background cache alpha-dominance threshold; §6.63.6. Gaussian contributing >60% to pixel is primary occluder. Rejects 50/50 boundary splits (two overlapping Gaussians each at ~50% cause ambiguous occlusion) while capturing solid surfaces at grazing angles (~60-70% contribution). Higher >0.8 misses semi-transparent; lower <0.5 catches boundary bleeding.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-BGCACHE-MIN-CONFIDENCE",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 128,
+      "tier": 2,
+      "description": "Background cache min confidence [0-255]; §6.63.6. Midpoint of uint8 range. Observation must accumulate confidence ≥128 (via repeated observations) before being used for background recovery. Prevents single-frame noise from polluting cache.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-BGCACHE-MIN-OBSERVATIONS",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 3,
+      "tier": 2,
+      "description": "Min observation count before background cache entry is eligible for recovery; §6.63.6. 3 = minimum for single-outlier rejection (2-of-3 voting). Independent of confidence threshold: even a high-confidence single observation could be a transient artifact.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.63.7"
+    },
+    {
+      "id": "K-OBS-MIN-BASELINE-PIXELS",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 3.0,
+      "tier": 1,
+      "description": "§6.64.1 Observability: hard minimum median parallax floor (pixels). 3.0px is a robust matching floor under handheld motion blur/noise; final gate is dynamic via d_gate=max(K-OBS-MIN-BASELINE-PIXELS, K-OBS-REQ-PARALLAX-RATIO*d_req).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.1"
+    },
+    {
+      "id": "K-OBS-REQ-PARALLAX-RATIO",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.2,
+      "tier": 1,
+      "description": "§6.64.1 Observability: dynamic parallax gate ratio. d_req=z*σ_d/σ_z_target from first principles, and d_gate=max(floor, ratio*d_req). 0.20 enforces at least 20% of theoretically required disparity to keep keyframe throughput while preserving measurable geometry.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.1"
+    },
+    {
+      "id": "K-OBS-OVERLAP-MIN",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.70,
+      "tier": 2,
+      "description": "§6.64.1 Observability: minimum keyframe overlap ratio. Below 0.70 feature matching degrades; above 0.85 baseline is insufficient. Sweet spot for indoor room-scale scanning.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.1"
+    },
+    {
+      "id": "K-OBS-OVERLAP-MAX",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.85,
+      "tier": 2,
+      "description": "§6.64.1 Observability: maximum keyframe overlap ratio. Above 0.85 means insufficient baseline for triangulation at target depth.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.1"
+    },
+    {
+      "id": "K-OBS-SIGMA-Z-TARGET-M",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.015,
+      "tier": 0,
+      "description": "§6.64.1 Observability: target depth uncertainty at 3m (meters). Derivation: LiDAR achieves 1-2cm; pure vision target 1.5cm with multi-anchor fusion. This drives B_req(z)=z²σ_d/(f·σ_z_target). Tier 0: forensic-critical, changing this changes all downstream quality gates.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.1"
+    },
+    {
+      "id": "K-OBS-INFO-GAIN-THRESHOLD",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.01,
+      "tier": 2,
+      "description": "§6.64.1 Observability: minimum information gain per frame to consider it useful. info_gain = Σ_voxel max(0, 1/σ_new² - 1/σ_old²). Below threshold → prompt user to move to uncovered area.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.1"
+    },
+    {
+      "id": "K-ANCHOR-MIN-OBJECTS",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 3,
+      "tier": 1,
+      "description": "§6.64.2 ScaleAnchor: minimum number of consistent anchor objects required to lock absolute scale. 3 anchors allows single-outlier rejection via median. Scale locked when std(estimates)/mean(estimates) < 0.05.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.2"
+    },
+    {
+      "id": "K-ANCHOR-CONSISTENCY-RATIO",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.05,
+      "tier": 1,
+      "description": "§6.64.2 ScaleAnchor: maximum coefficient of variation (std/mean) across anchor scale estimates for lock. 5% ensures sub-3cm accuracy at 3m distance. Derivation: door height 200±3cm (1.5% CV) + segmentation ±5px (0.5% CV) + focal ±0.1% → total ~1.6% CV; 5% gives 3× margin.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.2"
+    },
+    {
+      "id": "K-ANCHOR-EMA-ALPHA",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.05,
+      "tier": 2,
+      "description": "§6.64.2 ScaleAnchor: EMA smoothing factor for post-lock scale updates. 0.05 = 20-frame effective window. New anchor only accepted if within K-ANCHOR-OUTLIER-RATIO of current scale.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.2"
+    },
+    {
+      "id": "K-ANCHOR-OUTLIER-RATIO",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.08,
+      "tier": 1,
+      "description": "§6.64.2 ScaleAnchor: maximum relative deviation for post-lock anchor acceptance. New anchor with |scale_new - scale_current| / scale_current > 0.08 is discarded as misidentification.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.2"
+    },
+    {
+      "id": "K-ANCHOR-HUBER-DELTA-SIGMA",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 2.5,
+      "tier": 1,
+      "description": "§6.64.2 ScaleAnchor robust fusion: Huber transition threshold in sigma units for anchor residuals. Used in weighted M-estimation s*=argmin Σ w_i rho((s_i-s)/σ_i). 2.5σ suppresses semantic outliers without over-clipping valid anchors.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.2"
+    },
+    {
+      "id": "K-TSDF-TRUNC-K-SIGMA",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 3.5,
+      "tier": 1,
+      "description": "§6.64.3 Adaptive TSDF: truncation = k × σ_total. k=3.5 covers 99.95% confidence interval. Derivation: 3.5σ retains all physically plausible observations while rejecting outliers beyond 4σ. Actual truncation clamped to [τ_min, τ_max] voxels.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-TRUNC-MIN-VOXELS",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1.5,
+      "tier": 1,
+      "description": "§6.64.3 Adaptive TSDF: minimum truncation distance in voxel units. Below 1.5 voxels, the zero-crossing detection becomes unreliable (MC needs at least 1 voxel on each side of surface).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-TRUNC-MAX-VOXELS",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 6.0,
+      "tier": 2,
+      "description": "§6.64.3 Adaptive TSDF: maximum truncation distance in voxel units. Beyond 6 voxels, TSDF integration becomes diffuse and surface localization degrades. Trade-off: larger τ helps with noisy depth; smaller τ gives sharper surfaces.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-W-MAX",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 64,
+      "tier": 1,
+      "description": "§6.64.3 Adaptive TSDF: maximum cumulative weight per voxel. Derivation: 2-3min scan, 30fps, each voxel seen ~80× avg, E[w_total]≈0.6 → W_optimal≈48; 64=next power-of-2, gives 33% headroom. Too high → old data dominates; too low → insufficient fusion.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-ROBUST-NU",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 4.0,
+      "tier": 1,
+      "description": "§6.64.3 Adaptive TSDF robust kernel parameter. Observation weight uses Student-t kernel w_rho=(1+rho^2/nu)^(-(nu+1)/2). nu=4 gives heavy tails for pure-vision noise while preserving continuous monotonic decay.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-CAUTION-THRESHOLD",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 2.5,
+      "tier": 1,
+      "description": "§6.64.3 Adaptive TSDF: Mahalanobis distance threshold for ACCEPT→CAUTION transition. Pure vision noise is larger than LiDAR; 2.5 (vs original 2.0) prevents over-rejection of valid observations. Derivation: Bayesian posterior P(inlier|ρ=2.5)≈0.42 at 90% inlier rate.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-REJECT-THRESHOLD",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 5.0,
+      "tier": 1,
+      "description": "§6.64.3 Adaptive TSDF: Mahalanobis distance threshold for REJECT. Pure vision: 5.0σ (vs original 4.0). Bayesian posterior at ρ=5.0: P(inlier)<0.001. Beyond this, observation is certainly noise.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-EVIDENCE-EMA-BETA",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.93,
+      "tier": 1,
+      "description": "§6.64.3 Dual-timescale: evidence EMA smoothing factor. β=0.93 → effective window ~14 observations. Stronger smoothing suppresses single-frame tier flapping (S3↔S2) while geometry remains full-rate.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-TSDF-QUALITY-EXP-VISION",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1.5,
+      "tier": 2,
+      "description": "§6.64.3: w_quality exponent for pure vision mode. LiDAR uses 2.0 (quadratic). Pure vision: 1.5 (compromise) because good frames are rarer without LiDAR stabilization; too aggressive weighting starves the system of data.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.3"
+    },
+    {
+      "id": "K-FUSED-LAMBDA-DEPTH-SELF",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.3,
+      "tier": 1,
+      "description": "§6.64.4 FusedLoss: self-supervised depth consistency weight (pure vision). L_depth_self = |D_rendered(v_i) - warp(D_rendered(v_j), T_ij)| / σ_warp. Lower than LiDAR depth (0.5) because self-supervision has higher uncertainty.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-LAMBDA-NORMAL",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.2,
+      "tier": 1,
+      "description": "§6.64.4 FusedLoss: normal consistency weight. Upgraded from 0.1→0.2. Surface quality is critical for pure vision (no LiDAR ground truth to fall back on). Only applied at S2+ evidence tier (low-evidence normals unreliable).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-LAMBDA-FLOATER",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.05,
+      "tier": 2,
+      "description": "§6.64.4 FusedLoss: floater suppression weight (TIDI-GS inspired, 2026.01). L_floater = max(0, |D_gaussian - D_mono_nearest| - margin). Light penalty sufficient to suppress geometric outliers without disrupting valid thin structures.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-CHARB-EPSILON",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.001,
+      "tier": 2,
+      "description": "§6.64.4 FusedLoss: Charbonnier loss ε. L_charb = sqrt((I-Î)²+ε²)-ε. Smoother than L1 at origin → optimizer-friendly. 0.001 chosen so transition from quadratic to linear behavior occurs at ~1/255 pixel intensity.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-ADAM-EPSILON",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1e-10,
+      "tier": 1,
+      "description": "§6.64.5 Adam optimizer epsilon lower bound for adaptive epsilon schedule. eps_t=clamp(K-ADAM-EPSILON-SCALE*median(sqrt(v_hat)), K-ADAM-EPSILON, K-ADAM-EPSILON-MAX). Lower bound 1e-10 guarantees denominator stability.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-ADAM-EPSILON-MAX",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1e-8,
+      "tier": 1,
+      "description": "§6.64.5 Adam adaptive epsilon upper bound. Prevents over-damping of updates in high-noise windows when median second-moment spikes.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-ADAM-EPSILON-SCALE",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.01,
+      "tier": 1,
+      "description": "§6.64.5 Adam adaptive epsilon scale factor multiplied by median(sqrt(v_hat)). 0.01 sets epsilon to ~1% of typical second-moment scale before clamp.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-ADAM-BETA2",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.99,
+      "tier": 1,
+      "description": "§6.64.5 Adam beta2. CHANGED from 0.999→0.99 for short training budgets (<20K iter). Time constant 100 steps (vs 1000). Faster convergence for minute-scale on-device training. If iter>20K, restore to 0.999.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-ADAM-WARMUP-ITERS",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 300,
+      "tier": 2,
+      "description": "§6.64.5 Adam warmup iterations. CHANGED from 500→300. Aligned with SH1 activation timing. 300 iters sufficient for lr ramp from 0.1× to 1.0×.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-STALL-WINDOW",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 300,
+      "tier": 2,
+      "description": "§6.64.5 DPC stall detection window. CHANGED from 500→300 iterations. +40% faster response to training plateaus. Triggers opacity reset when PSNR unchanged ±0.1dB for 300 consecutive iters.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-OPACITY-RESET-INTERVAL",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 2500,
+      "tier": 2,
+      "description": "§6.64.5 DPC periodic opacity reset interval. CHANGED from 3000→2500. +20% parasitic Gaussian cleanup efficiency.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-ANGULAR-COHERENCE-SPLIT",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.7,
+      "tier": 2,
+      "description": "§6.64.5 DC4GS-inspired angular coherence threshold for split. If mean(cos(angle(grad_i, grad_mean))) > 0.7 AND magnitude > thresh → SPLIT. Reduces primitives 30% vs magnitude-only (NeurIPS 2025 DC4GS).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-ANGULAR-COHERENCE-SKIP",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.3,
+      "tier": 2,
+      "description": "§6.64.5 DC4GS angular coherence skip threshold. If coherence < 0.3 → gradient direction is noise, skip densification regardless of magnitude. Prevents wasted splits on transient gradient spikes.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-TRINITY-COS-THRESH-FP32",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.9999,
+      "tier": 0,
+      "description": "§6.64.6 Trinity backward cosine alignment threshold (FP32 mode). Derivation: arccos(0.9999)≈0.81°; for 1000-dim gradient, random perturbation ~1/√1000≈0.032. 0.9999 is well above noise floor. Tier 0: forensic determinism requirement.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.6"
+    },
+    {
+      "id": "K-TRINITY-COS-THRESH-FP16",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.999,
+      "tier": 0,
+      "description": "§6.64.6 Trinity backward cosine alignment threshold (FP16 mixed precision). Relaxed from 0.9999 due to larger FP16 quantization error. Still well above random (0.032).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.6"
+    },
+    {
+      "id": "K-AUDIT-HASH-BATCH-FRAMES",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 4,
+      "tier": 1,
+      "description": "§6.64.7 Audit: SHA-256 batch size. Accumulate 4 frames → single hash. Reduces SHA-256 invocations 4× while maintaining per-133ms audit granularity at 30fps. Hardware Secure Enclave amortizes startup overhead.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.7"
+    },
+    {
+      "id": "K-AUDIT-RFC3161-ANCHOR-SEC",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 60,
+      "tier": 1,
+      "description": "§6.64.7 Audit: RFC 3161 periodic anchor interval (seconds). Uniform policy for all sessions: mandatory anchor at session start + every 60s + mandatory anchor at session end. Client-first mode: mobile requests TSA directly; server primarily verifies and archives tokens.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.7"
+    },
+    {
+      "id": "K-AUDIT-TIME-DRIFT-MAX-SEC",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 300,
+      "tier": 1,
+      "description": "§6.64.7 Audit: maximum allowed local-vs-TSA drift before flagging time_unanchored. 300s tightens temporal proof integrity while still tolerating intermittent network delay.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.7"
+    },
+    {
+      "id": "K-VOLUME-INTERVAL-WIDTH-RATIO",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.02,
+      "tier": 0,
+      "description": "§6.64.8 Volume estimation: relative interval-width gate for Measured classification. Must satisfy ΔV <= max(K-VOLUME-INTERVAL-WIDTH-RATIO*V_mean, K-VOLUME-INTERVAL-WIDTH-ABS-M3). 2% keeps large-scene relative uncertainty bounded.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.8"
+    },
+    {
+      "id": "K-VOLUME-INTERVAL-WIDTH-ABS-M3",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.002,
+      "tier": 0,
+      "description": "§6.64.8 Volume estimation: absolute interval-width floor (m^3) for Measured classification. Prevents tiny-volume cases from passing solely on relative ratio; 0.002m^3 (~2L) is strict but practical for handheld room/object scans.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.8"
+    },
+    {
+      "id": "K-VOLUME-CLOSURE-RATIO-MIN",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.97,
+      "tier": 0,
+      "description": "§6.64.8 Volume estimation: minimum mesh closure ratio for Measured. 97% closure + unknown_voxel≤3% + connected_components≤2. Triple gate prevents single-metric gaming.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.8"
+    },
+    {
+      "id": "K-VOLUME-UNKNOWN-VOXEL-MAX",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.03,
+      "tier": 0,
+      "description": "§6.64.8 Volume estimation: maximum unknown voxel ratio within bounding volume. Complements closure_ratio — a mesh can be topologically closed but have large unobserved regions inside.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.8"
+    },
+    {
+      "id": "K-VOLUME-MAX-COMPONENTS",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 2,
+      "tier": 1,
+      "description": "§6.64.8 Volume estimation: maximum connected components for Measured volume. 1=single watertight; 2=allows room with one enclosed sub-object. >2 indicates fragmentation → downgrade to Assumed.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.8"
+    },
+    {
+      "id": "K-STREAM-UTILITY-EVIDENCE-W",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.4,
+      "tier": 2,
+      "description": "§6.64.9 Streaming: evidence weight in utility function U = w_e×evidence + w_v×view_prob + w_err×Δerror/bytes. 0.4 ensures S5 cells are prioritized over purely visual-impact cells.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.9"
+    },
+    {
+      "id": "K-STREAM-UTILITY-VIEW-W",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.35,
+      "tier": 2,
+      "description": "§6.64.9 Streaming: view probability weight in utility function. Viewport-likely cells get second priority after evidence cells.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.9"
+    },
+    {
+      "id": "K-STREAM-UTILITY-ERROR-W",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.25,
+      "tier": 2,
+      "description": "§6.64.9 Streaming: error-reduction-per-byte weight in utility function. Balances bandwidth efficiency against evidence and visibility priorities.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.9"
+    },
+    {
+      "id": "K-STREAM-S5-ARRIVAL-RATIO",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.99,
+      "tier": 1,
+      "description": "§6.64.9 Streaming: minimum S5 cell arrival ratio under constrained bandwidth (5-20Mbps). 99% of S5 cells must arrive before any non-evidence Layer 2 data. Gate test: low-bandwidth simulation.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.9"
+    },
+    {
+      "id": "K-NOISE-GYRO-BLUR-THRESHOLD",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1.2,
+      "tier": 2,
+      "description": "§6.64.10 NoiseClassifier: gyro blur threshold (rad/s). CHANGED from 1.5→1.2. Pure vision is more sensitive to motion blur (no depth sensor fallback). Earlier detection → earlier burst trigger.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.10"
+    },
+    {
+      "id": "K-NOISE-SATURATION-RATIO",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.03,
+      "tier": 2,
+      "description": "§6.64.10 NoiseClassifier: overexposure pixel ratio threshold. CHANGED from 0.05→0.03. Pure vision needs stricter exposure control (3% overexposed pixels → alarm). Clipped highlights destroy depth estimation from stereo.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.10"
+    },
+    {
+      "id": "K-MC-TOPO-NONMANIFOLD-MAX",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 0,
+      "tier": 0,
+      "description": "§6.64.11 MC33 topology: maximum non-manifold edges. Hard gate: MUST be 0 for Measured classification. MC33/Extended MC33 with asymptotic decider guarantees manifold output. Tier 0: forensic mesh integrity.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.11"
+    },
+    {
+      "id": "K-OIT-K-S-DEFAULT",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 8,
+      "tier": 2,
+      "description": "§6.64.12 ExactOIT: tile OIT (S backend) K-buffer depth. 8 layers per 16×16 tile. Sufficient for 95%+ indoor pixels. Overflow cascades to U backend.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.12"
+    },
+    {
+      "id": "K-OIT-K-U-DEFAULT",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 24,
+      "tier": 2,
+      "description": "§6.64.12 ExactOIT: exact K-buffer (U backend) depth. 24 handles dense vegetation/transparent objects. Overflow cascades to X (A-buffer PPLL).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.12"
+    },
+    {
+      "id": "K-OIT-X-MEM-LIMIT-MB",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 96,
+      "tier": 2,
+      "description": "§6.64.12 ExactOIT: A-buffer (X backend) memory hard limit. 96MB prevents OOM on complex scenes. If exceeded, reduce throughput (skip frames) but never reduce OIT precision.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.12"
+    },
+    {
+      "id": "K-FUSED-CONF-SFM-SIGMA",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 8.0,
+      "tier": 2,
+      "description": "§6.64.4 CDGS confidence: SfM proximity σ in pixels. 8px radius → Gaussian decay. Pixels far from SfM points get low depth-loss confidence.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-CONF-MONO-GRAD-MAX",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.5,
+      "tier": 2,
+      "description": "§6.64.4 CDGS confidence: mono depth gradient cutoff. |∇D|>0.5m/pixel → conf_mono=0. Prevents depth loss at depth discontinuities.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-CONF-MAP-FLOOR",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.01,
+      "tier": 1,
+      "description": "§6.64.4 CDGS confidence: minimum confidence floor. 0.01 prevents division by zero while allowing 1% residual regularization in zero-confidence areas.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-LAMBDA-OPACITY-ALIGN",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.02,
+      "tier": 2,
+      "description": "§6.64.4 StableGS Dual Opacity: coupling weight |α_geo-α_app|. 0.02 is weak enough to not impede depth correction but strong enough to prevent permanent divergence.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-DUAL-OPACITY-ENABLED",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 1,
+      "tier": 2,
+      "description": "§6.64.4 StableGS Dual Opacity: enable/disable. 1=dual path (α_geo+α_app); 0=single opacity fallback with TIDI-GS floater penalty.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-FUSED-DROPGS-RATE",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.1,
+      "tier": 2,
+      "description": "§6.64.4 DropGaussian: per-iteration dropout rate. 10% = mild regularization for short training budgets. Prevents individual Gaussian overfitting. CVPR 2025 recommends 0.1-0.3.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.4"
+    },
+    {
+      "id": "K-ADAM-POCKETGS-CACHE-ENABLED",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 0,
+      "tier": 2,
+      "description": "§6.64.5 PocketGS: enable cached alpha-compositing + index-mapped gradient scattering for on-device backward. 0=disabled (Phase 2+ pending code availability).",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-ISOTROPY-LAMBDA",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.005,
+      "tier": 2,
+      "description": "§6.64.5 Micro-splatting: isotropy regularization weight. 0.005 penalizes only extreme needle-like Gaussians (condition number >50:1). Weaker than Micro-splatting's 0.01 because we have shorter training budget.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-MV-CONSISTENCY-THRESH",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.02,
+      "tier": 2,
+      "description": "§6.64.5 FastGS MV consistency: relative depth error threshold for split validation. 2% = 6cm@3m. Below → skip (geometry converged); above → split confirmed.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-MH-ENABLED",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 0,
+      "tier": 2,
+      "description": "§6.64.5 MH-3DGS: enable Metropolis-Hastings probabilistic densification. 0=disabled (DC4GS+MV as main path). Research mode only.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-MH-TEMPERATURE-INIT",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 1.0,
+      "tier": 2,
+      "description": "§6.64.5 MH-3DGS: initial sampling temperature. Higher→more exploration. 1.0 is standard starting point for NeurIPS 2025 MH framework.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-MH-TEMPERATURE-DECAY",
+      "status": "active",
+      "track": "X",
+      "value_type": "float",
+      "value": 0.9997,
+      "tier": 2,
+      "description": "§6.64.5 MH-3DGS: per-iteration temperature decay. 0.995→T halves every ~139 iter. For 20K budget: final T≈0.995^20000≈4.3e-44→fully greedy.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-DPC-MH-PROPOSAL-COUNT",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 128,
+      "tier": 2,
+      "description": "§6.64.5 MH-3DGS: proposal candidates per iteration. 128 = ~2ms overhead. Balances exploration breadth vs computational cost.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.5"
+    },
+    {
+      "id": "K-MC-DIFFMC-ENABLED",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 0,
+      "tier": 2,
+      "description": "§6.64.11 DiffMC: enable differentiable marching cubes (WACV 2025 NeuManifold). 0=disabled, use MC33+post-check. Requires Metal/Vulkan porting from CUDA DISO package.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.11"
+    },
+    {
+      "id": "K-OIT-MOMENT-ENABLED",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 0,
+      "tier": 2,
+      "description": "§6.64.12 Moment-Based OIT: enable MB3DGS unified backend. When ON, replaces S/U/X cascade with moment-based transmittance (no sorting). 0=use S/U/X cascade.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.12"
+    },
+    {
+      "id": "K-OIT-MOMENT-ORDER",
+      "status": "active",
+      "track": "X",
+      "value_type": "int",
+      "value": 4,
+      "tier": 1,
+      "description": "§6.64.12 Moment-Based OIT: statistical moment order. 4=optimal quality/cost tradeoff per MB3DGS (Dec 2025). 2=fast but artifacts; 6=better but +50% cost. Tier 1: affects rendering precision.",
+      "normative_source": "CURSOR_MEGA_PROMPT_V2.md §6.64.12"
+    }
+  ],
+  "feature_flags": [
+    {
+      "name": "AETHER_FEATURE_FLAG_*",
+      "status": "active",
+      "track": "X",
+      "default": 0,
+      "notes": "Preferred namespace for Track X compile-time isolation"
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_REALTIME_QUALITY_PIPELINE",
+      "status": "active",
+      "track": "X",
+      "default": 0
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_LODGE_RENDER",
+      "status": "active",
+      "track": "X",
+      "default": 0
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_PROGRESSIVE_DISPLAY",
+      "status": "active",
+      "track": "X",
+      "default": 0
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_VISUAL_PRIORITY",
+      "status": "active",
+      "track": "X",
+      "default": 0,
+      "actual": 0,
+      "notes": "Aligned to Track X default-OFF contract"
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_EDIT_VOLUME",
+      "status": "active",
+      "track": "X",
+      "default": 0,
+      "notes": "§6.63 AetherEditVolume: TAIS instance separation + dual-mode editing + incremental scene graph"
+    },
+    {
+      "name": "AETHER_FEATURE_FLAG_PURE_VISION",
+      "status": "active",
+      "track": "X",
+      "default": 0,
+      "notes": "§6.64 AetherPureVision: 12-subsystem pure vision optimization — observability engine, scale anchor, adaptive TSDF, pure vision FusedLoss, optimizer/DPC, Trinity determinism, audit chain, volume estimation, streaming, noise classifier, MC33 topology, ExactOIT"
+    }
+  ]
+}

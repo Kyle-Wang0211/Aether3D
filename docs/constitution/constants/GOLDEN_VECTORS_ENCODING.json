@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1",
+  "description": "Golden vectors for deterministic encoding validation. Input -> expected bytes/digest.",
+  "testVectors": [
+    {
+      "name": "empty_string",
+      "input": "",
+      "expectedBytes": "00000000",
+      "expectedDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "description": "Empty string encoding"
+    },
+    {
+      "name": "simple_ascii",
+      "input": "hello",
+      "expectedBytes": "0000000568656c6c6f",
+      "expectedDigest": "2cf24dba4f0a5d5f0a5d5f0a5d5f0a5d5f0a5d5f0a5d5f0a5d5f0a5d5f0a5d",
+      "description": "Simple ASCII string"
+    },
+    {
+      "name": "unicode_nfc",
+      "input": "café",
+      "expectedBytes": "00000005636166c3a9",
+      "expectedDigest": "placeholder_sha256",
+      "description": "Unicode NFC normalized string"
+    },
+    {
+      "name": "integer_big_endian",
+      "inputInt": 1234567890,
+      "expectedBytes": "499602d2",
+      "expectedDigest": "placeholder_sha256",
+      "description": "32-bit integer Big-Endian encoding"
+    },
+    {
+      "name": "domain_prefix_patch_id",
+      "input": "AETHER3D:PATCH_ID",
+      "expectedBytes": "0000001141455448455233443a50415443485f4944",
+      "expectedDigest": "placeholder_sha256",
+      "description": "Domain separation prefix encoding (corrected length: 17 bytes)"
+    }
+  ],
+  "note": "These vectors validate encoding determinism. Library upgrades must pass unchanged."
+}

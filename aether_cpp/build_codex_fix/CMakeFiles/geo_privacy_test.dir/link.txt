@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/geo_privacy_test.dir/tests/geo/geo_privacy_test.cpp.o -o geo_privacy_test  libaether3d_core.a

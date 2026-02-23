@@ -1,0 +1,24 @@
+Aether3D
+Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
+===============================================================================
+
+Third-Party Software Notices
+===============================================================================
+
+This product includes the following third-party dependencies.
+Their inclusion does not imply any license grant over Aether3D's own code.
+
+-------------------------------------------------------------------------------
+swift-crypto
+-------------------------------------------------------------------------------
+Copyright (c) 2019-2023 Apple Inc. and the SwiftCrypto project authors
+Licensed under the Apache License, Version 2.0
+https://github.com/apple/swift-crypto
+
+-------------------------------------------------------------------------------
+swift-asn1 (transitive dependency via swift-crypto)
+-------------------------------------------------------------------------------
+Copyright (c) 2019-2025 Apple Inc. and the SwiftASN1 project authors
+Licensed under the Apache License, Version 2.0
+https://github.com/apple/swift-asn1

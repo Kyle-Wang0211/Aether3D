@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/spatial_quantizer_test.dir/tests/tsdf/spatial_quantizer_test.cpp.o -o spatial_quantizer_test  libaether3d_core.a

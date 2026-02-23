@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_frustum_culler.dir/tests/render/test_frustum_culler.cpp.o -o test_frustum_culler  libaether3d_core.a

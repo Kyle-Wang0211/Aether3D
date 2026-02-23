@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/map_label_sdf_test.dir/tests/geo/map_label_sdf_test.cpp.o -o map_label_sdf_test  libaether3d_core.a

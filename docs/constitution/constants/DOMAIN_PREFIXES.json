@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "foundationVersion": "1.1.1",
+  "description": "Domain separation prefix closure. No ad-hoc prefixes allowed.",
+  "prefixes": [
+    {
+      "prefix": "AETHER3D:PATCH_ID",
+      "purpose": "Domain separation for patchId hash computation",
+      "identityCritical": true,
+      "introducedInVersion": "1.1",
+      "encoding": "length_prefixed_utf8_no_nul"
+    },
+    {
+      "prefix": "AETHER3D:GEOM_ID",
+      "purpose": "Domain separation for geomId hash computation",
+      "identityCritical": true,
+      "introducedInVersion": "1.1",
+      "encoding": "length_prefixed_utf8_no_nul"
+    },
+    {
+      "prefix": "AETHER3D:MESH_EPOCH",
+      "purpose": "Domain separation for meshEpochSalt hash computation",
+      "identityCritical": true,
+      "introducedInVersion": "1.1",
+      "encoding": "length_prefixed_utf8_no_nul"
+    },
+    {
+      "prefix": "AETHER3D:ASSET_ROOT",
+      "purpose": "Domain separation for asset root hash computation",
+      "identityCritical": true,
+      "introducedInVersion": "1.1",
+      "encoding": "length_prefixed_utf8_no_nul"
+    },
+    {
+      "prefix": "AETHER3D:EVIDENCE",
+      "purpose": "Domain separation for evidence hash computation",
+      "identityCritical": true,
+      "introducedInVersion": "1.1",
+      "encoding": "length_prefixed_utf8_no_nul"
+    }
+  ],
+  "rule": "No ad-hoc prefixes allowed. All prefixes must be registered here. Any new prefix requires RFC and version bump."
+}

@@ -1,0 +1,52 @@
+name: protocol-governance
+
+on:
+  pull_request:
+    paths:
+      - governance/**
+      - CURSOR_MEGA_PROMPT_V2.md
+      - Core/**
+      - App/**
+      - server/**
+  push:
+    branches:
+      - codex/protocol-governance-integration
+    paths:
+      - governance/**
+      - CURSOR_MEGA_PROMPT_V2.md
+      - Core/**
+      - App/**
+      - server/**
+
+permissions:
+  contents: read
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate Governance (strict)
+        run: |
+          python3 governance/scripts/validate_governance.py --strict --report governance/generated/governance_diagnostics.json
+
+      - name: Generate Runbooks
+        run: |
+          python3 governance/scripts/generate_cursor_runbooks.py --output governance/generated/phases
+          python3 governance/scripts/generate_cursor_runbooks.py --check --output governance/generated/phases
+
+      - name: Upload Governance Diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: governance-diagnostics
+          path: |
+            governance/generated/governance_diagnostics.json
+            governance/generated/phases/index.md

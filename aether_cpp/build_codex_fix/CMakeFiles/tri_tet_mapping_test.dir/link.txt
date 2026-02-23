@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/tri_tet_mapping_test.dir/tests/tsdf/tri_tet_mapping_test.cpp.o -o tri_tet_mapping_test  libaether3d_core.a

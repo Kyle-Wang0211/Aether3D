@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package SQLAlchemy 2.0.45.
+License obligations are tracked via the package LICENSE file and SPDX policy.

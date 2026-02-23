@@ -1,0 +1,25 @@
+{
+  "generated_at_utc": "2026-02-18T16:52:58Z",
+  "git_head": "4aca3950cdb4432001f250371e80ae1233b0d02e",
+  "generator": "scripts/compliance/generate_sbom_provenance.py",
+  "inputs": {
+    "manifest": {
+      "path": "compliance/third_party/manifest.v1.json",
+      "sha256": "d1e460d8c8fa1ffa33ac04565e647a70f188d7c0daa626f767201d0dfdbae272"
+    },
+    "swift_lock": {
+      "path": "Package.resolved",
+      "sha256": "fd4e7f890211e715e2b7b76f221907d6c076fbb745bf64e8150b0df95bdb4ca8"
+    },
+    "python_lock": {
+      "path": "server/requirements.lock.txt",
+      "sha256": "1aa5b2e22411bba1f6a1cb5c66a32aceb051bd171be61f52f8a425bede67e418"
+    }
+  },
+  "outputs": {
+    "sbom": {
+      "path": "compliance/third_party/sbom.cyclonedx.json",
+      "sha256": "3aef4b67ef5fb48a540977a65b0c6a688657eb0c1f1060b7045620413098c382"
+    }
+  }
+}

@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package python-multipart 0.0.20.
+License obligations are tracked via the package LICENSE file and SPDX policy.

@@ -1,0 +1,36 @@
+{
+  "testCases": [
+    {
+      "name": "negative_zero",
+      "input": -0.0,
+      "expected": "0.000000"
+    },
+    {
+      "name": "rounding_boundary_up",
+      "input": 0.1234565,
+      "expected": "0.123457"
+    },
+    {
+      "name": "rounding_boundary_down",
+      "input": 0.1234564,
+      "expected": "0.123456"
+    },
+    {
+      "name": "rounding_boundary_half_away_zero",
+      "input": 0.1234565,
+      "expected": "0.123457"
+    },
+    {
+      "name": "large_number",
+      "input": 999.9999995,
+      "expected": "1000.000000"
+    },
+    {
+      "name": "scientific_notation_rejected",
+      "input": 1.23e10,
+      "shouldReject": true,
+      "rejectReason": "Scientific notation not allowed"
+    }
+  ]
+}
+

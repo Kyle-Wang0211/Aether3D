@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_screen_detail.dir/tests/render/test_screen_detail.cpp.o -o test_screen_detail  libaether3d_core.a

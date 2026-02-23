@@ -1,0 +1,77 @@
+Phase 1 TSDF Parity — 深度验收日志（算法完成态）
+================================================
+执行时间: 2026-02-17
+分支: codex/core-cpp-migration
+
+一、执行命令
+------------
+1) Phase 0→1 管线:
+   ./scripts/run_full_phase_pipeline.sh --fresh-state --from-phase 0 --to-phase 1 --enforce-deliverables
+   结果: PASS
+
+2) C++ 构建与测试:
+   cd aether_cpp && cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on-failure
+   结果: PASS
+
+3) 跨平台工具链构建门禁:
+   bash scripts/ci/validate_cpp_cross_platform_toolchains.sh --strict-if-ci
+   结果: PASS（host）/ SKIP（android, ohos，环境变量未设置）
+
+二、Phase 1 关键算法完成项
+-------------------------
+1) TSDF Constants:
+   - 15 个 section，77 数值常量
+   - Swift parity 值对齐 + cross-validation static_assert
+
+2) TSDFVolume:
+   - 5-Gate + AIMD 完整链路
+   - Gate 1: tracking
+   - Gate 2: pose teleport / angular velocity
+   - Gate 3: pose jitter
+   - Gate 4: thermal throttle
+   - Gate 5: valid pixel ratio
+   - AIMD: additively decrease skip / multiplicatively increase skip
+
+3) SpatialHashTable:
+   - linear probing
+   - backward-shift deletion（无 tombstone）
+   - stable key list（确定性遍历）
+   - rehash @ load factor 0.7
+
+4) marching_cubes:
+   - Paul Bourke edgeTable（256）
+   - interpolation clamp（MC_INTERPOLATION_MIN/MAX）
+   - degenerate triangle rejection（area/aspect）
+   - block 级增量提取接口
+
+5) C API:
+   - volume create/destroy/reset/integrate
+   - thermal/memory handlers
+   - legacy `aether_tsdf_integrate` 兼容路径保留
+
+三、Phase 1 完整模块覆盖: 15/15
+-------------------------------
+`sdf_storage.h`, `voxel_block_pool.h`, `managed_voxel_storage.h`,
+`adaptive_resolution.h`, `integration_backend.h`, `cpu_integration_backend.h`,
+`mesh_output.h`, `spatial_hash_table.h`, `tsdf_volume.h`, `marching_cubes.h`,
+`block_index.h`, `voxel_block.h`, `managed_storage.h`, `tsdf_constants.h`, `tsdf_types.h`
+
+四、测试结果
+------------
+Phase 1 C++ tests: 8/8
+
+ctest:
+- status: PASS
+- c_api: PASS
+- spatial_hash_table: PASS
+- marching_cubes: PASS
+- canonicalize: PASS
+- sha256: PASS
+- arena: PASS
+- replay_fixtures: PASS
+
+五、结论
+--------
+Phase 1 深度验收: PASS
+Phase 1 算法完成态验收: PASS
+是否放行 Phase 2: YES

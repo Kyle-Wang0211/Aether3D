@@ -1,0 +1,12 @@
+{
+  "failureReasons" : {
+
+  },
+  "firstScanSuccessRate" : 1,
+  "hardCapViolations" : 0,
+  "maxDurationSeconds" : 170,
+  "medianDurationSeconds" : 165,
+  "passesGate" : true,
+  "replayStableRate" : 1,
+  "totalSessions" : 10
+}

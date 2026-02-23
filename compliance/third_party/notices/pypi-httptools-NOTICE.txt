@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package httptools 0.7.1.
+License obligations are tracked via the package LICENSE file and SPDX policy.

@@ -1,0 +1,61 @@
+# Golden Fixtures Verification
+# Runs FixtureGen + PR4MathFixtureExporter, fails if output differs from committed fixtures.
+# Ensures golden fixtures stay in sync with generators (CURSOR_MEGA_PROMPT migration B.1).
+
+name: Golden Fixtures
+
+on:
+  pull_request:
+    paths:
+      - 'Core/**'
+      - 'Sources/FixtureGen/**'
+      - 'Sources/PR4MathFixtureExporter/**'
+      - 'Sources/PR4Math/**'
+      - 'Sources/PR4Softmax/**'
+      - 'Sources/PR4LUT/**'
+      - 'Tests/Fixtures/**'
+      - 'scripts/regen_fixtures.sh'
+  push:
+    branches: [main]
+    paths:
+      - 'Core/**'
+      - 'Sources/FixtureGen/**'
+      - 'Sources/PR4MathFixtureExporter/**'
+      - 'Sources/PR4Math/**'
+      - 'Sources/PR4Softmax/**'
+      - 'Sources/PR4LUT/**'
+      - 'Tests/Fixtures/**'
+
+concurrency:
+  group: golden-fixtures-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-golden-fixtures:
+    name: Verify Golden Fixtures
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Verify Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build
+        run: |
+          cd "$(git rev-parse --show-toplevel)"
+          swift build
+
+      - name: Regenerate and verify fixtures
+        run: |
+          cd "$(git rev-parse --show-toplevel)"
+          bash scripts/regen_fixtures.sh

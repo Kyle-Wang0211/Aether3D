@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "baseline_version": "1.0.0",
+    "generated_on": "2026-02-18",
+    "notes": "Release hard gate floor: quality must not regress; speed must not regress."
+  },
+  "quality_floor": {
+    "first_scan_success_rate": 0.95,
+    "replay_stable_rate": 1.0,
+    "tri_tet_max_unknown_ratio": 0.18
+  },
+  "speed_floor": {
+    "median_duration_seconds": 170.0,
+    "max_duration_seconds": 180.0
+  }
+}

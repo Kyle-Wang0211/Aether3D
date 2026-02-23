@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/arena_test.dir/tests/memory/arena_test.cpp.o -o arena_test  libaether3d_core.a

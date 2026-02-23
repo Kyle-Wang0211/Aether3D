@@ -1,0 +1,4 @@
+Phase 8 深度验收: PASS
+camera-IMU soft sync enabled in capture path
+first-scan KPI gate verified
+validation_scope=phase8

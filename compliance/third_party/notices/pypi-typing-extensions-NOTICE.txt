@@ -1,0 +1,2 @@
+No upstream NOTICE file was distributed with package typing_extensions 4.15.0.
+License obligations are tracked via the package LICENSE file and SPDX policy.

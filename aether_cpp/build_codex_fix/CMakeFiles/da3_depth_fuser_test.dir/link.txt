@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/da3_depth_fuser_test.dir/tests/trainer/da3_depth_fuser_test.cpp.o -o da3_depth_fuser_test  libaether3d_core.a

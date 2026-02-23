@@ -1,0 +1,11 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/f1_time_mirror_test.dir/tests/innovation/f1_time_mirror_test.cpp.o"
+  "CMakeFiles/f1_time_mirror_test.dir/tests/innovation/f1_time_mirror_test.cpp.o.d"
+  "f1_time_mirror_test"
+  "f1_time_mirror_test.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/f1_time_mirror_test.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

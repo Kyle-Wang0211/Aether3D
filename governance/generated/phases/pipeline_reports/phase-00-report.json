@@ -1,0 +1,70 @@
+{
+  "phase_id": 0,
+  "phase_name": "Golden Fixtures Baseline",
+  "started_at": "2026-02-17T15:51:17+00:00",
+  "prerequisites_ok": true,
+  "missing_prerequisites": [],
+  "required_gate_ids": [
+    "G-LONG-LIVED-BRANCH",
+    "G-CONTRACT-VALIDATOR",
+    "G-RUNBOOK-GENERATION",
+    "G-FIXTURE-BASELINE"
+  ],
+  "required_contract_ids": [
+    "C-PHASE-ORDERING-LAW",
+    "C-FIXTURE-PHASE0-MANDATORY",
+    "C-TRACK-P-LEGAL-BASELINE",
+    "C-LONG-LIVED-INTEGRATION-BRANCH"
+  ],
+  "gate_exit_code": 0,
+  "gate_output": "branch-check: errors=0 warnings=0\ngovernance-validator: errors=0 warnings=0 info=1\nrunbook-generator: write mode completed for 15 phases\nrunbook-generator: check mode completed for 15 phases\nGenerated fixtures:\n  - uuid_rfc4122_vectors_v1.txt\n  - decision_hash_v1.txt\n  - admission_decision_v1.txt\nExported PR4Math golden fixture: /Users/kaidongwang/Documents/progecttwo/progect2/progect2/Tests/Fixtures/PR4Math/pr4math_golden_v1.json\n[gate:G-LONG-LIVED-BRANCH] Long-lived integration branch is active\n  $ python3 governance/scripts/validate_governance.py --check-branch\n[gate:G-CONTRACT-VALIDATOR] Governance registry and contract validation\n  $ python3 governance/scripts/validate_governance.py --strict --report governance/generated/governance_diagnostics.json\n[gate:G-RUNBOOK-GENERATION] Cursor runbook generation is deterministic\n  $ python3 governance/scripts/generate_cursor_runbooks.py --output governance/generated/phases\n  $ python3 governance/scripts/generate_cursor_runbooks.py --check --output governance/generated/phases\n[gate:G-FIXTURE-BASELINE] Golden fixture baseline present and reproducible\n  $ swift run --disable-sandbox FixtureGen\n  $ swift run --disable-sandbox PR4MathFixtureExporter\ngate-matrix-runner: executed=4 failed=0\nBuilding for debugging...\n[0/3] Write swift-version--58304C5D6DBC2206.txt\nBuild of product 'FixtureGen' complete! (0.34s)\nBuilding for debugging...\n[0/3] Write swift-version--58304C5D6DBC2206.txt\nBuild of product 'PR4MathFixtureExporter' complete! (0.27s)\n",
+  "deliverables": {
+    "matched": [
+      "Tests/Fixtures/*.txt",
+      "Tests/Fixtures/PR4Math/pr4math_golden_v1.json",
+      "governance/generated/governance_diagnostics.json"
+    ],
+    "missing": [],
+    "informational": []
+  },
+  "adaptation": {
+    "governance_diagnostics": {
+      "exists": true,
+      "path": "governance/generated/governance_diagnostics.json",
+      "summary": {
+        "error": 0,
+        "warning": 0,
+        "info": 1
+      },
+      "findings": [
+        {
+          "id": "BINDING-COVERAGE-SUMMARY",
+          "severity": "info",
+          "scope": "bindings",
+          "message": "Binding coverage summary",
+          "context": {
+            "mode": "all_active_constants",
+            "active_constants": 595,
+            "bound_active_constants": 595,
+            "unbound_active_constants": 0,
+            "coverage_ratio": 1.0
+          }
+        }
+      ]
+    },
+    "first_scan_metrics": {
+      "exists": true,
+      "path": "governance/generated/first_scan_runtime_metrics.json",
+      "passesGate": true,
+      "firstScanSuccessRate": 0.9,
+      "replayStableRate": 1.0,
+      "medianDurationSeconds": 166.0,
+      "hardCapViolations": 0
+    }
+  },
+  "adaptation_ok": true,
+  "adaptation_reasons": [],
+  "status": "passed",
+  "failed_reasons": [],
+  "finished_at": "2026-02-17T15:51:20+00:00"
+}
