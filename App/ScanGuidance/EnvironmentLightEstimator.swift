@@ -47,6 +47,22 @@ public struct LightState: Sendable {
     }
 }
 
+public struct LightEstimateSnapshot: Sendable {
+    public let ambientIntensity: Float
+    public let primaryLightDirection: SIMD3<Float>?
+    public let sphericalHarmonicsCoefficients: [SIMD3<Float>]?
+
+    public init(
+        ambientIntensity: Float,
+        primaryLightDirection: SIMD3<Float>? = nil,
+        sphericalHarmonicsCoefficients: [SIMD3<Float>]? = nil
+    ) {
+        self.ambientIntensity = ambientIntensity
+        self.primaryLightDirection = primaryLightDirection
+        self.sphericalHarmonicsCoefficients = sphericalHarmonicsCoefficients
+    }
+}
+
 public final class EnvironmentLightEstimator {
     
     /// Fallback light direction (upward)
@@ -73,6 +89,10 @@ public final class EnvironmentLightEstimator {
         cameraImage: Any?,
         timestamp: TimeInterval
     ) -> LightState {
+        if let snapshot = lightEstimate as? LightEstimateSnapshot {
+            return extractSnapshotLight(snapshot: snapshot)
+        }
+
         // Tier 1: Try ARKit light estimate
         #if canImport(ARKit)
         if let arkitEstimate = lightEstimate as? ARLightEstimate {
@@ -138,6 +158,28 @@ public final class EnvironmentLightEstimator {
         )
     }
     #endif
+
+    private func extractSnapshotLight(snapshot: LightEstimateSnapshot) -> LightState {
+        let intensity = max(snapshot.ambientIntensity, 0.0)
+        let direction = snapshot.primaryLightDirection ?? Self.fallbackDirection
+
+        var shCoeffs: [SIMD3<Float>] = Array(repeating: SIMD3<Float>(0.0, 0.0, 0.0), count: 9)
+        if let provided = snapshot.sphericalHarmonicsCoefficients, !provided.isEmpty {
+            let count = min(9, provided.count)
+            for index in 0..<count {
+                shCoeffs[index] = provided[index]
+            }
+        } else {
+            shCoeffs[0] = SIMD3<Float>(intensity, intensity, intensity)
+        }
+
+        return LightState(
+            direction: direction,
+            intensity: intensity,
+            shCoeffs: shCoeffs,
+            tier: .arkit
+        )
+    }
     
     #if canImport(Vision)
     /// Extract light from Vision framework (simplified)

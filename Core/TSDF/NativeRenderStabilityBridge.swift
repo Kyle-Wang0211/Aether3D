@@ -184,7 +184,33 @@ public struct RenderSnapshotSample: Sendable, Equatable {
 /// - aether_query_mesh_stability
 /// - aether_decay_confidence
 public final class NativeRenderStabilityBridge: @unchecked Sendable {
-    public init() {}
+    private static let defaultRenderResidencyHoldFrames: Int32 = 90
+    private var renderSelectionRuntime: OpaquePointer?
+
+    public init() {
+        var runtime: OpaquePointer?
+        if aether_render_selection_runtime_create(
+            nil,
+            Self.defaultRenderResidencyHoldFrames,
+            &runtime
+        ) == 0 {
+            self.renderSelectionRuntime = runtime
+        } else {
+            self.renderSelectionRuntime = nil
+        }
+    }
+
+    deinit {
+        if let runtime = renderSelectionRuntime {
+            _ = aether_render_selection_runtime_destroy(runtime)
+        }
+    }
+
+    public func resetRenderSelectionRuntime() {
+        if let runtime = renderSelectionRuntime {
+            _ = aether_render_selection_runtime_reset(runtime)
+        }
+    }
 
     public func queryMeshStability(
         _ queries: [MeshStabilityQuery],
@@ -412,15 +438,31 @@ public final class NativeRenderStabilityBridge: @unchecked Sendable {
 
         var selectedIndices = [Int32](repeating: -1, count: candidates.count)
         var selectedCount: Int32 = 0
-        let rc = nativeCandidates.withUnsafeBufferPointer { candPtr in
-            selectedIndices.withUnsafeMutableBufferPointer { selectedPtr in
-                aether_select_stable_render_triangles(
-                    candPtr.baseAddress,
-                    Int32(nativeCandidates.count),
-                    &nativeConfig,
-                    selectedPtr.baseAddress,
-                    &selectedCount
-                )
+        let rc: Int32
+        if let runtime = renderSelectionRuntime {
+            rc = nativeCandidates.withUnsafeBufferPointer { candPtr in
+                selectedIndices.withUnsafeMutableBufferPointer { selectedPtr in
+                    aether_render_selection_runtime_select(
+                        runtime,
+                        candPtr.baseAddress,
+                        Int32(nativeCandidates.count),
+                        &nativeConfig,
+                        selectedPtr.baseAddress,
+                        &selectedCount
+                    )
+                }
+            }
+        } else {
+            rc = nativeCandidates.withUnsafeBufferPointer { candPtr in
+                selectedIndices.withUnsafeMutableBufferPointer { selectedPtr in
+                    aether_select_stable_render_triangles(
+                        candPtr.baseAddress,
+                        Int32(nativeCandidates.count),
+                        &nativeConfig,
+                        selectedPtr.baseAddress,
+                        &selectedCount
+                    )
+                }
             }
         }
         guard rc == 0 else {

@@ -158,6 +158,7 @@ public final class ScanGuidanceRenderPipeline: ScanGuidanceOverlayEncoder {
     /// draw() faster than ARSession fires frames causes unbounded semaphore growth,
     /// breaking the triple-buffer protection guarantee.
     private var hasUnconsumedUpdate: Bool = false
+    private var pendingSemaphoreWaitCount: Int = 0
 
     /// Protects currentIndexCount / lastWrittenBufferIndex / hasUnconsumedUpdate from
     /// concurrent read (encode on MTKView delegate thread) and write (update on main thread).
@@ -238,6 +239,20 @@ public final class ScanGuidanceRenderPipeline: ScanGuidanceOverlayEncoder {
         #endif
     }
 
+    deinit {
+        bufferLock.lock()
+        let pendingSignals = pendingSemaphoreWaitCount
+        pendingSemaphoreWaitCount = 0
+        hasUnconsumedUpdate = false
+        bufferLock.unlock()
+
+        if pendingSignals > 0 {
+            for _ in 0..<pendingSignals {
+                inflightSemaphore.signal()
+            }
+        }
+    }
+
     public func update(frame: ScanGuidanceFrameInput) {
         update(
             displaySnapshot: frame.displaySnapshot,
@@ -293,6 +308,9 @@ public final class ScanGuidanceRenderPipeline: ScanGuidanceOverlayEncoder {
             #endif
             return
         }
+        bufferLock.lock()
+        pendingSemaphoreWaitCount += 1
+        bufferLock.unlock()
 
         #if os(iOS) || os(macOS)
         thermalAdapter.updateThermalState(ProcessInfo.processInfo.thermalState)
@@ -432,6 +450,9 @@ public final class ScanGuidanceRenderPipeline: ScanGuidanceOverlayEncoder {
         let bufferIndex = lastWrittenBufferIndex
         let indexCountSnapshot = currentIndexCount
         let shouldSignalSemaphore = hasUnconsumedUpdate
+        if shouldSignalSemaphore {
+            pendingSemaphoreWaitCount = max(0, pendingSemaphoreWaitCount - 1)
+        }
         hasUnconsumedUpdate = false
         let drawBuffers: DrawBuffers? = (bufferIndex >= 0 && bufferIndex < Self.kMaxInflightBuffers)
             ? DrawBuffers(
@@ -475,8 +496,9 @@ public final class ScanGuidanceRenderPipeline: ScanGuidanceOverlayEncoder {
         #endif
 
         if shouldSignalSemaphore {
-            commandBuffer.addCompletedHandler { [weak self] _ in
-                self?.inflightSemaphore.signal()
+            let semaphore = inflightSemaphore
+            commandBuffer.addCompletedHandler { _ in
+                semaphore.signal()
             }
         }
 

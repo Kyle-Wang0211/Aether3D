@@ -230,6 +230,9 @@ struct ARCameraPreview: UIViewRepresentable {
             }
             // Collect mesh anchors from current frame
             let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+            let timestamp = frame.timestamp
+            let cameraTransform = frame.camera.transform
+            let lightEstimateSnapshot = makeLightEstimateSnapshot(frame.lightEstimate)
             #if os(iOS)
             // Use cached values (updated on main thread in draw(in:)) to avoid MainActor isolation
             let orientation = cachedOrientation
@@ -249,7 +252,9 @@ struct ARCameraPreview: UIViewRepresentable {
             Task { @MainActor in
                 self.configureOverlayAppearance(policy: self.viewModel.scanState.renderPresentationPolicy)
                 viewModel.processARFrame(
-                    frame: frame,
+                    timestamp: timestamp,
+                    cameraTransform: cameraTransform,
+                    lightEstimate: lightEstimateSnapshot,
                     meshAnchors: meshAnchors,
                     viewMatrix: viewMatrix,
                     projectionMatrix: projectionMatrix
@@ -281,6 +286,43 @@ struct ARCameraPreview: UIViewRepresentable {
         // Session interruption ended
         func sessionInterruptionEnded(_ session: ARSession) {
             // Session automatically resumes — user can tap to continue
+        }
+
+        private func makeLightEstimateSnapshot(_ estimate: ARLightEstimate?) -> LightEstimateSnapshot? {
+            guard let estimate else { return nil }
+
+            var direction: SIMD3<Float>?
+            var shCoeffs: [SIMD3<Float>]?
+
+            if let directional = estimate as? ARDirectionalLightEstimate {
+                let dir = directional.primaryLightDirection
+                direction = SIMD3<Float>(Float(dir.x), Float(dir.y), Float(dir.z))
+                let data = directional.sphericalHarmonicsCoefficients
+                let floatCount = data.count / MemoryLayout<Float>.size
+                if floatCount >= 27 {
+                    var values: [SIMD3<Float>] = []
+                    values.reserveCapacity(9)
+                    data.withUnsafeBytes { ptr in
+                        let floats = ptr.bindMemory(to: Float.self)
+                        for i in 0..<9 {
+                            values.append(
+                                SIMD3<Float>(
+                                    floats[i * 3],
+                                    floats[i * 3 + 1],
+                                    floats[i * 3 + 2]
+                                )
+                            )
+                        }
+                    }
+                    shCoeffs = values
+                }
+            }
+
+            return LightEstimateSnapshot(
+                ambientIntensity: Float(estimate.ambientIntensity),
+                primaryLightDirection: direction,
+                sphericalHarmonicsCoefficients: shCoeffs
+            )
         }
     }
 }

@@ -189,12 +189,6 @@ public final class WedgeGeometryGenerator {
         cameraPosition: SIMD3<Float>? = nil,
         lod: LODLevel
     ) -> WedgeVertexData {
-        guard !triangles.isEmpty else {
-            lastResolvedStyles = []
-            lastTriangleParentIndices = []
-            return WedgeVertexData(vertices: [], indices: [], triangleCount: 0)
-        }
-
         let fracturedTriangles = fractureTriangles(
             from: triangles,
             displayValues: displayValues,
@@ -425,8 +419,6 @@ public final class WedgeGeometryGenerator {
         displayValues: [String: Double],
         cameraPosition: SIMD3<Float>?
     ) -> [FractureTriangle] {
-        guard !triangles.isEmpty else { return [] }
-
         var nativeInputs = [aether_fracture_input_triangle_t](
             repeating: aether_fracture_input_triangle_t(),
             count: triangles.count
@@ -496,19 +488,26 @@ public final class WedgeGeometryGenerator {
         for i in 0..<safeCount {
             let item = nativeOutputs[i]
             let parentIndex = Int(item.parent_triangle_index)
-            guard parentIndex >= 0, parentIndex < triangles.count else { continue }
+            let resolvedParentIndex: Int
+            if parentIndex >= 0, parentIndex < triangles.count {
+                resolvedParentIndex = parentIndex
+            } else {
+                // Startup bootstrap triangles are synthesized in core before source mesh exists.
+                resolvedParentIndex = 0
+            }
             let v0 = SIMD3<Float>(item.v0.x, item.v0.y, item.v0.z)
             let v1 = SIMD3<Float>(item.v1.x, item.v1.y, item.v1.z)
             let v2 = SIMD3<Float>(item.v2.x, item.v2.y, item.v2.z)
             let normal = SIMD3<Float>(item.normal.x, item.normal.y, item.normal.z)
             let area = max(item.area_sq_m, 1e-8)
+            let basePatchKey = item.patch_key != 0 ? item.patch_key : UInt64(i &+ 1)
             fractured.append(
                 FractureTriangle(
                     stylePatchKey: stylePatchKey(
-                        basePatchKey: item.patch_key,
+                        basePatchKey: basePatchKey,
                         fragmentIndex: item.fragment_index
                     ),
-                    parentTriangleIndex: parentIndex,
+                    parentTriangleIndex: resolvedParentIndex,
                     vertices: (v0, v1, v2),
                     normal: normal,
                     display: min(max(item.display, 0.0), 1.0),

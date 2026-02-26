@@ -165,13 +165,13 @@ public enum ScanGuidanceConstants {
     /// Maximum inflight Metal buffers
     public static let kMaxInflightBuffers: Int = 3
     /// Nominal tier: max triangles
-    public static let thermalNominalMaxTriangles: Int = 5000
+    public static let thermalNominalMaxTriangles: Int = 7000
     /// Fair tier: max triangles
-    public static let thermalFairMaxTriangles: Int = 3000
+    public static let thermalFairMaxTriangles: Int = 5000
     /// Serious tier: max triangles
-    public static let thermalSeriousMaxTriangles: Int = 1500
+    public static let thermalSeriousMaxTriangles: Int = 3200
     /// Critical tier: max triangles
-    public static let thermalCriticalMaxTriangles: Int = 500
+    public static let thermalCriticalMaxTriangles: Int = 2000
     /// Thermal hysteresis duration (seconds)
     public static let thermalHysteresisS: Double = 10.0
     /// Frame budget overshoot threshold (ratio of target frame time)

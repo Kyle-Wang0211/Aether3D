@@ -838,11 +838,11 @@ inline float clamp01(float value) {
 aether_capture_style_runtime_config_t capture_style_default_config() {
     aether_capture_style_runtime_config_t config{};
     config.smoothing_alpha = 0.2f;
-    config.freeze_threshold = 0.75f;
-    config.min_thickness = 0.0005f;
-    config.max_thickness = 0.008f;
-    config.min_border_width = 2.8f;
-    config.max_border_width = 26.0f;
+    config.freeze_threshold = 0.93f;
+    config.min_thickness = 0.0002f;
+    config.max_thickness = 0.012f;
+    config.min_border_width = 0.08f;
+    config.max_border_width = 96.0f;
     config.min_area_sq_m = 1e-8f;
     config.min_median_area_sq_m = 1e-6f;
     return config;
@@ -5859,7 +5859,95 @@ int aether_generate_fracture_display_triangles(
         return -1;
     }
     if (tri_count == 0u) {
-        *inout_triangle_count = 0;
+        // Bootstrap fallback (S0): when runtime mesh is still empty, emit a deterministic
+        // coarse fractured sheet so capture starts with visible black fill + white borders.
+        constexpr int kCols = 5;
+        constexpr int kRows = 9;
+        constexpr int kRequired = kCols * kRows * 2;
+        if (out_triangles == nullptr || *inout_triangle_count < kRequired) {
+            *inout_triangle_count = kRequired;
+            return -3;
+        }
+
+        const float x_min = -1.55f;
+        const float x_max = 1.55f;
+        const float y_min = -2.25f;
+        const float y_max = 2.25f;
+        const float z_base = -1.35f;
+        const float step_x = (x_max - x_min) / static_cast<float>(kCols);
+        const float step_y = (y_max - y_min) / static_cast<float>(kRows);
+
+        int write_index = 0;
+        for (int row = 0; row < kRows; ++row) {
+            for (int col = 0; col < kCols; ++col) {
+                std::uint64_t seed = aether::innovation::splitmix64(
+                    (static_cast<std::uint64_t>(row) << 32u) ^
+                    static_cast<std::uint64_t>(col) ^
+                    0xA1E3D5F79B2468C1ULL);
+                auto jitter = [&](float mag) -> float {
+                    seed = aether::innovation::splitmix64(seed);
+                    const float r =
+                        static_cast<float>(seed & 0x00FFFFFFu) / static_cast<float>(0x00FFFFFFu);
+                    return (r - 0.5f) * 2.0f * mag;
+                };
+
+                const float x0 = x_min + static_cast<float>(col) * step_x;
+                const float x1 = x0 + step_x;
+                const float y0 = y_min + static_cast<float>(row) * step_y;
+                const float y1 = y0 + step_y;
+                const float jx = 0.28f * step_x;
+                const float jy = 0.28f * step_y;
+
+                aether::innovation::Float3 p00 = aether::innovation::make_float3(
+                    x0 + jitter(jx), y0 + jitter(jy), z_base + jitter(0.08f));
+                aether::innovation::Float3 p10 = aether::innovation::make_float3(
+                    x1 + jitter(jx), y0 + jitter(jy), z_base + jitter(0.08f));
+                aether::innovation::Float3 p01 = aether::innovation::make_float3(
+                    x0 + jitter(jx), y1 + jitter(jy), z_base + jitter(0.08f));
+                aether::innovation::Float3 p11 = aether::innovation::make_float3(
+                    x1 + jitter(jx), y1 + jitter(jy), z_base + jitter(0.08f));
+
+                seed = aether::innovation::splitmix64(seed);
+                const bool diag_flip = (seed & 1ULL) != 0ULL;
+                const aether::innovation::Float3 n = aether::innovation::make_float3(0.0f, 0.0f, 1.0f);
+                const std::uint64_t patch_key = aether::innovation::splitmix64(
+                    0x5F3759DFULL ^
+                    (static_cast<std::uint64_t>(row + 1) << 24u) ^
+                    static_cast<std::uint64_t>(col + 1));
+
+                auto emit_tri = [&](const aether::innovation::Float3& a,
+                                    const aether::innovation::Float3& b,
+                                    const aether::innovation::Float3& c,
+                                    std::uint32_t fragment_index) {
+                    const float area = aether::innovation::triangle_area(a, b, c);
+                    if (!std::isfinite(area) || area <= 1e-8f) {
+                        return;
+                    }
+                    aether_fracture_output_triangle_t out{};
+                    out.patch_key = patch_key;
+                    out.parent_triangle_index = 0u;
+                    out.fragment_index = fragment_index;
+                    out.v0 = to_c_float3(a);
+                    out.v1 = to_c_float3(b);
+                    out.v2 = to_c_float3(c);
+                    out.normal = to_c_float3(n);
+                    out.display = 0.0f;
+                    out.area_sq_m = area;
+                    out.gap_shrink = 0.0f;
+                    out.crack_seed = static_cast<float>(fragment_index & 0xFFu) / 255.0f;
+                    out_triangles[write_index++] = out;
+                };
+
+                if (diag_flip) {
+                    emit_tri(p00, p10, p11, 0u);
+                    emit_tri(p00, p11, p01, 1u);
+                } else {
+                    emit_tri(p00, p10, p01, 0u);
+                    emit_tri(p10, p11, p01, 1u);
+                }
+            }
+        }
+        *inout_triangle_count = write_index;
         return 0;
     }
     if (triangles == nullptr) {
@@ -5876,53 +5964,97 @@ int aether_generate_fracture_display_triangles(
     std::vector<uint8_t> selected_mask(tri_count, 0u);
     std::unordered_map<std::uint64_t, ParsedCandidate> best_by_cell;
     best_by_cell.reserve(tri_count);
+    double display_sum = 0.0;
+    std::size_t scored_count = 0u;
 
     for (std::size_t i = 0u; i < tri_count; ++i) {
         const aether_fracture_input_triangle_t& in = triangles[i];
         const aether::innovation::Float3 v0 = to_cpp_float3(in.v0);
         const aether::innovation::Float3 v1 = to_cpp_float3(in.v1);
         const aether::innovation::Float3 v2 = to_cpp_float3(in.v2);
+        if (!std::isfinite(v0.x) || !std::isfinite(v0.y) || !std::isfinite(v0.z) ||
+            !std::isfinite(v1.x) || !std::isfinite(v1.y) || !std::isfinite(v1.z) ||
+            !std::isfinite(v2.x) || !std::isfinite(v2.y) || !std::isfinite(v2.z)) {
+            continue;
+        }
 
         float area = in.area_sq_m;
         if (!std::isfinite(area) || area <= 1e-12f) {
             area = aether::innovation::triangle_area(v0, v1, v2);
         }
         if (!std::isfinite(area) || area <= 1e-12f) {
-            continue;
+            area = 1e-8f;
         }
 
         const float display = std::max(0.0f, std::min(1.0f, in.display));
         const float depth = (std::isfinite(in.depth) && in.depth > 0.0f) ? in.depth : 1.0f;
         const float depth_norm = std::max(0.0f, std::min(1.0f, (depth - 0.25f) / 1.75f));
-        const float detail = std::max(0.0f, std::min(1.0f, 0.80f * display + 0.20f * (1.0f - depth_norm)));
+        const float display_curve = std::pow(display, 0.90f);
+        const float near_curve = std::pow(1.0f - depth_norm, 0.65f);
+        const float detail = std::max(
+            0.0f,
+            std::min(1.0f, 0.72f * display_curve + 0.28f * near_curve));
         const float area_term = std::sqrt(std::max(area, 1e-8f));
-        const float score = 1.35f * detail + 0.35f * area_term;
+        const float score = 0.95f * display_curve + 1.45f * near_curve + 0.18f * area_term;
         scored_candidates.push_back(ParsedCandidate{i, score});
+        display_sum += static_cast<double>(display);
+        ++scored_count;
 
-        // Sparse sampling for distant low-evidence regions to remove "grid wall" look.
-        const float keep_ratio = std::max(0.02f, std::min(1.0f, 0.02f + 0.98f * detail * detail));
-        const std::uint64_t keep_seed = aether::innovation::splitmix64(
-            (in.patch_key != 0u ? in.patch_key : static_cast<std::uint64_t>(i + 1u))
-            ^ (static_cast<std::uint64_t>(i + 1u) * 0x9E3779B97F4A7C15ULL));
+        const aether::innovation::Float3 centroid = aether::innovation::make_float3(
+            (v0.x + v1.x + v2.x) / 3.0f,
+            (v0.y + v1.y + v2.y) / 3.0f,
+            (v0.z + v1.z + v2.z) / 3.0f);
+        const float stable_quant = 0.03f;
+        const int32_t sx = static_cast<int32_t>(std::floor(centroid.x / stable_quant));
+        const int32_t sy = static_cast<int32_t>(std::floor(centroid.y / stable_quant));
+        const int32_t sz = static_cast<int32_t>(std::floor(centroid.z / stable_quant));
+        const std::uint64_t stable_packed =
+            (static_cast<std::uint64_t>(static_cast<uint32_t>(sx)) << 42u) ^
+            (static_cast<std::uint64_t>(static_cast<uint32_t>(sy)) << 21u) ^
+            static_cast<std::uint64_t>(static_cast<uint32_t>(sz));
+        const std::uint64_t base_patch_key = in.patch_key != 0u
+            ? in.patch_key
+            : aether::innovation::splitmix64(stable_packed ^ 0xA24BAED4963EE407ULL);
+
+        // Deterministic keep decision in core: remove frame-index jitter that caused rollback flicker.
+        const float startup_boost = std::max(0.0f, std::min(1.0f, (0.24f - display) / 0.24f));
+        const float keep_floor = 0.015f + 0.12f * startup_boost + 0.02f * near_curve;
+        const float keep_ratio = std::max(
+            keep_floor,
+            std::min(1.0f, keep_floor + (1.0f - keep_floor) * std::pow(detail, 2.35f)));
+        const std::uint64_t keep_seed =
+            aether::innovation::splitmix64(base_patch_key ^ stable_packed ^ 0x9E3779B97F4A7C15ULL);
         const float keep_roll =
             static_cast<float>(keep_seed & 0x00FFFFFFu) / static_cast<float>(0x00FFFFFFu);
         if (keep_roll > keep_ratio) {
             continue;
         }
 
-        const aether::innovation::Float3 centroid = aether::innovation::make_float3(
-            (v0.x + v1.x + v2.x) / 3.0f,
-            (v0.y + v1.y + v2.y) / 3.0f,
-            (v0.z + v1.z + v2.z) / 3.0f);
-        const float cell_size = std::max(0.03f, std::min(0.35f, 0.35f - 0.32f * detail));
-        const int32_t qx = static_cast<int32_t>(std::floor(centroid.x / cell_size));
-        const int32_t qy = static_cast<int32_t>(std::floor(centroid.y / cell_size));
-        const int32_t qz = static_cast<int32_t>(std::floor(centroid.z / cell_size));
+        const float scarcity = std::pow(1.0f - detail, 2.20f);
+        const float cell_size = std::max(
+            0.04f,
+            std::min(6.80f, 0.04f + 6.60f * scarcity));
+        const std::uint64_t jitter_seed = aether::innovation::splitmix64(base_patch_key ^ 0xD2B74407B1CE6E93ULL);
+        const float jitter_scale = 0.38f * cell_size;
+        const float jx =
+            ((static_cast<float>((jitter_seed >> 0u) & 0x3FFu) / 1023.0f) - 0.5f) * jitter_scale;
+        const float jy =
+            ((static_cast<float>((jitter_seed >> 10u) & 0x3FFu) / 1023.0f) - 0.5f) * jitter_scale;
+        const float jz =
+            ((static_cast<float>((jitter_seed >> 20u) & 0x3FFu) / 1023.0f) - 0.5f) * jitter_scale;
+        // Use a fixed rotated basis to avoid axis-aligned row/column artifacts.
+        const float rx = 0.8017837f * centroid.x + 0.2672612f * centroid.y + 0.5345225f * centroid.z;
+        const float ry = -0.4082483f * centroid.x + 0.8164966f * centroid.y - 0.4082483f * centroid.z;
+        const float rz = -0.4364358f * centroid.x - 0.5202659f * centroid.y + 0.7340994f * centroid.z;
+        const int32_t qx = static_cast<int32_t>(std::floor((rx + jx) / cell_size));
+        const int32_t qy = static_cast<int32_t>(std::floor((ry + jy) / cell_size));
+        const int32_t qz = static_cast<int32_t>(std::floor((rz + jz) / cell_size));
         const std::uint64_t packed = (static_cast<std::uint64_t>(static_cast<uint32_t>(qx)) << 42u) ^
                                      (static_cast<std::uint64_t>(static_cast<uint32_t>(qy)) << 21u) ^
                                      static_cast<std::uint64_t>(static_cast<uint32_t>(qz));
-        const std::uint64_t cell_key =
-            aether::innovation::splitmix64(packed ^ (static_cast<std::uint64_t>(std::lround((1.0f - detail) * 7.0f)) << 58u));
+        const std::uint64_t depth_bucket = static_cast<std::uint64_t>(std::lround(depth_norm * 15.0f));
+        const std::uint64_t cell_key = aether::innovation::splitmix64(
+            packed ^ (depth_bucket << 58u) ^ (stable_packed >> 5u));
 
         auto cell_it = best_by_cell.find(cell_key);
         if (cell_it == best_by_cell.end() || score > cell_it->second.score) {
@@ -5944,7 +6076,19 @@ int aether_generate_fracture_display_triangles(
         }
     }
 
-    const std::size_t min_keep = std::min<std::size_t>(tri_count, 96u);
+    const float average_display = scored_count > 0u
+        ? static_cast<float>(display_sum / static_cast<double>(scored_count))
+        : 0.0f;
+    const bool startup_phase = average_display < 0.24f;
+    const std::size_t min_keep_floor = startup_phase ? 120u : 32u;
+    const double min_keep_ratio = startup_phase ? 0.10 : 0.03;
+    const std::size_t min_keep = std::min<std::size_t>(
+        tri_count,
+        std::max<std::size_t>(
+            min_keep_floor,
+            static_cast<std::size_t>(std::ceil(static_cast<double>(tri_count) * min_keep_ratio))
+        )
+    );
     if (selected_count < min_keep) {
         std::sort(
             scored_candidates.begin(),
@@ -5988,12 +6132,17 @@ int aether_generate_fracture_display_triangles(
         const aether::innovation::Float3 v0 = to_cpp_float3(in.v0);
         const aether::innovation::Float3 v1 = to_cpp_float3(in.v1);
         const aether::innovation::Float3 v2 = to_cpp_float3(in.v2);
+        if (!std::isfinite(v0.x) || !std::isfinite(v0.y) || !std::isfinite(v0.z) ||
+            !std::isfinite(v1.x) || !std::isfinite(v1.y) || !std::isfinite(v1.z) ||
+            !std::isfinite(v2.x) || !std::isfinite(v2.y) || !std::isfinite(v2.z)) {
+            continue;
+        }
         float area = in.area_sq_m;
         if (!std::isfinite(area) || area <= 1e-12f) {
             area = aether::innovation::triangle_area(v0, v1, v2);
         }
         if (!std::isfinite(area) || area <= 1e-12f) {
-            continue;
+            area = 1e-8f;
         }
 
         aether::innovation::Float3 normal = to_cpp_float3(in.normal);

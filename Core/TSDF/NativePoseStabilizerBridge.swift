@@ -7,9 +7,9 @@ import CAetherNativeBridge
 #endif
 
 /// Native bridge for pose stabilization (EMA + jitter suppression).
-enum NativePoseStabilizerBridge {
+public enum NativePoseStabilizerBridge {
 
-    static func create(config: aether_pose_stabilizer_config_t? = nil) -> OpaquePointer? {
+    public static func create(config: aether_pose_stabilizer_config_t? = nil) -> OpaquePointer? {
         #if canImport(CAetherNativeBridge)
         var stabilizer: OpaquePointer?
         if var cfg = config {
@@ -24,13 +24,13 @@ enum NativePoseStabilizerBridge {
         #endif
     }
 
-    static func destroy(_ stabilizer: OpaquePointer) {
+    public static func destroy(_ stabilizer: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_pose_stabilizer_destroy(stabilizer)
         #endif
     }
 
-    static func reset(_ stabilizer: OpaquePointer) {
+    public static func reset(_ stabilizer: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_pose_stabilizer_reset(stabilizer)
         #endif
@@ -38,11 +38,11 @@ enum NativePoseStabilizerBridge {
 
     /// Update with raw pose (4×4 column-major), gyro, accel, and timestamp.
     /// Returns (stabilizedPose, quality) or nil on error.
-    static func update(_ stabilizer: OpaquePointer,
-                       rawPose: UnsafePointer<Float>,
-                       gyro: UnsafePointer<Float>?,
-                       accel: UnsafePointer<Float>?,
-                       timestampNs: UInt64) -> ([Float], Float)? {
+    public static func update(_ stabilizer: OpaquePointer,
+                              rawPose: UnsafePointer<Float>,
+                              gyro: UnsafePointer<Float>?,
+                              accel: UnsafePointer<Float>?,
+                              timestampNs: UInt64) -> ([Float], Float)? {
         #if canImport(CAetherNativeBridge)
         var outPose = [Float](repeating: 0, count: 16)
         var quality: Float = 0
@@ -53,7 +53,7 @@ enum NativePoseStabilizerBridge {
         #endif
     }
 
-    static func predict(_ stabilizer: OpaquePointer, targetTimestampNs: UInt64) -> [Float]? {
+    public static func predict(_ stabilizer: OpaquePointer, targetTimestampNs: UInt64) -> [Float]? {
         #if canImport(CAetherNativeBridge)
         var outPose = [Float](repeating: 0, count: 16)
         let rc = aether_pose_stabilizer_predict(stabilizer, targetTimestampNs, &outPose)
