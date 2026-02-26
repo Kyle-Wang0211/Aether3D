@@ -36,7 +36,7 @@ let package = Package(
     // swift-crypto: Required for Linux compatibility (replaces Apple-only CryptoKit)
     // Used for cross-platform SHA-256 hashing and as BLAKE3 fallback
     // Note: blake3-swift removed due to swift-frontend crashes in CI (macOS + Ubuntu)
-    .package(path: ".deps/swift-crypto")
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
   ],
   targets: [
     .systemLibrary(

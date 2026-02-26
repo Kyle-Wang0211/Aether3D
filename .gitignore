@@ -18,3 +18,4 @@ build/
 aether3d.db
 artifacts/
 Aether3DApp.xcodeproj/
+.deps/

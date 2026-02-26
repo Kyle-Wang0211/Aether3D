@@ -39,7 +39,7 @@ private func jsonEscape(_ string: String) -> String {
     return result
 }
 
-public final class PipelineRunner {
+public final class PipelineRunner: @unchecked Sendable {
     private let remoteClient: RemoteB1Client
 
     public convenience init() {

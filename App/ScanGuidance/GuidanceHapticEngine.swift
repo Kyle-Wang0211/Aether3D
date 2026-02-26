@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import Aether3DCore
 
 #if canImport(CoreHaptics)
 import CoreHaptics
@@ -51,7 +52,7 @@ public final class GuidanceHapticEngine {
             hapticEngine = try CHHapticEngine()
             hapticEngine?.stoppedHandler = { [weak self] reason in
                 // Engine stopped, try to restart
-                if reason == .engineStopped {
+                if reason == .systemError || reason == .idleTimeout {
                     self?.initializeHapticEngine()
                 }
             }
@@ -87,8 +88,11 @@ public final class GuidanceHapticEngine {
         // Fire haptic
         fireHapticPattern(pattern)
         
-        // Show toast message
-        toastPresenter?.show(message: toastMessage(for: pattern))
+        // Show toast message (MainActor-isolated, dispatch asynchronously)
+        let message = toastMessage(for: pattern)
+        Task { @MainActor in
+            toastPresenter?.show(message: message)
+        }
         
         return true
     }
@@ -140,8 +144,10 @@ public final class GuidanceHapticEngine {
         guard let engine = hapticEngine else {
             // Fallback to UINotificationFeedbackGenerator if CoreHaptics unavailable
             #if os(iOS)
-            let generator = UINotificationFeedbackGenerator()
-            generator.notificationOccurred(.warning)
+            Task { @MainActor in
+                let generator = UINotificationFeedbackGenerator()
+                generator.notificationOccurred(.warning)
+            }
             #endif
             return
         }

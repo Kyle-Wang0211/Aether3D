@@ -47,15 +47,15 @@ int main() {
     // -- Test 2: compute_visual_params with zero display. --
     {
         FragmentVisualParams params = compute_visual_params(
-            0.0f,   // display = 0 (nothing visible)
+            0.0f,   // display = 0 (S0: black fill should be strongly visible)
             2.0f,
             0.005f,
             0.01f
         );
-        // At zero display, opacity should be minimal.
-        if (params.fill_opacity > 0.5f) {
+        // At zero display, opacity should be high.
+        if (params.fill_opacity < 0.5f) {
             std::fprintf(stderr,
-                         "fill_opacity should be low for display=0, got %f\n",
+                         "fill_opacity should be high for display=0, got %f\n",
                          params.fill_opacity);
             failed++;
         }
@@ -64,15 +64,15 @@ int main() {
     // -- Test 3: compute_visual_params with full display. --
     {
         FragmentVisualParams params = compute_visual_params(
-            1.0f,   // display = 1 (fully visible)
+            1.0f,   // display = 1 (high-quality, fill should fade out)
             0.5f,
             0.02f,
             0.01f
         );
-        // At full display, opacity should be high.
-        if (params.fill_opacity < 0.5f) {
+        // At full display, opacity should be low.
+        if (params.fill_opacity > 0.5f) {
             std::fprintf(stderr,
-                         "fill_opacity should be high for display=1, got %f\n",
+                         "fill_opacity should be low for display=1, got %f\n",
                          params.fill_opacity);
             failed++;
         }

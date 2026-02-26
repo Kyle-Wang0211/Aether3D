@@ -14,8 +14,9 @@
 // ============================================================================
 
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import os.log
+import Aether3DCore
 
 // CI-HARDENED: CMTime conversion helper (AVFoundation stays in App/Capture, not Core)
 // Single source of truth: uses CaptureRecordingConstants.cmTimePreferredTimescale
@@ -47,7 +48,7 @@ struct SelectedCaptureConfig {
 // CI-HARDENED: This file must not use Date() or Timer.scheduledTimer.
 // All time operations must use injected ClockProvider for determinism.
 
-final class CameraSession: CameraSessionProtocol {
+final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
     let captureSession: AVCaptureSession
     private(set) var selectedConfig: SelectedCaptureConfig?
     
@@ -121,8 +122,8 @@ final class CameraSession: CameraSessionProtocol {
         }
         
         // Determine tier
-        let tier = determineTier(width: selectedFormat.format.formatDescription.dimensions.width,
-                                  height: selectedFormat.format.formatDescription.dimensions.height)
+        let tier = determineTier(width: Int(selectedFormat.format.formatDescription.dimensions.width),
+                                  height: Int(selectedFormat.format.formatDescription.dimensions.height))
         
         // Create selected config
         selectedConfig = SelectedCaptureConfig(
@@ -332,13 +333,8 @@ final class CameraSession: CameraSessionProtocol {
         }
         
         // ProRes contribution (iOS 15+ only, safe check)
-        if #available(iOS 15.0, *) {
-            // Check if format supports ProRes codec types
-            if format.supportedVideoCodecTypes.contains(.hevc) {
-                // Additional ProRes check would go here if AVFoundation API provides it
-                // For now, we rely on device capability detection via constants
-            }
-        }
+        // ProRes support is detected via device capability constants
+        // (CaptureRecordingConstants.proResCapableModels), not format-level API
         
         // Apple Log contribution (iOS 17.2+ only)
         if #available(iOS 17.2, *) {
@@ -467,11 +463,11 @@ extension String {
 // MARK: - AVCaptureDevice.Format Extensions
 
 extension AVCaptureDevice.Format {
-    var isVideoCodecSupported: (AVVideoCodecType) -> Bool {
-        return { codecType in
-            self.formatDescription.mediaSubType == codecType.rawValue.fourCharCode ||
-            self.supportedVideoCodecTypes.contains(codecType)
-        }
+    /// Check if a video codec is generally supported for this format.
+    /// On iOS 16+ (our minimum target), HEVC and H.264 are universally supported.
+    /// ProRes requires specific hardware (detected via device model constants).
+    func isVideoCodecSupported(_ codecType: AVVideoCodecType) -> Bool {
+        codecType == .hevc || codecType == .h264
     }
 }
 

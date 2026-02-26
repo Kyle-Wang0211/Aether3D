@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import Aether3DCore
 
 #if canImport(ARKit)
 import ARKit
@@ -34,7 +35,10 @@ public struct MeshExtractor {
     /// Maximum triangles to extract per frame (performance guard)
     private static let maxTrianglesPerExtraction: Int = 10000
     /// Patch identity quantization cell size (meters).
-    private static let patchIdentityCellSizeM: Double = 0.02
+    /// 5cm cells: tolerant of ARKit mesh refinement shifts (1-3cm typical).
+    /// Ensures coverage state persists when camera moves away and returns.
+    /// Smaller cells (2cm) caused coverage loss on remesh due to centroid jitter.
+    private static let patchIdentityCellSizeM: Double = 0.05
 
     public init() {}
 
@@ -94,18 +98,39 @@ public struct MeshExtractor {
                 // Safety bounds check
                 guard i0 < vertexCount, i1 < vertexCount, i2 < vertexCount else { continue }
 
-                // Read vertices
-                let v0Local = vertexData.load(fromByteOffset: i0 * vertexStride, as: SIMD3<Float>.self)
-                let v1Local = vertexData.load(fromByteOffset: i1 * vertexStride, as: SIMD3<Float>.self)
-                let v2Local = vertexData.load(fromByteOffset: i2 * vertexStride, as: SIMD3<Float>.self)
+                // Read vertices (component-wise to avoid SIMD3 16-byte alignment crash
+                // on ARKit's packed_float3 vertex data which has 12-byte stride)
+                let v0Off = i0 * vertexStride
+                let v0Local = SIMD3<Float>(
+                    vertexData.load(fromByteOffset: v0Off, as: Float.self),
+                    vertexData.load(fromByteOffset: v0Off + 4, as: Float.self),
+                    vertexData.load(fromByteOffset: v0Off + 8, as: Float.self)
+                )
+                let v1Off = i1 * vertexStride
+                let v1Local = SIMD3<Float>(
+                    vertexData.load(fromByteOffset: v1Off, as: Float.self),
+                    vertexData.load(fromByteOffset: v1Off + 4, as: Float.self),
+                    vertexData.load(fromByteOffset: v1Off + 8, as: Float.self)
+                )
+                let v2Off = i2 * vertexStride
+                let v2Local = SIMD3<Float>(
+                    vertexData.load(fromByteOffset: v2Off, as: Float.self),
+                    vertexData.load(fromByteOffset: v2Off + 4, as: Float.self),
+                    vertexData.load(fromByteOffset: v2Off + 8, as: Float.self)
+                )
 
                 // Transform to world space
                 let v0 = (combinedTransform * SIMD4<Float>(v0Local, 1.0)).xyz
                 let v1 = (combinedTransform * SIMD4<Float>(v1Local, 1.0)).xyz
                 let v2 = (combinedTransform * SIMD4<Float>(v2Local, 1.0)).xyz
 
-                // Read normal
-                let n0 = normalData.load(fromByteOffset: i0 * normalStride, as: SIMD3<Float>.self)
+                // Read normal (same component-wise load for packed_float3)
+                let n0Off = i0 * normalStride
+                let n0 = SIMD3<Float>(
+                    normalData.load(fromByteOffset: n0Off, as: Float.self),
+                    normalData.load(fromByteOffset: n0Off + 4, as: Float.self),
+                    normalData.load(fromByteOffset: n0Off + 8, as: Float.self)
+                )
                 let transformedNormal = simd_normalize(
                     (combinedTransform * SIMD4<Float>(n0, 0.0)).xyz
                 )

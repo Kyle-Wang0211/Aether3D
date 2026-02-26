@@ -20,18 +20,19 @@ import UIKit
 #if canImport(SwiftUI)
 /// Scan capture control button
 public struct ScanCaptureControls: View {
-    @State private var isPressed = false
     @State private var showMenu = false
-    
+    let isCapturing: Bool
     let onStart: () -> Void
     let onStop: () -> Void
     let onPause: () -> Void
     
     public init(
+        isCapturing: Bool = false,
         onStart: @escaping () -> Void,
         onStop: @escaping () -> Void,
         onPause: @escaping () -> Void
     ) {
+        self.isCapturing = isCapturing
         self.onStart = onStart
         self.onStop = onStop
         self.onPause = onPause
@@ -45,12 +46,11 @@ public struct ScanCaptureControls: View {
                 
                 // Main capture button (white border, black fill)
                 Button(action: {
-                    if isPressed {
+                    if isCapturing {
                         onStop()
                     } else {
                         onStart()
                     }
-                    isPressed.toggle()
                 }) {
                     Circle()
                         .fill(Color.black)
@@ -61,7 +61,7 @@ public struct ScanCaptureControls: View {
                         .frame(width: 60, height: 60)
                         .overlay(
                             Circle()
-                                .fill(isPressed ? Color.red : Color.white)
+                                .fill(isCapturing ? Color.red : Color.white)
                                 .frame(width: 20, height: 20)
                         )
                 }

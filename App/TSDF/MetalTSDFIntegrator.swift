@@ -7,6 +7,7 @@
 //
 // Metal compute shader orchestrator for TSDF integration
 
+import Aether3DCore
 #if canImport(ARKit)
 import ARKit
 #endif
@@ -48,7 +49,7 @@ struct BlockEntry {
 ///   - Hash table metadata: single persistent MTLBuffer
 /// Conforms to TSDFIntegrationBackend (Section 0.6) — the Metal production implementation.
 /// TSDFVolume calls backend.processFrame() after all gates pass.
-public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
+public final class MetalTSDFIntegrator: TSDFIntegrationBackend, @unchecked Sendable {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let textureCache: CVMetalTextureCache
@@ -160,10 +161,15 @@ public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
 
         let startTime = ProcessInfo.processInfo.systemUptime
 
-        // Wait on semaphore (with timeout guard)
-        let waitResult = inflightSemaphore.wait(
-            timeout: .now() + .milliseconds(Int(TSDFConstants.semaphoreWaitTimeoutMs))
-        )
+        // Wait on semaphore (with timeout guard) — moved to background to avoid blocking cooperative thread pool
+        let waitResult: DispatchTimeoutResult = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [inflightSemaphore] in
+                let result = inflightSemaphore.wait(
+                    timeout: .now() + .milliseconds(Int(TSDFConstants.semaphoreWaitTimeoutMs))
+                )
+                continuation.resume(returning: result)
+            }
+        }
         if waitResult == .timedOut {
             return IntegrationResult.IntegrationStats(
                 blocksUpdated: 0, blocksAllocated: 0,
@@ -310,7 +316,12 @@ public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
         encoder1.endEncoding()
         
         cb1.commit()
-        cb1.waitUntilCompleted()  // CPU blocks here (~0.3ms for 256×192)
+        // CPU blocks here (~0.3ms for 256×192) — moved to background to avoid blocking cooperative thread pool
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            cb1.addCompletedHandler { _ in
+                continuation.resume()
+            }
+        }
 
         // Guardrail #19: Command buffer error check
         if cb1.status == .error {

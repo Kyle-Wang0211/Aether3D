@@ -5,6 +5,7 @@
 #ifndef AETHER_TSDF_C_H
 #define AETHER_TSDF_C_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -740,6 +741,12 @@ int aether_motion_analyzer_quality_metric(
     int quality_level,
     double* out_value,
     double* out_confidence);
+double aether_camera_translation_speed(
+    const aether_float3_t* current_position,
+    const aether_float3_t* previous_position,
+    double current_timestamp_s,
+    double previous_timestamp_s,
+    double min_dt_s);
 int aether_laplacian_variance_compute(
     const uint8_t* image,
     int width,
@@ -783,6 +790,53 @@ int aether_frame_quality_eval(
     int quality_level,
     double tenengrad_threshold,
     aether_frame_quality_result_t* out_result);
+
+typedef struct aether_exposure_analysis {
+    double overexpose_ratio;
+    double underexpose_ratio;
+    int has_large_blown_region;
+} aether_exposure_analysis_t;
+
+int aether_exposure_analyze_image(
+    const uint8_t* image,
+    int width,
+    int height,
+    int row_bytes,
+    aether_exposure_analysis_t* out_result);
+
+typedef struct aether_texture_analysis {
+    int feature_count;
+    double spatial_spread;
+    double entropy;
+    double repetitive_penalty;
+    double fused_score;
+    double confidence;
+} aether_texture_analysis_t;
+
+int aether_texture_analyze_image(
+    const uint8_t* image,
+    int width,
+    int height,
+    int row_bytes,
+    aether_texture_analysis_t* out_result);
+
+int aether_brightness_metric_for_quality(
+    int quality_level,
+    double* out_value,
+    double* out_confidence);
+
+typedef struct aether_material_analysis {
+    double specular_percent;
+    double transparent_percent;
+    double textureless_percent;
+    int is_non_lambertian;
+    double confidence;
+    int largest_specular_region;
+} aether_material_analysis_t;
+
+int aether_material_analyze_quality(
+    int quality_level,
+    aether_material_analysis_t* out_result);
 
 // M05.1 pure-vision cross-validation and gate kernels.
 enum {
@@ -1154,6 +1208,44 @@ int aether_patch_color_evidence(
     const aether_patch_display_kernel_config_t* config_or_null,
     double* out_color_evidence);
 
+typedef struct aether_patch_evidence_step_input {
+    double previous_evidence;
+    int64_t last_update_ms;
+    int32_t observation_count;
+    int32_t error_count;
+    int32_t error_streak;
+    int64_t last_good_update_ms;  // <0 means none
+    int32_t suspect_count;
+    double ledger_quality;
+    int32_t verdict;              // 0=good, 1=suspect, 2=bad, 3=unknown
+    int64_t timestamp_ms;
+    double lock_threshold;
+    int32_t min_observations_for_lock;
+    double cooldown_seconds;
+    double corpse_protection_seconds;
+    double base_penalty_per_observation;
+    double max_penalty_per_second;
+    double current_frame_rate;
+} aether_patch_evidence_step_input_t;
+
+typedef struct aether_patch_evidence_step_result {
+    double evidence;
+    int64_t last_update_ms;
+    int32_t observation_count;
+    int32_t error_count;
+    int32_t error_streak;
+    int64_t last_good_update_ms;  // <0 means none
+    int32_t suspect_count;
+    int32_t is_locked;
+    int32_t should_update_best_frame;
+    int32_t was_updated;
+    int32_t verdict_was_unknown;
+} aether_patch_evidence_step_result_t;
+
+int aether_patch_evidence_step(
+    const aether_patch_evidence_step_input_t* input,
+    aether_patch_evidence_step_result_t* out_result);
+
 typedef struct aether_smart_smoother_config {
     int32_t window_size;
     double jitter_band;
@@ -1174,6 +1266,121 @@ int aether_smart_smoother_add(
     aether_smart_smoother_t* smoother,
     double value,
     double* out_smoothed);
+
+// M05.3 quality speed/state decision kernels.
+enum {
+    AETHER_QUALITY_VISUAL_STATE_BLACK = 0,
+    AETHER_QUALITY_VISUAL_STATE_GRAY = 1,
+    AETHER_QUALITY_VISUAL_STATE_WHITE = 2,
+    AETHER_QUALITY_VISUAL_STATE_CLEAR = 3,
+};
+
+enum {
+    AETHER_QUALITY_FPS_TIER_FULL = 0,
+    AETHER_QUALITY_FPS_TIER_DEGRADED = 1,
+    AETHER_QUALITY_FPS_TIER_EMERGENCY = 2,
+};
+
+enum {
+    AETHER_QUALITY_SPEED_TIER_EXCELLENT = 0,
+    AETHER_QUALITY_SPEED_TIER_GOOD = 1,
+    AETHER_QUALITY_SPEED_TIER_MODERATE = 2,
+    AETHER_QUALITY_SPEED_TIER_POOR = 3,
+    AETHER_QUALITY_SPEED_TIER_STOPPED = 4,
+};
+
+enum {
+    AETHER_QUALITY_TRANSITION_REASON_NONE = 0,
+    AETHER_QUALITY_TRANSITION_REASON_ONLY_FULL_TIER = 1,
+    AETHER_QUALITY_TRANSITION_REASON_MISSING_CRITICAL_METRICS = 2,
+    AETHER_QUALITY_TRANSITION_REASON_MISSING_STABILITY = 3,
+    AETHER_QUALITY_TRANSITION_REASON_CONFIDENCE_THRESHOLD_NOT_MET = 4,
+    AETHER_QUALITY_TRANSITION_REASON_STABILITY_THRESHOLD_EXCEEDED = 5,
+    AETHER_QUALITY_TRANSITION_REASON_CANNOT_RETREAT = 6,
+    AETHER_QUALITY_TRANSITION_REASON_INVALID_VISUAL_STATE = 7,
+};
+
+enum {
+    AETHER_NO_PROGRESS_WARNING_STATE_ARMED = 0,
+    AETHER_NO_PROGRESS_WARNING_STATE_FIRED = 1,
+    AETHER_NO_PROGRESS_WARNING_STATE_COOLDOWN = 2,
+};
+
+typedef struct aether_quality_transition_result {
+    int allowed;
+    int reason;  // AETHER_QUALITY_TRANSITION_REASON_*
+} aether_quality_transition_result_t;
+
+typedef struct aether_speed_feedback_result {
+    double progress_speed;
+    int tier;  // AETHER_QUALITY_SPEED_TIER_*
+    double target_animation_speed;
+    double animation_speed;
+} aether_speed_feedback_result_t;
+
+typedef struct aether_no_progress_warning_state {
+    int state;  // AETHER_NO_PROGRESS_WARNING_STATE_*
+    int64_t armed_time_ms;  // <0 means none
+} aether_no_progress_warning_state_t;
+
+int aether_quality_visual_state_update(
+    int current_state,
+    int incoming_state,
+    int* out_state);
+int aether_quality_can_transition(
+    int from_state,
+    int to_state,
+    int fps_tier,
+    int has_critical_metrics,
+    double brightness_confidence,
+    double laplacian_confidence,
+    int has_stability,
+    double stability,
+    double confidence_threshold_full,
+    double full_white_stability_max,
+    aether_quality_transition_result_t* out_result);
+int aether_quality_check_black_to_gray(
+    int has_brightness,
+    double brightness_confidence,
+    int has_focus,
+    double focus_confidence,
+    double threshold,
+    int* out_pass);
+int aether_quality_smooth_speed(
+    double current_speed,
+    double target_speed,
+    int64_t time_delta_ms,
+    double max_change_rate,
+    int64_t window_ms,
+    double* out_speed);
+int aether_quality_speed_feedback(
+    int white_coverage_increment,
+    int64_t no_progress_duration_ms,
+    double current_animation_speed,
+    int64_t time_delta_ms,
+    double max_change_rate,
+    int64_t window_ms,
+    int64_t no_progress_warning_ms,
+    aether_speed_feedback_result_t* out_result);
+int aether_quality_no_progress_warning_step(
+    aether_no_progress_warning_state_t* inout_state,
+    int64_t no_progress_duration_ms,
+    int64_t now_ms,
+    int64_t trigger_ms,
+    int64_t cooldown_ms,
+    int* out_warning_active);
+int aether_quality_stopped_animation_alpha(
+    int64_t timestamp_ms,
+    double frequency_hz,
+    double* out_alpha);
+int aether_quality_trend_variance(
+    const double* values,
+    const int64_t* timestamps,
+    int count,
+    int64_t now_ms,
+    int64_t window_ms,
+    double* out_variance,
+    int* out_has_value);
 
 // M05.4 persistent visual style (non-rollback).
 typedef struct aether_visual_style_state_input {
@@ -1255,7 +1462,17 @@ typedef struct aether_capture_style_output {
     float roughness;
     float thickness;
     float border_width;
+    float border_alpha;
     float grayscale;
+    float ripple_min_amplitude;
+    float ripple_boost_scale;
+    float fill_dither_start;
+    float fill_dither_end;
+    float border_min_width_px;
+    float border_min_alpha;
+    float border_aa_factor;
+    float border_fwidth_epsilon;
+    float border_discard_alpha;
     int visual_frozen;
     int border_frozen;
     int visual_should_freeze;
@@ -1273,6 +1490,12 @@ int aether_capture_style_runtime_resolve(
     aether_capture_style_runtime_t* runtime,
     const aether_capture_style_input_t* inputs,
     int input_count,
+    aether_capture_style_output_t* out_states);
+int aether_capture_style_resolve_stateless(
+    const aether_capture_style_runtime_config_t* config_or_null,
+    const aether_capture_style_input_t* inputs,
+    int input_count,
+    float median_area_sq_m,
     aether_capture_style_output_t* out_states);
 
 // M05.5 hashes and scan geometry helpers.
@@ -1319,6 +1542,37 @@ typedef struct aether_fragment_visual_params {
     float roughness;
     float wedge_thickness;
 } aether_fragment_visual_params_t;
+
+typedef struct aether_fracture_input_triangle {
+    uint64_t patch_key;
+    aether_float3_t v0;
+    aether_float3_t v1;
+    aether_float3_t v2;
+    aether_float3_t normal;
+    float display;
+    float depth;
+    float area_sq_m;
+} aether_fracture_input_triangle_t;
+
+typedef struct aether_fracture_output_triangle {
+    uint64_t patch_key;
+    uint32_t parent_triangle_index;
+    uint32_t fragment_index;
+    aether_float3_t v0;
+    aether_float3_t v1;
+    aether_float3_t v2;
+    aether_float3_t normal;
+    float display;
+    float area_sq_m;
+    float gap_shrink;
+    float crack_seed;
+} aether_fracture_output_triangle_t;
+
+int aether_generate_fracture_display_triangles(
+    const aether_fracture_input_triangle_t* triangles,
+    int triangle_count,
+    aether_fracture_output_triangle_t* out_triangles,
+    int* inout_triangle_count);
 
 int aether_generate_wedge_geometry(
     const aether_wedge_input_triangle_t* triangles,
@@ -1796,6 +2050,123 @@ int aether_bandwidth_kalman_predict(
     const aether_kalman_bandwidth_state_t* state,
     aether_kalman_bandwidth_output_t* out);
 
+// M13.5 upload fusion scheduler.
+typedef struct aether_upload_fusion_scheduler_input {
+    int64_t queue_length_bytes;
+    int32_t last_chunk_size_bytes;
+    double kalman_predicted_bps;
+    int32_t kalman_trend;  // 0 rising, 1 stable, 2 falling
+    double ml_predicted_bps;
+    int32_t has_ml_prediction;  // 0/1
+    double controller_accuracy_mpc;
+    double controller_accuracy_abr;
+    double controller_accuracy_ewma;
+    double controller_accuracy_kalman;
+    double controller_accuracy_ml;
+    int32_t chunk_size_min_bytes;
+    int32_t chunk_size_default_bytes;
+    int32_t chunk_size_max_bytes;
+    int32_t chunk_size_step_bytes;
+    double ewma_alpha;
+    double ewma_target_seconds;
+    double ml_norm_bps;
+    int32_t alignment_bytes;
+} aether_upload_fusion_scheduler_input_t;
+
+typedef struct aether_upload_fusion_scheduler_output {
+    int32_t mpc_size_bytes;
+    int32_t abr_size_bytes;
+    int32_t ewma_size_bytes;
+    int32_t kalman_size_bytes;
+    int32_t ml_size_bytes;
+    int32_t fused_size_bytes;
+    int32_t safe_size_bytes;
+    int32_t final_chunk_size_bytes;
+} aether_upload_fusion_scheduler_output_t;
+
+int aether_upload_fusion_decide_chunk_size(
+    const aether_upload_fusion_scheduler_input_t* input,
+    aether_upload_fusion_scheduler_output_t* out);
+
+// M13.6 network speed monitor.
+enum {
+    AETHER_NETWORK_SPEED_CLASS_SLOW = 0,
+    AETHER_NETWORK_SPEED_CLASS_NORMAL = 1,
+    AETHER_NETWORK_SPEED_CLASS_FAST = 2,
+    AETHER_NETWORK_SPEED_CLASS_ULTRAFAST = 3,
+    AETHER_NETWORK_SPEED_CLASS_UNKNOWN = 4,
+};
+
+enum {
+    AETHER_UPLOAD_CHUNK_STRATEGY_FIXED = 0,
+    AETHER_UPLOAD_CHUNK_STRATEGY_ADAPTIVE = 1,
+    AETHER_UPLOAD_CHUNK_STRATEGY_AGGRESSIVE = 2,
+};
+
+typedef struct aether_network_speed_state {
+    int64_t bytes_transferred[64];
+    double duration_seconds[64];
+    double timestamp_seconds[64];
+    int32_t head;
+    int32_t count;
+    int32_t max_samples;
+    double window_seconds;
+    double current_speed_mbps;
+    int32_t current_class;
+    int32_t reliable;
+} aether_network_speed_state_t;
+
+typedef struct aether_network_speed_statistics {
+    double min_mbps;
+    double max_mbps;
+    double avg_mbps;
+    double stddev_mbps;
+    int32_t sample_count;
+} aether_network_speed_statistics_t;
+
+int aether_network_speed_reset(
+    aether_network_speed_state_t* state,
+    int max_samples,
+    double window_seconds);
+int aether_network_speed_record_sample(
+    aether_network_speed_state_t* state,
+    int64_t bytes_transferred,
+    double duration_seconds,
+    double timestamp_seconds);
+int aether_network_speed_snapshot(
+    aether_network_speed_state_t* state,
+    double now_seconds,
+    int* out_speed_class,
+    double* out_speed_mbps,
+    int* out_sample_count,
+    int* out_reliable);
+int aether_network_speed_statistics(
+    aether_network_speed_state_t* state,
+    double now_seconds,
+    aether_network_speed_statistics_t* out_stats);
+int aether_network_speed_recommended_chunk_size(
+    int speed_class,
+    int chunk_size_min,
+    int chunk_size_default,
+    int chunk_size_max,
+    int* out_chunk_size);
+int aether_network_speed_recommended_parallel_count(
+    int speed_class,
+    int max_parallel_uploads,
+    int* out_parallel_count);
+int aether_upload_calculate_chunk_size(
+    int strategy,
+    int speed_class,
+    int recommended_chunk_size,
+    int chunk_size_default,
+    int chunk_size_max,
+    int* out_chunk_size);
+int aether_upload_calculate_chunk_size_for_file(
+    int base_chunk_size,
+    int chunk_size_min,
+    int64_t file_size_bytes,
+    int* out_chunk_size);
+
 // M14 erasure coding.
 typedef struct aether_erasure_selection {
     int mode;   // 0 RS, 1 RaptorQ
@@ -2130,6 +2501,11 @@ int aether_decay_confidence(
     const int* in_current_frustum,
     uint64_t current_frame,
     const aether_confidence_decay_config_t* config);
+int aether_confidence_aggregation_weight(
+    int64_t last_update_ms,
+    int64_t current_time_ms,
+    double half_life_sec,
+    double* out_weight);
 
 // Patch identity matching.
 typedef struct aether_patch_identity_sample {
@@ -2170,6 +2546,22 @@ typedef struct aether_render_selection_config {
 } aether_render_selection_config_t;
 
 int aether_select_stable_render_triangles(
+    const aether_render_triangle_candidate_t* candidates,
+    int candidate_count,
+    const aether_render_selection_config_t* config,
+    int32_t* out_selected_indices,
+    int* inout_selected_count);
+
+typedef struct aether_render_selection_runtime aether_render_selection_runtime_t;
+
+int aether_render_selection_runtime_create(
+    const aether_render_selection_config_t* config_or_null,
+    int32_t hold_frames,
+    aether_render_selection_runtime_t** out_runtime);
+int aether_render_selection_runtime_destroy(aether_render_selection_runtime_t* runtime);
+int aether_render_selection_runtime_reset(aether_render_selection_runtime_t* runtime);
+int aether_render_selection_runtime_select(
+    aether_render_selection_runtime_t* runtime,
     const aether_render_triangle_candidate_t* candidates,
     int candidate_count,
     const aether_render_selection_config_t* config,
@@ -3156,6 +3548,8 @@ double aether_softplus(double x);
 int64_t aether_quantize_q01(double value);
 double aether_dequantize_q01(int64_t q);
 int aether_quantized_are_close(int64_t a, int64_t b, int64_t tolerance);
+int64_t aether_quantize_angle_deg(double degrees);
+double aether_dequantize_angle_deg(int64_t q);
 
 // ═══════════════════════════════════════════════════════════════════════
 // SpatialQuantizer: Morton Code / Z-Order Curve
@@ -3472,6 +3866,806 @@ int aether_compute_fiedler_value(
     uint64_t vertex_count,
     int max_iterations,
     aether_fiedler_result_t* out);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* P0: Observation Quality from Triangle Geometry                            */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+/// Compute observation quality [0.1, 1.0] from triangle area.
+/// Pure math — no state, no allocation.
+float aether_observation_quality_from_area(float area_sq_m, float reference_area);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* P1b: Oklab Perceptual Color from Display Value                            */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct aether_srgb_color {
+    float r, g, b;
+} aether_srgb_color_t;
+
+/// Weber-Fechner + Oklab perceptual color from display [0,1].
+int aether_oklab_color_from_display(float display, aether_srgb_color_t* out);
+
+/// Raw Oklab to gamma sRGB conversion.
+int aether_oklab_to_srgb(float L, float a, float b, aether_srgb_color_t* out);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* P1c: Environment Light Fusion Kernel                                      */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct aether_light_estimator aether_light_estimator_t;
+
+typedef struct aether_light_estimator_config {
+    float fallback_direction[3];
+    float fallback_intensity;
+    float min_intensity;
+    float max_intensity;
+    float rise_alpha;
+    float fall_alpha;
+    float direction_alpha;
+    float sh_alpha;
+    float missing_decay_per_s;
+    float max_missing_hold_s;
+} aether_light_estimator_config_t;
+
+typedef struct aether_light_observation {
+    int32_t source_tier;       /* 0=ARKit, 1=Vision, 2=Fallback */
+    int32_t has_direction;     /* 0 or 1 */
+    int32_t has_sh;            /* 0 or 1 */
+    float direction[3];
+    float intensity;
+    float sh_coeffs_rgb[27];   /* flattened [coeff][rgb], coeff in [0..8] */
+} aether_light_observation_t;
+
+typedef struct aether_light_state {
+    int32_t tier;              /* 0=ARKit, 1=Vision, 2=Fallback */
+    float direction[3];
+    float intensity;
+    float sh_coeffs_rgb[27];   /* flattened [coeff][rgb], coeff in [0..8] */
+    float missing_seconds;
+} aether_light_state_t;
+
+int aether_light_estimator_create(
+    const aether_light_estimator_config_t* config_or_null,
+    aether_light_estimator_t** out_estimator);
+int aether_light_estimator_destroy(aether_light_estimator_t* estimator);
+int aether_light_estimator_reset(aether_light_estimator_t* estimator);
+int aether_light_estimator_step(
+    aether_light_estimator_t* estimator,
+    const aether_light_observation_t* observation_or_null,
+    double timestamp_s,
+    aether_light_state_t* out_state);
+int aether_light_state_copy_sh9_rgb(
+    const aether_light_state_t* state,
+    float* out_sh_coeffs_rgb27,
+    int out_count);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* P2b+P1a: Thermal Quality Decision (proactive + cool-down + pass mask)     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct aether_thermal_quality_decision aether_thermal_quality_decision_t;
+
+typedef struct aether_thermal_quality_config {
+    float hysteresis_s;
+    float overshoot_ratio;
+    int window_frames;
+    float proactive_threshold;
+    float cooldown_threshold;
+    float cooldown_multiplier;
+    int tier_max_triangles[4];
+    int tier_target_fps[4];
+} aether_thermal_quality_config_t;
+
+typedef struct aether_thermal_quality_state {
+    int current_tier;      /* 0=nominal, 1=fair, 2=serious, 3=critical */
+    uint32_t pass_mask;    /* Bitmask of enabled render passes */
+    int max_triangles;
+    int target_fps;
+    int enable_flip;
+    int enable_ripple;
+    int enable_metallic;
+    int enable_haptics;
+} aether_thermal_quality_state_t;
+
+int aether_thermal_quality_create(
+    const aether_thermal_quality_config_t* config,
+    aether_thermal_quality_decision_t** out);
+int aether_thermal_quality_destroy(aether_thermal_quality_decision_t* dec);
+int aether_thermal_quality_reset(aether_thermal_quality_decision_t* dec);
+int aether_thermal_quality_update_os(
+    aether_thermal_quality_decision_t* dec, int os_level, double timestamp_s);
+int aether_thermal_quality_update_frame(
+    aether_thermal_quality_decision_t* dec, float gpu_ms, double timestamp_s);
+int aether_thermal_quality_evaluate(
+    aether_thermal_quality_decision_t* dec, double timestamp_s);
+int aether_thermal_quality_state(
+    const aether_thermal_quality_decision_t* dec,
+    aether_thermal_quality_state_t* out);
+int aether_thermal_quality_force_tier(
+    aether_thermal_quality_decision_t* dec, int tier, double timestamp_s);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* P2c: Camera Format Policy / Scan State / Haptic Policy                     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+enum {
+    AETHER_RESOLUTION_TIER_8K = 0,
+    AETHER_RESOLUTION_TIER_4K = 1,
+    AETHER_RESOLUTION_TIER_2K = 2,
+    AETHER_RESOLUTION_TIER_1080P = 3,
+    AETHER_RESOLUTION_TIER_720P = 4,
+    AETHER_RESOLUTION_TIER_480P = 5,
+    AETHER_RESOLUTION_TIER_LOWER = 6
+};
+
+typedef struct aether_camera_format_descriptor {
+    int32_t width;
+    int32_t height;
+    double fps;
+    int32_t hdr_supported;
+    int32_t hevc_supported;
+    int64_t weight_fps;
+    int64_t weight_resolution;
+    int64_t bonus_hdr;
+    int64_t bonus_hevc;
+} aether_camera_format_descriptor_t;
+
+int aether_camera_format_tier_from_dimensions(
+    int32_t width,
+    int32_t height,
+    int32_t* out_tier_code);
+int aether_camera_format_score(
+    const aether_camera_format_descriptor_t* descriptor,
+    int64_t* out_score);
+
+enum {
+    AETHER_SCAN_STATE_INITIALIZING = 0,
+    AETHER_SCAN_STATE_READY = 1,
+    AETHER_SCAN_STATE_CAPTURING = 2,
+    AETHER_SCAN_STATE_PAUSED = 3,
+    AETHER_SCAN_STATE_FINISHING = 4,
+    AETHER_SCAN_STATE_COMPLETED = 5,
+    AETHER_SCAN_STATE_FAILED = 6
+};
+
+int aether_scan_state_can_transition(
+    int32_t from_state,
+    int32_t to_state,
+    int32_t* out_allowed);
+int aether_scan_state_is_active(
+    int32_t state,
+    int32_t* out_active);
+int aether_scan_state_can_finish(
+    int32_t state,
+    int32_t* out_can_finish);
+int aether_scan_state_recommended_abort_state(
+    int32_t state,
+    int32_t* out_state);
+
+enum {
+    AETHER_SCAN_ACTION_REASON_PRESENTATION = 0,
+    AETHER_SCAN_ACTION_REASON_ABORT = 1
+};
+
+enum {
+    AETHER_SCAN_ACTION_SET_BLACK_BACKGROUND = 1u << 0,
+    AETHER_SCAN_ACTION_SET_OVERLAY_OPAQUE = 1u << 1,
+    AETHER_SCAN_ACTION_SET_BORDER_DEPTH_LESS_EQUAL = 1u << 2,
+    AETHER_SCAN_ACTION_APPLY_TRANSITION = 1u << 3
+};
+
+typedef struct aether_scan_action_plan {
+    uint32_t action_mask;           /* Bitwise OR of AETHER_SCAN_ACTION_* */
+    float overlay_clear_alpha;      /* Used by presentation action plan */
+    int32_t transition_target_state;/* Used when APPLY_TRANSITION bit is set */
+} aether_scan_action_plan_t;
+
+int aether_scan_state_action_plan(
+    int32_t state,
+    int32_t reason,
+    aether_scan_action_plan_t* out_plan);
+
+enum {
+    AETHER_SCAN_BORDER_DEPTH_LESS = 0,
+    AETHER_SCAN_BORDER_DEPTH_LESS_EQUAL = 1
+};
+
+typedef struct aether_scan_render_presentation_policy {
+    int32_t force_black_background;  /* 1 => hide camera preview behind black */
+    int32_t overlay_opaque;          /* 1 => overlay view should be opaque */
+    float overlay_clear_alpha;       /* Overlay clear alpha in [0, 1] */
+    int32_t border_depth_mode;       /* AETHER_SCAN_BORDER_DEPTH_* */
+} aether_scan_render_presentation_policy_t;
+
+int aether_scan_state_render_presentation_policy(
+    int32_t state,
+    aether_scan_render_presentation_policy_t* out_policy);
+
+enum {
+    AETHER_HAPTIC_PATTERN_MOTION_TOO_FAST = 0,
+    AETHER_HAPTIC_PATTERN_BLUR_DETECTED = 1,
+    AETHER_HAPTIC_PATTERN_EXPOSURE_ABNORMAL = 2,
+    AETHER_HAPTIC_PATTERN_SCAN_COMPLETE = 3
+};
+
+typedef struct aether_haptic_policy aether_haptic_policy_t;
+
+typedef struct aether_haptic_policy_config {
+    double debounce_seconds;
+    int32_t max_per_minute;
+} aether_haptic_policy_config_t;
+
+int aether_haptic_policy_create(
+    const aether_haptic_policy_config_t* config_or_null,
+    aether_haptic_policy_t** out_policy);
+int aether_haptic_policy_destroy(aether_haptic_policy_t* policy);
+int aether_haptic_policy_reset(aether_haptic_policy_t* policy);
+int aether_haptic_policy_should_fire(
+    aether_haptic_policy_t* policy,
+    int32_t pattern,
+    double timestamp_s,
+    int32_t* out_should_fire);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/* P3: SPZ Compressor (Gaussian Splat Compression)                           */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct aether_spz_header {
+    uint32_t num_splats;
+    uint8_t sh_degree;
+    uint8_t flags;
+    float bbox_min[3];
+    float bbox_max[3];
+} aether_spz_header_t;
+
+/// Compress Gaussian splat data to SPZ format.
+/// Caller must free *out_data with aether_spz_free().
+int aether_spz_compress(
+    const float* positions,
+    const float* scales,
+    const float* rotations,
+    const float* opacities,
+    const float* sh_coeffs,
+    int num_splats,
+    int sh_degree,
+    uint8_t** out_data,
+    size_t* out_size);
+
+/// Decompress SPZ data. Caller must free each non-NULL output with aether_spz_free().
+int aether_spz_decompress(
+    const uint8_t* data,
+    size_t size,
+    float** out_positions,
+    float** out_scales,
+    float** out_rotations,
+    float** out_opacities,
+    float** out_sh_coeffs,
+    float** out_colors,
+    aether_spz_header_t* out_header);
+
+/// Free memory allocated by aether_spz_compress / aether_spz_decompress.
+void aether_spz_free(void* ptr);
+
+// ═══════════════════════════════════════════════════════════════════════
+// P0: Multi-view Photometric Cross-Validation
+// ═══════════════════════════════════════════════════════════════════════
+
+typedef struct aether_multiview_photometric aether_multiview_photometric_t;
+
+typedef struct aether_view_radiance_sample {
+    double rgb[3];
+    double view_dir[3];
+    double normal[3];
+    double luminance;
+    double lab_l, lab_a, lab_b;
+    int64_t timestamp_ms;
+} aether_view_radiance_sample_t;
+
+typedef struct aether_cross_view_result {
+    double mean_cross_view_delta_e;
+    double max_cross_view_delta_e;
+    double lambertian_consistency;
+    size_t pair_count;
+    int is_consistent;
+    double confidence;
+} aether_cross_view_result_t;
+
+aether_multiview_photometric_t* aether_multiview_photometric_create(void);
+void aether_multiview_photometric_destroy(aether_multiview_photometric_t* handle);
+int aether_multiview_photometric_add_observation(
+    aether_multiview_photometric_t* handle,
+    uint64_t patch_id,
+    const aether_view_radiance_sample_t* sample);
+int aether_multiview_photometric_evaluate_patch(
+    const aether_multiview_photometric_t* handle,
+    uint64_t patch_id,
+    aether_cross_view_result_t* out);
+int aether_multiview_photometric_evaluate_all(
+    const aether_multiview_photometric_t* handle,
+    aether_cross_view_result_t* out);
+size_t aether_multiview_photometric_patch_count(
+    const aether_multiview_photometric_t* handle);
+void aether_multiview_photometric_reset(aether_multiview_photometric_t* handle);
+
+// ═══════════════════════════════════════════════════════════════════════
+// P1a: Bayesian Quality Network
+// ═══════════════════════════════════════════════════════════════════════
+
+typedef struct aether_bayesian_quality_network aether_bayesian_quality_network_t;
+
+typedef struct aether_bayesian_quality_result {
+    double fusion_score;
+    double fusion_variance;
+    double risk_score;
+    double risk_variance;
+    double fusion_credible_low;
+    double fusion_credible_high;
+} aether_bayesian_quality_result_t;
+
+aether_bayesian_quality_network_t* aether_bayesian_quality_network_create(void);
+void aether_bayesian_quality_network_destroy(aether_bayesian_quality_network_t* handle);
+int aether_bayesian_quality_network_initialize(
+    aether_bayesian_quality_network_t* handle,
+    const double weights[6]);
+int aether_bayesian_quality_network_infer(
+    const aether_bayesian_quality_network_t* handle,
+    const double component_scores[6],
+    aether_bayesian_quality_result_t* out);
+
+// ═══════════════════════════════════════════════════════════════════════
+// P1b: Choquet Fuzzy Measure Learner
+// ═══════════════════════════════════════════════════════════════════════
+
+typedef struct aether_choquet_learner aether_choquet_learner_t;
+
+typedef struct aether_choquet_observation {
+    double super_dims[5];
+    int certified;
+    double weight;
+} aether_choquet_observation_t;
+
+typedef struct aether_choquet_learner_stats {
+    size_t observation_count;
+    size_t steps_taken;
+    double last_loss;
+} aether_choquet_learner_stats_t;
+
+aether_choquet_learner_t* aether_choquet_learner_create(void);
+void aether_choquet_learner_destroy(aether_choquet_learner_t* handle);
+int aether_choquet_learner_add_observation(
+    aether_choquet_learner_t* handle,
+    const aether_choquet_observation_t* obs);
+int aether_choquet_learner_step(
+    aether_choquet_learner_t* handle,
+    double out_mu[32]);
+int aether_choquet_learner_stats(
+    const aether_choquet_learner_t* handle,
+    aether_choquet_learner_stats_t* out);
+
+// ═══════════════════════════════════════════════════════════════════════
+// P2a: Multi-scale Image Quality
+// ═══════════════════════════════════════════════════════════════════════
+
+typedef struct aether_multiscale_image_result {
+    double composite_quality;
+    double per_level_energy[4];
+    double noise_estimate;
+    double sharpness_profile;
+    int levels_computed;
+} aether_multiscale_image_result_t;
+
+int aether_multiscale_image_quality(
+    const uint8_t* bytes,
+    int width,
+    int height,
+    int row_bytes,
+    int max_levels,
+    aether_multiscale_image_result_t* out);
+
+// ═══════════════════════════════════════════════════════════════════════
+// P2b: Monte Carlo Uncertainty Estimation
+// ═══════════════════════════════════════════════════════════════════════
+
+typedef struct aether_mc_confidence_interval {
+    double median, p5, p95, mean, std_dev;
+} aether_mc_confidence_interval_t;
+
+typedef struct aether_mc_uncertainty_result {
+    aether_mc_confidence_interval_t coverage_ci;
+    aether_mc_confidence_interval_t belief_ci;
+    aether_mc_confidence_interval_t plausibility_ci;
+    aether_mc_confidence_interval_t lyapunov_rate_ci;
+    aether_mc_confidence_interval_t pac_bound_ci;
+    size_t iterations_run;
+    int converged;
+} aether_mc_uncertainty_result_t;
+
+typedef struct aether_mc_cell_observation {
+    double occupied;
+    double unknown;
+    uint32_t view_count;
+    double area_weight;
+    int excluded;
+} aether_mc_cell_observation_t;
+
+int aether_mc_uncertainty_estimate(
+    const aether_mc_cell_observation_t* cells,
+    size_t count,
+    int num_iterations,
+    uint64_t seed,
+    aether_mc_uncertainty_result_t* out);
+
+// ═══════════════════════════════════════════════════════════════════════
+// PBR: Cook-Torrance Material
+// ═══════════════════════════════════════════════════════════════════════
+
+typedef struct aether_pbr_material_params {
+    float metallic;
+    float roughness;
+    float f0;
+    float ior;
+    float clearcoat;
+    float clearcoat_roughness;
+    float ambient_occlusion;
+} aether_pbr_material_params_t;
+
+typedef struct aether_brdf_eval_result {
+    float specular;
+    float diffuse;
+    float fresnel;
+    float ndf;
+    float geometry;
+    float total;
+    int energy_conserving;
+} aether_brdf_eval_result_t;
+
+int aether_pbr_from_evidence(
+    float display_confidence,
+    uint8_t evidence_state,
+    aether_pbr_material_params_t* out);
+
+int aether_brdf_evaluate(
+    const aether_pbr_material_params_t* material,
+    float n_dot_l, float n_dot_v, float n_dot_h, float v_dot_h,
+    aether_brdf_eval_result_t* out);
+
+int aether_pbr_check_energy_conservation(
+    const aether_pbr_material_params_t* material,
+    int num_samples);
+
+// ═══════════════════════════════════════════════════════════════════════
+// Mobile/System Runtime Decision Kernels
+// ═══════════════════════════════════════════════════════════════════════
+
+typedef struct aether_mobile_overlap_result {
+    double overlap_ratio;
+    double photometric_delta;
+    double photometric_penalty;
+    double temporal_penalty;
+} aether_mobile_overlap_result_t;
+
+typedef struct aether_mobile_sfm_prediction {
+    int will_succeed;
+    double confidence;
+    int reason_code;
+} aether_mobile_sfm_prediction_t;
+
+typedef struct aether_mobile_frame_pacing_runtime aether_mobile_frame_pacing_runtime_t;
+
+typedef struct aether_mobile_frame_pacing_result {
+    double variance;
+    double p95;
+    int advice;
+} aether_mobile_frame_pacing_result_t;
+
+typedef struct aether_mobile_frame_interval_analysis {
+    double fps;
+    double average_interval_s;
+    double coefficient_of_variation;
+    int drop_count;
+    double drop_rate;
+} aether_mobile_frame_interval_analysis_t;
+
+typedef struct aether_mobile_frame_pacing_classification {
+    int frame_rate_code;  // 0=unknown, 1=24fps, 2=30fps, 3=60fps, 4=variable
+    int rhythm_code;      // 0=regular, 1=irregular, 2=dropped, 3=stuttering
+    double fps;
+    double coefficient_of_variation;
+    int drop_count;
+} aether_mobile_frame_pacing_classification_t;
+
+/// motion_direction: 0=forward, 1=side, 2=backward
+int aether_mobile_estimate_overlap(
+    const uint8_t* frame1_bytes,
+    int frame1_size,
+    const uint8_t* frame2_bytes,
+    int frame2_size,
+    int motion_direction,
+    double dt_seconds,
+    aether_mobile_overlap_result_t* out);
+
+/// overall_tier_rejected: 1 if rejected, else 0
+int aether_mobile_predict_sfm_success(
+    int total_frames,
+    int acceptable_frames,
+    int overall_tier_rejected,
+    int total_problem_frames,
+    aether_mobile_sfm_prediction_t* out);
+
+int aether_mobile_frame_pacing_create(
+    double target_frame_time_s,
+    int history_size,
+    aether_mobile_frame_pacing_runtime_t** out_runtime);
+int aether_mobile_frame_pacing_destroy(aether_mobile_frame_pacing_runtime_t* runtime);
+int aether_mobile_frame_pacing_reset(aether_mobile_frame_pacing_runtime_t* runtime);
+int aether_mobile_frame_pacing_record(
+    aether_mobile_frame_pacing_runtime_t* runtime,
+    double frame_time_s,
+    aether_mobile_frame_pacing_result_t* out);
+int aether_mobile_analyze_frame_intervals(
+    const double* intervals_s,
+    int interval_count,
+    aether_mobile_frame_interval_analysis_t* out);
+int aether_mobile_classify_frame_pacing(
+    const aether_mobile_frame_interval_analysis_t* input,
+    int sample_count,
+    aether_mobile_frame_pacing_classification_t* out);
+
+/// os_thermal_state: 0=nominal, 1=fair, 2=serious, 3=critical
+/// out_state: 0=normal, 1=warning, 2=critical, 3=shutdown
+int aether_mobile_map_thermal_state(int os_thermal_state, int* out_state);
+
+/// out_quality: 0=maximum, 1=balanced, 2=efficient
+int aether_mobile_recommended_scan_quality(int low_power_mode_enabled, int* out_quality);
+
+/// out_allow: 1 allow, 0 disallow
+int aether_mobile_should_allow_background_processing(
+    int low_power_mode_enabled,
+    int* out_allow);
+
+// ─── Device Capability Detection & Algorithm Gating ───────────────────
+//
+// Cross-platform device capability descriptor.
+// The platform layer (Swift/JNI/NAPI) fills this struct once at startup,
+// then passes it to aether_device_select_algorithm_set() which returns
+// a bitmask of algorithms that should be activated.
+//
+// This keeps ALL gating logic in the C++ core — the platform layer
+// is a thin capability reporter, never a decision maker.
+
+typedef struct aether_device_capabilities {
+    int has_depth_camera;          // 1 if LiDAR/ToF depth sensor present
+    int has_mesh_reconstruction;   // 1 if real-time mesh reconstruction available
+    int has_scene_depth;           // 1 if per-frame depth maps available (e.g. ARKit sceneDepth)
+    int has_mesh_shader;           // 1 if GPU supports mesh shaders (Apple A15+ / Vulkan mesh)
+    int has_compute_shader;        // 1 if GPU supports general compute
+    int has_gpu_hiz;               // 1 if GPU supports hierarchical Z-buffer
+    int cpu_core_count;            // number of CPU cores (for parallelism decisions)
+    int gpu_tier;                  // 0=low, 1=mid, 2=high (estimated GPU class)
+    float ram_gb;                  // total device RAM in GB
+    int os_platform;               // 0=iOS, 1=Android, 2=HarmonyOS
+
+    // Extended capabilities for adaptive budget estimation (Phase 1)
+    float gpu_clock_mhz;           // GPU max clock speed in MHz (0 = unknown)
+    float gpu_flops_estimate;      // Estimated peak GFLOPS (0 = auto-detect from other fields)
+    int screen_width;              // Screen width in pixels (0 = assume 1170)
+    int screen_height;             // Screen height in pixels (0 = assume 2532)
+    float target_frame_time_ms;    // Target frame time (0 = default 16.67ms for 60fps)
+} aether_device_capabilities_t;
+
+// Algorithm set bitmask — each bit enables a specific algorithm module.
+// The C++ core decides which algorithms to activate based on device caps.
+#define AETHER_ALGO_GHOST_WARMSTART       (1 << 0)
+#define AETHER_ALGO_ADMISSION_CONTROL     (1 << 1)
+#define AETHER_ALGO_VIEW_DIVERSITY        (1 << 2)
+#define AETHER_ALGO_PATCH_IDENTITY_MATCH  (1 << 3)
+#define AETHER_ALGO_STABLE_RENDER_SELECT  (1 << 4)
+#define AETHER_ALGO_FRUSTUM_CULLER        (1 << 5)
+#define AETHER_ALGO_TWO_PASS_CULLER       (1 << 6)
+#define AETHER_ALGO_MESHLET_BUILDER       (1 << 7)
+#define AETHER_ALGO_SCREEN_DETAIL         (1 << 8)
+#define AETHER_ALGO_LOD_PIPELINE          (1 << 9)
+#define AETHER_ALGO_DEPTH_FILTER          (1 << 10)
+#define AETHER_ALGO_DA3_DEPTH_FUSER       (1 << 11)
+#define AETHER_ALGO_TSDF_INTEGRATION      (1 << 12)
+#define AETHER_ALGO_FRAME_PACING          (1 << 13)
+#define AETHER_ALGO_BATTERY_AWARE         (1 << 14)
+#define AETHER_ALGO_THERMAL_HANDLER       (1 << 15)
+#define AETHER_ALGO_MEMORY_HANDLER        (1 << 16)
+#define AETHER_ALGO_MOTION_ANALYZER       (1 << 17)
+#define AETHER_ALGO_COVERAGE_ESTIMATOR    (1 << 18)
+#define AETHER_ALGO_EVIDENCE_STATE_MACHINE (1 << 19)
+#define AETHER_ALGO_DIRECTIONAL_HAPTICS   (1 << 20)
+#define AETHER_ALGO_POSE_STABILIZER       (1 << 21)
+#define AETHER_ALGO_MARCHING_CUBES        (1 << 22)
+
+// Pure-visual algorithm set: algorithms that require NO depth camera.
+// These are ALWAYS enabled regardless of device capabilities.
+#define AETHER_ALGO_SET_PURE_VISUAL ( \
+    AETHER_ALGO_GHOST_WARMSTART | \
+    AETHER_ALGO_ADMISSION_CONTROL | \
+    AETHER_ALGO_VIEW_DIVERSITY | \
+    AETHER_ALGO_PATCH_IDENTITY_MATCH | \
+    AETHER_ALGO_STABLE_RENDER_SELECT | \
+    AETHER_ALGO_FRAME_PACING | \
+    AETHER_ALGO_BATTERY_AWARE | \
+    AETHER_ALGO_THERMAL_HANDLER | \
+    AETHER_ALGO_MEMORY_HANDLER | \
+    AETHER_ALGO_MOTION_ANALYZER | \
+    AETHER_ALGO_COVERAGE_ESTIMATOR | \
+    AETHER_ALGO_EVIDENCE_STATE_MACHINE | \
+    AETHER_ALGO_DIRECTIONAL_HAPTICS \
+)
+
+// Depth-dependent algorithm set: only enabled when depth camera is present.
+#define AETHER_ALGO_SET_DEPTH_DEPENDENT ( \
+    AETHER_ALGO_DEPTH_FILTER | \
+    AETHER_ALGO_DA3_DEPTH_FUSER | \
+    AETHER_ALGO_TSDF_INTEGRATION | \
+    AETHER_ALGO_MARCHING_CUBES | \
+    AETHER_ALGO_POSE_STABILIZER \
+)
+
+// GPU-dependent algorithm set: only enabled when compute shaders available.
+#define AETHER_ALGO_SET_GPU_DEPENDENT ( \
+    AETHER_ALGO_FRUSTUM_CULLER | \
+    AETHER_ALGO_TWO_PASS_CULLER | \
+    AETHER_ALGO_MESHLET_BUILDER | \
+    AETHER_ALGO_SCREEN_DETAIL | \
+    AETHER_ALGO_LOD_PIPELINE \
+)
+
+typedef struct aether_algorithm_set_result {
+    uint32_t enabled_algorithms;      // bitmask of enabled algorithms
+    uint32_t depth_algorithms;        // bitmask of depth-dependent algorithms (subset of enabled)
+    uint32_t gpu_algorithms;          // bitmask of GPU-dependent algorithms (subset of enabled)
+    int culling_tier;                 // 0=A, 1=B, 2=C (determined from caps)
+    int recommended_max_triangles;    // initial budget from static estimation
+
+    // ── Adaptive Budget Output (Phase 1: static scoring) ──
+    float device_perf_score;          // [0, 1] continuous device performance score
+    int budget_floor;                 // absolute minimum (never go below this)
+    int budget_ceiling;               // absolute maximum (hardware limit)
+} aether_algorithm_set_result_t;
+
+/// Determine which algorithms to activate based on device capabilities.
+/// This is the SINGLE decision point for algorithm gating — keeps all
+/// logic in C++ core for cross-platform consistency.
+///
+/// The recommended_max_triangles field is now computed via continuous
+/// scoring rather than 3-tier bucketing. The score considers:
+///   - RAM contribution (log-weighted, diminishing returns above 8GB)
+///   - CPU parallelism (sqrt-weighted, accounts for thermal throttle)
+///   - GPU class (continuous score from fill rate + compute caps)
+///   - Screen resolution (more pixels = higher per-triangle GPU cost)
+///   - Culling tier bonus (Tier A gets +20%, Tier B +10%)
+///
+/// - Parameter caps: Device capabilities reported by platform layer
+/// - Parameter out_result: Output algorithm set + parameters
+/// - Returns: 0 on success, nonzero on error
+int aether_device_select_algorithm_set(
+    const aether_device_capabilities_t* caps,
+    aether_algorithm_set_result_t* out_result);
+
+// ─── Adaptive Triangle Budget: Runtime Calibration (Phase 2+3) ────────
+//
+// Phase 2: Runtime calibration
+//   After the first few frames, measure actual frame time to refine the
+//   static estimate. The calibrator learns: "this device renders N triangles
+//   in T ms" and extrapolates the optimal budget to fill 80% of frame time
+//   (leaving 20% headroom for evidence/haptics/UI).
+//
+// Phase 3: Continuous dynamic feedback
+//   Each frame feeds back (triangle_count, frame_time_ms, thermal_state,
+//   battery_level) and the controller adjusts the budget via PID-like
+//   control with asymmetric gain: drops fast (2-frame response),
+//   recovers slow (30-frame ramp to prevent oscillation).
+
+typedef struct aether_adaptive_budget_controller aether_adaptive_budget_controller_t;
+
+typedef struct aether_budget_controller_config {
+    int initial_budget;            // from aether_device_select_algorithm_set()
+    int budget_floor;              // absolute minimum (from result.budget_floor)
+    int budget_ceiling;            // absolute maximum (from result.budget_ceiling)
+    float target_frame_time_ms;    // target (default 16.67 for 60fps)
+    float headroom_fraction;       // fraction of frame time reserved (default 0.20)
+    float drop_rate;               // budget drop speed on overrun (default 0.5 = halve excess)
+    float recover_rate;            // budget recovery speed on headroom (default 0.02 = 2%/frame)
+    float thermal_penalty_per_level; // budget reduction per thermal level (default 0.10 = -10%)
+    float ema_alpha;               // EMA smoothing for frame time (default 0.15)
+} aether_budget_controller_config_t;
+
+typedef struct aether_budget_frame_sample {
+    int triangle_count;            // number of triangles rendered this frame
+    float frame_time_ms;           // measured frame time in milliseconds
+    int thermal_state;             // 0=nominal, 1=fair, 2=serious, 3=critical
+    float battery_fraction;        // [0, 1] remaining battery (1.0 = full, 0.0 = unknown)
+    int low_power_mode;            // 1 if OS low-power mode is active
+    int memory_pressure;           // 0=normal, 1=warning, 2=critical (NEW)
+    int app_became_active;         // 1 on first frame after returning from background (NEW)
+} aether_budget_frame_sample_t;
+
+typedef struct aether_budget_decision {
+    int recommended_budget;        // triangles for next frame
+    float estimated_cost_per_tri;  // learned: milliseconds per 1000 triangles
+    float utilization;             // frame_time / target_time [0, ∞)
+    float headroom_ms;             // remaining ms after rendering
+    int calibrated;                // 1 if enough samples to be confident
+    int sample_count;              // total frames fed so far
+    float confidence;              // [0, 1] confidence in the estimate
+} aether_budget_decision_t;
+
+/// Create an adaptive budget controller.
+/// Config fields set to 0 will use sensible defaults.
+int aether_adaptive_budget_create(
+    const aether_budget_controller_config_t* config,
+    aether_adaptive_budget_controller_t** out_controller);
+
+/// Destroy the controller and free resources.
+int aether_adaptive_budget_destroy(
+    aether_adaptive_budget_controller_t* controller);
+
+/// Feed a frame sample and get the recommended budget for next frame.
+/// This is the main runtime loop call — should be called every frame.
+int aether_adaptive_budget_update(
+    aether_adaptive_budget_controller_t* controller,
+    const aether_budget_frame_sample_t* sample,
+    aether_budget_decision_t* out_decision);
+
+/// Get the current budget without feeding a new sample.
+/// Useful for querying the last decision.
+int aether_adaptive_budget_query(
+    const aether_adaptive_budget_controller_t* controller,
+    aether_budget_decision_t* out_decision);
+
+/// Reset the controller (e.g., when starting a new scan session).
+int aether_adaptive_budget_reset(
+    aether_adaptive_budget_controller_t* controller);
+
+/// Fill config with sensible defaults.
+int aether_adaptive_budget_default_config(
+    aether_budget_controller_config_t* out_config);
+
+// ─── Cross-Validation Framework ───────────────────────────────────────
+//
+// When redundant algorithms exist (e.g. ThermalQualityAdapter + MobileThermalStateHandler),
+// the cross-validation framework runs both and compares outputs.
+// Disagreements are logged and the more conservative result is used.
+
+typedef struct aether_cross_validation_pair {
+    double value_a;           // Primary algorithm output
+    double value_b;           // Secondary algorithm output
+    double tolerance;         // Maximum acceptable divergence
+} aether_cross_validation_pair_t;
+
+typedef struct aether_cross_validation_result {
+    double final_value;       // Chosen output (conservative)
+    int agreement;            // 1 = within tolerance, 0 = diverged
+    double divergence;        // |value_a - value_b|
+    int preferred_source;     // 0 = A chosen, 1 = B chosen
+} aether_cross_validation_result_t;
+
+/// Cross-validate two redundant algorithm outputs.
+/// Returns the more conservative (lower/safer) value when they diverge.
+int aether_cross_validate(
+    const aether_cross_validation_pair_t* pair,
+    aether_cross_validation_result_t* out_result);
+
+/// Cross-validate coverage estimates from two independent sources.
+/// Uses monotonic constraint: final coverage >= max(current high-water, min(a, b))
+int aether_cross_validate_coverage(
+    double coverage_a,
+    double coverage_b,
+    double current_high_water,
+    double* out_coverage);
+
+/// Cross-validate thermal budget from two independent sources.
+/// Uses conservative constraint: final budget = min(budget_a, budget_b)
+int aether_cross_validate_thermal_budget(
+    int budget_a,
+    int budget_b,
+    int* out_budget);
 
 #ifdef __cplusplus
 }

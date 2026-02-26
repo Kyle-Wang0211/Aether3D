@@ -98,28 +98,32 @@ public final class EnvironmentLightEstimator {
     private func extractARKitLight(estimate: ARLightEstimate) -> LightState {
         // ARKit provides ambient intensity and primary light direction
         let intensity = Float(estimate.ambientIntensity)
-        
-        // Primary light direction (if available)
+
+        // Primary light direction (available on ARDirectionalLightEstimate only)
         var direction = Self.fallbackDirection
-        if let primaryLightDirection = estimate.primaryLightDirection {
+        if let directional = estimate as? ARDirectionalLightEstimate {
+            let dir = directional.primaryLightDirection
             direction = SIMD3<Float>(
-                Float(primaryLightDirection.x),
-                Float(primaryLightDirection.y),
-                Float(primaryLightDirection.z)
+                Float(dir.x),
+                Float(dir.y),
+                Float(dir.z)
             )
         }
-        
+
         // Convert ARKit SH coefficients to our format (9 × RGB)
         var shCoeffs: [SIMD3<Float>] = Array(repeating: SIMD3<Float>(0.0, 0.0, 0.0), count: 9)
-        
-        // ARKit provides spherical harmonics coefficients
-        // ARLightEstimate.sphericalHarmonicsCoefficients is a 27-element array (9 × RGB)
-        if estimate.sphericalHarmonicsCoefficients.count >= 27 {
-            for i in 0..<9 {
-                let r = Float(estimate.sphericalHarmonicsCoefficients[i * 3 + 0])
-                let g = Float(estimate.sphericalHarmonicsCoefficients[i * 3 + 1])
-                let b = Float(estimate.sphericalHarmonicsCoefficients[i * 3 + 2])
-                shCoeffs[i] = SIMD3<Float>(r, g, b)
+
+        // ARDirectionalLightEstimate provides spherical harmonics coefficients (Data, 27 floats = 9 × RGB)
+        if let directional = estimate as? ARDirectionalLightEstimate {
+            let data = directional.sphericalHarmonicsCoefficients
+            let floatCount = data.count / MemoryLayout<Float>.size
+            if floatCount >= 27 {
+                data.withUnsafeBytes { ptr in
+                    let floats = ptr.bindMemory(to: Float.self)
+                    for i in 0..<9 {
+                        shCoeffs[i] = SIMD3<Float>(floats[i * 3], floats[i * 3 + 1], floats[i * 3 + 2])
+                    }
+                }
             }
         } else {
             // Fallback: ambient-only SH

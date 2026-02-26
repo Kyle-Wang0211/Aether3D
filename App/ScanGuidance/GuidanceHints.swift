@@ -38,46 +38,36 @@ public struct DirectionalAffordanceView: View {
     let hints: GuidanceHints
     
     public var body: some View {
-        // Directional arrow/indicator
-        // White arrow pointing in the direction vector
         GeometryReader { geometry in
-            let centerX = geometry.size.width / 2
-            let centerY = geometry.size.height / 2
-            
-            // Convert 3D direction to 2D screen direction
-            let screenDir = projectToScreen(direction: hints.direction)
-            let angle = atan2(screenDir.y, screenDir.x)
-            
-            // Arrow shape
-            Path { path in
-                let arrowLength: CGFloat = 30 * CGFloat(hints.intensity)
-                let arrowWidth: CGFloat = 15
-                
-                // Arrow tip
-                let tipX = centerX + cos(angle) * arrowLength
-                let tipY = centerY + sin(angle) * arrowLength
-                
-                // Arrow base
-                let baseX = centerX - cos(angle) * arrowLength * 0.5
-                let baseY = centerY - sin(angle) * arrowLength * 0.5
-                
-                // Left wing
-                let leftWingX = baseX + cos(angle + .pi / 2) * arrowWidth
-                let leftWingY = baseY + sin(angle + .pi / 2) * arrowWidth
-                
-                // Right wing
-                let rightWingX = baseX + cos(angle - .pi / 2) * arrowWidth
-                let rightWingY = baseY + sin(angle - .pi / 2) * arrowWidth
-                
-                path.move(to: CGPoint(x: tipX, y: tipY))
-                path.addLine(to: CGPoint(x: leftWingX, y: leftWingY))
-                path.addLine(to: CGPoint(x: baseX, y: baseY))
-                path.addLine(to: CGPoint(x: rightWingX, y: rightWingY))
-                path.closeSubpath()
-            }
-            .fill(Color.white.opacity(Double(hints.intensity)))
-            .stroke(Color.white.opacity(Double(hints.intensity)), lineWidth: 2)
+            arrowPath(in: geometry.size)
+                .fill(Color.white.opacity(Double(hints.intensity)))
         }
+    }
+
+    private func arrowPath(in size: CGSize) -> Path {
+        let centerX: CGFloat = size.width / 2
+        let centerY: CGFloat = size.height / 2
+        let screenDir = projectToScreen(direction: hints.direction)
+        let angle: CGFloat = CGFloat(atan2(screenDir.y, screenDir.x))
+        let arrowLength: CGFloat = 30 * CGFloat(hints.intensity)
+        let arrowWidth: CGFloat = 15
+
+        let tipX: CGFloat = centerX + cos(angle) * arrowLength
+        let tipY: CGFloat = centerY + sin(angle) * arrowLength
+        let baseX: CGFloat = centerX - cos(angle) * arrowLength * 0.5
+        let baseY: CGFloat = centerY - sin(angle) * arrowLength * 0.5
+        let leftWingX: CGFloat = baseX + cos(angle + .pi / 2) * arrowWidth
+        let leftWingY: CGFloat = baseY + sin(angle + .pi / 2) * arrowWidth
+        let rightWingX: CGFloat = baseX + cos(angle - .pi / 2) * arrowWidth
+        let rightWingY: CGFloat = baseY + sin(angle - .pi / 2) * arrowWidth
+
+        var path = Path()
+        path.move(to: CGPoint(x: tipX, y: tipY))
+        path.addLine(to: CGPoint(x: leftWingX, y: leftWingY))
+        path.addLine(to: CGPoint(x: baseX, y: baseY))
+        path.addLine(to: CGPoint(x: rightWingX, y: rightWingY))
+        path.closeSubpath()
+        return path
     }
     
     /// Project 3D direction to 2D screen space

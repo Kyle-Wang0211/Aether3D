@@ -178,6 +178,7 @@ struct aether_capture_style_runtime {
         float roughness{1.0f};
         float thickness{0.0f};
         float border_width{0.0f};
+        float border_alpha{0.0f};
         float grayscale{0.0f};
         bool visual_frozen{false};
         bool border_frozen{false};
@@ -245,6 +246,14 @@ struct aether_f2_collision_mesh {
 
 struct aether_mesh_extraction_scheduler {
     aether::tsdf::MeshExtractionScheduler impl;
+};
+
+struct aether_render_selection_runtime {
+    explicit aether_render_selection_runtime(int32_t hold)
+        : hold_frames(std::max<int32_t>(1, hold)) {}
+
+    int32_t hold_frames{90};
+    std::unordered_map<std::uint64_t, int32_t> residency_until_by_patch;
 };
 
 namespace {
@@ -832,8 +841,8 @@ aether_capture_style_runtime_config_t capture_style_default_config() {
     config.freeze_threshold = 0.75f;
     config.min_thickness = 0.0005f;
     config.max_thickness = 0.008f;
-    config.min_border_width = 1.0f;
-    config.max_border_width = 12.0f;
+    config.min_border_width = 2.8f;
+    config.max_border_width = 26.0f;
     config.min_area_sq_m = 1e-8f;
     config.min_median_area_sq_m = 1e-6f;
     return config;
@@ -2260,6 +2269,14 @@ aether::tsdf::PoseGraphConfig to_cpp_pose_graph_config(
 
 aether::innovation::Float3 to_cpp_float3(const aether_float3_t& in) {
     return aether::innovation::make_float3(in.x, in.y, in.z);
+}
+
+aether_float3_t to_c_float3(const aether::innovation::Float3& in) {
+    aether_float3_t out{};
+    out.x = in.x;
+    out.y = in.y;
+    out.z = in.z;
+    return out;
 }
 
 [[maybe_unused]]
@@ -5636,7 +5653,9 @@ int aether_capture_style_runtime_resolve(
             resolved_display = std::max(state.display, clamp01(resolved_display));
         }
 
-        const float area_sq_m = std::max(config.min_area_sq_m, std::isfinite(in.area_sq_m) ? in.area_sq_m : config.min_area_sq_m);
+        const float area_sq_m = std::max(
+            config.min_area_sq_m,
+            std::isfinite(in.area_sq_m) ? in.area_sq_m : config.min_area_sq_m);
         const aether::render::FragmentVisualParams params = aether::render::compute_visual_params(
             resolved_display,
             1.0f,
@@ -5645,8 +5664,13 @@ int aether_capture_style_runtime_resolve(
 
         float metallic = clamp01(params.metallic);
         float roughness = clamp01(params.roughness);
-        float thickness = std::max(config.min_thickness, std::min(config.max_thickness, params.wedge_thickness));
-        float border = std::max(config.min_border_width, std::min(config.max_border_width, params.border_width_px));
+        float thickness = std::max(
+            config.min_thickness,
+            std::min(config.max_thickness, params.wedge_thickness));
+        float border_width = std::max(
+            config.min_border_width,
+            std::min(config.max_border_width, params.border_width_px));
+        float border_alpha = clamp01(params.border_alpha);
         float grayscale = clamp01(params.fill_gray);
 
         if (state.has_visual) {
@@ -5656,13 +5680,18 @@ int aether_capture_style_runtime_resolve(
             grayscale = std::max(state.grayscale, grayscale);
         }
         if (state.has_border) {
-            border = std::min(state.border_width, border);
+            border_width = std::min(state.border_width, border_width);
+            border_alpha = std::min(state.border_alpha, border_alpha);
         }
 
-        const bool should_freeze = (state.visual_frozen || state.border_frozen ||
-            resolved_display >= config.freeze_threshold || state.display >= config.freeze_threshold);
-        if (should_freeze) {
+        const bool visual_should_freeze =
+            (resolved_display >= config.freeze_threshold) || state.visual_frozen;
+        const bool border_should_freeze =
+            (resolved_display >= config.freeze_threshold) || state.border_frozen;
+        if (visual_should_freeze) {
             state.visual_frozen = true;
+        }
+        if (border_should_freeze) {
             state.border_frozen = true;
         }
 
@@ -5670,7 +5699,8 @@ int aether_capture_style_runtime_resolve(
         state.metallic = metallic;
         state.roughness = roughness;
         state.thickness = thickness;
-        state.border_width = border;
+        state.border_width = border_width;
+        state.border_alpha = border_alpha;
         state.grayscale = grayscale;
         state.has_visual = true;
         state.has_border = true;
@@ -5681,10 +5711,77 @@ int aether_capture_style_runtime_resolve(
         out.metallic = metallic;
         out.roughness = roughness;
         out.thickness = thickness;
-        out.border_width = border;
+        out.border_width = border_width;
+        out.border_alpha = border_alpha;
         out.grayscale = grayscale;
+        out.ripple_min_amplitude = std::max(0.0f, 0.015f + 0.02f * (1.0f - resolved_display));
+        out.ripple_boost_scale = std::max(0.0f, 0.10f + 0.20f * (1.0f - resolved_display));
+        out.fill_dither_start = 0.90f;
+        out.fill_dither_end = 0.985f;
+        out.border_min_width_px = 0.0f;
+        out.border_min_alpha = 0.0f;
+        out.border_aa_factor = 1.25f;
+        out.border_fwidth_epsilon = 1e-4f;
+        out.border_discard_alpha = 0.002f;
         out.visual_frozen = state.visual_frozen ? 1 : 0;
         out.border_frozen = state.border_frozen ? 1 : 0;
+        out.visual_should_freeze = visual_should_freeze ? 1 : 0;
+        out.border_should_freeze = border_should_freeze ? 1 : 0;
+        out_states[i] = out;
+    }
+    return 0;
+}
+
+int aether_capture_style_resolve_stateless(
+    const aether_capture_style_runtime_config_t* config_or_null,
+    const aether_capture_style_input_t* inputs,
+    int input_count,
+    float median_area_sq_m,
+    aether_capture_style_output_t* out_states) {
+    std::size_t count = 0u;
+    if (!checked_count(input_count, &count) || inputs == nullptr || out_states == nullptr) {
+        return -1;
+    }
+    const aether_capture_style_runtime_config_t config = sanitize_capture_style_config(config_or_null);
+    const float safe_median = std::max(
+        config.min_median_area_sq_m,
+        std::isfinite(median_area_sq_m) ? median_area_sq_m : config.min_median_area_sq_m);
+
+    for (std::size_t i = 0u; i < count; ++i) {
+        const aether_capture_style_input_t& in = inputs[i];
+        const float resolved_display = clamp01(std::isfinite(in.display) ? in.display : 0.0f);
+        const float area_sq_m = std::max(
+            config.min_area_sq_m,
+            std::isfinite(in.area_sq_m) ? in.area_sq_m : config.min_area_sq_m);
+        const aether::render::FragmentVisualParams params = aether::render::compute_visual_params(
+            resolved_display,
+            1.0f,
+            area_sq_m,
+            std::max(area_sq_m, safe_median));
+
+        aether_capture_style_output_t out{};
+        out.resolved_display = resolved_display;
+        out.metallic = clamp01(params.metallic);
+        out.roughness = clamp01(params.roughness);
+        out.thickness = std::max(config.min_thickness, std::min(config.max_thickness, params.wedge_thickness));
+        out.border_width = std::max(
+            config.min_border_width,
+            std::min(config.max_border_width, params.border_width_px));
+        out.border_alpha = clamp01(params.border_alpha);
+        out.grayscale = clamp01(params.fill_gray);
+        out.ripple_min_amplitude = std::max(0.0f, 0.015f + 0.02f * (1.0f - resolved_display));
+        out.ripple_boost_scale = std::max(0.0f, 0.10f + 0.20f * (1.0f - resolved_display));
+        out.fill_dither_start = 0.90f;
+        out.fill_dither_end = 0.985f;
+        out.border_min_width_px = 0.0f;
+        out.border_min_alpha = 0.0f;
+        out.border_aa_factor = 1.25f;
+        out.border_fwidth_epsilon = 1e-4f;
+        out.border_discard_alpha = 0.002f;
+        out.visual_frozen = 0;
+        out.border_frozen = 0;
+        out.visual_should_freeze = (resolved_display >= config.freeze_threshold) ? 1 : 0;
+        out.border_should_freeze = (resolved_display >= config.freeze_threshold) ? 1 : 0;
         out_states[i] = out;
     }
     return 0;
@@ -5749,6 +5846,291 @@ int aether_scan_triangle_longest_edge(
     *out_start = verts[edge_pairs[best_edge][0]];
     *out_end = verts[edge_pairs[best_edge][1]];
     *out_length_sq = std::max(0.0f, best_len_sq);
+    return 0;
+}
+
+int aether_generate_fracture_display_triangles(
+    const aether_fracture_input_triangle_t* triangles,
+    int triangle_count,
+    aether_fracture_output_triangle_t* out_triangles,
+    int* inout_triangle_count) {
+    std::size_t tri_count = 0u;
+    if (!checked_count(triangle_count, &tri_count) || inout_triangle_count == nullptr) {
+        return -1;
+    }
+    if (tri_count == 0u) {
+        *inout_triangle_count = 0;
+        return 0;
+    }
+    if (triangles == nullptr) {
+        return -1;
+    }
+
+    struct ParsedCandidate {
+        std::size_t index{0u};
+        float score{0.0f};
+    };
+
+    std::vector<ParsedCandidate> scored_candidates;
+    scored_candidates.reserve(tri_count);
+    std::vector<uint8_t> selected_mask(tri_count, 0u);
+    std::unordered_map<std::uint64_t, ParsedCandidate> best_by_cell;
+    best_by_cell.reserve(tri_count);
+
+    for (std::size_t i = 0u; i < tri_count; ++i) {
+        const aether_fracture_input_triangle_t& in = triangles[i];
+        const aether::innovation::Float3 v0 = to_cpp_float3(in.v0);
+        const aether::innovation::Float3 v1 = to_cpp_float3(in.v1);
+        const aether::innovation::Float3 v2 = to_cpp_float3(in.v2);
+
+        float area = in.area_sq_m;
+        if (!std::isfinite(area) || area <= 1e-12f) {
+            area = aether::innovation::triangle_area(v0, v1, v2);
+        }
+        if (!std::isfinite(area) || area <= 1e-12f) {
+            continue;
+        }
+
+        const float display = std::max(0.0f, std::min(1.0f, in.display));
+        const float depth = (std::isfinite(in.depth) && in.depth > 0.0f) ? in.depth : 1.0f;
+        const float depth_norm = std::max(0.0f, std::min(1.0f, (depth - 0.25f) / 1.75f));
+        const float detail = std::max(0.0f, std::min(1.0f, 0.80f * display + 0.20f * (1.0f - depth_norm)));
+        const float area_term = std::sqrt(std::max(area, 1e-8f));
+        const float score = 1.35f * detail + 0.35f * area_term;
+        scored_candidates.push_back(ParsedCandidate{i, score});
+
+        // Sparse sampling for distant low-evidence regions to remove "grid wall" look.
+        const float keep_ratio = std::max(0.02f, std::min(1.0f, 0.02f + 0.98f * detail * detail));
+        const std::uint64_t keep_seed = aether::innovation::splitmix64(
+            (in.patch_key != 0u ? in.patch_key : static_cast<std::uint64_t>(i + 1u))
+            ^ (static_cast<std::uint64_t>(i + 1u) * 0x9E3779B97F4A7C15ULL));
+        const float keep_roll =
+            static_cast<float>(keep_seed & 0x00FFFFFFu) / static_cast<float>(0x00FFFFFFu);
+        if (keep_roll > keep_ratio) {
+            continue;
+        }
+
+        const aether::innovation::Float3 centroid = aether::innovation::make_float3(
+            (v0.x + v1.x + v2.x) / 3.0f,
+            (v0.y + v1.y + v2.y) / 3.0f,
+            (v0.z + v1.z + v2.z) / 3.0f);
+        const float cell_size = std::max(0.03f, std::min(0.35f, 0.35f - 0.32f * detail));
+        const int32_t qx = static_cast<int32_t>(std::floor(centroid.x / cell_size));
+        const int32_t qy = static_cast<int32_t>(std::floor(centroid.y / cell_size));
+        const int32_t qz = static_cast<int32_t>(std::floor(centroid.z / cell_size));
+        const std::uint64_t packed = (static_cast<std::uint64_t>(static_cast<uint32_t>(qx)) << 42u) ^
+                                     (static_cast<std::uint64_t>(static_cast<uint32_t>(qy)) << 21u) ^
+                                     static_cast<std::uint64_t>(static_cast<uint32_t>(qz));
+        const std::uint64_t cell_key =
+            aether::innovation::splitmix64(packed ^ (static_cast<std::uint64_t>(std::lround((1.0f - detail) * 7.0f)) << 58u));
+
+        auto cell_it = best_by_cell.find(cell_key);
+        if (cell_it == best_by_cell.end() || score > cell_it->second.score) {
+            best_by_cell[cell_key] = ParsedCandidate{i, score};
+        }
+    }
+
+    for (const auto& item : best_by_cell) {
+        const std::size_t index = item.second.index;
+        if (index < tri_count) {
+            selected_mask[index] = 1u;
+        }
+    }
+
+    std::size_t selected_count = 0u;
+    for (std::size_t i = 0u; i < tri_count; ++i) {
+        if (selected_mask[i] != 0u) {
+            ++selected_count;
+        }
+    }
+
+    const std::size_t min_keep = std::min<std::size_t>(tri_count, 96u);
+    if (selected_count < min_keep) {
+        std::sort(
+            scored_candidates.begin(),
+            scored_candidates.end(),
+            [](const ParsedCandidate& a, const ParsedCandidate& b) {
+                if (a.score != b.score) {
+                    return a.score > b.score;
+                }
+                return a.index < b.index;
+            });
+        for (const ParsedCandidate& candidate : scored_candidates) {
+            if (selected_count >= min_keep) {
+                break;
+            }
+            if (candidate.index >= tri_count || selected_mask[candidate.index] != 0u) {
+                continue;
+            }
+            selected_mask[candidate.index] = 1u;
+            ++selected_count;
+        }
+    }
+
+    std::vector<aether::innovation::ScaffoldVertex> cpp_vertices;
+    std::vector<aether::innovation::ScaffoldUnit> cpp_units;
+    std::vector<float> displays;
+    std::vector<float> depths;
+    std::vector<std::uint64_t> unit_patch_keys;
+    std::vector<std::uint32_t> unit_parent_indices;
+    cpp_vertices.reserve(selected_count * 3u);
+    cpp_units.reserve(selected_count);
+    displays.reserve(selected_count);
+    depths.reserve(selected_count);
+    unit_patch_keys.reserve(selected_count);
+    unit_parent_indices.reserve(selected_count);
+
+    for (std::size_t i = 0u; i < tri_count; ++i) {
+        if (selected_mask[i] == 0u) {
+            continue;
+        }
+        const aether_fracture_input_triangle_t& in = triangles[i];
+        const aether::innovation::Float3 v0 = to_cpp_float3(in.v0);
+        const aether::innovation::Float3 v1 = to_cpp_float3(in.v1);
+        const aether::innovation::Float3 v2 = to_cpp_float3(in.v2);
+        float area = in.area_sq_m;
+        if (!std::isfinite(area) || area <= 1e-12f) {
+            area = aether::innovation::triangle_area(v0, v1, v2);
+        }
+        if (!std::isfinite(area) || area <= 1e-12f) {
+            continue;
+        }
+
+        aether::innovation::Float3 normal = to_cpp_float3(in.normal);
+        if (!std::isfinite(normal.x) || !std::isfinite(normal.y) || !std::isfinite(normal.z) ||
+            aether::innovation::length_sq(normal) <= 1e-12f) {
+            normal = aether::innovation::triangle_normal(v0, v1, v2);
+        }
+        if (!std::isfinite(normal.x) || !std::isfinite(normal.y) || !std::isfinite(normal.z) ||
+            aether::innovation::length_sq(normal) <= 1e-12f) {
+            normal = aether::innovation::make_float3(0.0f, 0.0f, 1.0f);
+        }
+
+        const std::size_t base = cpp_vertices.size();
+        if (base > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max() - 3u)) {
+            return -1;
+        }
+        cpp_vertices.push_back(aether::innovation::ScaffoldVertex{
+            static_cast<std::uint32_t>(base + 0u), v0});
+        cpp_vertices.push_back(aether::innovation::ScaffoldVertex{
+            static_cast<std::uint32_t>(base + 1u), v1});
+        cpp_vertices.push_back(aether::innovation::ScaffoldVertex{
+            static_cast<std::uint32_t>(base + 2u), v2});
+
+        const std::uint64_t seed = in.patch_key != 0u
+            ? in.patch_key
+            : static_cast<std::uint64_t>(i + 1u);
+        const std::uint64_t unit_id = aether::innovation::splitmix64(
+            seed ^ (static_cast<std::uint64_t>(i + 1u) * 0x9E3779B97F4A7C15ULL));
+
+        aether::innovation::ScaffoldUnit unit{};
+        unit.unit_id = unit_id;
+        unit.generation = 0u;
+        unit.v0 = static_cast<std::uint32_t>(base + 0u);
+        unit.v1 = static_cast<std::uint32_t>(base + 1u);
+        unit.v2 = static_cast<std::uint32_t>(base + 2u);
+        unit.area = area;
+        unit.normal = normal;
+        unit.confidence = std::max(0.0f, std::min(1.0f, in.display));
+        unit.view_count = 1u;
+        unit.lod_level = 0u;
+
+        cpp_units.push_back(unit);
+        displays.push_back(std::max(0.0f, std::min(1.0f, in.display)));
+        depths.push_back((std::isfinite(in.depth) && in.depth > 0.0f) ? in.depth : 1.0f);
+        unit_patch_keys.push_back(in.patch_key);
+        unit_parent_indices.push_back(static_cast<std::uint32_t>(i));
+    }
+
+    if (cpp_units.empty()) {
+        *inout_triangle_count = 0;
+        return 0;
+    }
+
+    std::vector<aether::innovation::DisplayFragment> fragments;
+    const Status fracture_status = aether::render::generate_fracture_fragments(
+        cpp_units.data(),
+        cpp_units.size(),
+        cpp_vertices.data(),
+        cpp_vertices.size(),
+        displays.data(),
+        depths.data(),
+        &fragments);
+    if (fracture_status != Status::kOk && fracture_status != Status::kOutOfRange) {
+        return to_rc(fracture_status);
+    }
+
+    std::unordered_map<std::uint64_t, std::size_t> unit_index;
+    unit_index.reserve(cpp_units.size());
+    for (std::size_t i = 0u; i < cpp_units.size(); ++i) {
+        unit_index[cpp_units[i].unit_id] = i;
+    }
+
+    int required = 0;
+    for (const aether::innovation::DisplayFragment& fragment : fragments) {
+        if (fragment.vertex_count < 3u) {
+            continue;
+        }
+        if (unit_index.find(fragment.parent_unit_id) == unit_index.end()) {
+            continue;
+        }
+        required += static_cast<int>(fragment.vertex_count) - 2;
+    }
+
+    if (out_triangles == nullptr || *inout_triangle_count < required) {
+        *inout_triangle_count = required;
+        return -3;
+    }
+
+    int write_index = 0;
+    for (const aether::innovation::DisplayFragment& fragment : fragments) {
+        if (fragment.vertex_count < 3u) {
+            continue;
+        }
+        const auto unit_it = unit_index.find(fragment.parent_unit_id);
+        if (unit_it == unit_index.end()) {
+            continue;
+        }
+        const std::size_t unit_slot = unit_it->second;
+        const std::uint64_t patch_key = unit_patch_keys[unit_slot];
+        const std::uint32_t parent_index = unit_parent_indices[unit_slot];
+        const std::uint8_t vcount = fragment.vertex_count;
+        for (std::uint8_t i = 1u; i + 1u < vcount; ++i) {
+            const aether::innovation::Float3 a = fragment.vertices[0];
+            const aether::innovation::Float3 b = fragment.vertices[i];
+            const aether::innovation::Float3 c = fragment.vertices[i + 1u];
+            const float area = aether::innovation::triangle_area(a, b, c);
+            if (!std::isfinite(area) || area <= 1e-12f) {
+                continue;
+            }
+
+            aether::innovation::Float3 normal = fragment.normal;
+            if (!std::isfinite(normal.x) || !std::isfinite(normal.y) || !std::isfinite(normal.z) ||
+                aether::innovation::length_sq(normal) <= 1e-12f) {
+                normal = aether::innovation::triangle_normal(a, b, c);
+            }
+            if (!std::isfinite(normal.x) || !std::isfinite(normal.y) || !std::isfinite(normal.z) ||
+                aether::innovation::length_sq(normal) <= 1e-12f) {
+                normal = aether::innovation::make_float3(0.0f, 0.0f, 1.0f);
+            }
+
+            aether_fracture_output_triangle_t out{};
+            out.patch_key = patch_key;
+            out.parent_triangle_index = parent_index;
+            out.fragment_index = static_cast<std::uint32_t>(fragment.sub_index * 8u + i - 1u);
+            out.v0 = to_c_float3(a);
+            out.v1 = to_c_float3(b);
+            out.v2 = to_c_float3(c);
+            out.normal = to_c_float3(normal);
+            out.display = std::max(0.0f, std::min(1.0f, fragment.display));
+            out.area_sq_m = area;
+            out.gap_shrink = std::max(0.0f, std::min(1.0f, fragment.gap_shrink));
+            out.crack_seed = std::max(0.0f, std::min(1.0f, fragment.crack_seed));
+            out_triangles[write_index++] = out;
+        }
+    }
+
+    *inout_triangle_count = write_index;
     return 0;
 }
 
@@ -6430,6 +6812,135 @@ int aether_match_patch_identities(
     return 0;
 }
 
+int aether_scan_state_can_transition(
+    int32_t from_state,
+    int32_t to_state,
+    int32_t* out_allowed) {
+    if (out_allowed == nullptr) {
+        return -1;
+    }
+    int32_t allowed = 0;
+    switch (from_state) {
+        case AETHER_SCAN_STATE_INITIALIZING:
+            allowed = (to_state == AETHER_SCAN_STATE_READY || to_state == AETHER_SCAN_STATE_FAILED) ? 1 : 0;
+            break;
+        case AETHER_SCAN_STATE_READY:
+            allowed = (to_state == AETHER_SCAN_STATE_CAPTURING || to_state == AETHER_SCAN_STATE_FAILED) ? 1 : 0;
+            break;
+        case AETHER_SCAN_STATE_CAPTURING:
+            allowed = (to_state == AETHER_SCAN_STATE_PAUSED ||
+                       to_state == AETHER_SCAN_STATE_FINISHING ||
+                       to_state == AETHER_SCAN_STATE_FAILED) ? 1 : 0;
+            break;
+        case AETHER_SCAN_STATE_PAUSED:
+            allowed = (to_state == AETHER_SCAN_STATE_CAPTURING ||
+                       to_state == AETHER_SCAN_STATE_READY ||
+                       to_state == AETHER_SCAN_STATE_FINISHING ||
+                       to_state == AETHER_SCAN_STATE_FAILED) ? 1 : 0;
+            break;
+        case AETHER_SCAN_STATE_FINISHING:
+            allowed = (to_state == AETHER_SCAN_STATE_COMPLETED ||
+                       to_state == AETHER_SCAN_STATE_FAILED) ? 1 : 0;
+            break;
+        case AETHER_SCAN_STATE_COMPLETED:
+            allowed = (to_state == AETHER_SCAN_STATE_READY) ? 1 : 0;
+            break;
+        case AETHER_SCAN_STATE_FAILED:
+            allowed = (to_state == AETHER_SCAN_STATE_READY) ? 1 : 0;
+            break;
+        default:
+            allowed = 0;
+            break;
+    }
+    *out_allowed = allowed;
+    return 0;
+}
+
+int aether_scan_state_is_active(
+    int32_t state,
+    int32_t* out_active) {
+    if (out_active == nullptr) {
+        return -1;
+    }
+    *out_active = (state == AETHER_SCAN_STATE_CAPTURING || state == AETHER_SCAN_STATE_FINISHING) ? 1 : 0;
+    return 0;
+}
+
+int aether_scan_state_can_finish(
+    int32_t state,
+    int32_t* out_can_finish) {
+    if (out_can_finish == nullptr) {
+        return -1;
+    }
+    *out_can_finish = (state == AETHER_SCAN_STATE_CAPTURING || state == AETHER_SCAN_STATE_PAUSED) ? 1 : 0;
+    return 0;
+}
+
+int aether_scan_state_recommended_abort_state(
+    int32_t state,
+    int32_t* out_state) {
+    if (out_state == nullptr) {
+        return -1;
+    }
+    switch (state) {
+        case AETHER_SCAN_STATE_COMPLETED:
+            *out_state = AETHER_SCAN_STATE_COMPLETED;
+            break;
+        default:
+            *out_state = AETHER_SCAN_STATE_FAILED;
+            break;
+    }
+    return 0;
+}
+
+int aether_scan_state_action_plan(
+    int32_t state,
+    int32_t reason,
+    aether_scan_action_plan_t* out_plan) {
+    if (out_plan == nullptr) {
+        return -1;
+    }
+    std::memset(out_plan, 0, sizeof(*out_plan));
+
+    if (reason == AETHER_SCAN_ACTION_REASON_ABORT) {
+        out_plan->action_mask = AETHER_SCAN_ACTION_APPLY_TRANSITION;
+        out_plan->overlay_clear_alpha = 0.0f;
+        out_plan->transition_target_state = AETHER_SCAN_STATE_FAILED;
+        return 0;
+    }
+
+    const bool force_black =
+        (state == AETHER_SCAN_STATE_CAPTURING ||
+         state == AETHER_SCAN_STATE_PAUSED ||
+         state == AETHER_SCAN_STATE_FINISHING);
+    out_plan->action_mask = AETHER_SCAN_ACTION_SET_BORDER_DEPTH_LESS_EQUAL;
+    if (force_black) {
+        out_plan->action_mask |= AETHER_SCAN_ACTION_SET_BLACK_BACKGROUND;
+        out_plan->action_mask |= AETHER_SCAN_ACTION_SET_OVERLAY_OPAQUE;
+    }
+    out_plan->overlay_clear_alpha = force_black ? 1.0f : 0.0f;
+    out_plan->transition_target_state = state;
+    return 0;
+}
+
+int aether_scan_state_render_presentation_policy(
+    int32_t state,
+    aether_scan_render_presentation_policy_t* out_policy) {
+    if (out_policy == nullptr) {
+        return -1;
+    }
+    std::memset(out_policy, 0, sizeof(*out_policy));
+    const bool force_black =
+        (state == AETHER_SCAN_STATE_CAPTURING ||
+         state == AETHER_SCAN_STATE_PAUSED ||
+         state == AETHER_SCAN_STATE_FINISHING);
+    out_policy->force_black_background = force_black ? 1 : 0;
+    out_policy->overlay_opaque = force_black ? 1 : 0;
+    out_policy->overlay_clear_alpha = force_black ? 1.0f : 0.0f;
+    out_policy->border_depth_mode = AETHER_SCAN_BORDER_DEPTH_LESS_EQUAL;
+    return 0;
+}
+
 int aether_select_stable_render_triangles(
     const aether_render_triangle_candidate_t* candidates,
     int candidate_count,
@@ -6451,13 +6962,27 @@ int aether_select_stable_render_triangles(
         return -1;
     }
 
-    // Score each candidate.
-    struct Scored {
+    struct ScoredTriangle {
         float score;
         std::uint64_t patch_key;
         int original_index;
+        bool is_resident;
+        float distance;
     };
-    std::vector<Scored> scored(n);
+    struct PatchAggregate {
+        float sum_score{0.0f};
+        float best_score{-std::numeric_limits<float>::infinity()};
+        float min_distance{std::numeric_limits<float>::infinity()};
+        int resident_count{0};
+        int count{0};
+        std::vector<ScoredTriangle> triangles;
+    };
+
+    std::unordered_map<std::uint64_t, PatchAggregate> patch_map;
+    patch_map.reserve(n);
+    std::vector<ScoredTriangle> global_sorted;
+    global_sorted.reserve(n);
+
     for (std::size_t i = 0u; i < n; ++i) {
         const aether_render_triangle_candidate_t& c = candidates[i];
         const float dx = c.centroid.x - config->camera_position.x;
@@ -6465,43 +6990,246 @@ int aether_select_stable_render_triangles(
         const float dz = c.centroid.z - config->camera_position.z;
         const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
         const float display_clamped = std::max(0.0f, std::min(1.0f, c.display));
-        float score = (1.0f - display_clamped) * config->display_weight;
-        score -= dist * config->distance_bias;
-        score += c.stability_fade_alpha * config->stability_weight;
-        if (c.display >= config->completion_threshold) {
-            score += config->completion_boost;
+        const bool is_resident = c.residency_until_frame >= config->current_frame;
+
+        // Favor already-covered regions first (anti-regression), then frontier growth.
+        float score = (0.10f + 0.90f * display_clamped) * config->display_weight;
+        score += c.stability_fade_alpha * config->stability_weight * 1.15f;
+        score -= dist * config->distance_bias * 1.25f;
+        if (!is_resident && display_clamped < 0.06f) {
+            score -= 0.18f;
         }
-        if (c.residency_until_frame <= config->current_frame) {
-            score += config->residency_boost;
+        if (display_clamped >= config->completion_threshold) {
+            score += config->completion_boost * 1.15f;
         }
-        scored[i] = Scored{score, c.patch_key, static_cast<int>(i)};
+        if (is_resident) {
+            const float hold_frames =
+                static_cast<float>(c.residency_until_frame - config->current_frame);
+            const float hold_scale = 1.0f + std::min(3.0f, hold_frames / 35.0f);
+            score += config->residency_boost * hold_scale * 1.15f;
+        }
+
+        ScoredTriangle tri{
+            score,
+            c.patch_key,
+            static_cast<int>(i),
+            is_resident,
+            dist};
+        PatchAggregate& agg = patch_map[c.patch_key];
+        agg.sum_score += score;
+        agg.best_score = std::max(agg.best_score, score);
+        agg.min_distance = std::min(agg.min_distance, dist);
+        agg.resident_count += is_resident ? 1 : 0;
+        agg.count += 1;
+        agg.triangles.push_back(tri);
+        global_sorted.push_back(tri);
     }
 
-    // Sort by score descending, then by patch_key ascending for stability.
-    std::sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
+    struct PatchRank {
+        float score;
+        std::uint64_t patch_key;
+    };
+    std::vector<PatchRank> patch_ranks;
+    patch_ranks.reserve(patch_map.size());
+    for (const auto& entry : patch_map) {
+        const std::uint64_t patch_key = entry.first;
+        const PatchAggregate& agg = entry.second;
+        const float count_f = std::max(1.0f, static_cast<float>(agg.count));
+        const float avg = agg.sum_score / count_f;
+        const float resident_ratio =
+            static_cast<float>(agg.resident_count) / count_f;
+        float patch_score = avg * 0.60f + agg.best_score * 0.40f;
+        patch_score += resident_ratio * config->residency_boost * 2.4f;
+        if (agg.resident_count > 0) {
+            patch_score += config->stability_weight * 0.8f;
+        }
+        patch_score -= agg.min_distance * config->distance_bias * 0.65f;
+        patch_ranks.push_back(PatchRank{patch_score, patch_key});
+    }
+
+    std::sort(patch_ranks.begin(), patch_ranks.end(), [](const PatchRank& a, const PatchRank& b) {
         if (a.score != b.score) {
             return a.score > b.score;
         }
         return a.patch_key < b.patch_key;
     });
 
+    std::sort(global_sorted.begin(), global_sorted.end(), [](const ScoredTriangle& a, const ScoredTriangle& b) {
+        if (a.is_resident != b.is_resident) {
+            return a.is_resident && !b.is_resident;
+        }
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.original_index < b.original_index;
+    });
+
     const int max_tri = std::min(config->max_triangles, static_cast<int>(n));
-    // If max_triangles >= n, select all, sorted by patch_key for determinism.
+    if (max_tri <= 0) {
+        *inout_selected_count = 0;
+        return 0;
+    }
     if (max_tri >= static_cast<int>(n)) {
-        std::sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
-            return a.patch_key < b.patch_key;
-        });
         for (int i = 0; i < static_cast<int>(n); ++i) {
-            out_selected_indices[i] = scored[static_cast<std::size_t>(i)].original_index;
+            out_selected_indices[i] = static_cast<int32_t>(i);
         }
         *inout_selected_count = static_cast<int>(n);
         return 0;
     }
 
-    for (int i = 0; i < max_tri; ++i) {
-        out_selected_indices[i] = scored[static_cast<std::size_t>(i)].original_index;
+    std::vector<uint8_t> selected_mask(n, 0u);
+    int selected_count = 0;
+
+    for (const PatchRank& rank : patch_ranks) {
+        auto it = patch_map.find(rank.patch_key);
+        if (it == patch_map.end()) {
+            continue;
+        }
+        std::vector<ScoredTriangle>& tris = it->second.triangles;
+        std::sort(tris.begin(), tris.end(), [](const ScoredTriangle& a, const ScoredTriangle& b) {
+            if (a.is_resident != b.is_resident) {
+                return a.is_resident && !b.is_resident;
+            }
+            if (a.score != b.score) {
+                return a.score > b.score;
+            }
+            return a.original_index < b.original_index;
+        });
+        for (const ScoredTriangle& tri : tris) {
+            if (selected_count >= max_tri) {
+                break;
+            }
+            if (tri.original_index < 0 ||
+                static_cast<std::size_t>(tri.original_index) >= n ||
+                selected_mask[static_cast<std::size_t>(tri.original_index)] != 0u) {
+                continue;
+            }
+            out_selected_indices[selected_count++] = static_cast<int32_t>(tri.original_index);
+            selected_mask[static_cast<std::size_t>(tri.original_index)] = 1u;
+        }
+        if (selected_count >= max_tri) {
+            break;
+        }
     }
-    *inout_selected_count = max_tri;
+
+    if (selected_count < max_tri) {
+        for (const ScoredTriangle& tri : global_sorted) {
+            if (selected_count >= max_tri) {
+                break;
+            }
+            if (tri.original_index < 0 ||
+                static_cast<std::size_t>(tri.original_index) >= n ||
+                selected_mask[static_cast<std::size_t>(tri.original_index)] != 0u) {
+                continue;
+            }
+            out_selected_indices[selected_count++] = static_cast<int32_t>(tri.original_index);
+            selected_mask[static_cast<std::size_t>(tri.original_index)] = 1u;
+        }
+    }
+
+    *inout_selected_count = selected_count;
+    return 0;
+}
+
+int aether_render_selection_runtime_create(
+    const aether_render_selection_config_t* /*config_or_null*/,
+    int32_t hold_frames,
+    aether_render_selection_runtime_t** out_runtime) {
+    if (out_runtime == nullptr) {
+        return -1;
+    }
+    aether_render_selection_runtime_t* runtime =
+        new (std::nothrow) aether_render_selection_runtime_t(hold_frames);
+    if (runtime == nullptr) {
+        return -2;
+    }
+    *out_runtime = runtime;
+    return 0;
+}
+
+int aether_render_selection_runtime_destroy(aether_render_selection_runtime_t* runtime) {
+    if (runtime == nullptr) {
+        return -1;
+    }
+    delete runtime;
+    return 0;
+}
+
+int aether_render_selection_runtime_reset(aether_render_selection_runtime_t* runtime) {
+    if (runtime == nullptr) {
+        return -1;
+    }
+    runtime->residency_until_by_patch.clear();
+    return 0;
+}
+
+int aether_render_selection_runtime_select(
+    aether_render_selection_runtime_t* runtime,
+    const aether_render_triangle_candidate_t* candidates,
+    int candidate_count,
+    const aether_render_selection_config_t* config,
+    int32_t* out_selected_indices,
+    int* inout_selected_count) {
+    std::size_t n = 0u;
+    if (!checked_count(candidate_count, &n) ||
+        runtime == nullptr ||
+        config == nullptr ||
+        out_selected_indices == nullptr ||
+        inout_selected_count == nullptr) {
+        return -1;
+    }
+    if (n == 0u) {
+        *inout_selected_count = 0;
+        return 0;
+    }
+    if (candidates == nullptr) {
+        return -1;
+    }
+
+    std::vector<aether_render_triangle_candidate_t> local(candidates, candidates + n);
+    for (std::size_t i = 0u; i < n; ++i) {
+        const std::uint64_t patch_key = local[i].patch_key;
+        const auto it = runtime->residency_until_by_patch.find(patch_key);
+        if (it == runtime->residency_until_by_patch.end()) {
+            continue;
+        }
+        local[i].residency_until_frame = std::max(local[i].residency_until_frame, it->second);
+        if (local[i].residency_until_frame >= config->current_frame) {
+            local[i].stability_fade_alpha = std::max(local[i].stability_fade_alpha, 1.0f);
+        }
+    }
+
+    int rc = aether_select_stable_render_triangles(
+        local.data(),
+        candidate_count,
+        config,
+        out_selected_indices,
+        inout_selected_count);
+    if (rc != 0) {
+        return rc;
+    }
+
+    const int safe_selected = std::max(0, std::min(*inout_selected_count, candidate_count));
+    const int32_t until_frame = config->current_frame + runtime->hold_frames;
+    for (int i = 0; i < safe_selected; ++i) {
+        const int32_t idx = out_selected_indices[i];
+        if (idx < 0 || static_cast<std::size_t>(idx) >= n) {
+            continue;
+        }
+        const std::uint64_t patch_key = local[static_cast<std::size_t>(idx)].patch_key;
+        runtime->residency_until_by_patch[patch_key] = until_frame;
+    }
+
+    const int32_t prune_floor = config->current_frame - runtime->hold_frames;
+    for (auto it = runtime->residency_until_by_patch.begin();
+         it != runtime->residency_until_by_patch.end();) {
+        if (it->second < prune_floor) {
+            it = runtime->residency_until_by_patch.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     return 0;
 }
 

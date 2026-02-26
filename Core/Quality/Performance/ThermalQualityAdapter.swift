@@ -55,6 +55,22 @@ public final class ThermalQualityAdapter {
 
     public private(set) var currentTier: RenderTier = .nominal
 
+    /// Bitmask consumed by ScanGuidanceRenderPipeline.
+    /// bit0 wedgeFill, bit1 borderStroke are always on;
+    /// bit2..bit5 are optional compositing passes.
+    public var passMask: UInt32 {
+        var mask: UInt32 = 0x03
+        if currentTier.enableMetallicBRDF {
+            mask |= 0x04  // metallic lighting
+            mask |= 0x08  // color correction
+            mask |= 0x10  // ambient occlusion
+            mask |= 0x20  // post process
+        }
+        return mask
+    }
+
+    public init() {}
+
     private var lastTierChangeTime: TimeInterval = 0
     private var frameTimeSamples: [Double] = []
 

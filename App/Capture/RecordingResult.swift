@@ -13,35 +13,35 @@ import Foundation
 /// Recording Result
 ///
 /// Result of a video recording session.
-public struct RecordingResult: Sendable {
+struct RecordingResult: Sendable {
     /// Output file URL
-    public let fileURL: URL
-    
+    let fileURL: URL
+
     /// Recording duration (seconds)
-    public let duration: TimeInterval
-    
+    let duration: TimeInterval
+
     /// File size (bytes)
-    public let fileSize: Int64
-    
+    let fileSize: Int64
+
     /// Recording start time
-    public let startTime: Date
-    
+    let startTime: Date
+
     /// Recording end time
-    public let endTime: Date
-    
+    let endTime: Date
+
     /// Capture metadata
-    public let metadata: CaptureMetadata?
-    
+    let metadata: CaptureMetadata?
+
     /// IMU data (if collected)
-    public let imuData: [IMUDataPoint]?
-    
+    let imuData: [IMUDataPoint]?
+
     /// LiDAR depth data (if collected)
-    public let lidarData: [LiDARDepthFrame]?
-    
+    let lidarData: [LiDARDepthFrame]?
+
     /// Recording errors (if any)
-    public let errors: [RecordingError]?
-    
-    public init(
+    let errors: [RecordingError]?
+
+    init(
         fileURL: URL,
         duration: TimeInterval,
         fileSize: Int64,
@@ -65,13 +65,13 @@ public struct RecordingResult: Sendable {
 }
 
 /// IMU Data Point
-public struct IMUDataPoint: Sendable {
-    public let timestamp: Date
-    public let acceleration: SIMD3<Double>
-    public let rotationRate: SIMD3<Double>
-    public let magneticField: SIMD3<Double>
-    
-    public init(timestamp: Date, acceleration: SIMD3<Double>, rotationRate: SIMD3<Double>, magneticField: SIMD3<Double>) {
+struct IMUDataPoint: Sendable {
+    let timestamp: Date
+    let acceleration: SIMD3<Double>
+    let rotationRate: SIMD3<Double>
+    let magneticField: SIMD3<Double>
+
+    init(timestamp: Date, acceleration: SIMD3<Double>, rotationRate: SIMD3<Double>, magneticField: SIMD3<Double>) {
         self.timestamp = timestamp
         self.acceleration = acceleration
         self.rotationRate = rotationRate
@@ -80,33 +80,16 @@ public struct IMUDataPoint: Sendable {
 }
 
 /// LiDAR Depth Frame
-public struct LiDARDepthFrame: Sendable {
-    public let timestamp: Date
-    public let depthMap: Data
-    public let confidenceMap: Data?
-    
-    public init(timestamp: Date, depthMap: Data, confidenceMap: Data? = nil) {
+struct LiDARDepthFrame: Sendable {
+    let timestamp: Date
+    let depthMap: Data
+    let confidenceMap: Data?
+
+    init(timestamp: Date, depthMap: Data, confidenceMap: Data? = nil) {
         self.timestamp = timestamp
         self.depthMap = depthMap
         self.confidenceMap = confidenceMap
     }
 }
 
-/// Recording Error
-public enum RecordingError: Error, Sendable {
-    case permissionDenied
-    case cameraUnavailable
-    case recordingFailed(String)
-    case fileSizeExceeded
-    case durationExceeded
-    case thermalShutdown
-    case interruption(String)
-    case configurationFailed(ConfigurationError)
-    
-    public enum ConfigurationError: Sendable {
-        case permissionNotDetermined
-        case cameraUnavailable
-        case formatNotSupported
-        case codecNotSupported
-    }
-}
+// RecordingError is defined in CaptureMetadata.swift — do not redeclare here

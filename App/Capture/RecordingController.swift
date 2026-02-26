@@ -19,6 +19,7 @@ import Foundation
 import AVFoundation
 import UIKit
 import os.log
+import Aether3DCore
 
 // MARK: - Dependency Protocols
 
@@ -77,8 +78,9 @@ private struct DefaultFileManagerProvider: FileManagerProvider {
     }
     
     func freeDiskBytes(for url: URL) -> UInt64? {
-        try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage
+        guard let capacity = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage else { return nil }
+        return UInt64(max(0, capacity))
     }
     
     func createDirectory(at url: URL, withIntermediateDirectories createIntermediates: Bool) throws {
@@ -105,7 +107,7 @@ enum RecordingState: Equatable {
     case failed(RecordingError)
 }
 
-final class RecordingController: NSObject {
+final class RecordingController: NSObject, @unchecked Sendable {
     private let cameraSession: CameraSessionProtocol
     private let interruptionHandler: InterruptionHandler
     private let thermalProvider: ThermalStateProvider
@@ -130,7 +132,7 @@ final class RecordingController: NSObject {
     var onFinish: ((Result<CaptureMetadata, RecordingError>) -> Void)?
     var onStateChange: ((String) -> Void)?
     
-    init(cameraSession: CameraSessionProtocol,
+    fileprivate init(cameraSession: CameraSessionProtocol,
          interruptionHandler: InterruptionHandler,
          thermalProvider: ThermalStateProvider = DefaultThermalStateProvider(),
          fileManager: FileManagerProvider = DefaultFileManagerProvider(),
@@ -145,8 +147,16 @@ final class RecordingController: NSObject {
         self.timerScheduler = timerScheduler
         self.bundleInfo = bundleInfo
         
-        let deviceModel = UIDevice.current.model
-        let osVersion = UIDevice.current.systemVersion
+        // Use ProcessInfo/uname to avoid MainActor-isolated UIDevice access
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let deviceModel = withUnsafePointer(to: &systemInfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+                String(cString: $0)
+            }
+        }
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        let osVersion = "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
         self.metadata = CaptureMetadata(
             recordingId: UUID(),
             epoch: 0,
@@ -358,7 +368,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
     private func startFileSizePolling(fileURL: URL) {
         // Initial delay before first poll
         sizePollToken = timerScheduler.schedule(after: CaptureRecordingConstants.fileSizePollStartDelaySeconds) { [weak self] in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 self?.pollFileSize(fileURL: fileURL)
             }
         }
@@ -406,7 +416,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
         }
         
         sizePollToken = timerScheduler.schedule(after: interval) { [weak self] in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 self?.pollFileSize(fileURL: fileURL)
             }
         }
@@ -451,15 +461,17 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
             self.processingFinishEpoch = snapshotEpoch
             
             // === PHASE 1: Background - gather file info ===
-            workerQueue.async { [weak self] in
+            // Use Task for async AVAsset.load() APIs (replaces deprecated sync properties)
+            let capturedError = error as NSError?  // bridge to NSError for Sendable closure
+            Task.detached(priority: .userInitiated) { [weak self] in
                 guard let self = self else { return }
-                
+
                 let budgetStart = self.clock.now()
                 let fileExists = self.fileManager.fileExists(at: outputFileURL)
-                
+
                 // If file missing, record diagnostic on main thread and skip AVAsset checks
                 if !fileExists {
-                    DispatchQueue.main.async {
+                    await MainActor.run {
                         self.addDiag(.fileMissingAtFinish, note: nil)
                     }
                     let evidence = FinishEvidence(
@@ -470,42 +482,42 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
                         audioTracks: nil,
                         isPlayable: nil,
                         budgetSkipped: false,
-                        error: error
+                        error: capturedError
                     )
                     self.proceedToPhase2(evidence: evidence, snapshotEpoch: snapshotEpoch, snapshotTmpURL: snapshotTmpURL, outputFileURL: outputFileURL)
                     return
                 }
-                
+
                 // File exists, gather evidence
                 let tmpSize = Int64(self.fileManager.fileSize(at: outputFileURL) ?? 0)
                 let wallclockDuration = self.metadata.startedAt.map { self.clock.now().timeIntervalSince($0) } ?? 0
-                
+
                 var assetDuration: Double?
                 var audioTracks: Int?
                 var isPlayable: Bool?
                 var budgetSkipped = false
-                
-                // AVAsset checks with budget
+
+                // AVAsset async checks (iOS 16+ async load API)
                 let asset = AVAsset(url: outputFileURL)
-                let d = asset.duration.seconds
+                let d = ((try? await asset.load(.duration)) ?? .zero).seconds
                 if d.isFinite && d > 0 {
                     assetDuration = d
                 }
-                
+
                 // Check budget
                 let elapsed = self.clock.now().timeIntervalSince(budgetStart)
                 if elapsed < CaptureRecordingConstants.assetCheckTimeoutSeconds {
                     // Within budget, check tracks and playable
-                    audioTracks = asset.tracks(withMediaType: .audio).count
-                    isPlayable = asset.isPlayable
+                    audioTracks = (try? await asset.loadTracks(withMediaType: .audio))?.count
+                    isPlayable = try? await asset.load(.isPlayable)
                 } else {
                     // Budget exceeded
                     budgetSkipped = true
-                    DispatchQueue.main.async {
+                    await MainActor.run {
                         self.addDiag(.assetChecksSkippedBudget, note: .elapsedSeconds(Int(elapsed.rounded())))
                     }
                 }
-                
+
                 let evidence = FinishEvidence(
                     fileMissing: false,
                     tmpSize: tmpSize,
@@ -514,7 +526,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
                     audioTracks: audioTracks,
                     isPlayable: isPlayable,
                     budgetSkipped: budgetSkipped,
-                    error: error
+                    error: capturedError
                 )
                 
                 self.proceedToPhase2(evidence: evidence, snapshotEpoch: snapshotEpoch, snapshotTmpURL: snapshotTmpURL, outputFileURL: outputFileURL)
@@ -620,7 +632,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
         }
     }
     
-    private struct FinishEvidence {
+    private struct FinishEvidence: @unchecked Sendable {
         let fileMissing: Bool
         let tmpSize: Int64?
         let assetDuration: Double?
@@ -628,7 +640,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
         let audioTracks: Int?
         let isPlayable: Bool?
         let budgetSkipped: Bool
-        let error: Error?
+        let error: NSError?  // NSError is Sendable (bridged from Error? for Task.detached)
     }
     
     private func deliverFinish(result: Result<CaptureMetadata, RecordingError>) {

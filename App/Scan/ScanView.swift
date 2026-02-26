@@ -77,6 +77,7 @@ struct ScanView: View {
 
                 // Bottom: Capture controls (reused component)
                 ScanCaptureControls(
+                    isCapturing: viewModel.scanState.isActive || viewModel.scanState == .paused,
                     onStart: { viewModel.startCapture() },
                     onStop: { handleStop() },
                     onPause: { viewModel.pauseCapture() }
@@ -88,7 +89,7 @@ struct ScanView: View {
         .onDisappear {
             // Ensure ARKit session is cleaned up
             if viewModel.scanState != .completed {
-                viewModel.transition(to: .failed)
+                transitionToSafeTerminalState()
             }
         }
     }
@@ -102,7 +103,7 @@ struct ScanView: View {
     private func handleDismiss() {
         if viewModel.scanState.canFinish {
             // TODO: Show confirmation dialog before discarding scan
-            viewModel.transition(to: .failed)
+            transitionToSafeTerminalState()
         }
         dismiss()
     }
@@ -116,6 +117,14 @@ struct ScanView: View {
             ScanRecordStore().saveRecord(record)
         }
         dismiss()
+    }
+
+    /// Abort flow without assuming a specific transition edge is legal.
+    /// Some runtime states (for example paused in older native policies)
+    /// may reject .failed; fall back to .ready to avoid debug-time crashes.
+    private func transitionToSafeTerminalState() {
+        let plan = viewModel.scanState.actionPlan(for: .abort)
+        viewModel.executeScanActionPlan(plan)
     }
 
     // MARK: - Formatting

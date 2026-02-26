@@ -15,6 +15,7 @@
 
 import Foundation
 import AVFoundation
+import Aether3DCore
 
 // MARK: - Error Types
 
@@ -146,11 +147,7 @@ enum WarningCode: String, Codable {
 
 // MARK: - v4.2 Types
 
-enum VideoCodec: String, Codable {
-    case hevc
-    case h264
-    case unknown
-}
+// VideoCodec is defined in CameraConfig.swift — do not redeclare here
 
 enum DiagnosticEventCode: String, Codable {
     case startRequested
@@ -195,7 +192,7 @@ enum FinishDeliveryWinner: String, Codable {
     case finalizeTimeout
 }
 
-enum DiagnosticNote: Codable, Equatable {
+enum DiagnosticNote: Codable, Equatable, Sendable {
     case tierFpsCodec(tier: ResolutionTier, fps: Int, codec: VideoCodec)
     case elapsedSeconds(Int)
     case reasonCode(String)  // Closed set: "diskFull", "systemError", "finishWithoutStart", "unknown"
@@ -203,7 +200,7 @@ enum DiagnosticNote: Codable, Equatable {
     case destUnavailable
 }
 
-struct DiagnosticEvent: Codable, Equatable {
+struct DiagnosticEvent: Codable, Equatable, Sendable {
     let code: DiagnosticEventCode
     let at: Date
     let note: DiagnosticNote?
@@ -219,7 +216,7 @@ struct VideoDimensions: Codable, Equatable {
 
 // MARK: - v4.1 Types
 
-struct CaptureCapabilitySnapshot: Codable, Equatable {
+struct CaptureCapabilitySnapshot: Codable, Equatable, Sendable {
     let resolutionTier: ResolutionTier
     let width: Int
     let height: Int
@@ -246,9 +243,9 @@ enum AudioPolicy: String, Codable {
 
 // MARK: - CaptureMetadata
 
-struct CaptureMetadata: Codable, Equatable {
+struct CaptureMetadata: Codable, Equatable, Sendable {
     // Schema
-    let schemaVersion: Int = 1
+    var schemaVersion: Int = 1
     
     // Identity
     var recordingId: UUID

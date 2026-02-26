@@ -11,11 +11,12 @@
 import Foundation
 import AVFoundation
 import UIKit
+import Aether3DCore
 
 // CI-HARDENED: This file must not use DispatchQueue.main.asyncAfter.
 // All timer operations must use injected TimerScheduler for determinism.
 
-final class InterruptionHandler {
+final class InterruptionHandler: @unchecked Sendable {
     private let session: AVCaptureSession
     private let onInterruptionBegan: (InterruptionReasonCode) -> Void
     private let onInterruptionEnded: () -> Void
@@ -64,7 +65,11 @@ final class InterruptionHandler {
                     reason = .multitaskingNotSupported
                 case .audioDeviceInUseByAnotherClient:
                     reason = .audioConflict
-                @unknown default:
+                case .videoDeviceNotAvailableWithMultipleForegroundApps:
+                    reason = .multitaskingNotSupported
+                case .videoDeviceNotAvailableDueToSystemPressure:
+                    reason = .unknown
+                default:
                     reason = .unknown
                 }
             } else {

@@ -86,6 +86,14 @@ public enum IntegrationResult: Sendable {
         public let voxelsUpdated: Int
         public let gpuTimeMs: Double
         public let totalTimeMs: Double
+
+        public init(blocksUpdated: Int, blocksAllocated: Int, voxelsUpdated: Int, gpuTimeMs: Double, totalTimeMs: Double) {
+            self.blocksUpdated = blocksUpdated
+            self.blocksAllocated = blocksAllocated
+            self.voxelsUpdated = voxelsUpdated
+            self.gpuTimeMs = gpuTimeMs
+            self.totalTimeMs = totalTimeMs
+        }
     }
 
     public enum SkipReason: Sendable {

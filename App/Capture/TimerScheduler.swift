@@ -22,14 +22,14 @@ protocol Cancellable {
 
 protocol TimerScheduler {
     @discardableResult
-    func schedule(after: TimeInterval, _ block: @escaping () -> Void) -> Cancellable
+    func schedule(after: TimeInterval, _ block: @Sendable @escaping () -> Void) -> Cancellable
 }
 
 // MARK: - Default Implementation
 
 struct DefaultTimerScheduler: TimerScheduler {
     @discardableResult
-    func schedule(after: TimeInterval, _ block: @escaping () -> Void) -> Cancellable {
+    func schedule(after: TimeInterval, _ block: @Sendable @escaping () -> Void) -> Cancellable {
         let timer = Timer.scheduledTimer(withTimeInterval: after, repeats: false) { _ in block() }
         return TimerCancellable(timer: timer)
     }

@@ -29,7 +29,7 @@ import Foundation
 /// - t720p: 1280x720 (HD)
 /// - t480p: 640x480 (SD) - NEW
 /// - lower: Below 480p
-public enum ResolutionTier: String, Codable, CaseIterable, Equatable {
+public enum ResolutionTier: String, Codable, CaseIterable, Equatable, Sendable {
     case t8K = "8K"
     case t4K = "4K"
     case t1080p = "1080p"

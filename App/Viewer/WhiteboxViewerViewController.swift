@@ -110,8 +110,8 @@ final class WhiteboxViewerViewController: UIViewController {
 
         let asset = MDLAsset(url: artifactURL)
         asset.loadTextures()
-        guard let mdlScene = try? SCNScene(mdlAsset: asset),
-              !mdlScene.rootNode.childNodes.isEmpty else {
+        let mdlScene = SCNScene(mdlAsset: asset)
+        guard !mdlScene.rootNode.childNodes.isEmpty else {
             return nil
         }
         let root = SCNNode()

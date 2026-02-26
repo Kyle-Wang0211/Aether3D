@@ -70,4 +70,28 @@ public struct TSDFParams: Sendable {
     public var depthHeight: UInt32
     public var sdfDeadZoneBase: Float
     public var sdfDeadZoneWeightScale: Float
+
+    public init(
+        depthMin: Float, depthMax: Float, skipLowConfidence: Int32, _pad0: Int32,
+        depthNearThreshold: Float, depthFarThreshold: Float,
+        voxelSizeNear: Float, voxelSizeMid: Float, voxelSizeFar: Float,
+        truncationMultiplier: Float, truncationMinimum: Float,
+        confidenceWeights: (Float, Float, Float), distanceDecayAlpha: Float, viewingAngleFloor: Float,
+        weightMax: UInt8, carvingDecayRate: UInt8, _pad1: (UInt8, UInt8),
+        blockSize: Int32, maxOutputBlocks: Int32,
+        depthWidth: UInt32, depthHeight: UInt32,
+        sdfDeadZoneBase: Float, sdfDeadZoneWeightScale: Float
+    ) {
+        self.depthMin = depthMin; self.depthMax = depthMax
+        self.skipLowConfidence = skipLowConfidence; self._pad0 = _pad0
+        self.depthNearThreshold = depthNearThreshold; self.depthFarThreshold = depthFarThreshold
+        self.voxelSizeNear = voxelSizeNear; self.voxelSizeMid = voxelSizeMid; self.voxelSizeFar = voxelSizeFar
+        self.truncationMultiplier = truncationMultiplier; self.truncationMinimum = truncationMinimum
+        self.confidenceWeights = confidenceWeights; self.distanceDecayAlpha = distanceDecayAlpha
+        self.viewingAngleFloor = viewingAngleFloor
+        self.weightMax = weightMax; self.carvingDecayRate = carvingDecayRate; self._pad1 = _pad1
+        self.blockSize = blockSize; self.maxOutputBlocks = maxOutputBlocks
+        self.depthWidth = depthWidth; self.depthHeight = depthHeight
+        self.sdfDeadZoneBase = sdfDeadZoneBase; self.sdfDeadZoneWeightScale = sdfDeadZoneWeightScale
+    }
 }

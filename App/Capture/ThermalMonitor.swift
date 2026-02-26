@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import Aether3DCore
 #if canImport(IOKit)
 import IOKit
 #endif

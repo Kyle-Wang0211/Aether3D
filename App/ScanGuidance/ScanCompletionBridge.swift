@@ -15,7 +15,7 @@ extension Notification.Name {
 }
 
 /// Observes scan completion and fires haptic
-public final class ScanCompletionBridge {
+public final class ScanCompletionBridge: @unchecked Sendable {
     private let hapticEngine: GuidanceHapticEngine
     private var observation: NSObjectProtocol?
     

@@ -90,12 +90,12 @@ public actor LiDARDepthProcessor {
     /// Get depth frames
     ///
     /// - Returns: Array of depth frames
-    public func getDepthFrames() -> [LiDARDepthFrame] {
+    func getDepthFrames() -> [LiDARDepthFrame] {
         return depthFrames
     }
 
     /// Clear depth frames
-    public func clearFrames() {
+    func clearFrames() {
         depthFrames.removeAll()
         _latestSceneDepth = nil
     }
@@ -104,7 +104,7 @@ public actor LiDARDepthProcessor {
     ///
     /// - Parameter timestamp: Frame timestamp
     /// - Returns: Depth frame if found
-    public func getDepthFrame(for timestamp: Date) -> LiDARDepthFrame? {
+    func getDepthFrame(for timestamp: Date) -> LiDARDepthFrame? {
         // Find closest depth frame to timestamp
         let tolerance: TimeInterval = 0.033 // ~30fps tolerance
 

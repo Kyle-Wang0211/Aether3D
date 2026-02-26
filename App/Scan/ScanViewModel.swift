@@ -8,11 +8,15 @@
 //
 
 import Foundation
+import Aether3DCore
 
 #if canImport(SwiftUI) && canImport(ARKit)
 import SwiftUI
 import ARKit
 import simd
+#if canImport(Metal)
+import Metal
+#endif
 
 /// THE ORCHESTRATOR — @MainActor ViewModel that wires ALL subsystems together
 ///
@@ -53,9 +57,8 @@ final class ScanViewModel: ObservableObject {
     private let meshExtractor = MeshExtractor()
 
     // MARK: - Metal Pipeline (graceful degradation)
-    // createRenderPipelines() contains fatalError() in Phase 2
-    // Pipeline is nil — UI works perfectly without mesh overlay
-    // When Metal shaders are ready, pipeline auto-activates
+    // Pipeline is created from ScanGuidance.metal shaders.
+    // If Metal device or shader compilation fails, pipeline is nil — UI still works.
     private var renderPipeline: ScanGuidanceRenderPipeline?
 
     // MARK: - State
@@ -65,12 +68,19 @@ final class ScanViewModel: ObservableObject {
     private var currentPatchDisplaySnapshot: [String: Double] = [:]
     private var previousPatchDisplaySnapshot: [String: Double] = [:]
     private var captureStartTime: Date?
-    private var elapsedTimer: Timer?
+    nonisolated(unsafe) private var elapsedTimer: Timer?
     private var frameCounter: Int = 0
     private var lastMotionSample: (position: SIMD3<Float>, timestamp: TimeInterval)?
+    private let renderStabilityBridge = NativeRenderStabilityBridge()
+    private var stableAnchorSamples: [PatchIdentitySample] = []
+    private var patchKeyToPatchId: [UInt64: String] = [:]
+
+    private static let identityLockDisplayThreshold: Float = 0.18
+    private static let identitySnapDistanceM: Float = 0.12
+    private static let identityDisplayDeltaThreshold: Float = 0.01
 
     // MARK: - Thermal Monitoring
-    private var thermalObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var thermalObserver: NSObjectProtocol?
 
     // MARK: - Initialization
 
@@ -80,9 +90,17 @@ final class ScanViewModel: ObservableObject {
         self.completionBridge = ScanCompletionBridge(hapticEngine: hapticEngine)
 
         // Graceful Metal pipeline initialization
-        // createRenderPipelines() calls fatalError() in Phase 2 — cannot catch
-        // Pipeline is nil until Metal shaders are implemented
+        // ScanGuidance.metal contains wedgeFillVertex/Fragment + borderStrokeFragment
+        // Pipeline init uses `throws` — safe to try? here
+        #if canImport(Metal)
+        if let device = MTLCreateSystemDefaultDevice() {
+            self.renderPipeline = try? ScanGuidanceRenderPipeline(device: device)
+        } else {
+            self.renderPipeline = nil
+        }
+        #else
         self.renderPipeline = nil
+        #endif
 
         setupThermalMonitoring()
     }
@@ -99,11 +117,14 @@ final class ScanViewModel: ObservableObject {
     /// VALIDATED state transition — rejects invalid transitions
     ///
     /// Every state change goes through this single gateway.
-    /// Invalid transitions trigger assertionFailure in DEBUG, silently ignored in RELEASE.
+    /// Invalid transitions are logged and ignored to keep runtime resilient.
     func transition(to newState: ScanState) {
+        if scanState == newState {
+            return
+        }
         guard scanState.allowedTransitions.contains(newState) else {
             #if DEBUG
-            assertionFailure("Invalid state transition: \(scanState) → \(newState)")
+            print("[Aether3D] ⚠️ Rejected state transition: \(scanState) → \(newState) — not in allowed set")
             #endif
             return
         }
@@ -122,10 +143,6 @@ final class ScanViewModel: ObservableObject {
             isCapturing = false
             stopElapsedTimer()
 
-        case (.paused, .capturing):
-            isCapturing = true
-            startElapsedTimer()
-
         case (_, .finishing):
             isCapturing = false
             stopElapsedTimer()
@@ -143,6 +160,15 @@ final class ScanViewModel: ObservableObject {
         default:
             break
         }
+    }
+
+    /// Executes core-owned action masks. Swift only performs imperative side effects.
+    func executeScanActionPlan(_ plan: ScanActionPlan) {
+        guard plan.actionMask.contains(.applyTransition),
+              let targetState = plan.transitionTargetState else {
+            return
+        }
+        transition(to: targetState)
     }
 
     // MARK: - User Actions
@@ -182,18 +208,15 @@ final class ScanViewModel: ObservableObject {
         renderPipeline
     }
 
-    /// Exposes the render pipeline handle for overlay draw delegation.
-    func currentRenderPipelineForOverlay() -> ScanGuidanceRenderPipeline? {
-        renderPipeline
-    }
-
     // MARK: - ARKit Frame Processing
 
     /// Called from ARSCNView delegate on EVERY frame (~60 FPS)
     /// PERFORMANCE CRITICAL — must complete within frame budget (~16ms)
     func processARFrame(
         frame: ARFrame,
-        meshAnchors: [ARMeshAnchor]
+        meshAnchors: [ARMeshAnchor],
+        viewMatrix: simd_float4x4? = nil,
+        projectionMatrix: simd_float4x4? = nil
     ) {
         guard scanState.isActive else { return }
 
@@ -201,14 +224,14 @@ final class ScanViewModel: ObservableObject {
         let extractedTriangles = meshExtractor.extract(from: meshAnchors)
         let newTriangles = stabilizePatchIdentities(extractedTriangles)
 
-        // Only rebuild adjacency if mesh changed significantly
+        // Always update mesh triangles for accurate world-space tracking.
+        // ARKit refines mesh geometry every frame even when triangle count stays the same.
+        // Stale meshTriangles → triangles don't follow objects properly.
         let meshChanged = newTriangles.count != meshTriangles.count
-        if meshChanged {
-            meshTriangles = newTriangles
-        }
+        meshTriangles = newTriangles
 
         // Rebuild adjacency graph using SpatialHashAdjacency (O(n), not O(n²))
-        // Only rebuild every 60 frames (~1s) when mesh has changed
+        // Only rebuild every 60 frames (~1s) when mesh topology has changed
         // SpatialHashAdjacency handles ANY mesh size (50,000+ triangles) in ~50ms
         if meshChanged && (frameCounter % 60 == 0) {
             rebuildAdjacencyGraph()
@@ -223,14 +246,19 @@ final class ScanViewModel: ObservableObject {
         // Step 3: Thermal-aware quality control
         let tier = thermalAdapter.currentTier
         let maxTriangles = tier.maxTriangles
-        let limitedTriangles = Array(meshTriangles.prefix(maxTriangles))
+        let analysisTriangles = Array(meshTriangles.prefix(maxTriangles))
+        let renderTriangles = selectStableRenderTriangles(
+            meshTriangles,
+            maxTriangles: maxTriangles,
+            cameraTransform: frame.camera.transform
+        )
 
         // Step 4: Check flip thresholds (if animation enabled for this tier)
         if tier.enableFlipAnimation, let adj = adjacencyGraph {
             let crossedIndices = flipController.checkThresholdCrossings(
                 previousDisplay: previousPatchDisplaySnapshot,
                 currentDisplay: currentPatchDisplaySnapshot,
-                triangles: limitedTriangles,
+                triangles: analysisTriangles,
                 adjacencyGraph: adj
             )
 
@@ -278,15 +306,99 @@ final class ScanViewModel: ObservableObject {
         renderPipeline?.update(
             displaySnapshot: currentPatchDisplaySnapshot,
             colorStates: [:],
-            meshTriangles: limitedTriangles,
+            meshTriangles: renderTriangles,
             lightEstimate: frame.lightEstimate,
             cameraTransform: frame.camera.transform,
+            viewMatrix: viewMatrix,
+            projectionMatrix: projectionMatrix,
             frameDeltaTime: 1.0 / 60.0,
             gpuDurationMs: nil
         )
     }
 
     // MARK: - Private Helpers
+
+    /// Stabilizes patch identities using core matcher so covered regions don't remap backwards.
+    private func stabilizePatchIdentities(_ triangles: [ScanTriangle]) -> [ScanTriangle] {
+        guard !triangles.isEmpty else {
+            stableAnchorSamples.removeAll()
+            return []
+        }
+
+        var observations: [PatchIdentitySample] = []
+        observations.reserveCapacity(triangles.count)
+
+        for triangle in triangles {
+            let patchKey = stablePatchKey(triangle.patchId)
+            patchKeyToPatchId[patchKey] = triangle.patchId
+            let display = Float(
+                currentPatchDisplaySnapshot[triangle.patchId]
+                    ?? patchDisplayMap.display(for: triangle.patchId)
+            )
+            observations.append(
+                PatchIdentitySample(
+                    patchKey: patchKey,
+                    centroid: triangleCentroid(triangle),
+                    display: min(max(display, 0.0), 1.0)
+                )
+            )
+        }
+
+        let resolvedKeys = renderStabilityBridge.matchPatchIdentities(
+            observations: observations,
+            anchors: stableAnchorSamples,
+            lockDisplayThreshold: Self.identityLockDisplayThreshold,
+            snapDistanceM: Self.identitySnapDistanceM,
+            cellSizeM: Self.identityDisplayDeltaThreshold
+        ) ?? observations.map(\.patchKey)
+
+        var stabilized: [ScanTriangle] = []
+        stabilized.reserveCapacity(triangles.count)
+        var nextAnchors: [PatchIdentitySample] = []
+        nextAnchors.reserveCapacity(triangles.count)
+
+        for index in triangles.indices {
+            let resolvedKey = index < resolvedKeys.count ? resolvedKeys[index] : observations[index].patchKey
+            let resolvedPatchId = patchKeyToPatchId[resolvedKey] ?? triangles[index].patchId
+            patchKeyToPatchId[resolvedKey] = resolvedPatchId
+
+            let triangle = triangles[index]
+            stabilized.append(
+                ScanTriangle(
+                    patchId: resolvedPatchId,
+                    vertices: triangle.vertices,
+                    normal: triangle.normal,
+                    areaSqM: triangle.areaSqM,
+                    blockIndex: triangle.blockIndex
+                )
+            )
+
+            let display = Float(
+                currentPatchDisplaySnapshot[resolvedPatchId]
+                    ?? patchDisplayMap.display(for: resolvedPatchId)
+            )
+            if display >= Self.identityLockDisplayThreshold {
+                nextAnchors.append(
+                    PatchIdentitySample(
+                        patchKey: resolvedKey,
+                        centroid: observations[index].centroid,
+                        display: display
+                    )
+                )
+            }
+        }
+
+        if nextAnchors.isEmpty {
+            nextAnchors = observations.filter { $0.display >= Self.identityLockDisplayThreshold }
+        }
+        if nextAnchors.count > 10_000 {
+            nextAnchors.sort { $0.display > $1.display }
+            nextAnchors = Array(nextAnchors.prefix(10_000))
+        }
+        stableAnchorSamples = nextAnchors
+
+        return stabilized
+    }
 
     /// Update display values for visible patches through PatchDisplayMap.
     private func updatePatchDisplayMap() {
@@ -295,7 +407,7 @@ final class ScanViewModel: ObservableObject {
             let current = patchDisplayMap.display(for: triangle.patchId)
             // Simple accumulation: each visible frame adds a small increment
             // ~100 frames to reach 1.0 at 60fps ≈ 1.7 seconds viewing
-            let increment = 0.01
+            let increment = ScanGuidanceConstants.scanDisplayIncrementPerFrame
             let target = min(current + increment, 1.0)
             _ = patchDisplayMap.update(
                 patchId: triangle.patchId,
@@ -364,14 +476,94 @@ final class ScanViewModel: ObservableObject {
         adjacencyGraph = SpatialHashAdjacency(triangles: meshTriangles)
     }
 
+    private func selectStableRenderTriangles(
+        _ triangles: [ScanTriangle],
+        maxTriangles: Int,
+        cameraTransform: simd_float4x4
+    ) -> [ScanTriangle] {
+        guard maxTriangles > 0 else { return [] }
+        guard triangles.count > maxTriangles else { return triangles }
+
+        let currentFrame = Int32(clamping: frameCounter)
+        let cameraPosition = SIMD3<Float>(
+            cameraTransform.columns.3.x,
+            cameraTransform.columns.3.y,
+            cameraTransform.columns.3.z
+        )
+
+        let candidates: [RenderTriangleCandidate] = triangles.map { triangle in
+            let patchKey = stablePatchKey(triangle.patchId)
+            let display = Float(
+                currentPatchDisplaySnapshot[triangle.patchId]
+                    ?? patchDisplayMap.display(for: triangle.patchId)
+            )
+            return RenderTriangleCandidate(
+                patchKey: patchKey,
+                centroid: triangleCentroid(triangle),
+                display: min(max(display, 0.0), 1.0),
+                stabilityFadeAlpha: 0.0,
+                residencyUntilFrame: 0
+            )
+        }
+
+        guard let selectedIndices = renderStabilityBridge.selectStableRenderTriangles(
+            candidates: candidates,
+            config: RenderSelectionConfig(
+                currentFrame: currentFrame,
+                maxTriangles: Int32(clamping: maxTriangles),
+                cameraPosition: cameraPosition,
+                completionThreshold: Float(ScanGuidanceConstants.s3ToS4Threshold),
+                distanceBias: 0.03,
+                displayWeight: 2.0,
+                residencyBoost: 1.6,
+                completionBoost: BridgeInteropConstants.renderSelectionCompletionBoost,
+                stabilityWeight: 0.7
+            )
+        ), !selectedIndices.isEmpty else {
+            return Array(triangles.prefix(maxTriangles))
+        }
+
+        var selected: [ScanTriangle] = []
+        selected.reserveCapacity(min(maxTriangles, selectedIndices.count))
+        for index in selectedIndices {
+            guard index >= 0, index < triangles.count else { continue }
+            let triangle = triangles[index]
+            selected.append(triangle)
+            if selected.count >= maxTriangles {
+                break
+            }
+        }
+
+        return selected.isEmpty ? Array(triangles.prefix(maxTriangles)) : selected
+    }
+
+    private func stablePatchKey(_ patchId: String) -> UInt64 {
+        let bytes = Array(patchId.utf8)
+        var hash = BridgeInteropConstants.fnv1a64OffsetBasis
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= BridgeInteropConstants.fnv1a64Prime
+        }
+        return hash
+    }
+
+    private func triangleCentroid(_ triangle: ScanTriangle) -> SIMD3<Float> {
+        let (v0, v1, v2) = triangle.vertices
+        return (v0 + v1 + v2) / 3.0
+    }
+
     /// Reset all subsystems for next scan session
     private func resetSubsystems() {
         flipController.reset()
         rippleEngine.reset()
         patchDisplayMap.reset()
+        wedgeGenerator.resetPersistentVisualState()
         currentPatchDisplaySnapshot.removeAll()
         previousPatchDisplaySnapshot.removeAll()
         meshTriangles.removeAll()
+        stableAnchorSamples.removeAll()
+        patchKeyToPatchId.removeAll()
+        renderStabilityBridge.resetRenderSelectionRuntime()
         adjacencyGraph = nil
         frameCounter = 0
         lastMotionSample = nil

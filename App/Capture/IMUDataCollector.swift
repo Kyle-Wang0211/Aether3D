@@ -102,25 +102,29 @@ public actor IMUDataCollector {
         }
         
         // Start accelerometer updates
-        motionManager.startAccelerometerUpdates(to: .main) { [weak self] (data, error) in
-            Task { @MainActor in
-                await self?.handleAccelerometerData(data, error: error)
-            }
+        // Extract Sendable values before crossing actor boundary to avoid data races
+        motionManager.startAccelerometerUpdates(to: .main) { [weak self] (data, _) in
+            guard let self, let data else { return }
+            let accel = SIMD3<Double>(data.acceleration.x, data.acceleration.y, data.acceleration.z)
+            let ts = data.timestamp
+            Task { await self.processAccelerometerUpdate(acceleration: accel, timestamp: ts) }
         }
-        
+
         // Start gyro updates
-        motionManager.startGyroUpdates(to: .main) { [weak self] (data, error) in
-            Task { @MainActor in
-                await self?.handleGyroData(data, error: error)
-            }
+        motionManager.startGyroUpdates(to: .main) { [weak self] (data, _) in
+            guard let self, let data else { return }
+            let rate = SIMD3<Double>(data.rotationRate.x, data.rotationRate.y, data.rotationRate.z)
+            let ts = data.timestamp
+            Task { await self.processGyroUpdate(rotationRate: rate, timestamp: ts) }
         }
-        
+
         // Start magnetometer updates (if available)
         if motionManager.isMagnetometerAvailable {
-            motionManager.startMagnetometerUpdates(to: .main) { [weak self] (data, error) in
-                Task { @MainActor in
-                    await self?.handleMagnetometerData(data, error: error)
-                }
+            motionManager.startMagnetometerUpdates(to: .main) { [weak self] (data, _) in
+                guard let self, let data else { return }
+                let field = SIMD3<Double>(data.magneticField.x, data.magneticField.y, data.magneticField.z)
+                let ts = data.timestamp
+                Task { await self.processMagnetometerUpdate(magneticField: field, timestamp: ts) }
             }
         }
         #else
@@ -149,7 +153,7 @@ public actor IMUDataCollector {
     /// Get collected data points
     /// 
     /// - Returns: Array of IMU data points
-    public func getDataPoints() -> [IMUDataPoint] {
+    func getDataPoints() -> [IMUDataPoint] {
         return dataPoints
     }
     
@@ -164,28 +168,21 @@ public actor IMUDataCollector {
     private var lastRotationRate: SIMD3<Double>?
     private var lastMagneticField: SIMD3<Double>?
     
-    #if canImport(CoreMotion)
-    private func handleAccelerometerData(_ data: CMAccelerometerData?, error: Error?) {
-        guard let data = data else { return }
-        let acceleration = SIMD3<Double>(data.acceleration.x, data.acceleration.y, data.acceleration.z)
+    // Actor-isolated methods that receive already-extracted Sendable values
+    private func processAccelerometerUpdate(acceleration: SIMD3<Double>, timestamp: TimeInterval) {
         lastAcceleration = acceleration
-        createDataPointIfReady(timestamp: data.timestamp)
+        createDataPointIfReady(timestamp: timestamp)
     }
-    
-    private func handleGyroData(_ data: CMGyroData?, error: Error?) {
-        guard let data = data else { return }
-        let rotationRate = SIMD3<Double>(data.rotationRate.x, data.rotationRate.y, data.rotationRate.z)
+
+    private func processGyroUpdate(rotationRate: SIMD3<Double>, timestamp: TimeInterval) {
         lastRotationRate = rotationRate
-        createDataPointIfReady(timestamp: data.timestamp)
+        createDataPointIfReady(timestamp: timestamp)
     }
-    
-    private func handleMagnetometerData(_ data: CMMagnetometerData?, error: Error?) {
-        guard let data = data else { return }
-        let magneticField = SIMD3<Double>(data.magneticField.x, data.magneticField.y, data.magneticField.z)
+
+    private func processMagnetometerUpdate(magneticField: SIMD3<Double>, timestamp: TimeInterval) {
         lastMagneticField = magneticField
-        createDataPointIfReady(timestamp: data.timestamp)
+        createDataPointIfReady(timestamp: timestamp)
     }
-    #endif
     
     private func createDataPointIfReady(timestamp: TimeInterval) {
         guard let acceleration = lastAcceleration,

@@ -53,27 +53,64 @@ public struct WedgeVertexCPU {
 }
 
 public final class WedgeGeometryGenerator {
+    private struct FractureTriangle {
+        let stylePatchKey: UInt64
+        let parentTriangleIndex: Int
+        let vertices: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)
+        let normal: SIMD3<Float>
+        let display: Float
+        let areaSqM: Float
+    }
 
     public enum LODLevel: Int, CaseIterable {
         case full = 0
         case medium = 1
         case low = 2
         case flat = 3
+
+        /// Compute maximum safe input triangles for given LOD level.
+        /// Pure math — no state, no side effects.
+        ///
+        /// Index buffer = 4MB = 1,048,576 UInt32 slots. Indices per input varies by LOD:
+        ///   LOD 0 (full):   ~44 subtriangles × 3 = 132 indices
+        ///   LOD 1 (medium): ~22 subtriangles × 3 = 66 indices
+        ///   LOD 2 (low):    ~11 subtriangles × 3 = 33 indices
+        ///   LOD 3 (flat):   ~3  subtriangles × 3 = 9 indices
+        ///
+        /// Moved from ScanGuidanceRenderPipeline inline computation.
+        ///
+        /// - Parameters:
+        ///   - maxTrianglesFromTier: Maximum triangles allowed by thermal tier
+        ///   - indexBufferCapacity: Index buffer capacity in UInt32 slots (default 1M)
+        /// - Returns: Maximum safe input triangle count
+        public static func maxSafeInputTriangles(
+            lod: LODLevel,
+            maxTrianglesFromTier: Int,
+            indexBufferCapacity: Int = 1_048_576
+        ) -> Int {
+            let indicesPerInput: Int
+            switch lod {
+            case .full:   indicesPerInput = 132
+            case .medium: indicesPerInput = 66
+            case .low:    indicesPerInput = 33
+            case .flat:   indicesPerInput = 9
+            }
+            return min(maxTrianglesFromTier, indexBufferCapacity / indicesPerInput)
+        }
     }
+
+    /// Optional color mapper for perceptual color (Oklab).
+    /// When set, overrides C++ grayscale with Oklab-mapped RGB per display value.
+    public var colorMapper: ((Double) -> (r: Float, g: Float, b: Float))?
 
     private let nativeStyleRuntime: OpaquePointer?
     private var lastResolvedStyles: [aether_capture_style_output_t] = []
+    private var lastTriangleParentIndices: [Int] = []
 
     public init() {
         var config = aether_capture_style_runtime_config_t()
         var runtime: OpaquePointer?
         if aether_capture_style_runtime_default_config(&config) == 0 {
-            config.smoothing_alpha = 0.2
-            config.freeze_threshold = Float(ScanGuidanceConstants.s3ToS4Threshold)
-            config.min_thickness = Float(ScanGuidanceConstants.wedgeMinThicknessM)
-            config.max_thickness = Float(ScanGuidanceConstants.wedgeBaseThicknessM)
-            config.min_border_width = Float(ScanGuidanceConstants.borderMinWidthPx)
-            config.max_border_width = Float(ScanGuidanceConstants.borderMaxWidthPx)
             if aether_capture_style_runtime_create(&config, &runtime) == 0 {
                 self.nativeStyleRuntime = runtime
             } else {
@@ -95,52 +132,102 @@ public final class WedgeGeometryGenerator {
             _ = aether_capture_style_runtime_reset(nativeStyleRuntime)
         }
         lastResolvedStyles.removeAll()
+        lastTriangleParentIndices.removeAll()
     }
 
     public func borderWidthsForLastGenerate() -> [Float] {
         lastResolvedStyles.map { $0.border_width }
     }
 
+    public func borderAlphasForLastGenerate() -> [Float] {
+        lastResolvedStyles.map { min(max($0.border_alpha, 0.0), 1.0) }
+    }
+
+    public func shaderThresholdsForLastGenerate() -> [(
+        rippleMinAmplitude: Float,
+        rippleBoostScale: Float,
+        fillDitherStart: Float,
+        fillDitherEnd: Float,
+        borderMinWidth: Float,
+        borderMinAlpha: Float,
+        borderAAFactor: Float,
+        borderFwidthEpsilon: Float,
+        borderDiscardAlpha: Float
+    )] {
+        lastResolvedStyles.map { style in
+            return (
+                rippleMinAmplitude: style.ripple_min_amplitude,
+                rippleBoostScale: style.ripple_boost_scale,
+                fillDitherStart: style.fill_dither_start,
+                fillDitherEnd: style.fill_dither_end,
+                borderMinWidth: style.border_min_width_px,
+                borderMinAlpha: style.border_min_alpha,
+                borderAAFactor: style.border_aa_factor,
+                borderFwidthEpsilon: style.border_fwidth_epsilon,
+                borderDiscardAlpha: style.border_discard_alpha
+            )
+        }
+    }
+
     public func grayscaleForLastGenerate() -> [(Float, Float, Float)] {
         lastResolvedStyles.map { style in
+            if let mapper = colorMapper {
+                return mapper(Double(style.resolved_display))
+            }
             let gray = min(max(style.grayscale, 0.0), 1.0)
             return (gray, gray, gray)
         }
     }
 
+    public func parentTriangleIndicesForLastGenerate() -> [Int] {
+        lastTriangleParentIndices
+    }
+
     public func generate(
         triangles: [ScanTriangle],
         displayValues: [String: Double],
+        cameraPosition: SIMD3<Float>? = nil,
         lod: LODLevel
     ) -> WedgeVertexData {
         guard !triangles.isEmpty else {
             lastResolvedStyles = []
+            lastTriangleParentIndices = []
             return WedgeVertexData(vertices: [], indices: [], triangleCount: 0)
         }
+
+        let fracturedTriangles = fractureTriangles(
+            from: triangles,
+            displayValues: displayValues,
+            cameraPosition: cameraPosition
+        )
+        guard !fracturedTriangles.isEmpty else {
+            lastResolvedStyles = []
+            lastTriangleParentIndices = []
+            return WedgeVertexData(vertices: [], indices: [], triangleCount: 0)
+        }
+        lastTriangleParentIndices = fracturedTriangles.map(\.parentTriangleIndex)
 
         guard let nativeStyleRuntime else {
             lastResolvedStyles = []
             return generateStateless(
-                triangles: triangles,
-                displayValues: displayValues,
+                fracturedTriangles: fracturedTriangles,
                 lod: lod
             )
         }
 
         var styleInputs = [aether_capture_style_input_t](
             repeating: aether_capture_style_input_t(),
-            count: triangles.count
+            count: fracturedTriangles.count
         )
-        for (index, triangle) in triangles.enumerated() {
-            let display = Float(min(max(displayValues[triangle.patchId] ?? 0.0, 0.0), 1.0))
-            styleInputs[index].patch_key = stablePatchKey(triangle.patchId)
-            styleInputs[index].display = display
+        for (index, triangle) in fracturedTriangles.enumerated() {
+            styleInputs[index].patch_key = triangle.stylePatchKey
+            styleInputs[index].display = triangle.display
             styleInputs[index].area_sq_m = max(triangle.areaSqM, 1e-8)
         }
 
         var styleOutputs = [aether_capture_style_output_t](
             repeating: aether_capture_style_output_t(),
-            count: triangles.count
+            count: fracturedTriangles.count
         )
         let styleRC = styleInputs.withUnsafeBufferPointer { inputBuffer in
             styleOutputs.withUnsafeMutableBufferPointer { outputBuffer in
@@ -155,8 +242,7 @@ public final class WedgeGeometryGenerator {
         guard styleRC == 0 else {
             lastResolvedStyles = []
             return generateStateless(
-                triangles: triangles,
-                displayValues: displayValues,
+                fracturedTriangles: fracturedTriangles,
                 lod: lod
             )
         }
@@ -164,9 +250,9 @@ public final class WedgeGeometryGenerator {
 
         var nativeTriangles = [aether_wedge_input_triangle_t](
             repeating: aether_wedge_input_triangle_t(),
-            count: triangles.count
+            count: fracturedTriangles.count
         )
-        for (index, triangle) in triangles.enumerated() {
+        for (index, triangle) in fracturedTriangles.enumerated() {
             let style = styleOutputs[index]
             let (v0, v1, v2) = triangle.vertices
             nativeTriangles[index].v0 = aether_float3_t(x: v0.x, y: v0.y, z: v0.z)
@@ -179,7 +265,11 @@ public final class WedgeGeometryGenerator {
             )
             nativeTriangles[index].metallic = style.metallic
             nativeTriangles[index].roughness = style.roughness
-            nativeTriangles[index].display = style.resolved_display
+            // Safety: fallback to fracture display if C++ returns invalid value.
+            let resolvedDisplay = style.resolved_display
+            nativeTriangles[index].display = resolvedDisplay.isFinite && resolvedDisplay >= 0
+                ? resolvedDisplay
+                : triangle.display
             nativeTriangles[index].thickness = style.thickness
             nativeTriangles[index].triangle_id = UInt32(index)
         }
@@ -187,7 +277,7 @@ public final class WedgeGeometryGenerator {
         return buildGeometry(
             nativeTriangles: nativeTriangles,
             lod: lod,
-            triangleCount: triangles.count
+            triangleCount: fracturedTriangles.count
         )
     }
 
@@ -253,65 +343,55 @@ public final class WedgeGeometryGenerator {
                 SIMD3<Float>(value.x, value.y, value.z)
             }
         }
-
-        guard safeSegments > 0 else {
-            return [simd_normalize(topFaceNormal)]
-        }
-        var fallback: [SIMD3<Float>] = []
-        fallback.reserveCapacity(safeSegments + 1)
-        for i in 0...safeSegments {
-            let t = Float(i) / Float(safeSegments)
-            let mixed = topFaceNormal * (1.0 - t) + sideFaceNormal * t
-            let len = (mixed.x * mixed.x + mixed.y * mixed.y + mixed.z * mixed.z).squareRoot()
-            fallback.append(len > 0 ? mixed / len : mixed)
-        }
-        return fallback
+        return [simd_normalize(topFaceNormal)]
     }
 
     private func generateStateless(
-        triangles: [ScanTriangle],
-        displayValues: [String: Double],
+        fracturedTriangles: [FractureTriangle],
         lod: LODLevel
     ) -> WedgeVertexData {
-        let areas = triangles.map { max($0.areaSqM, 1e-8) }
-        let sortedAreas = areas.sorted()
-        let medianArea = max(1e-6, sortedAreas[sortedAreas.count / 2])
+        let medianArea = medianArea(of: fracturedTriangles)
+        var config = aether_capture_style_runtime_config_t()
+        _ = aether_capture_style_runtime_default_config(&config)
+
+        var styleInputs = [aether_capture_style_input_t](
+            repeating: aether_capture_style_input_t(),
+            count: fracturedTriangles.count
+        )
+        for (index, triangle) in fracturedTriangles.enumerated() {
+            styleInputs[index].patch_key = triangle.stylePatchKey
+            styleInputs[index].display = triangle.display
+            styleInputs[index].area_sq_m = max(triangle.areaSqM, 1e-8)
+        }
+
+        var styleOutputs = [aether_capture_style_output_t](
+            repeating: aether_capture_style_output_t(),
+            count: fracturedTriangles.count
+        )
+        let styleRC = styleInputs.withUnsafeBufferPointer { inputBuffer in
+            styleOutputs.withUnsafeMutableBufferPointer { outputBuffer in
+                aether_capture_style_resolve_stateless(
+                    &config,
+                    inputBuffer.baseAddress,
+                    Int32(styleInputs.count),
+                    medianArea,
+                    outputBuffer.baseAddress
+                )
+            }
+        }
+        if styleRC != 0 {
+            lastResolvedStyles = []
+            return WedgeVertexData(vertices: [], indices: [], triangleCount: fracturedTriangles.count)
+        }
+        lastResolvedStyles = styleOutputs
+
         var nativeTriangles = [aether_wedge_input_triangle_t](
             repeating: aether_wedge_input_triangle_t(),
-            count: triangles.count
+            count: fracturedTriangles.count
         )
 
-        for (index, triangle) in triangles.enumerated() {
-            let display = Float(min(max(displayValues[triangle.patchId] ?? 0.0, 0.0), 1.0))
-            var params = aether_fragment_visual_params_t()
-            let rc = aether_compute_fragment_visual_params(
-                display,
-                1.0,
-                max(triangle.areaSqM, 1e-8),
-                medianArea,
-                &params
-            )
-            let metallic = rc == 0 && params.metallic.isFinite
-                ? min(max(params.metallic, 0.0), 1.0)
-                : Float(ScanGuidanceConstants.metallicBase)
-            let roughness = rc == 0 && params.roughness.isFinite
-                ? min(max(params.roughness, 0.0), 1.0)
-                : Float(ScanGuidanceConstants.roughnessBase)
-            let thickness = rc == 0 && params.wedge_thickness.isFinite
-                ? min(
-                    max(params.wedge_thickness, Float(ScanGuidanceConstants.wedgeMinThicknessM)),
-                    Float(ScanGuidanceConstants.wedgeBaseThicknessM)
-                )
-                : Float(ScanGuidanceConstants.wedgeMinThicknessM)
-            let border = rc == 0 && params.border_width_px.isFinite
-                ? min(
-                    max(params.border_width_px, Float(ScanGuidanceConstants.borderMinWidthPx)),
-                    Float(ScanGuidanceConstants.borderMaxWidthPx)
-                )
-                : Float(ScanGuidanceConstants.borderMinWidthPx)
-            let gray = rc == 0 && params.fill_gray.isFinite
-                ? min(max(params.fill_gray, 0.0), 1.0)
-                : display
+        for (index, triangle) in fracturedTriangles.enumerated() {
+            let style = styleOutputs[index]
 
             let (v0, v1, v2) = triangle.vertices
             nativeTriangles[index].v0 = aether_float3_t(x: v0.x, y: v0.y, z: v0.z)
@@ -322,33 +402,156 @@ public final class WedgeGeometryGenerator {
                 y: triangle.normal.y,
                 z: triangle.normal.z
             )
-            nativeTriangles[index].metallic = metallic
-            nativeTriangles[index].roughness = roughness
-            nativeTriangles[index].display = display
-            nativeTriangles[index].thickness = thickness
+            nativeTriangles[index].metallic = style.metallic
+            nativeTriangles[index].roughness = style.roughness
+            // Safety: fallback to fracture display if C++ returns invalid value.
+            let resolvedDisplay = style.resolved_display
+            nativeTriangles[index].display = resolvedDisplay.isFinite && resolvedDisplay >= 0
+                ? resolvedDisplay
+                : triangle.display
+            nativeTriangles[index].thickness = style.thickness
             nativeTriangles[index].triangle_id = UInt32(index)
-
-            var style = aether_capture_style_output_t()
-            style.resolved_display = display
-            style.metallic = metallic
-            style.roughness = roughness
-            style.thickness = thickness
-            style.border_width = border
-            style.grayscale = gray
-            style.visual_should_freeze = display >= Float(ScanGuidanceConstants.s3ToS4Threshold) ? 1 : 0
-            style.border_should_freeze = style.visual_should_freeze
-            if index < lastResolvedStyles.count {
-                lastResolvedStyles[index] = style
-            } else {
-                lastResolvedStyles.append(style)
-            }
         }
 
         return buildGeometry(
             nativeTriangles: nativeTriangles,
             lod: lod,
-            triangleCount: triangles.count
+            triangleCount: fracturedTriangles.count
         )
+    }
+
+    private func fractureTriangles(
+        from triangles: [ScanTriangle],
+        displayValues: [String: Double],
+        cameraPosition: SIMD3<Float>?
+    ) -> [FractureTriangle] {
+        guard !triangles.isEmpty else { return [] }
+
+        var nativeInputs = [aether_fracture_input_triangle_t](
+            repeating: aether_fracture_input_triangle_t(),
+            count: triangles.count
+        )
+        for (index, triangle) in triangles.enumerated() {
+            let (v0, v1, v2) = triangle.vertices
+            let display = clampedDisplayValue(displayValues[triangle.patchId])
+            nativeInputs[index].patch_key = stablePatchKey(triangle.patchId)
+            nativeInputs[index].v0 = aether_float3_t(x: v0.x, y: v0.y, z: v0.z)
+            nativeInputs[index].v1 = aether_float3_t(x: v1.x, y: v1.y, z: v1.z)
+            nativeInputs[index].v2 = aether_float3_t(x: v2.x, y: v2.y, z: v2.z)
+            nativeInputs[index].normal = aether_float3_t(
+                x: triangle.normal.x,
+                y: triangle.normal.y,
+                z: triangle.normal.z
+            )
+            nativeInputs[index].display = display
+            let centroid = (v0 + v1 + v2) / 3.0
+            let depth: Float
+            if let cameraPosition {
+                depth = simd_length(centroid - cameraPosition)
+            } else {
+                depth = simd_length(centroid)
+            }
+            nativeInputs[index].depth = max(depth, 0.05)
+            nativeInputs[index].area_sq_m = max(triangle.areaSqM, 1e-8)
+        }
+
+        var outCount: Int32 = 0
+        let probeRC = nativeInputs.withUnsafeBufferPointer { inputBuffer in
+            aether_generate_fracture_display_triangles(
+                inputBuffer.baseAddress,
+                Int32(nativeInputs.count),
+                nil,
+                &outCount
+            )
+        }
+        guard probeRC == -3 || probeRC == 0, outCount > 0 else {
+            return fallbackTriangles(from: triangles, displayValues: displayValues)
+        }
+
+        var nativeOutputs = [aether_fracture_output_triangle_t](
+            repeating: aether_fracture_output_triangle_t(),
+            count: Int(outCount)
+        )
+        let buildRC = nativeInputs.withUnsafeBufferPointer { inputBuffer in
+            nativeOutputs.withUnsafeMutableBufferPointer { outputBuffer in
+                aether_generate_fracture_display_triangles(
+                    inputBuffer.baseAddress,
+                    Int32(nativeInputs.count),
+                    outputBuffer.baseAddress,
+                    &outCount
+                )
+            }
+        }
+        guard buildRC == 0, outCount > 0 else {
+            return fallbackTriangles(from: triangles, displayValues: displayValues)
+        }
+
+        let safeCount = min(Int(outCount), nativeOutputs.count)
+        if safeCount <= 0 {
+            return fallbackTriangles(from: triangles, displayValues: displayValues)
+        }
+
+        var fractured: [FractureTriangle] = []
+        fractured.reserveCapacity(safeCount)
+        for i in 0..<safeCount {
+            let item = nativeOutputs[i]
+            let parentIndex = Int(item.parent_triangle_index)
+            guard parentIndex >= 0, parentIndex < triangles.count else { continue }
+            let v0 = SIMD3<Float>(item.v0.x, item.v0.y, item.v0.z)
+            let v1 = SIMD3<Float>(item.v1.x, item.v1.y, item.v1.z)
+            let v2 = SIMD3<Float>(item.v2.x, item.v2.y, item.v2.z)
+            let normal = SIMD3<Float>(item.normal.x, item.normal.y, item.normal.z)
+            let area = max(item.area_sq_m, 1e-8)
+            fractured.append(
+                FractureTriangle(
+                    stylePatchKey: stylePatchKey(
+                        basePatchKey: item.patch_key,
+                        fragmentIndex: item.fragment_index
+                    ),
+                    parentTriangleIndex: parentIndex,
+                    vertices: (v0, v1, v2),
+                    normal: normal,
+                    display: min(max(item.display, 0.0), 1.0),
+                    areaSqM: area
+                )
+            )
+        }
+        return fractured.isEmpty ? fallbackTriangles(from: triangles, displayValues: displayValues) : fractured
+    }
+
+    private func fallbackTriangles(
+        from triangles: [ScanTriangle],
+        displayValues: [String: Double]
+    ) -> [FractureTriangle] {
+        triangles.enumerated().map { index, triangle in
+            let display = clampedDisplayValue(displayValues[triangle.patchId])
+            return FractureTriangle(
+                stylePatchKey: stylePatchKey(
+                    basePatchKey: stablePatchKey(triangle.patchId),
+                    fragmentIndex: 0
+                ),
+                parentTriangleIndex: index,
+                vertices: triangle.vertices,
+                normal: triangle.normal,
+                display: display,
+                areaSqM: max(triangle.areaSqM, 1e-8)
+            )
+        }
+    }
+
+    private func stylePatchKey(basePatchKey: UInt64, fragmentIndex: UInt32) -> UInt64 {
+        let seed = UInt64(fragmentIndex &+ 1)
+        return basePatchKey ^ (seed &* 0x9E3779B97F4A7C15)
+    }
+
+    private func medianArea(of triangles: [FractureTriangle]) -> Float {
+        guard !triangles.isEmpty else { return 1e-6 }
+        let sortedAreas = triangles.map { max($0.areaSqM, 1e-8) }.sorted()
+        return max(1e-6, sortedAreas[sortedAreas.count / 2])
+    }
+
+    private func clampedDisplayValue(_ value: Double?) -> Float {
+        Float(min(max(value ?? 0.0, 0.0), 1.0))
     }
 
     private func buildGeometry(
@@ -431,14 +634,6 @@ public final class WedgeGeometryGenerator {
                 &hash
             )
         }
-        if rc == 0 {
-            return hash
-        }
-        var fallback: UInt64 = BridgeInteropConstants.fnv1a64OffsetBasis
-        for byte in bytes {
-            fallback ^= UInt64(byte)
-            fallback &*= BridgeInteropConstants.fnv1a64Prime
-        }
-        return fallback
+        return rc == 0 ? hash : 0
     }
 }

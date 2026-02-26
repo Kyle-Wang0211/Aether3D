@@ -55,7 +55,7 @@ kernel void projectDepthAndAllocate(
 
     // Atomic append (with overflow guard)
     uint idx = atomic_fetch_add_explicit(&blockCount, 1, memory_order_relaxed);
-    if (idx < params.maxOutputBlocks) {
+    if (idx < uint(params.maxOutputBlocks)) {
         outputBlocks[idx] = GPUBlockIndex{blockIdx.x, blockIdx.y, blockIdx.z, 0};
     }
 }

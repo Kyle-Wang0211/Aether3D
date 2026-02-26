@@ -18,6 +18,7 @@ import UIKit
 #endif
 
 /// Toast message presenter for scan guidance
+@MainActor
 public final class GuidanceToastPresenter: ObservableObject {
     
     /// Current toast message

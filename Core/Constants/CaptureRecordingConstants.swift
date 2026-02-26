@@ -74,44 +74,44 @@ public struct CaptureRecordingConstants {
     
     // === Thermal ===
     /// Thermal state weights (0=nominal, 1=fair, 2=serious, 3=critical)
-    static let thermalWeightNominal: Int = 0
-    static let thermalWeightFair: Int = 1
-    static let thermalWeightSerious: Int = 2
-    static let thermalWeightCritical: Int = 3
+    public static let thermalWeightNominal: Int = 0
+    public static let thermalWeightFair: Int = 1
+    public static let thermalWeightSerious: Int = 2
+    public static let thermalWeightCritical: Int = 3
     
     /// Thresholds for thermal actions
-    static let thermalWeightWarnUser: Int = 1      // Show warning at fair
-    static let thermalWeightReduceQuality: Int = 2  // Reduce bitrate/FPS at serious
-    static let thermalWeightStopRecording: Int = 3  // Force stop at critical
+    public static let thermalWeightWarnUser: Int = 1      // Show warning at fair
+    public static let thermalWeightReduceQuality: Int = 2  // Reduce bitrate/FPS at serious
+    public static let thermalWeightStopRecording: Int = 3  // Force stop at critical
     
     /// Quality reduction factors at thermal states
-    static let thermalBitrateFactorFair: Double = 1.0       // No reduction
-    static let thermalBitrateFactorSerious: Double = 0.75  // 25% reduction
-    static let thermalFpsFactorSerious: Double = 0.5        // Drop to half FPS (60→30, 30→24)
+    public static let thermalBitrateFactorFair: Double = 1.0       // No reduction
+    public static let thermalBitrateFactorSerious: Double = 0.75  // 25% reduction
+    public static let thermalFpsFactorSerious: Double = 0.5        // Drop to half FPS (60→30, 30→24)
     
     // Note: @unknown default is detected via ThermalStateProvider.isCurrentStateUnknown, not weight
     
     // === Storage ===
     /// Base minimum free space (always reserved) in bytes
-    static let minFreeSpaceBytesBase: Int64 = 2 * 1024 * 1024 * 1024  // 2 GB (up from 1GB)
+    public static let minFreeSpaceBytesBase: Int64 = 2 * 1024 * 1024 * 1024  // 2 GB (up from 1GB)
     
     /// Buffer for recording continuation (seconds)
-    static let minFreeSpaceSecondsBuffer: TimeInterval = 30  // 30 seconds buffer (up from 10)
+    public static let minFreeSpaceSecondsBuffer: TimeInterval = 30  // 30 seconds buffer (up from 10)
     
     /// Warning thresholds for storage
-    static let lowStorageWarningBytes: Int64 = 5 * 1024 * 1024 * 1024  // Warn at 5GB remaining
-    static let criticalStorageBytes: Int64 = 1 * 1024 * 1024 * 1024    // Critical at 1GB remaining
+    public static let lowStorageWarningBytes: Int64 = 5 * 1024 * 1024 * 1024  // Warn at 5GB remaining
+    public static let criticalStorageBytes: Int64 = 1 * 1024 * 1024 * 1024    // Critical at 1GB remaining
     
     /// ProRes storage requirements (per minute, 4K60)
-    static let proRes422HQBytesPerMinute4K60: Int64 = 2_475_000_000  // ~2.3GB/min
-    static let hevcBytesPerMinute4K60Estimate: Int64 = 900_000_000   // ~850MB/min at 120Mbps
+    public static let proRes422HQBytesPerMinute4K60: Int64 = 2_475_000_000  // ~2.3GB/min
+    public static let hevcBytesPerMinute4K60Estimate: Int64 = 900_000_000   // ~850MB/min at 120Mbps
     
     // === Bitrate Estimation (bps) by tier+fps ===
     // 3D Reconstruction requires high detail preservation:
     // - Minimum 50 Mbps for any 4K content (industry standard for photogrammetry)
     // - 8K support for future iPhone 17+ models
     // - ProRes awareness (220+ Mbps sustained write for 4K60 ProRes)
-    static let bitrateEstimates: [String: Int64] = [
+    public static let bitrateEstimates: [String: Int64] = [
         // 8K tier (future-proofing for iPhone 17+ / external cameras)
         "8K_60": 400_000_000,   // 400 Mbps (ProRes 422 HQ @ 8K30 = 330 Mbps, estimate 8K60)
         "8K_30": 200_000_000,   // 200 Mbps
@@ -142,7 +142,7 @@ public struct CaptureRecordingConstants {
     
     // Bitrate key mapping: tier + normalized fps → lookup key
     // fps normalization: >= 90 → 120, >= 45 → 60, < 45 → 30
-    static func bitrateKey(tier: ResolutionTier, fps: Double) -> String {
+    public static func bitrateKey(tier: ResolutionTier, fps: Double) -> String {
         let normalizedFps: Int
         if fps >= 90 {
             normalizedFps = 120  // Support 120fps tier
@@ -174,7 +174,7 @@ public struct CaptureRecordingConstants {
     
     // === Timeouts ===
     /// Timeout for finalization operations (seconds)
-    static let finalizeTimeoutSeconds: TimeInterval = 15.0  // Increased for large files
+    public static let finalizeTimeoutSeconds: TimeInterval = 15.0  // Increased for large files
     // assetCheckTimeoutSeconds: Budget time for asset checks in Phase 1
     // If exceeded, skip remaining checks (tracks/isPlayable) and proceed with fileExists/duration only
     // HARD CONSTRAINT FOR AI/CURSOR:
@@ -183,19 +183,19 @@ public struct CaptureRecordingConstants {
     // - MUST NOT use DispatchSemaphore or blocking waits
     // - If budget exceeded, skip remaining checks IMMEDIATELY
     // This design prioritizes determinism over completeness
-    static let assetCheckTimeoutSeconds: TimeInterval = 1.5 // Reduced budget, skip faster
-    static let reconfigureDelaySeconds: TimeInterval = 0.3  // Faster reconfigure
-    static let reconfigureDebounceSeconds: TimeInterval = 2.0  // Reduced from 3.0
+    public static let assetCheckTimeoutSeconds: TimeInterval = 1.5 // Reduced budget, skip faster
+    public static let reconfigureDelaySeconds: TimeInterval = 0.3  // Faster reconfigure
+    public static let reconfigureDebounceSeconds: TimeInterval = 2.0  // Reduced from 3.0
     
     /// Additional timeouts
-    static let sessionStartTimeoutSeconds: TimeInterval = 5.0  // Max wait for session.startRunning()
-    static let deviceLockTimeoutSeconds: TimeInterval = 2.0    // Max wait for lockForConfiguration()
-    static let formatValidationTimeoutSeconds: TimeInterval = 3.0  // Max for format validation loop
+    public static let sessionStartTimeoutSeconds: TimeInterval = 5.0  // Max wait for session.startRunning()
+    public static let deviceLockTimeoutSeconds: TimeInterval = 2.0    // Max wait for lockForConfiguration()
+    public static let formatValidationTimeoutSeconds: TimeInterval = 3.0  // Max for format validation loop
     
     // === Format Selection ===
     /// Complete FPS candidate list (sorted descending for priority)
     /// Includes all standard broadcast + cinematic rates
-    static let candidateFps: [Double] = [
+    public static let candidateFps: [Double] = [
         240,    // iPhone 15 Pro+ slo-mo (1080p only)
         120,    // iPhone 15 Pro 4K120 HEVC
         100,    // PAL high-speed
@@ -210,48 +210,48 @@ public struct CaptureRecordingConstants {
         23.976  // NTSC cinema (3:2 pulldown source)
     ]
     /// FPS matching tolerance (allows 59.94↔60 and 29.97↔30)
-    static let fpsMatchTolerance: Double = 0.1  // Tightened from 0.5, but preserves NTSC compatibility
-    static let maxFormatAttempts: Int = 5
-    static let formatWarmupDelaySeconds: TimeInterval = 0.3
-    static let sessionRunningCheckMaxSeconds: TimeInterval = 1.0
-    
+    public static let fpsMatchTolerance: Double = 0.1  // Tightened from 0.5, but preserves NTSC compatibility
+    public static let maxFormatAttempts: Int = 5
+    public static let formatWarmupDelaySeconds: TimeInterval = 0.3
+    public static let sessionRunningCheckMaxSeconds: TimeInterval = 1.0
+
     // === Format Scoring Weights ===
     /// Higher score = preferred format
-    static let scoreWeightFps: Int64 = 1000        // FPS * 1000 (primary factor)
-    static let scoreWeightResolution: Int64 = 100  // maxDimension / 100
-    static let scoreWeightHDR: Int64 = 500         // HDR capability bonus
-    static let scoreWeightHEVC: Int64 = 200        // HEVC codec bonus
-    static let scoreWeightProRes: Int64 = 800      // ProRes capability bonus
-    static let scoreWeightAppleLog: Int64 = 600    // Apple Log encoding bonus
-    static let scoreWeightDolbyVision: Int64 = 400 // Dolby Vision bonus
-    static let scoreWeightHDR10Plus: Int64 = 350   // HDR10+ bonus
+    public static let scoreWeightFps: Int64 = 1000        // FPS * 1000 (primary factor)
+    public static let scoreWeightResolution: Int64 = 100  // maxDimension / 100
+    public static let scoreWeightHDR: Int64 = 500         // HDR capability bonus
+    public static let scoreWeightHEVC: Int64 = 200        // HEVC codec bonus
+    public static let scoreWeightProRes: Int64 = 800      // ProRes capability bonus
+    public static let scoreWeightAppleLog: Int64 = 600    // Apple Log encoding bonus
+    public static let scoreWeightDolbyVision: Int64 = 400 // Dolby Vision bonus
+    public static let scoreWeightHDR10Plus: Int64 = 350   // HDR10+ bonus
     // Example: 4K60 HDR HEVC = 60*1000 + 3840/100 + 500 + 200 = 60,738
     
     // === File Naming ===
-    static let maxFileNameLength: Int = 120
-    static let maxFilenameCollisionRetries: Int = 3  // prevent infinite loop
-    static let timestampFormat: String = "yyyyMMdd'T'HHmmss'Z'"
-    static let timestampLocale: String = "en_US_POSIX"
-    static let uuidStyle: String = "lowercase_no_hyphens"  // 32 chars
+    public static let maxFileNameLength: Int = 120
+    public static let maxFilenameCollisionRetries: Int = 3  // prevent infinite loop
+    public static let timestampFormat: String = "yyyyMMdd'T'HHmmss'Z'"
+    public static let timestampLocale: String = "en_US_POSIX"
+    public static let uuidStyle: String = "lowercase_no_hyphens"  // 32 chars
     
     // === Cleanup ===
     /// Orphan tmp file cleanup (faster on mobile)
-    static let orphanTmpMaxAgeSeconds: TimeInterval = 4 * 60 * 60   // 4 hours (down from 12)
-    static let orphanTmpCheckIntervalSeconds: TimeInterval = 30 * 60  // Check every 30 min
+    public static let orphanTmpMaxAgeSeconds: TimeInterval = 4 * 60 * 60   // 4 hours (down from 12)
+    public static let orphanTmpCheckIntervalSeconds: TimeInterval = 30 * 60  // Check every 30 min
     
     /// Failure file retention (mobile storage is precious)
-    static let maxRetainedFailureFiles: Int = 10  // Down from 20
-    static let maxRetainedFailureBytesTotal: Int64 = 500 * 1024 * 1024  // 500MB (down from 2GB)
-    static let maxRetainedFailureAgeDays: Int = 7  // Auto-delete after 7 days
+    public static let maxRetainedFailureFiles: Int = 10  // Down from 20
+    public static let maxRetainedFailureBytesTotal: Int64 = 500 * 1024 * 1024  // 500MB (down from 2GB)
+    public static let maxRetainedFailureAgeDays: Int = 7  // Auto-delete after 7 days
     
     /// Success file retention (for debugging)
-    static let maxRetainedSuccessFilesForDebug: Int = 3  // Keep last 3 successful recordings for debug
+    public static let maxRetainedSuccessFilesForDebug: Int = 3  // Keep last 3 successful recordings for debug
     
     // === Update Frequency ===
-    static let recordingUpdateIntervalSeconds: TimeInterval = 1.0
+    public static let recordingUpdateIntervalSeconds: TimeInterval = 1.0
     
     // === Platform ===
-    static let thermalPlatform: String = "ios"
+    public static let thermalPlatform: String = "ios"
     
     // === HDR and Color Space ===
     /// Prefer HDR when device supports it (richer color for 3D reconstruction)
