@@ -116,6 +116,57 @@ public final class PatchDisplayMap {
         
         return entry
     }
+
+    /// Update display evidence using backend patch display kernel.
+    ///
+    /// This path routes review target values into C++ SSOT 
+    /// so UI display/style evolution stays synchronized with backend review logic.
+    @discardableResult
+    public func updateWithBackendReview(
+        patchId: String,
+        reviewTarget: Double,
+        timestampMs: Int64,
+        isLocked: Bool
+    ) -> DisplayEntry {
+        var entry = displays[patchId] ?? DisplayEntry(
+            patchId: patchId,
+            lastUpdateMs: timestampMs
+        )
+
+        let prevDisplay = entry.display
+        let prevEma = entry.ema
+        let clampedTarget = max(0.0, min(1.0, reviewTarget))
+
+        if let nativeStep = NativePatchDisplayBridge.patchDisplayStep(
+            previousDisplay: prevDisplay,
+            previousEMA: prevEma,
+            observationCount: entry.observationCount,
+            target: clampedTarget,
+            isLocked: isLocked
+        ) {
+            entry.display = max(prevDisplay, min(1.0, nativeStep.display))
+            entry.ema = max(0.0, min(1.0, nativeStep.ema))
+        } else {
+            // Fallback to Swift path if native bridge is unavailable.
+            let alpha = EvidenceConstants.patchDisplayAlpha
+            let newEma = alpha * clampedTarget + (1.0 - alpha) * prevEma
+            let baseNext = newEma
+            if isLocked {
+                let growthDelta = baseNext - prevDisplay
+                let acceleratedDelta = growthDelta * EvidenceConstants.patchDisplayLockedAcceleration
+                let acceleratedNext = prevDisplay + acceleratedDelta
+                entry.display = max(prevDisplay, min(1.0, acceleratedNext))
+            } else {
+                entry.display = max(prevDisplay, min(1.0, baseNext))
+            }
+            entry.ema = max(0.0, min(1.0, newEma))
+        }
+
+        entry.observationCount += 1
+        entry.lastUpdateMs = timestampMs
+        displays[patchId] = entry
+        return entry
+    }
     
     /// Get display evidence for a patch
     public func display(for patchId: String) -> Double {
