@@ -141,6 +141,10 @@ public final class UnifiedAdmissionController {
         )
     }
 
+    public func reset() {
+        _ = aether_admission_controller_reset(nativeController)
+    }
+
     #if canImport(CAetherNativeBridge)
     private static func reasons(fromMask mask: UInt32) -> [EvidenceAdmissionDecision.EvidenceAdmissionReason] {
         var reasons: [EvidenceAdmissionDecision.EvidenceAdmissionReason] = []

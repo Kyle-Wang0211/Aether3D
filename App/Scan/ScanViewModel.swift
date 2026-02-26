@@ -55,6 +55,11 @@ final class ScanViewModel: ObservableObject {
     private let rippleEngine = RipplePropagationEngine()
     private let borderCalculator = AdaptiveBorderCalculator()
     private let thermalAdapter = ThermalQualityAdapter()
+    private let admissionController = UnifiedAdmissionController(
+        spamProtection: SpamProtection(),
+        tokenBucket: TokenBucketLimiter(),
+        viewDiversity: ViewDiversityTracker()
+    )
 
     // MARK: - App Platform Components
     private let grayscaleMapper = GrayscaleMapper()
@@ -266,8 +271,7 @@ final class ScanViewModel: ObservableObject {
         previousPatchDisplaySnapshot = currentPatchDisplaySnapshot
         updatePatchDisplayMap(
             cameraTransform: stabilizedCameraTransform,
-            lightEstimate: lightEstimate,
-            motionSpeed: velocity
+            timestamp: timestamp
         )
         currentPatchDisplaySnapshot = makeDisplaySnapshot()
 
@@ -526,11 +530,10 @@ final class ScanViewModel: ObservableObject {
         }
     }
 
-    /// Update display values for visible patches through backend review target.
+    /// Update display values for visible patches through backend admission quality.
     private func updatePatchDisplayMap(
         cameraTransform: simd_float4x4,
-        lightEstimate: LightEstimateSnapshot?,
-        motionSpeed: Double
+        timestamp: TimeInterval
     ) {
         guard !meshTriangles.isEmpty else { return }
 
@@ -540,21 +543,33 @@ final class ScanViewModel: ObservableObject {
             cameraTransform.columns.3.y,
             cameraTransform.columns.3.z
         )
-        let medianAreaSqM = medianTriangleArea(meshTriangles)
-        let ambientIntensity = lightEstimate.map { Double($0.ambientIntensity) }
 
+        var representatives: [String: ScanTriangle] = [:]
+        representatives.reserveCapacity(meshTriangles.count)
         for triangle in meshTriangles {
-            let current = patchDisplayMap.display(for: triangle.patchId)
-            let target = backendReviewTargetDisplay(
-                triangle: triangle,
-                cameraPosition: cameraPosition,
-                medianAreaSqM: medianAreaSqM,
-                ambientIntensity: ambientIntensity,
-                motionSpeed: motionSpeed
+            if let existing = representatives[triangle.patchId] {
+                if triangle.areaSqM > existing.areaSqM {
+                    representatives[triangle.patchId] = triangle
+                }
+            } else {
+                representatives[triangle.patchId] = triangle
+            }
+        }
+
+        let orderedPatchIds = representatives.keys.sorted()
+        for patchId in orderedPatchIds {
+            guard let triangle = representatives[patchId] else { continue }
+            let current = patchDisplayMap.display(for: patchId)
+            let viewAngle = viewAngleDegrees(triangle: triangle, cameraPosition: cameraPosition)
+            let decision = admissionController.checkAdmission(
+                patchId: patchId,
+                viewAngle: viewAngle,
+                timestamp: timestamp
             )
+            let target = clamp01(decision.qualityScale)
             let isLocked = current >= ScanGuidanceConstants.s3ToS4Threshold
             _ = patchDisplayMap.updateWithBackendReview(
-                patchId: triangle.patchId,
+                patchId: patchId,
                 reviewTarget: target,
                 timestampMs: timestampMs,
                 isLocked: isLocked
@@ -562,59 +577,22 @@ final class ScanViewModel: ObservableObject {
         }
     }
 
-    private func backendReviewTargetDisplay(
+    private func viewAngleDegrees(
         triangle: ScanTriangle,
-        cameraPosition: SIMD3<Float>,
-        medianAreaSqM: Float,
-        ambientIntensity: Double?,
-        motionSpeed: Double
-    ) -> Double {
+        cameraPosition: SIMD3<Float>
+    ) -> Float {
         let centroid = triangleCentroid(triangle)
-        let distance = Double(simd_length(centroid - cameraPosition))
-
-        let distanceQuality: Double
-        if distance < 0.18 {
-            distanceQuality = clamp01(distance / 0.18)
-        } else if distance <= 1.35 {
-            distanceQuality = 1.0
-        } else {
-            distanceQuality = clamp01(1.0 - (distance - 1.35) / 1.45)
+        let toCamera = cameraPosition - centroid
+        let toCameraLength = simd_length(toCamera)
+        let normalLength = simd_length(triangle.normal)
+        guard toCameraLength > 1e-6, normalLength > 1e-6 else {
+            return 0.0
         }
 
-        let normalizedArea = Double(
-            sqrt(max(triangle.areaSqM, 1e-8) / max(medianAreaSqM, 1e-8))
-        )
-        let areaQuality = clamp01((normalizedArea - 0.35) / 0.85)
-
-        let lightQuality: Double
-        if let ambientIntensity {
-            if ambientIntensity < 250.0 {
-                lightQuality = clamp01(ambientIntensity / 250.0)
-            } else if ambientIntensity <= 2200.0 {
-                lightQuality = 1.0
-            } else {
-                lightQuality = clamp01(1.0 - (ambientIntensity - 2200.0) / 3800.0)
-            }
-        } else {
-            lightQuality = 0.75
-        }
-
-        let motionBudget = max(ScanGuidanceConstants.hapticMotionThreshold, 0.1)
-        let motionQuality = clamp01(1.0 - motionSpeed / (motionBudget * 2.0))
-
-        // Review target blends geometry, distance, illumination, and motion stability.
-        let reviewTarget =
-            0.45 * distanceQuality
-            + 0.20 * areaQuality
-            + 0.20 * lightQuality
-            + 0.15 * motionQuality
-        return clamp01(reviewTarget)
-    }
-
-    private func medianTriangleArea(_ triangles: [ScanTriangle]) -> Float {
-        guard !triangles.isEmpty else { return 1e-6 }
-        let sorted = triangles.map { max($0.areaSqM, 1e-8) }.sorted()
-        return max(sorted[sorted.count / 2], 1e-8)
+        let viewDir = toCamera / toCameraLength
+        let normalDir = triangle.normal / normalLength
+        let cosine = max(-1.0, min(1.0, Double(simd_dot(normalDir, viewDir))))
+        return Float(acos(cosine) * 180.0 / Double.pi)
     }
 
     private func clamp01(_ value: Double) -> Double {
@@ -852,6 +830,7 @@ final class ScanViewModel: ObservableObject {
         patchIdAliases.removeAll()
         patchAliasLastSeenFrame.removeAll()
         renderStabilityBridge.resetRenderSelectionRuntime()
+        admissionController.reset()
         if let stabilizer = poseStabilizer {
             NativePoseStabilizerBridge.reset(stabilizer)
         }

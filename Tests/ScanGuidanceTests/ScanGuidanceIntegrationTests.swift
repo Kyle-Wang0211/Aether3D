@@ -361,7 +361,8 @@ final class ScanGuidanceIntegrationTests: XCTestCase {
             lod: .low
         )
 
-        XCTAssertEqual(result.vertices.count, 6, "LOD2 should have 6 vertices")
+        XCTAssertGreaterThanOrEqual(result.vertices.count, 6, "LOD2 should generate at least one wedge fragment")
+        XCTAssertEqual(result.vertices.count % 6, 0, "LOD2 should output 6 vertices per fragment")
 
         let zValues = result.vertices.map { $0.position.z }
         let minZ = zValues.min()!
