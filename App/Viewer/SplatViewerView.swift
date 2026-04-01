@@ -23,6 +23,9 @@ import SwiftUI
 /// Uses GaussianSplatViewController internally (MTKView + Metal rendering).
 struct SplatViewerView: View {
     let record: ScanRecord
+    var scanViewModel: ScanViewModel? = nil
+    var homeViewModel: HomeViewModel? = nil
+    var onReturnHome: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var isLoading = true
 
@@ -70,7 +73,7 @@ struct SplatViewerView: View {
             VStack {
                 // Top bar: close + share
                 HStack {
-                    Button(action: { dismiss() }) {
+                    Button(action: { closeExperience() }) {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 28))
                             .foregroundColor(.white)
@@ -145,6 +148,14 @@ struct SplatViewerView: View {
         return documents
             .appendingPathComponent("Aether3D")
             .appendingPathComponent(relativePath)
+    }
+
+    private func closeExperience() {
+        if let onReturnHome {
+            onReturnHome()
+        } else {
+            dismiss()
+        }
     }
 }
 
