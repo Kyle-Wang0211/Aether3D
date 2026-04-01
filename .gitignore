@@ -19,3 +19,12 @@ aether3d.db
 artifacts/
 Aether3DApp.xcodeproj/
 .deps/
+
+# Generated models / exports
+DepthAnythingV2Large.mlmodelc/
+DepthAnythingV2Small.mlmodelc/
+MLModels/
+exports/
+
+# Python caches
+**/__pycache__/
