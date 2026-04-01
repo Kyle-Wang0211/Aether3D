@@ -60,10 +60,12 @@ inline void record_non_finite(double value) {
     }
 }
 
+#if defined(__ARM_NEON)
 inline bool lane_has_bad(uint32x4_t mask) {
     const uint64x2_t packed = vreinterpretq_u64_u32(mask);
     return (vgetq_lane_u64(packed, 0) | vgetq_lane_u64(packed, 1)) != 0u;
 }
+#endif
 
 bool guard_finite_vector_scalar(float* values, std::size_t count) {
     bool all_finite = true;

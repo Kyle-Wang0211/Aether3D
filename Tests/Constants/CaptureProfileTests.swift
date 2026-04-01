@@ -58,25 +58,10 @@ final class CaptureProfileTests: XCTestCase {
         }
     }
     
-    // MARK: - Digest Input Tests
-    
-    func testDigestInput() throws {
-        let schemaVersionId = SSOTVersion.schemaVersionId
+    func testAllProfilesExposeStableNames() {
         for profile in CaptureProfile.allCases {
-            let digestInput = profile.digestInput(schemaVersionId: schemaVersionId)
-            XCTAssertEqual(digestInput.profileId, profile.profileId)
-            XCTAssertEqual(digestInput.name, profile.name)
-            XCTAssertEqual(digestInput.schemaVersionId, schemaVersionId)
+            XCTAssertFalse(profile.name.isEmpty)
+            XCTAssertFalse(profile.documentation.isEmpty)
         }
-    }
-    
-    func testDigestInputDeterministic() throws {
-        let schemaVersionId = SSOTVersion.schemaVersionId
-        let profile = CaptureProfile.standard
-        
-        let digest1 = try CanonicalDigest.computeDigest(profile.digestInput(schemaVersionId: schemaVersionId))
-        let digest2 = try CanonicalDigest.computeDigest(profile.digestInput(schemaVersionId: schemaVersionId))
-        
-        XCTAssertEqual(digest1, digest2, "Digest must be deterministic")
     }
 }

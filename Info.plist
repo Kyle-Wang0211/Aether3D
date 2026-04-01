@@ -2,26 +2,59 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<key>AETHER_BROKER_API_KEY</key>
+	<string></string>
+	<key>AETHER_BROKER_BACKGROUND_SESSION_ID</key>
+	<string>com.aether3d.background-upload.v20260323c</string>
+	<key>AETHER_BROKER_BASE_URL</key>
+	<string>https://api.aether-3d.com</string>
+	<key>AETHER_BROKER_FALLBACK_BASE_URL</key>
+	<string></string>
+	<key>AETHER_BROKER_BACKGROUND_MAX_CONNECTIONS_PER_HOST</key>
+	<string>20</string>
+	<key>AETHER_BROKER_FOREGROUND_MULTIPART_MAX_CONNECTIONS_PER_HOST</key>
+	<string>24</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>Aether3D</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
-	<key>CFBundlePackageType</key>
-	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>en</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.aether3d.remote-resume.refresh</string>
+		<string>com.aether3d.remote-resume.processing</string>
+	</array>
 	<key>LSMinimumSystemVersion</key>
-	<string>16.0</string>
+	<string>18.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is required for 3D scanning</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Local network access is required to upload videos to your nearby Aether3D broker.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Select video for 3D reconstruction demo</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
@@ -31,9 +64,5 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 	</array>
-	<key>NSCameraUsageDescription</key>
-	<string>Camera access is required for 3D scanning</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Select video for 3D reconstruction demo</string>
 </dict>
 </plist>

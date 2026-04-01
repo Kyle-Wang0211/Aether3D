@@ -12,6 +12,7 @@ enum class Status : int {
     kInvalidArgument = -1,
     kOutOfRange = -2,
     kResourceExhausted = -3,
+    kCancelled = -4,
 };
 
 inline bool is_ok(Status s) { return static_cast<int>(s) == 0; }

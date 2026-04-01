@@ -36,6 +36,7 @@ enum class GPUTextureFormat : std::uint8_t {
     kR8Unorm = 0,
     kRG8Unorm,
     kRGBA8Unorm,
+    kBGRA8Unorm,       // Native display format on Apple (MTLPixelFormatBGRA8Unorm)
     kRGBA8Srgb,
     kR16Float,
     kRG16Float,
@@ -47,6 +48,7 @@ enum class GPUTextureFormat : std::uint8_t {
     kDepth32Float_Stencil8,
     kR32Uint,
     kRG32Uint,
+    kInvalid = 255,
 };
 
 enum class GPUTextureUsage : std::uint8_t {
@@ -91,6 +93,33 @@ enum class GPUWindingOrder : std::uint8_t {
     kCounterClockwise = 1,
 };
 
+enum class GPUCompareFunction : std::uint8_t {
+    kAlways = 0,
+    kLess = 1,
+    kLessEqual = 2,
+    kGreater = 3,
+    kGreaterEqual = 4,
+};
+
+enum class GPUBlendOperation : std::uint8_t {
+    kAdd = 0,
+    kSubtract = 1,
+    kReverseSubtract = 2,
+};
+
+enum class GPUBlendFactor : std::uint8_t {
+    kZero = 0,
+    kOne = 1,
+    kSourceColor = 2,
+    kOneMinusSourceColor = 3,
+    kDestinationColor = 4,
+    kOneMinusDestinationColor = 5,
+    kSourceAlpha = 6,
+    kOneMinusSourceAlpha = 7,
+    kDestinationAlpha = 8,
+    kOneMinusDestinationAlpha = 9,
+};
+
 // ═══════════════════════════════════════════════════════════════════════
 // GPU Resource Descriptors (POD — no virtual, no allocation)
 // ═══════════════════════════════════════════════════════════════════════
@@ -113,12 +142,41 @@ struct GPUTextureDesc {
     const char* label{nullptr};
 };
 
+constexpr std::uint32_t kMaxColorAttachments = 4;
+
+struct GPUColorAttachmentBlendDesc {
+    bool blending_enabled{false};
+    GPUBlendOperation rgb_blend_op{GPUBlendOperation::kAdd};
+    GPUBlendOperation alpha_blend_op{GPUBlendOperation::kAdd};
+    GPUBlendFactor source_rgb_blend{GPUBlendFactor::kOne};
+    GPUBlendFactor destination_rgb_blend{GPUBlendFactor::kZero};
+    GPUBlendFactor source_alpha_blend{GPUBlendFactor::kOne};
+    GPUBlendFactor destination_alpha_blend{GPUBlendFactor::kZero};
+};
+
+struct GPUColorAttachmentTargetDesc {
+    GPUTextureFormat format{GPUTextureFormat::kRGBA8Unorm};
+    GPUColorAttachmentBlendDesc blend{};
+};
+
 struct GPURenderTargetDesc {
+    // Legacy compatibility fields for attachment 0.
     GPUTextureFormat color_format{GPUTextureFormat::kRGBA8Unorm};
     GPUTextureFormat depth_format{GPUTextureFormat::kDepth32Float};
     std::uint32_t width{0};
     std::uint32_t height{0};
     std::uint32_t sample_count{1};
+    bool blending_enabled{true};
+    bool depth_test_enabled{false};
+    bool depth_write_enabled{false};
+    GPUCompareFunction depth_compare{GPUCompareFunction::kAlways};
+
+    // Extended pipeline description: multiple color attachments with
+    // per-attachment blend state. Attachment 0 falls back to the legacy
+    // fields above when callers do not explicitly populate this array.
+    std::uint32_t color_attachment_count{1};
+    GPUColorAttachmentTargetDesc color_attachments[kMaxColorAttachments]{};
+
     float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
     float clear_depth{1.0f};
     GPULoadAction color_load{GPULoadAction::kClear};
@@ -172,6 +230,29 @@ struct GPURenderPipelineHandle {
 struct GPUComputePipelineHandle {
     std::uint32_t id{0};
     bool valid() const noexcept { return id != 0; }
+};
+
+struct GPURenderPassColorAttachmentDesc {
+    GPUTextureHandle texture{};
+    GPULoadAction load{GPULoadAction::kClear};
+    GPUStoreAction store{GPUStoreAction::kStore};
+    float clear_color[4]{0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+struct GPURenderPassDepthAttachmentDesc {
+    GPUTextureHandle texture{};
+    GPULoadAction load{GPULoadAction::kClear};
+    GPUStoreAction store{GPUStoreAction::kDontCare};
+    float clear_depth{1.0f};
+};
+
+struct GPURenderPassDesc {
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+    std::uint32_t sample_count{1};
+    std::uint32_t color_attachment_count{1};
+    GPURenderPassColorAttachmentDesc color_attachments[kMaxColorAttachments]{};
+    GPURenderPassDepthAttachmentDesc depth_attachment{};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

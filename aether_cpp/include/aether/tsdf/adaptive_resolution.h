@@ -15,7 +15,7 @@ namespace tsdf {
 
 struct ContinuousResolutionConfig {
     float min_voxel_size{0.002f};
-    float max_voxel_size{0.032f};
+    float max_voxel_size{0.010f};   // 10mm (iPhone 12 safe; was 32mm)
     float min_edge_length{0.005f};
     float max_edge_length{0.5f};
     float depth_range_min{0.3f};
@@ -104,7 +104,9 @@ inline float continuous_gap_width(float display, const ContinuousResolutionConfi
 }
 
 inline float continuous_fill_opacity(float display) {
-    return smoothstep(0.0f, 0.92f, clamp01(display));
+    // display=0 (S0, early scan) → high opacity (strong black fill guides user)
+    // display=1 (S5, complete)   → low opacity  (fill fades as quality improves)
+    return 1.0f - smoothstep(0.0f, 0.92f, clamp01(display));
 }
 
 inline float continuous_border_width(float display, float triangle_area) {

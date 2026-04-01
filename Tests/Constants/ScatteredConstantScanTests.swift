@@ -330,6 +330,7 @@ final class ScatteredConstantScanTests: XCTestCase {
             if file.path.contains("/BuildMeta/") ||
                file.path.contains("/Invariants/") ||
                file.path.contains("/Models/") ||
+               file.path.contains("/Render/") ||
                file.path.contains("/Rendering/") ||
                file.path.contains("/Utils/") ||
                file.path.contains("/Quality/") ||

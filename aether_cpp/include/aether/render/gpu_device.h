@@ -7,9 +7,13 @@
 #ifdef __cplusplus
 
 #include "aether/render/gpu_resource.h"
+#include <memory>
 
 namespace aether {
 namespace render {
+
+// Forward declare
+class GPUCommandBuffer;
 
 // ═══════════════════════════════════════════════════════════════════════
 // GPUDevice: Abstract GPU device interface
@@ -64,6 +68,11 @@ public:
     virtual GPUComputePipelineHandle create_compute_pipeline(
         GPUShaderHandle compute_shader) noexcept = 0;
     virtual void destroy_compute_pipeline(GPUComputePipelineHandle handle) noexcept = 0;
+
+    // ─── Command Buffer ───
+    /// Create a command buffer for GPU work submission.
+    /// Returns nullptr if the backend doesn't support command buffers (e.g. NullGPUDevice).
+    virtual std::unique_ptr<GPUCommandBuffer> create_command_buffer() noexcept = 0;
 
     // ─── Synchronization ───
     // Wait for all submitted GPU work to complete.
@@ -120,6 +129,10 @@ public:
         return GPUComputePipelineHandle{++next_id_};
     }
     void destroy_compute_pipeline(GPUComputePipelineHandle) noexcept override {}
+
+    std::unique_ptr<GPUCommandBuffer> create_command_buffer() noexcept override {
+        return nullptr;  // NullGPUDevice: no real GPU
+    }
 
     void wait_idle() noexcept override {}
 

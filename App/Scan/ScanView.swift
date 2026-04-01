@@ -2,140 +2,396 @@
 // ScanView.swift
 // Aether3D
 //
-// PR#7 Scan Guidance UI — Scan View (Three-Layer AR Interface)
-// Layer 1: AR Camera (ARSCNView)
-// Layer 2: Metal mesh overlay (point cloud + splat stars via PointCloudOIRPipeline)
-// Layer 3: HUD (Toast + Capture Controls + Close button + Timer)
-// Apple-platform only (ARKit + SwiftUI)
+// Minimal whitebox capture flow.
 //
 
 import Foundation
+import Aether3DCore
 
 #if canImport(SwiftUI) && canImport(ARKit)
 import SwiftUI
 
-/// Three-layer AR scanning interface
-///
-/// Architecture:
-///   ZStack {
-///     Layer 1: ARCameraPreview (ARSCNView via UIViewRepresentable)
-///     Layer 2: Metal overlay (PointCloudOIRPipeline — point cloud stars on objects)
-///     Layer 3: HUD overlay (SwiftUI)
-///       - Top: Close button + elapsed time
-///       - Middle: Toast overlay (guidance messages)
-///       - Bottom: ScanCaptureControls
-///   }
-///
-/// Point cloud "stars" are rendered via Metal overlay (Layer 2),
-/// not as SwiftUI elements. They attach to 3D surfaces in world space.
 struct ScanView: View {
     @StateObject private var viewModel = ScanViewModel()
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(ProcessingBackendChoice.userDefaultsKey) private var selectedProcessingBackendRaw = ProcessingBackendChoice.cloud.rawValue
 
-    // Post-scan viewer navigation
     @State private var completedRecord: ScanRecord?
     @State private var showViewer = false
 
+    private var selectedProcessingBackend: ProcessingBackendChoice {
+        ProcessingBackendChoice(rawValue: selectedProcessingBackendRaw) ?? .cloud
+    }
+
     var body: some View {
         ZStack {
-            // Layer 1: AR Camera
             ARCameraPreview(viewModel: viewModel)
                 .ignoresSafeArea()
 
-            // Layer 2: Metal overlay renders point cloud "stars" on scanned surfaces
-            // (handled inside ARCameraPreview coordinator — no separate SwiftUI layer)
+            LinearGradient(
+                colors: [Color.black.opacity(0.34), Color.clear, Color.black.opacity(0.64)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
 
-            // Layer 3: HUD
             VStack(spacing: 0) {
-                // ─── Top bar: Close + Timer ───
-                HStack(alignment: .center) {
-                    Button(action: { handleDismiss() }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 28))
-                            .foregroundColor(.white)
-                            .shadow(radius: 2)
-                    }
-                    .accessibilityLabel("关闭")
-                    .padding(.leading, 16)
+                topBar
 
-                    Spacer()
-
-                    if viewModel.scanState.isActive || viewModel.scanState == .paused {
-                        Text(formatTime(viewModel.elapsedTime))
-                            .font(.system(size: 16, weight: .medium, design: .monospaced))
-                            .foregroundColor(.white)
-                            .shadow(radius: 2)
-                            .padding(.trailing, 16)
-                            .accessibilityLabel("扫描时长 \(formatTime(viewModel.elapsedTime))")
-                    }
-                }
-                .padding(.top, 8)
-
-                // ─── Debug Overlay: Real-time pipeline stats ───
-                // Always visible during development (screenshot for diagnostics)
-                if viewModel.scanState.isActive || viewModel.scanState == .paused {
-                    debugOverlayView
-                        .padding(.top, 4)
+                if viewModel.coordinatorNotReady {
+                    inlineBanner(
+                        title: "扫描引擎还在加载",
+                        detail: "请再等几秒后再结束拍摄，避免拿不到可用结果。",
+                        tint: .orange
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
                 }
 
                 Spacer()
 
-                // Export progress overlay
-                if viewModel.isExporting {
-                    VStack(spacing: 8) {
-                        ProgressView()
-                            .tint(.white)
-                        Text("正在导出...")
-                            .font(.system(size: 14))
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-                    .padding(.bottom, 24)
-                }
+                centerOverlay
 
-                // Toast overlay (guidance messages: move slower, too dark, etc.)
+                Spacer()
+
                 ToastOverlay(presenter: viewModel.toastPresenter)
 
-                // Bottom: Capture controls
-                ScanCaptureControls(
-                    isCapturing: viewModel.scanState.isActive || viewModel.scanState == .paused,
-                    onStart: { viewModel.startCapture() },
-                    onStop: { handleStop() },
-                    onPause: { viewModel.pauseCapture() }
-                )
+                if showsCaptureDashboard {
+                    captureDashboard
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 14)
+                }
+
+                if showsCaptureControls {
+                    ScanCaptureControls(
+                        isCapturing: viewModel.scanState == .capturing,
+                        onStart: { viewModel.startCapture(processingBackend: selectedProcessingBackend) },
+                        onStop: { handleStop() },
+                        onPause: { viewModel.pauseCapture() }
+                    )
+                } else {
+                    Color.clear.frame(height: 24)
+                }
             }
         }
         .navigationBarHidden(true)
         .statusBarHidden(true)
         .onDisappear {
-            // Ensure ARKit session is cleaned up
-            if viewModel.scanState != .completed {
+            if !showViewer && viewModel.scanState != .completed {
                 transitionToSafeTerminalState()
             }
+        }
+        .onAppear {
+            viewModel.prepareCapture(processingBackend: selectedProcessingBackend)
         }
         #if canImport(UIKit) && canImport(Metal)
         .navigationDestination(isPresented: $showViewer) {
             if let record = completedRecord {
-                SplatViewerView(record: record)
+                SplatViewerView(
+                    record: record,
+                    scanViewModel: viewModel,
+                    onReturnHome: {
+                        completedRecord = nil
+                        showViewer = false
+                        dismiss()
+                    }
+                )
             } else {
-                // Defensive fallback: completedRecord should always be set before showViewer.
-                // If we reach here, something went wrong in handleStop() ordering.
-                SplatViewerView(record: ScanRecord(
-                    id: UUID(), name: nil, createdAt: Date(),
-                    thumbnailPath: nil, artifactPath: nil,
-                    coveragePercentage: 0, triangleCount: 0,
-                    durationSeconds: 0))
-                .onAppear {
-                    NSLog("[Aether3D] WARNING: navigationDestination fired but completedRecord is nil")
-                }
+                EmptyView()
             }
         }
         #endif
     }
 
-    // MARK: - Actions
+    private var topBar: some View {
+        HStack(alignment: .center) {
+            Button(action: { handleDismiss() }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(.white)
+                    .shadow(radius: 2)
+            }
+            .accessibilityLabel("关闭")
+            .padding(.leading, 16)
 
-    /// Handle dismiss (X button)
+            Spacer()
+
+            if viewModel.scanState.isActive || viewModel.scanState == .paused {
+                Text(formatTime(viewModel.elapsedTime))
+                    .font(.system(size: 16, weight: .medium, design: .monospaced))
+                    .foregroundColor(.white)
+                    .shadow(radius: 2)
+                    .padding(.trailing, 16)
+                    .accessibilityLabel("扫描时长 \(formatTime(viewModel.elapsedTime))")
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private var centerOverlay: some View {
+        switch viewModel.scanState {
+        case .initializing:
+            statusPanel(
+                title: "正在启动扫描环境",
+                detail: "第一次进入会初始化相机和本地引擎，请保持手机稳定。"
+            )
+        case .ready:
+            statusPanel(
+                title: viewModel.liveGuidanceTitle,
+                detail: viewModel.liveGuidanceDetail
+            )
+        case .paused:
+            pausedPanel
+        case .failed:
+            failurePanel
+        case .finishing:
+            statusPanel(
+                title: "正在整理这次拍摄",
+                detail: "马上会进入等待页，并继续远端训练和回传。"
+            )
+        default:
+            EmptyView()
+        }
+    }
+
+    private var showsCaptureDashboard: Bool {
+        viewModel.scanState == .capturing || viewModel.scanState == .ready
+    }
+
+    private var showsCaptureControls: Bool {
+        switch viewModel.scanState {
+        case .initializing, .failed, .finishing:
+            return false
+        case .ready, .capturing:
+            return true
+        case .paused:
+            return false
+        case .completed:
+            return false
+        }
+    }
+
+    private var captureDashboard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(viewModel.liveGuidanceTitle)
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundColor(.white)
+                    Text(viewModel.liveGuidanceDetail)
+                        .font(.system(size: 13))
+                        .foregroundColor(.white.opacity(0.68))
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text("\(Int(viewModel.coveragePercent * 100))%")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                    Text("覆盖率")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.55))
+                }
+            }
+
+            ProgressView(value: Double(viewModel.coveragePercent))
+                .tint(.cyan)
+
+            HStack(spacing: 10) {
+                signalChip(
+                    title: viewModel.motionWarningActive ? "移动过快" : "速度正常",
+                    subtitle: String(format: "%.2f m/s", viewModel.latestMotionSpeedMps),
+                    tint: viewModel.motionWarningActive ? .orange : .green
+                )
+                signalChip(
+                    title: viewModel.exposureWarningActive ? "光线异常" : "曝光正常",
+                    subtitle: viewModel.latestAmbientIntensity > 0
+                        ? String(format: "%.0f lux", viewModel.latestAmbientIntensity)
+                        : "等待测光",
+                    tint: viewModel.exposureWarningActive ? .orange : .green
+                )
+                signalChip(
+                    title: viewModel.stabilityWarningActive ? "姿态不稳" : "稳定性正常",
+                    subtitle: viewModel.stabilityWarningActive ? "请稍稳一点" : "可以继续",
+                    tint: viewModel.stabilityWarningActive ? .orange : .green
+                )
+            }
+
+            Text("当前方案：\(selectedProcessingBackend.displayLabel) · \(FrameSamplingProfile.currentSelection().displayLabel)。云端高质量会走当前成功链；本地快速预览会优先在手机上给出单目 preview。")
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.48))
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color.black.opacity(0.62))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+
+    private var pausedPanel: some View {
+        VStack(spacing: 18) {
+            statusPanel(
+                title: "扫描已暂停",
+                detail: viewModel.sessionPauseMessage ?? "你可以继续拍摄，也可以直接结束生成。"
+            )
+
+            HStack(spacing: 12) {
+                overlayButton(
+                    title: "继续拍摄",
+                    systemImage: "play.fill",
+                    style: .primary
+                ) {
+                    viewModel.resumeCapture()
+                }
+
+                overlayButton(
+                    title: "结束生成",
+                    systemImage: "stop.fill",
+                    style: .secondary
+                ) {
+                    handleStop()
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var failurePanel: some View {
+        VStack(spacing: 18) {
+            statusPanel(
+                title: "扫描中断了",
+                detail: viewModel.scanFailureMessage ?? "请返回主页重新开始一次拍摄。"
+            )
+
+            HStack(spacing: 12) {
+                overlayButton(
+                    title: "返回主页",
+                    systemImage: "house.fill",
+                    style: .primary
+                ) {
+                    dismiss()
+                }
+
+                overlayButton(
+                    title: "重新准备",
+                    systemImage: "arrow.clockwise",
+                    style: .secondary
+                ) {
+                    viewModel.prepareCapture(processingBackend: selectedProcessingBackend)
+                    viewModel.transition(to: .ready)
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private func statusPanel(title: String, detail: String) -> some View {
+        VStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+            Text(detail)
+                .font(.system(size: 14))
+                .foregroundColor(.white.opacity(0.68))
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 18)
+        .frame(maxWidth: 340)
+        .background(
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color.black.opacity(0.64))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+
+    private func inlineBanner(title: String, detail: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(tint)
+                .frame(width: 10, height: 10)
+                .padding(.top, 6)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundColor(.white.opacity(0.66))
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.black.opacity(0.62))
+        )
+    }
+
+    private func signalChip(title: String, subtitle: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white)
+            Text(subtitle)
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.58))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(tint.opacity(0.18))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(tint.opacity(0.28), lineWidth: 1)
+                )
+        )
+    }
+
+    private enum OverlayButtonStyle {
+        case primary
+        case secondary
+    }
+
+    private func overlayButton(
+        title: String,
+        systemImage: String,
+        style: OverlayButtonStyle,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.system(size: 15, weight: .bold))
+            .foregroundColor(style == .primary ? .black : .white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background(style == .primary ? Color.white : Color.white.opacity(0.10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 25)
+                    .stroke(Color.white.opacity(style == .primary ? 0.0 : 0.16), lineWidth: 1)
+            )
+            .cornerRadius(25)
+        }
+        .buttonStyle(.plain)
+    }
+
     private func handleDismiss() {
         if viewModel.scanState.canFinish {
             transitionToSafeTerminalState()
@@ -143,151 +399,51 @@ struct ScanView: View {
         dismiss()
     }
 
-    /// Handle stop capture — navigate to 3D viewer IMMEDIATELY.
-    /// User requirement: "拍摄结束后直接进入黑色3d空间"
-    /// Export + training continue in background. Viewer loads when ready.
     private func handleStop() {
         NSLog("[Aether3D] handleStop: IMMEDIATE navigation to viewer")
 
-        // 1. Signal pipeline to stop scanning (non-blocking)
         viewModel.finishScanningOnly()
 
-        // 2. Create placeholder record immediately (no waiting for export)
         let recordId = UUID()
+        let frameSamplingProfile = FrameSamplingProfile.currentSelection()
         let record = ScanRecord(
-            id: recordId, name: nil, createdAt: Date(),
-            thumbnailPath: nil, artifactPath: nil,
+            id: recordId,
+            name: nil,
+            createdAt: Date(),
+            thumbnailPath: nil,
+            artifactPath: nil,
+            sourceVideoPath: nil,
+            frameSamplingProfile: frameSamplingProfile.rawValue,
+            captureIntent: nil,
+            processingBackend: selectedProcessingBackend.rawValue,
             coveragePercentage: Double(viewModel.coveragePercent),
             triangleCount: 0,
-            durationSeconds: viewModel.elapsedTime)
+            durationSeconds: viewModel.elapsedTime,
+            status: .preparing,
+            statusMessage: selectedProcessingBackend == .localPreview ? "正在准备本地快速预览" : "正在整理拍摄素材",
+            detailMessage: selectedProcessingBackend == .localPreview
+                ? "现在会进入等待页；手机会先用本地单目链路生成一个快速可看的 preview。"
+                : "现在会进入黑色等待页。你可以留在这里，也可以返回主页稍后继续。",
+            progressFraction: 0.01,
+            estimatedRemainingMinutes: nil
+        )
 
         ScanRecordStore().saveRecord(record)
         completedRecord = record
 
-        // 3. Transition states
-        if viewModel.scanState != .completed {
-            if viewModel.scanState.allowedTransitions.contains(.finishing) {
-                viewModel.transition(to: .finishing)
-            }
-            if viewModel.scanState.allowedTransitions.contains(.completed) {
-                viewModel.transition(to: .completed)
-            }
+        if viewModel.scanState.allowedTransitions.contains(.finishing) {
+            viewModel.transition(to: .finishing)
         }
 
-        // 4. Navigate to 3D viewer IMMEDIATELY (black space → progressive reveal)
         showViewer = true
-        NSLog("[Aether3D] handleStop: showViewer=true — navigating NOW")
-
-        // 5. Signal viewer entered → triggers fly-in animations for staged regions
         viewModel.signalViewerEntered()
-
-        // 6. Export runs in background (viewer will pick up when ready)
-        viewModel.startBackgroundExport(recordId: recordId)
+        viewModel.startBackgroundExport(recordId: recordId, processingBackend: selectedProcessingBackend)
     }
 
-    /// Abort flow without assuming a specific transition edge is legal.
     private func transitionToSafeTerminalState() {
         let plan = viewModel.scanState.actionPlan(for: .abort)
         viewModel.executeScanActionPlan(plan)
     }
-
-    // MARK: - Debug Overlay
-
-    /// Semi-transparent debug HUD showing real-time pipeline stats.
-    /// Always visible during development. Screenshot for diagnostics.
-    private var debugOverlayView: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            // Bridge status (most important indicator)
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(viewModel.debugBridgeReady ? Color.green : Color.red)
-                    .frame(width: 8, height: 8)
-                Text(viewModel.debugBridgeReady ? "Bridge: OK" : "Bridge: nil")
-                    .foregroundColor(viewModel.debugBridgeReady ? .green : .red)
-            }
-
-            // Coordinator init time (shows loading progress)
-            if !viewModel.debugBridgeReady {
-                Text("Init: \(String(format: "%.1fs", viewModel.debugCoordinatorInitTime))")
-                    .foregroundColor(.yellow)
-            }
-
-            // Frame counters
-            Text("Frame: \(viewModel.debugFrameCount)  →C++: \(viewModel.debugPipelineFrameCount)")
-
-            // Render data
-            Text("Blk: \(viewModel.debugPointCloudCount)  OVL: \(viewModel.debugOverlayCount)  Splat: \(viewModel.debugSplatCount)")
-
-            // Point cloud global alpha + encode stats
-            Text("Alpha: \(String(format: "%.2f", viewModel.debugPointCloudAlpha))  Draw: \(viewModel.debugEncodeDrawCount)  Skip: \(viewModel.debugEncodeSkipCount)")
-
-            // Training status (S6+ quality gate)
-            HStack(spacing: 4) {
-                // S6+ quality gate indicator
-                let s6 = viewModel.debugHasS6Quality
-                Text("S6+: \(s6 ? "✓" : "—")")
-                    .foregroundColor(s6 ? .green : .orange)
-                Text("Sel: \(viewModel.debugSelectedFrames)")
-                    .foregroundColor(.white.opacity(0.7))
-                if viewModel.debugTotalSteps > 0 {
-                    let gpuTag = viewModel.debugIsGPUTraining ? "GPU" : "CPU"
-                    Text("\(gpuTag) \(viewModel.debugTrainingStep)/\(viewModel.debugTotalSteps)  Loss: \(String(format: "%.4f", viewModel.debugLoss))")
-                        .foregroundColor(viewModel.debugIsGPUTraining ? .cyan : .yellow)
-                } else if !s6 {
-                    Text("(scanning for quality)")
-                        .foregroundColor(.orange)
-                } else {
-                    Text("(initializing...)")
-                        .foregroundColor(.yellow)
-                }
-            }
-
-            // Region training status (区域化训练)
-            if viewModel.debugRegionTotal > 0 {
-                HStack(spacing: 4) {
-                    Text("Rgn: \(viewModel.debugRegionCompleted)/\(viewModel.debugRegionTotal)")
-                        .foregroundColor(.cyan)
-                    if viewModel.debugActiveRegionId >= 0 {
-                        Text("R\(viewModel.debugActiveRegionId) \(Int(viewModel.debugActiveRegionProgress * 100))%")
-                            .foregroundColor(.yellow)
-                    }
-                    if viewModel.debugStagedCount > 0 {
-                        Text("Stg:\(viewModel.debugStagedCount)")
-                            .foregroundColor(.green)
-                    }
-                }
-            }
-
-            // Memory usage (detect jetsam risk)
-            let memMB = Self.currentMemoryMB()
-            Text("Mem: \(memMB)MB")
-                .foregroundColor(memMB > 1200 ? .red : (memMB > 800 ? .yellow : .white))
-        }
-        .font(.system(size: 10, weight: .medium, design: .monospaced))
-        .foregroundColor(.white)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.black.opacity(0.6))
-        .cornerRadius(6)
-        .padding(.leading, 16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - Memory Monitoring
-
-    /// Current app memory footprint in MB (mach_task_basic_info)
-    private static func currentMemoryMB() -> Int {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        return result == KERN_SUCCESS ? Int(info.resident_size / (1024 * 1024)) : 0
-    }
-
-    // MARK: - Formatting
 
     private func formatTime(_ interval: TimeInterval) -> String {
         let minutes = Int(interval) / 60

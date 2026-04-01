@@ -25,9 +25,13 @@ int main() {
         failed++;
     }
 
+    // continuous_fill_opacity models the black-fill overlay that guides the user
+    // during early scans and fades as quality improves:
+    //   display=0 (S0, no data)   → high opacity  (strong black fill)
+    //   display=1 (S5, complete)  → low  opacity  (fill invisible)
     const float opacity_s5 = continuous_fill_opacity(0.88f);
     const float opacity_s1 = continuous_fill_opacity(0.10f);
-    if (!(opacity_s5 > 0.95f && opacity_s1 < 0.10f)) {
+    if (!(opacity_s5 < 0.10f && opacity_s1 > 0.85f)) {
         std::fprintf(stderr, "continuous_fill_opacity S0-S5 alignment mismatch\n");
         failed++;
     }

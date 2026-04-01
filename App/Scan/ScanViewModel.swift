@@ -10,11 +10,18 @@
 
 import Foundation
 import Aether3DCore
+import Darwin
 
 #if canImport(SwiftUI) && canImport(ARKit)
 import SwiftUI
 import ARKit
 import simd
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(Metal)
 import Metal
 #endif
@@ -55,7 +62,17 @@ final class ScanViewModel: ObservableObject {
     @Published var trainingProgress: Float = 0.0
     @Published var coveragePercent: Float = 0.0
     @Published var isExporting: Bool = false
+    @Published var backgroundExportStatusMessage: String? = nil
     @Published var coordinatorNotReady: Bool = false  // Set when stop attempted before coordinator loaded
+    @Published var liveGuidanceTitle: String = "正在准备扫描环境"
+    @Published var liveGuidanceDetail: String = "请先把目标物体完整放进画面中央。"
+    @Published var scanFailureMessage: String? = nil
+    @Published var sessionPauseMessage: String? = nil
+    @Published var motionWarningActive: Bool = false
+    @Published var exposureWarningActive: Bool = false
+    @Published var stabilityWarningActive: Bool = false
+    @Published var latestMotionSpeedMps: Double = 0.0
+    @Published var latestAmbientIntensity: Float = 0.0
 
     // MARK: - Existing Components (REUSE, DO NOT RECREATE)
     let toastPresenter: GuidanceToastPresenter
@@ -96,6 +113,9 @@ final class ScanViewModel: ObservableObject {
     private var lastMotionSample: (position: SIMD3<Float>, timestamp: TimeInterval)?
     private var frameCounter: Int = 0
     private var isInitializingCoordinator: Bool = false
+    private var selectedProcessingBackend: ProcessingBackendChoice = .cloud
+    private var activeCoordinatorBackend: ProcessingBackendChoice?
+    private var pendingCaptureStartAfterCoordinatorReady: Bool = false
 
     // MARK: - Debug Overlay Stats (drives scan screen HUD)
     @Published var debugBridgeReady: Bool = false
@@ -114,15 +134,12 @@ final class ScanViewModel: ObservableObject {
     @Published var debugSelectedFrames: Int = 0        // Frames passing selection for training
     @Published var debugMinFramesNeeded: Int = 4       // min_frames_to_start_training from C++
     @Published var debugIsGPUTraining: Bool = false    // GPU vs CPU training path
-    @Published var debugHasS6Quality: Bool = false     // S6+ quality reached (training gate open)
+    @Published var debugHasS6Quality: Bool = false     // S6+ quality reached (display only, 0.85)
 
-    // ── 区域化训练状态 (破镜重圆) ──
-    @Published var debugRegionTotal: Int = 0           // Total training regions formed
-    @Published var debugRegionCompleted: Int = 0       // Converged + revealed regions
-    @Published var debugActiveRegionId: Int = -1       // Currently training region (-1 = none)
-    @Published var debugActiveRegionProgress: Float = 0.0
-    @Published var debugIsAnimating: Bool = false      // Any region doing fly-in animation
-    @Published var debugStagedCount: Int = 0           // Regions waiting to fly in
+    // ── 全局训练状态 ──
+    @Published var debugNumGaussians: Int = 0          // Current Gaussian count in global engine
+    @Published var debugAssignedBlocks: Int = 0        // Surface blocks → Gaussians (geometry gate)
+    @Published var debugPendingGaussians: Int = 0      // Gaussians waiting in queue
 
     private var coordinatorInitStartTime: CFAbsoluteTime = 0
 
@@ -138,18 +155,135 @@ final class ScanViewModel: ObservableObject {
 
     // MARK: - Frame Throttling
     /// Forward every Nth frame to C++ pipeline. ARKit runs at 60fps.
-    /// 30fps (interval=2) is optimal: dense coverage + manageable CPU load.
-    /// PocketGS captures 50 frames total in ~4min. We capture 30fps × scan_time →
-    /// even 30sec = 900 frames (18× more than PocketGS). Dense coverage is our edge.
-    /// C++ thermal management handles CPU throttling (drops to 15fps/10fps at thermal 2/3).
-    private static let pipelineFrameInterval: Int = 2  // 60fps / 2 = 30fps to C++ — maximum density for S6+ quality
+    /// On-device stability takes priority over raw feed rate:
+    /// 15fps to C++ avoids frame-queue saturation and VIO starvation.
+    private static let pipelineFrameInterval: Int = 6  // 60fps / 6 ≈ 10fps (reduces queue overflow on mobile)
 
     // MARK: - Timer
     private var captureStartTime: Date?
     nonisolated(unsafe) private var elapsedTimer: Timer?
+    #if canImport(AVFoundation)
+    private var remoteVideoRecorder: ARFrameVideoRecorder?
+    #endif
 
     // MARK: - Thermal Monitoring
     nonisolated(unsafe) private var thermalObserver: NSObjectProtocol?
+
+    // MARK: - Product World-State Export
+    private let worldStateRecorder = WorldStateRecorder()
+    nonisolated private static let worldStateSchemaVersion = "aether_world_state_v1"
+    nonisolated private static let worldStateGridCell: Float = 0.05
+    nonisolated private static let worldStateConfirmedSamples = 2
+    nonisolated private static let worldStateLockedSamples = 5
+    nonisolated private static let worldStateSurfaceCell: Float = 0.05
+    nonisolated private static let worldStateSurfaceMaxPoints = 200_000
+    nonisolated private static let worldStateSurfaceSupportThresholdMM: Float = 20.0
+    nonisolated private static let worldStateSurfaceNormalRadius: Float = 0.08
+    nonisolated private static let worldStateSurfaceSearchRings = 2
+
+    struct RawWorldStateTile: Sendable {
+        let center: SIMD3<Float>
+        let normal: SIMD3<Float>
+        let size: Float
+        let quality: Float
+    }
+
+    private struct SurfaceIndex: Sendable {
+        let points: [SIMD3<Float>]
+        let buckets: [Int64: [Int]]
+    }
+
+    struct RawWorldStateFrame: Sendable {
+        let frameIndex: Int
+        let timestampS: Double
+        let coverage: Double
+        let cameraIntrinsics: simd_float3x3?
+        let tiles: [RawWorldStateTile]
+    }
+
+    private struct WorldStateNeighbor: Codable, Sendable {
+        let tile_id: String
+        let gap_mm: Double
+    }
+
+    private struct WorldStateTile: Codable, Sendable {
+        let tile_id: String
+        let cell_id: String
+        let state: String
+        let visible: Bool
+        let center: [Double]
+        let normal: [Double]
+        let corners: [[Double]]
+        let u: Int?
+        let v: Int?
+        let neighbors: [WorldStateNeighbor]
+        let surface_center_distance_mm: Double?
+        let surface_normal_dot: Double?
+        let surface_corner_support: [Bool]?
+    }
+
+    private struct WorldStateFrame: Codable, Sendable {
+        let frame_index: Int
+        let timestamp_s: Double
+        let coverage: Double
+        let tiles: [WorldStateTile]
+    }
+
+    private struct WorldStateMeta: Codable, Sendable {
+        let scene_id: String
+        let cell_level: Int
+        let notes: String
+    }
+
+    private struct WorldStateExport: Codable, Sendable {
+        let version: String
+        let meta: WorldStateMeta
+        let frames: [WorldStateFrame]
+    }
+
+    private struct DerivedTileDraft {
+        var tile: WorldStateTile
+        let center: SIMD3<Float>
+        let normal: SIMD3<Float>
+        let size: Float
+    }
+
+    private final class WorldStateRecorder {
+        private var frames: [RawWorldStateFrame] = []
+        private var firstTimestamp: TimeInterval?
+
+        func reset() {
+            frames.removeAll(keepingCapacity: false)
+            firstTimestamp = nil
+        }
+
+        func snapshot() -> [RawWorldStateFrame] {
+            frames
+        }
+
+        func recordFrame(
+            frameIndex: Int,
+            timestamp: TimeInterval,
+            coverage: Float,
+            cameraIntrinsics: simd_float3x3?,
+            renderData: PipelineCoordinatorBridge.RenderData?
+        ) {
+            if firstTimestamp == nil {
+                firstTimestamp = timestamp
+            }
+            let baseTimestamp = firstTimestamp ?? timestamp
+            let timestampS = max(0.0, timestamp - baseTimestamp)
+            frames.append(
+                RawWorldStateFrame(
+                    frameIndex: frameIndex,
+                    timestampS: timestampS,
+                    coverage: Double(max(0.0, min(1.0, coverage))),
+                    cameraIntrinsics: cameraIntrinsics,
+                    tiles: ScanViewModel.extractRawWorldStateTiles(from: renderData)
+                )
+            )
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // MARK: - Initialization
@@ -180,6 +314,500 @@ final class ScanViewModel: ObservableObject {
         }
     }
 
+    // MARK: - World-State Export Helpers
+
+    nonisolated private static func extractRawWorldStateTiles(
+        from renderData: PipelineCoordinatorBridge.RenderData?
+    ) -> [RawWorldStateTile] {
+        #if canImport(CAetherNativeBridge)
+        guard let renderData, renderData.overlayCount > 0, let overlayVertices = renderData.overlayVertices else {
+            return []
+        }
+        let vertexPointer = overlayVertices.bindMemory(
+            to: aether_overlay_vertex_t.self,
+            capacity: renderData.overlayCount
+        )
+        let vertices = UnsafeBufferPointer(start: vertexPointer, count: renderData.overlayCount)
+        return vertices.map { vertex in
+            RawWorldStateTile(
+                center: SIMD3<Float>(vertex.position.0, vertex.position.1, vertex.position.2),
+                normal: SIMD3<Float>(vertex.normal.0, vertex.normal.1, vertex.normal.2),
+                size: vertex.size,
+                quality: vertex.quality
+            )
+        }
+        #else
+        _ = renderData
+        return []
+        #endif
+    }
+
+    nonisolated private static func sampleSurfacePoints(
+        from renderData: PipelineCoordinatorBridge.RenderData?
+    ) -> [SIMD3<Float>] {
+        #if canImport(CAetherNativeBridge)
+        guard let renderData,
+              renderData.pointCloudCount > 0,
+              let pointCloudVertices = renderData.pointCloudVertices else {
+            return []
+        }
+        let floatsPerPoint = 8
+        let totalFloats = renderData.pointCloudCount * floatsPerPoint
+        let pointPointer = pointCloudVertices.bindMemory(
+            to: Float.self,
+            capacity: totalFloats
+        )
+        let values = UnsafeBufferPointer(start: pointPointer, count: totalFloats)
+        let step = max(1, renderData.pointCloudCount / worldStateSurfaceMaxPoints)
+        var points: [SIMD3<Float>] = []
+        points.reserveCapacity(max(1, renderData.pointCloudCount / step))
+        var index = 0
+        while index < renderData.pointCloudCount {
+            let base = index * floatsPerPoint
+            let alpha = values[base + 7]
+            let point = SIMD3<Float>(values[base + 0], values[base + 1], values[base + 2])
+            if alpha > 0.0001,
+               point.x.isFinite,
+               point.y.isFinite,
+               point.z.isFinite {
+                points.append(point)
+            }
+            index += step
+        }
+        return points
+        #else
+        _ = renderData
+        return []
+        #endif
+    }
+
+    nonisolated private static func makeWorldStateExport(
+        sceneID: String,
+        frames: [RawWorldStateFrame],
+        surfacePoints: [SIMD3<Float>]
+    ) -> WorldStateExport {
+        let surfaceIndex = buildSurfaceIndex(from: surfacePoints)
+        var seenCounts: [String: Int] = [:]
+        let exportedFrames = frames.map { frame in
+            WorldStateFrame(
+                frame_index: frame.frameIndex,
+                timestamp_s: frame.timestampS,
+                coverage: frame.coverage,
+                tiles: deriveWorldStateTiles(
+                    from: frame.tiles,
+                    seenCounts: &seenCounts,
+                    surfaceIndex: surfaceIndex
+                )
+            )
+        }
+        return WorldStateExport(
+            version: worldStateSchemaVersion,
+            meta: WorldStateMeta(
+                scene_id: sceneID,
+                cell_level: 0,
+                notes: "Derived from Aether overlay vertices. Tile state is a monotonic visibility-persistence proxy. Surface fields are approximated from the exported point cloud at capture stop."
+            ),
+            frames: exportedFrames
+        )
+    }
+
+    nonisolated private static func deriveWorldStateTiles(
+        from rawTiles: [RawWorldStateTile],
+        seenCounts: inout [String: Int],
+        surfaceIndex: SurfaceIndex?
+    ) -> [WorldStateTile] {
+        guard !rawTiles.isEmpty else { return [] }
+
+        var drafts: [DerivedTileDraft] = []
+        drafts.reserveCapacity(rawTiles.count)
+
+        for rawTile in rawTiles {
+            let normalizedNormal = normalize(rawTile.normal)
+            let cell = overlayCellIndices(for: rawTile.center)
+            let cellKey = packOverlayCellKey(gx: cell.gx, gy: cell.gy, gz: cell.gz)
+            let cellID = "spatial:\(cellKey)|grid:\(cell.gx):\(cell.gy):\(cell.gz)"
+            let tileID = "tile:\(cellKey)"
+            let seenCount = (seenCounts[tileID] ?? 0) + 1
+            seenCounts[tileID] = seenCount
+
+            let corners = tileCorners(
+                center: rawTile.center,
+                normal: normalizedNormal,
+                halfSize: rawTile.size
+            )
+            let uv = planeGridCoordinates(for: rawTile.center, normal: normalizedNormal)
+            let surfaceMetrics = deriveSurfaceMetrics(
+                center: rawTile.center,
+                corners: corners,
+                normal: normalizedNormal,
+                surfaceIndex: surfaceIndex
+            )
+            drafts.append(
+                DerivedTileDraft(
+                    tile: WorldStateTile(
+                        tile_id: tileID,
+                        cell_id: cellID,
+                        state: worldState(forVisibilitySamples: seenCount),
+                        visible: true,
+                        center: vectorArray(rawTile.center),
+                        normal: vectorArray(normalizedNormal),
+                        corners: corners.map(vectorArray),
+                        u: uv.u,
+                        v: uv.v,
+                        neighbors: [],
+                        surface_center_distance_mm: surfaceMetrics.centerDistanceMM,
+                        surface_normal_dot: surfaceMetrics.normalDot,
+                        surface_corner_support: surfaceMetrics.cornerSupport
+                    ),
+                    center: rawTile.center,
+                    normal: normalizedNormal,
+                    size: rawTile.size
+                )
+            )
+        }
+
+        var neighborsByIndex = Array(repeating: [WorldStateNeighbor](), count: drafts.count)
+        for i in 0..<drafts.count {
+            for j in (i + 1)..<drafts.count {
+                guard let gapMm = sideGapIfAdjacent(lhs: drafts[i], rhs: drafts[j]) else {
+                    continue
+                }
+                neighborsByIndex[i].append(
+                    WorldStateNeighbor(tile_id: drafts[j].tile.tile_id, gap_mm: gapMm)
+                )
+                neighborsByIndex[j].append(
+                    WorldStateNeighbor(tile_id: drafts[i].tile.tile_id, gap_mm: gapMm)
+                )
+            }
+        }
+
+        for index in drafts.indices {
+            drafts[index].tile = WorldStateTile(
+                tile_id: drafts[index].tile.tile_id,
+                cell_id: drafts[index].tile.cell_id,
+                state: drafts[index].tile.state,
+                visible: drafts[index].tile.visible,
+                center: drafts[index].tile.center,
+                normal: drafts[index].tile.normal,
+                corners: drafts[index].tile.corners,
+                u: drafts[index].tile.u,
+                v: drafts[index].tile.v,
+                neighbors: neighborsByIndex[index].sorted { lhs, rhs in
+                    if lhs.gap_mm == rhs.gap_mm {
+                        return lhs.tile_id < rhs.tile_id
+                    }
+                    return lhs.gap_mm < rhs.gap_mm
+                },
+                surface_center_distance_mm: drafts[index].tile.surface_center_distance_mm,
+                surface_normal_dot: drafts[index].tile.surface_normal_dot,
+                surface_corner_support: drafts[index].tile.surface_corner_support
+            )
+        }
+
+        return drafts.map(\.tile)
+    }
+
+    nonisolated private static func worldState(forVisibilitySamples seenCount: Int) -> String {
+        if seenCount >= worldStateLockedSamples {
+            return "locked"
+        }
+        if seenCount >= worldStateConfirmedSamples {
+            return "confirmed"
+        }
+        return "provisional"
+    }
+
+    nonisolated private static func overlayCellIndices(for position: SIMD3<Float>) -> (gx: Int, gy: Int, gz: Int) {
+        (
+            gx: Int(floor(position.x / worldStateGridCell)),
+            gy: Int(floor(position.y / worldStateGridCell)),
+            gz: Int(floor(position.z / worldStateGridCell))
+        )
+    }
+
+    nonisolated private static func surfaceCellIndices(for position: SIMD3<Float>) -> (gx: Int, gy: Int, gz: Int) {
+        (
+            gx: Int(floor(position.x / worldStateSurfaceCell)),
+            gy: Int(floor(position.y / worldStateSurfaceCell)),
+            gz: Int(floor(position.z / worldStateSurfaceCell))
+        )
+    }
+
+    nonisolated private static func packOverlayCellKey(gx: Int, gy: Int, gz: Int) -> Int64 {
+        let ox = Int64(gx + 2048)
+        let oy = Int64(gy + 2048)
+        let oz = Int64(gz + 2048)
+        return (ox << 24) ^ (oy << 12) ^ oz
+    }
+
+    nonisolated private static func buildSurfaceIndex(from points: [SIMD3<Float>]) -> SurfaceIndex? {
+        guard !points.isEmpty else { return nil }
+        var buckets: [Int64: [Int]] = [:]
+        buckets.reserveCapacity(max(64, points.count / 6))
+        for (index, point) in points.enumerated() {
+            let cell = surfaceCellIndices(for: point)
+            let key = packOverlayCellKey(gx: cell.gx, gy: cell.gy, gz: cell.gz)
+            buckets[key, default: []].append(index)
+        }
+        return SurfaceIndex(points: points, buckets: buckets)
+    }
+
+    nonisolated private static func candidateSurfaceIndices(
+        around query: SIMD3<Float>,
+        surfaceIndex: SurfaceIndex,
+        maxRings: Int = worldStateSurfaceSearchRings
+    ) -> [Int] {
+        let cell = surfaceCellIndices(for: query)
+        for ring in 0...maxRings {
+            var indices: [Int] = []
+            for gx in (cell.gx - ring)...(cell.gx + ring) {
+                for gy in (cell.gy - ring)...(cell.gy + ring) {
+                    for gz in (cell.gz - ring)...(cell.gz + ring) {
+                        let key = packOverlayCellKey(gx: gx, gy: gy, gz: gz)
+                        if let bucket = surfaceIndex.buckets[key] {
+                            indices.append(contentsOf: bucket)
+                        }
+                    }
+                }
+            }
+            if !indices.isEmpty {
+                return indices
+            }
+        }
+        return []
+    }
+
+    nonisolated private static func nearestSurfaceDistance(
+        to query: SIMD3<Float>,
+        surfaceIndex: SurfaceIndex
+    ) -> Float? {
+        let indices = candidateSurfaceIndices(around: query, surfaceIndex: surfaceIndex)
+        guard !indices.isEmpty else { return nil }
+        var best = Float.greatestFiniteMagnitude
+        for idx in indices {
+            let distance = simd_length(surfaceIndex.points[idx] - query)
+            if distance < best {
+                best = distance
+            }
+        }
+        return best.isFinite ? best : nil
+    }
+
+    nonisolated private static func localSurfaceNormalDot(
+        center: SIMD3<Float>,
+        tileNormal: SIMD3<Float>,
+        surfaceIndex: SurfaceIndex
+    ) -> Double? {
+        let indices = candidateSurfaceIndices(around: center, surfaceIndex: surfaceIndex, maxRings: 3)
+        guard !indices.isEmpty else { return nil }
+        let radius = worldStateSurfaceNormalRadius
+        var neighbors: [SIMD3<Float>] = []
+        neighbors.reserveCapacity(32)
+        for idx in indices {
+            let point = surfaceIndex.points[idx]
+            if simd_length(point - center) <= radius {
+                neighbors.append(point)
+            }
+        }
+        if neighbors.count < 3 {
+            let sorted = indices
+                .map { surfaceIndex.points[$0] }
+                .sorted { simd_length($0 - center) < simd_length($1 - center) }
+            neighbors = Array(sorted.prefix(8))
+        }
+        guard neighbors.count >= 3 else { return nil }
+        let estimated = estimatePlaneNormal(from: neighbors, preferredNormal: tileNormal)
+        let dot = simd_dot(normalize(estimated), normalize(tileNormal))
+        return Double(max(-1.0, min(1.0, dot)))
+    }
+
+    nonisolated private static func estimatePlaneNormal(
+        from points: [SIMD3<Float>],
+        preferredNormal: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        let count = Float(points.count)
+        let centroid = points.reduce(SIMD3<Float>(repeating: 0), +) / count
+        var cxx: Float = 0
+        var cxy: Float = 0
+        var cxz: Float = 0
+        var cyy: Float = 0
+        var cyz: Float = 0
+        var czz: Float = 0
+        for point in points {
+            let d = point - centroid
+            cxx += d.x * d.x
+            cxy += d.x * d.y
+            cxz += d.x * d.z
+            cyy += d.y * d.y
+            cyz += d.y * d.z
+            czz += d.z * d.z
+        }
+        let scale = 1.0 / max(1.0, count - 1.0)
+        var matrix = [
+            [cxx * scale, cxy * scale, cxz * scale],
+            [cxy * scale, cyy * scale, cyz * scale],
+            [cxz * scale, cyz * scale, czz * scale]
+        ]
+        var eigenvectors = [
+            [Float(1), Float(0), Float(0)],
+            [Float(0), Float(1), Float(0)],
+            [Float(0), Float(0), Float(1)]
+        ]
+        for _ in 0..<12 {
+            var p = 0
+            var q = 1
+            var maxValue = abs(matrix[0][1])
+            for i in 0..<3 {
+                for j in (i + 1)..<3 {
+                    let value = abs(matrix[i][j])
+                    if value > maxValue {
+                        maxValue = value
+                        p = i
+                        q = j
+                    }
+                }
+            }
+            if maxValue < 1e-6 {
+                break
+            }
+            let phi = 0.5 * atan2(2.0 * matrix[p][q], matrix[q][q] - matrix[p][p])
+            let c = cos(phi)
+            let s = sin(phi)
+            for i in 0..<3 {
+                let mip = matrix[i][p]
+                let miq = matrix[i][q]
+                matrix[i][p] = c * mip - s * miq
+                matrix[i][q] = s * mip + c * miq
+            }
+            for j in 0..<3 {
+                let mpj = matrix[p][j]
+                let mqj = matrix[q][j]
+                matrix[p][j] = c * mpj - s * mqj
+                matrix[q][j] = s * mpj + c * mqj
+            }
+            matrix[p][q] = 0
+            matrix[q][p] = 0
+            for i in 0..<3 {
+                let vip = eigenvectors[i][p]
+                let viq = eigenvectors[i][q]
+                eigenvectors[i][p] = c * vip - s * viq
+                eigenvectors[i][q] = s * vip + c * viq
+            }
+        }
+        let eigenvalues = [matrix[0][0], matrix[1][1], matrix[2][2]]
+        let minIndex = eigenvalues.enumerated().min { lhs, rhs in lhs.element < rhs.element }?.offset ?? 0
+        var normal = SIMD3<Float>(
+            eigenvectors[0][minIndex],
+            eigenvectors[1][minIndex],
+            eigenvectors[2][minIndex]
+        )
+        normal = normalize(normal)
+        if simd_dot(normal, preferredNormal) < 0 {
+            normal = -normal
+        }
+        return normal
+    }
+
+    nonisolated private static func deriveSurfaceMetrics(
+        center: SIMD3<Float>,
+        corners: [SIMD3<Float>],
+        normal: SIMD3<Float>,
+        surfaceIndex: SurfaceIndex?
+    ) -> (centerDistanceMM: Double?, normalDot: Double?, cornerSupport: [Bool]?) {
+        guard let surfaceIndex else {
+            return (nil, nil, nil)
+        }
+        let centerDistance = nearestSurfaceDistance(to: center, surfaceIndex: surfaceIndex)
+        let centerDistanceMM = centerDistance.map { Double($0 * 1000.0) }
+        let supportThreshold = worldStateSurfaceSupportThresholdMM / 1000.0
+        let cornerSupport = corners.map { corner in
+            guard let distance = nearestSurfaceDistance(to: corner, surfaceIndex: surfaceIndex) else {
+                return false
+            }
+            return distance <= supportThreshold
+        }
+        let normalDot = localSurfaceNormalDot(center: center, tileNormal: normal, surfaceIndex: surfaceIndex)
+        return (centerDistanceMM, normalDot, cornerSupport)
+    }
+
+    nonisolated private static func normalize(_ vector: SIMD3<Float>) -> SIMD3<Float> {
+        let length = simd_length(vector)
+        if length > 1e-6 {
+            return vector / length
+        }
+        return SIMD3<Float>(0.0, 1.0, 0.0)
+    }
+
+    nonisolated private static func buildTileBasis(normal: SIMD3<Float>) -> (tangent: SIMD3<Float>, bitangent: SIMD3<Float>) {
+        let up = abs(normal.y) < 0.9
+            ? SIMD3<Float>(0.0, 1.0, 0.0)
+            : SIMD3<Float>(1.0, 0.0, 0.0)
+        let tangent = normalize(simd_cross(up, normal))
+        let bitangent = normalize(simd_cross(normal, tangent))
+        return (tangent, bitangent)
+    }
+
+    nonisolated private static func tileCorners(
+        center: SIMD3<Float>,
+        normal: SIMD3<Float>,
+        halfSize: Float
+    ) -> [SIMD3<Float>] {
+        let basis = buildTileBasis(normal: normal)
+        let tangent = basis.tangent
+        let bitangent = basis.bitangent
+        let signs: [(Float, Float)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        return signs.map { sign in
+            center + sign.0 * halfSize * tangent + sign.1 * halfSize * bitangent
+        }
+    }
+
+    nonisolated private static func planeGridCoordinates(
+        for center: SIMD3<Float>,
+        normal: SIMD3<Float>
+    ) -> (u: Int, v: Int) {
+        let absNormal = SIMD3<Float>(abs(normal.x), abs(normal.y), abs(normal.z))
+        if absNormal.y >= absNormal.x && absNormal.y >= absNormal.z {
+            return (Int(floor(center.x / worldStateGridCell)), Int(floor(center.z / worldStateGridCell)))
+        }
+        if absNormal.x >= absNormal.y && absNormal.x >= absNormal.z {
+            return (Int(floor(center.z / worldStateGridCell)), Int(floor(center.y / worldStateGridCell)))
+        }
+        return (Int(floor(center.x / worldStateGridCell)), Int(floor(center.y / worldStateGridCell)))
+    }
+
+    nonisolated private static func sideGapIfAdjacent(lhs: DerivedTileDraft, rhs: DerivedTileDraft) -> Double? {
+        let normalDot = simd_dot(lhs.normal, rhs.normal)
+        if normalDot < 0.85 {
+            return nil
+        }
+        let centerDistance = simd_length(lhs.center - rhs.center)
+        if centerDistance > 0.11 {
+            return nil
+        }
+
+        let avgNormal = normalize(lhs.normal + rhs.normal)
+        let basis = buildTileBasis(normal: avgNormal)
+        let delta = rhs.center - lhs.center
+        let du = abs(simd_dot(delta, basis.tangent))
+        let dv = abs(simd_dot(delta, basis.bitangent))
+        let halfSum = lhs.size + rhs.size
+
+        let nu = du / worldStateGridCell
+        let nv = dv / worldStateGridCell
+        let err10 = hypotf(nu - 1.0, nv)
+        let err01 = hypotf(nu, nv - 1.0)
+        if min(err10, err01) >= 0.30 {
+            return nil
+        }
+        let axisSeparation = err10 <= err01 ? du : dv
+        let gapMm = Double(max(0.0, axisSeparation - halfSum) * 1000.0)
+        return gapMm
+    }
+
+    nonisolated private static func vectorArray(_ vector: SIMD3<Float>) -> [Double] {
+        [Double(vector.x), Double(vector.y), Double(vector.z)]
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // MARK: - State Machine Transitions
     // ═══════════════════════════════════════════════════════════════════════
@@ -198,21 +826,29 @@ final class ScanViewModel: ObservableObject {
 
         switch (oldState, newState) {
         case (_, .ready):
-            // Pre-load C++ coordinator (CoreML models) while user sees camera.
-            // By the time user taps capture, models are loaded → instant TSDF.
-            initializeCoordinatorIfNeeded()
+            liveGuidanceTitle = "可以开始拍摄了"
+            liveGuidanceDetail = "围绕物体缓慢移动，先拍正面，再补侧面和顶部。"
+            scanFailureMessage = nil
+            sessionPauseMessage = nil
+            // Pre-load the selected backend coordinator while the user frames the shot.
+            initializeCoordinatorIfNeeded(processingBackend: selectedProcessingBackend)
 
         case (_, .capturing):
             isCapturing = true
             captureStartTime = captureStartTime ?? Date()
+            sessionPauseMessage = nil
+            scanFailureMessage = nil
             startElapsedTimer()
 
         case (.capturing, .paused):
             isCapturing = false
+            sessionPauseMessage = sessionPauseMessage ?? "扫描已暂停。你可以继续拍摄，也可以直接结束生成。"
             stopElapsedTimer()
 
         case (_, .finishing):
             isCapturing = false
+            liveGuidanceTitle = "正在整理扫描结果"
+            liveGuidanceDetail = "稍后会直接进入远端训练与 3DGS 回传。"
             stopElapsedTimer()
             NotificationCenter.default.post(name: .scanDidComplete, object: nil)
 
@@ -222,12 +858,17 @@ final class ScanViewModel: ObservableObject {
 
         case (_, .failed):
             isCapturing = false
+            if scanFailureMessage == nil {
+                scanFailureMessage = "扫描流程中断了，请回到主页重新开始。"
+            }
             stopElapsedTimer()
             resetSubsystems()
 
         default:
             break
         }
+
+        refreshCaptureGuidance()
     }
 
     func executeScanActionPlan(_ plan: ScanActionPlan) {
@@ -242,17 +883,66 @@ final class ScanViewModel: ObservableObject {
     // MARK: - User Actions
     // ═══════════════════════════════════════════════════════════════════════
 
-    func startCapture() {
-        initializeCoordinatorIfNeeded()  // no-op if already started in .ready
+    func prepareCapture(processingBackend: ProcessingBackendChoice) {
+        selectedProcessingBackend = processingBackend
+
+        // If the user switched backend before starting capture, discard the old
+        // coordinator so the next preload/recording path uses the correct profile.
+        if let currentBackend = self.activeCoordinatorBackend,
+           currentBackend != processingBackend,
+           coordinatorBridge != nil,
+           !isInitializingCoordinator {
+            teardownCoordinatorAsync()
+            debugBridgeReady = false
+            self.activeCoordinatorBackend = nil
+        }
+
+        if scanState == .ready {
+            initializeCoordinatorIfNeeded(processingBackend: processingBackend)
+        }
+    }
+
+    func startCapture(processingBackend: ProcessingBackendChoice) {
+        prepareCapture(processingBackend: processingBackend)
+        initializeCoordinatorIfNeeded(processingBackend: processingBackend)  // no-op if already started in .ready
+        worldStateRecorder.reset()
+        prepareRemoteVideoRecorderIfNeeded()
+        backgroundExportStatusMessage = nil
+        coordinatorNotReady = false
+        scanFailureMessage = nil
+        let waitForCoordinatorBeforeCapture =
+            processingBackend == .localPreview &&
+            (coordinatorBridge == nil || isInitializingCoordinator)
+        if waitForCoordinatorBeforeCapture {
+            pendingCaptureStartAfterCoordinatorReady = true
+            refreshCaptureGuidance()
+            return
+        }
+        pendingCaptureStartAfterCoordinatorReady = false
         transition(to: .capturing)
     }
 
     func pauseCapture() {
+        sessionPauseMessage = "扫描已暂停。你可以继续拍摄，也可以直接结束生成。"
         transition(to: .paused)
     }
 
     func resumeCapture() {
+        sessionPauseMessage = nil
         transition(to: .capturing)
+    }
+
+    func handleSessionInterrupted() {
+        pauseCapture()
+        sessionPauseMessage = "系统中断了当前拍摄，已自动暂停。"
+        refreshCaptureGuidance()
+    }
+
+    func handleSessionFailure(_ message: String) {
+        scanFailureMessage = message
+        if scanState.allowedTransitions.contains(.failed) {
+            transition(to: .failed)
+        }
     }
 
     /// Signal pipeline to finish scanning (non-blocking, no export).
@@ -283,6 +973,8 @@ final class ScanViewModel: ObservableObject {
         let bridge = coordinatorBridge
         let coverage = coveragePercent
         let duration = elapsedTime
+        let recordId = UUID()
+        let worldStateFrames = worldStateRecorder.snapshot()
 
         // If coordinator never loaded (still initializing), skip export entirely.
         // No frames were processed → nothing to export → no 3D viewer possible.
@@ -293,6 +985,7 @@ final class ScanViewModel: ObservableObject {
             return ScanRecord(
                 id: UUID(), name: nil, createdAt: Date(),
                 thumbnailPath: nil, artifactPath: nil,
+                captureIntent: nil,
                 coveragePercentage: 0, triangleCount: 0,
                 durationSeconds: duration)
         }
@@ -313,7 +1006,6 @@ final class ScanViewModel: ObservableObject {
                   bridge?.isGPUTraining == true ? "YES" : "NO")
 
             // Export PLY
-            let recordId = UUID()
             var artifactPath: String?
 
             let documents = FileManager.default.urls(
@@ -325,6 +1017,15 @@ final class ScanViewModel: ObservableObject {
                 at: exportDir, withIntermediateDirectories: true)
 
             let plyURL = exportDir.appendingPathComponent("\(recordId.uuidString).ply")
+            let surfaceSamples = {
+                let copied = bridge?.copySurfacePoints(
+                    maxPoints: Int(ScanViewModel.worldStateSurfaceMaxPoints)
+                ) ?? []
+                if !copied.isEmpty {
+                    return copied
+                }
+                return ScanViewModel.sampleSurfacePoints(from: bridge?.getRenderData())
+            }()
             NSLog("[Aether3D] Attempting exportPLY to: %@", plyURL.path)
             if bridge?.exportPLY(path: plyURL.path) == true {
                 artifactPath = "exports/\(recordId.uuidString).ply"
@@ -339,9 +1040,30 @@ final class ScanViewModel: ObservableObject {
                 }
             }
 
+            if !worldStateFrames.isEmpty {
+                let worldStateURL = exportDir.appendingPathComponent("\(recordId.uuidString).world_state.json")
+                do {
+                    let exportPayload = ScanViewModel.makeWorldStateExport(
+                        sceneID: recordId.uuidString,
+                        frames: worldStateFrames,
+                        surfacePoints: surfaceSamples
+                    )
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    let data = try encoder.encode(exportPayload)
+                    try data.write(to: worldStateURL, options: .atomic)
+                    NSLog("[Aether3D] ✅ Exported world-state JSON: %@", worldStateURL.path)
+                } catch {
+                    NSLog("[Aether3D] ❌ Failed to export world-state JSON: %@", String(describing: error))
+                }
+            } else {
+                NSLog("[Aether3D] World-state recorder empty; skipping JSON export")
+            }
+
             return ScanRecord(
                 id: recordId, name: nil, createdAt: Date(),
                 thumbnailPath: nil, artifactPath: artifactPath,
+                captureIntent: nil,
                 coveragePercentage: Double(coverage), triangleCount: 0,
                 durationSeconds: duration)
         }.value
@@ -374,12 +1096,13 @@ final class ScanViewModel: ObservableObject {
         pixelBuffer: CVPixelBuffer? = nil,
         cameraIntrinsics: simd_float3x3? = nil,
         lidarDepthBuffer: CVPixelBuffer? = nil,
-        featureCloud: ARPointCloud? = nil
+        featurePoints: [SIMD3<Float>]? = nil
     ) {
         guard scanState.isActive else { return }
         frameCounter += 1
         debugFrameCount = frameCounter
         debugBridgeReady = (coordinatorBridge != nil)
+        appendRemoteVideoFrame(pixelBuffer: pixelBuffer, timestamp: timestamp)
 
         // Update coordinator init elapsed time while waiting
         if isInitializingCoordinator && coordinatorInitStartTime > 0 {
@@ -397,17 +1120,26 @@ final class ScanViewModel: ObservableObject {
         if shouldForwardToPipeline {
             // DAv2 depth inference now handled by C++ PipelineCoordinator internally.
             // Swift passes ne_depth=nil; C++ runs async Neural Engine inference itself.
+            // When DAv2 is not yet ready, C++ VIO fallback uses ARKit feature points
+            // (metric scale from IMU — VINGS-Mono approach) for immediate TSDF coverage.
 
-            debugPipelineFrameCount += 1
+            // Only count frames ACTUALLY forwarded to a live coordinator.
+            // Previous bug: counter incremented even when coordinatorBridge==nil
+            // (coordinator still loading CoreML models), making "管线" count misleading.
+            if coordinatorBridge != nil {
+                debugPipelineFrameCount += 1
+            }
 
-            // Forward frame to C++ coordinator (includes CIContext conversion)
+            // Forward frame to C++ coordinator (includes CIContext conversion).
+            // LiDAR provides metric depth (meters) when available (LiDAR devices).
+            // Non-LiDAR: C++ uses DAv2 + ARKit VIO feature-point affine calibration.
             forwardFrameToCoordinator(
                 cameraTransform: stabilizedTransform,
                 timestamp: timestamp,
                 pixelBuffer: pixelBuffer,
                 cameraIntrinsics: cameraIntrinsics,
                 lidarDepthBuffer: lidarDepthBuffer,
-                featureCloud: featureCloud
+                featurePoints: featurePoints
             )
         }
 
@@ -422,13 +1154,10 @@ final class ScanViewModel: ObservableObject {
             debugIsGPUTraining = coordinatorBridge?.isGPUTraining ?? false
             debugHasS6Quality = snapshot.has_s6_quality != 0
 
-            // 区域化训练状态 (破镜重圆)
-            debugRegionTotal = Int(snapshot.training_region_total)
-            debugRegionCompleted = Int(snapshot.training_region_completed)
-            debugActiveRegionId = snapshot.active_region_id == 0xFFFF ? -1 : Int(snapshot.active_region_id)
-            debugActiveRegionProgress = snapshot.active_region_progress
-            debugIsAnimating = snapshot.is_animating != 0
-            debugStagedCount = Int(snapshot.staged_count)
+            // 全局训练状态
+            debugNumGaussians = Int(snapshot.num_gaussians)
+            debugAssignedBlocks = Int(snapshot.assigned_blocks)
+            debugPendingGaussians = Int(snapshot.pending_gaussian_count)
         }
 
         if let progress = coordinatorBridge?.trainingProgress() {
@@ -447,6 +1176,9 @@ final class ScanViewModel: ObservableObject {
         let velocity = extractMotionMagnitude(from: stabilizedTransform, timestamp: timestamp)
         let feedbackTimestamp = ProcessInfo.processInfo.systemUptime
         let tier = thermalAdapter.currentTier
+        latestMotionSpeedMps = velocity
+        motionWarningActive = velocity > 0.7
+        stabilityWarningActive = lastPoseQuality < Self.poseMinimumAcceptedQuality
 
         // 0.7 m/s — inlined from former ScanGuidanceConstants.hapticMotionThreshold
         if tier.enableHaptics && velocity > 0.7 {
@@ -459,6 +1191,8 @@ final class ScanViewModel: ObservableObject {
 
         if let lightEstimate {
             let ambientIntensity = lightEstimate.ambientIntensity
+            latestAmbientIntensity = ambientIntensity
+            exposureWarningActive = ambientIntensity < 250.0 || ambientIntensity > 5000.0
             if tier.enableHaptics && (ambientIntensity < 250.0 || ambientIntensity > 5000.0) {
                 _ = hapticEngine.fire(
                     pattern: .exposureAbnormal,
@@ -466,9 +1200,19 @@ final class ScanViewModel: ObservableObject {
                     toastPresenter: toastPresenter
                 )
             }
+        } else {
+            latestAmbientIntensity = 0.0
+            exposureWarningActive = false
         }
 
+        refreshCaptureGuidance()
+
         // ─── Every frame: Update Metal render pipeline (smooth 60fps overlay) ───
+        var renderDataForFrame: PipelineCoordinatorBridge.RenderData?
+        #if canImport(CAetherNativeBridge)
+        renderDataForFrame = coordinatorBridge?.getRenderData()
+        #endif
+
         #if canImport(Metal) && canImport(CAetherNativeBridge)
         if let pipeline = renderPipeline,
            let vm = viewMatrix,
@@ -479,7 +1223,7 @@ final class ScanViewModel: ObservableObject {
             let vpW: Float = pixelBuffer.map { Float(CVPixelBufferGetWidth($0)) } ?? 1920
             let vpH: Float = pixelBuffer.map { Float(CVPixelBufferGetHeight($0)) } ?? 1080
 
-            if let renderData = coordinatorBridge?.getRenderData() {
+            if let renderData = renderDataForFrame {
                 // ── Full pipeline: C++ → triple buffer → Metal ──
                 pipeline.update(
                     pointCloudVertices: renderData.pointCloudVertices,
@@ -508,6 +1252,14 @@ final class ScanViewModel: ObservableObject {
             // Camera feed is shown cleanly; C++ pipeline overlay appears once ready.
         }
         #endif
+
+        worldStateRecorder.recordFrame(
+            frameIndex: max(0, frameCounter - 1),
+            timestamp: timestamp,
+            coverage: coveragePercent,
+            cameraIntrinsics: cameraIntrinsics,
+            renderData: renderDataForFrame
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -524,18 +1276,28 @@ final class ScanViewModel: ObservableObject {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Result of background coordinator creation (Sendable for cross-isolation transfer).
-    private struct CoordinatorHandles: @unchecked Sendable {
+    struct CoordinatorHandles: @unchecked Sendable {
         let gpuDevice: OpaquePointer
         let splatEngine: OpaquePointer
         let bridge: PipelineCoordinatorBridge?
     }
 
+    private final class CoordinatorTeardownBox: @unchecked Sendable {
+        var bridge: PipelineCoordinatorBridge?
+
+        init(_ bridge: PipelineCoordinatorBridge?) {
+            self.bridge = bridge
+        }
+    }
+
     /// Create coordinator handles on any thread (no MainActor requirement).
     /// CoreML model loading (~10-30s) happens here — MUST be off-main.
-    private nonisolated static func createCoordinatorHandles() -> CoordinatorHandles? {
+    nonisolated static func createCoordinatorHandles(
+        processingBackend: ProcessingBackendChoice
+    ) -> CoordinatorHandles? {
         #if canImport(CAetherNativeBridge) && canImport(Metal)
         let t0 = CFAbsoluteTimeGetCurrent()
-        NSLog("[Aether3D] Coordinator: starting creation...")
+        NSLog("[Aether3D] Coordinator: starting creation for backend=%@", processingBackend.rawValue)
 
         // Step 1: Metal device
         guard let mtlDevice = MTLCreateSystemDefaultDevice() else {
@@ -567,9 +1329,13 @@ final class ScanViewModel: ObservableObject {
         NSLog("[Aether3D] Coordinator Step 3/4: Splat engine OK (%.1fs)", CFAbsoluteTimeGetCurrent() - t0)
 
         // Step 4: Pipeline coordinator bridge (CoreML model loading — slowest step)
+        let profile: PipelineCoordinatorProfile = processingBackend == .localPreview
+            ? .localPreviewMonocular
+            : .cloudDefault
         let bridge = PipelineCoordinatorBridge(
             gpuDevicePtr: UnsafeMutableRawPointer(gpuDevice),
-            splatEnginePtr: UnsafeMutableRawPointer(engine)
+            splatEnginePtr: UnsafeMutableRawPointer(engine),
+            profile: profile
         )
         NSLog("[Aether3D] Coordinator Step 4/4: Bridge=%@ (%.1fs total)", bridge != nil ? "OK" : "FAILED", CFAbsoluteTimeGetCurrent() - t0)
 
@@ -579,27 +1345,59 @@ final class ScanViewModel: ObservableObject {
         #endif
     }
 
+    nonisolated static func destroyCoordinatorHandles(_ handles: CoordinatorHandles) {
+        #if canImport(CAetherNativeBridge) && canImport(Metal)
+        let teardown = CoordinatorTeardownBox(handles.bridge)
+        let engine = handles.splatEngine
+        let device = handles.gpuDevice
+        DispatchQueue.global(qos: .utility).async {
+            // Tear down the coordinator first so its training thread can stop
+            // and join while the Metal engine/device are still alive.
+            teardown.bridge = nil
+            aether_splat_engine_destroy(engine)
+            aether_gpu_device_destroy(device)
+        }
+        #else
+        _ = handles
+        #endif
+    }
+
     /// Lazily initialize the C++ PipelineCoordinator on first capture start.
     /// Heavy work (CoreML model loading: 10-30s) runs on background thread
     /// to avoid blocking the main thread (button/timer UI).
     /// Frames are dropped until coordinator is ready (camera feed still shows).
-    private func initializeCoordinatorIfNeeded() {
+    private func initializeCoordinatorIfNeeded(
+        processingBackend: ProcessingBackendChoice
+    ) {
         #if canImport(CAetherNativeBridge) && canImport(Metal)
+        if let activeCoordinatorBackend,
+           activeCoordinatorBackend == processingBackend,
+           coordinatorBridge != nil {
+            return
+        }
         guard coordinatorBridge == nil, !isInitializingCoordinator else { return }
         isInitializingCoordinator = true
         let initStartTime = CFAbsoluteTimeGetCurrent()
         coordinatorInitStartTime = initStartTime
-        NSLog("[Aether3D] initializeCoordinatorIfNeeded: launching background creation...")
+        NSLog(
+            "[Aether3D] initializeCoordinatorIfNeeded: launching background creation for backend=%@...",
+            processingBackend.rawValue
+        )
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let handles = Self.createCoordinatorHandles()
+            let handles = Self.createCoordinatorHandles(processingBackend: processingBackend)
             await MainActor.run { [weak self] in
                 let elapsed = CFAbsoluteTimeGetCurrent() - initStartTime
                 guard let self else {
                     if let h = handles {
-                        _ = h.bridge
-                        aether_splat_engine_destroy(h.splatEngine)
-                        aether_gpu_device_destroy(h.gpuDevice)
+                        let teardown = CoordinatorTeardownBox(h.bridge)
+                        let engine = h.splatEngine
+                        let device = h.gpuDevice
+                        DispatchQueue.global(qos: .utility).async {
+                            teardown.bridge = nil
+                            aether_splat_engine_destroy(engine)
+                            aether_gpu_device_destroy(device)
+                        }
                     }
                     NSLog("[Aether3D] Coordinator: ViewModel deallocated during init (%.1fs)", elapsed)
                     return
@@ -616,11 +1414,11 @@ final class ScanViewModel: ObservableObject {
                         NSLog("[Aether3D] Coordinator: scan already ended (state=%@), discarding (%.1fs)",
                               "\(self.scanState)", elapsed)
                         // Destroy on background to avoid blocking MainActor
-                        let bridge = h.bridge
+                        let teardown = CoordinatorTeardownBox(h.bridge)
                         let engine = h.splatEngine
                         let device = h.gpuDevice
                         DispatchQueue.global(qos: .utility).async {
-                            _ = bridge  // triggers deinit → thread joins
+                            teardown.bridge = nil
                             aether_splat_engine_destroy(engine)
                             aether_gpu_device_destroy(device)
                         }
@@ -639,8 +1437,21 @@ final class ScanViewModel: ObservableObject {
                 self.gpuDeviceHandle = h.gpuDevice
                 self.splatEngineHandle = h.splatEngine
                 self.coordinatorBridge = bridge
+                self.activeCoordinatorBackend = processingBackend
                 self.debugBridgeReady = true
-                NSLog("[Aether3D] Pipeline coordinator READY (%.1fs elapsed)", elapsed)
+                NSLog(
+                    "[Aether3D] Pipeline coordinator READY backend=%@ (%.1fs elapsed)",
+                    processingBackend.rawValue,
+                    elapsed
+                )
+                if self.pendingCaptureStartAfterCoordinatorReady &&
+                    processingBackend == .localPreview &&
+                    self.scanState == .ready {
+                    self.pendingCaptureStartAfterCoordinatorReady = false
+                    self.transition(to: .capturing)
+                } else {
+                    self.refreshCaptureGuidance()
+                }
             }
         }
         #endif
@@ -726,7 +1537,7 @@ final class ScanViewModel: ObservableObject {
         pixelBuffer: CVPixelBuffer?,
         cameraIntrinsics: simd_float3x3?,
         lidarDepthBuffer: CVPixelBuffer? = nil,
-        featureCloud: ARPointCloud? = nil
+        featurePoints: [SIMD3<Float>]? = nil
     ) {
         #if canImport(CAetherNativeBridge) && canImport(CoreVideo) && canImport(CoreImage)
         guard let bridge = coordinatorBridge, let pixelBuffer = pixelBuffer else {
@@ -746,7 +1557,7 @@ final class ScanViewModel: ObservableObject {
         // Flatten ARKit feature points on main thread (needs ARPointCloud access).
         var features: [Float] = []
         let featureCount: UInt32
-        if let pts = featureCloud?.points, !pts.isEmpty {
+        if let pts = featurePoints, !pts.isEmpty {
             let maxPts = min(pts.count, 512)
             features.reserveCapacity(maxPts * 3)
             for i in 0..<maxPts {
@@ -772,10 +1583,14 @@ final class ScanViewModel: ObservableObject {
         )
 
         // Dispatch heavy work (CIContext conversion + C++ enqueue) to serial queue.
+        // CRITICAL: Use autoreleasepool to ensure CVPixelBuffer references are
+        // released promptly. Without this, ARKit's pixel buffer pool exhausts
+        // and ARSession complains about "retaining 11+ ARFrames".
         frameForwardQueue.async { [weak self] in
             guard let self else { return }
             defer { self.isForwardingFrame = false }
 
+            autoreleasepool {
             // Convert YCbCr → BGRA (GPU-accelerated, now off main thread)
             guard let bgraPixelBuffer = self.convertToBGRA(payload.pixelBuffer.buffer) else { return }
 
@@ -824,6 +1639,7 @@ final class ScanViewModel: ObservableObject {
                     thermalState: payload.thermalState
                 )
             }
+            } // autoreleasepool — releases CVPixelBuffer refs immediately
         }
         #endif
     }
@@ -833,37 +1649,731 @@ final class ScanViewModel: ObservableObject {
         _ = coordinatorBridge?.requestEnhance(iterations: iterations)
     }
 
+    /// Poll training/snapshot state without a live AR frame.
+    /// Used by viewer waiting screen after capture stops.
+    func refreshTrainingStatusFromCoordinator() {
+        #if canImport(CAetherNativeBridge)
+        guard let bridge = coordinatorBridge else { return }
+
+        if let snapshot = bridge.getSnapshot() {
+            coveragePercent = snapshot.coverage
+            trainingProgress = snapshot.training_progress
+            trainingActive = snapshot.training_active != 0
+            debugSelectedFrames = Int(snapshot.selected_frames)
+            debugMinFramesNeeded = Int(snapshot.min_frames_needed)
+            debugIsGPUTraining = bridge.isGPUTraining
+            debugHasS6Quality = snapshot.has_s6_quality != 0
+            debugNumGaussians = Int(snapshot.num_gaussians)
+            debugAssignedBlocks = Int(snapshot.assigned_blocks)
+            debugPendingGaussians = Int(snapshot.pending_gaussian_count)
+        }
+
+        if let progress = bridge.trainingProgress() {
+            if progress.total_steps > 0 {
+                trainingProgress = Float(progress.step) / Float(progress.total_steps)
+            }
+            debugTrainingStep = Int(progress.step)
+            debugTotalSteps = Int(progress.total_steps)
+            debugLoss = progress.loss
+        }
+        #endif
+    }
+
     /// Export trained 3DGS to PLY file.
     func exportTrainedPLY(to path: String) -> Bool {
         return coordinatorBridge?.exportPLY(path: path) ?? false
     }
 
+    #if canImport(AVFoundation)
+    private func prepareRemoteVideoRecorderIfNeeded() {
+        let outputURL = Self.exportDirectoryURL()
+            .appendingPathComponent("remote_inputs", isDirectory: true)
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        remoteVideoRecorder?.cancel()
+        remoteVideoRecorder = ARFrameVideoRecorder(outputURL: outputURL)
+    }
+
+    private func appendRemoteVideoFrame(pixelBuffer: CVPixelBuffer?, timestamp: TimeInterval) {
+        guard let pixelBuffer else { return }
+        remoteVideoRecorder?.appendFrame(pixelBuffer: pixelBuffer, timestamp: timestamp)
+    }
+    #else
+    private func prepareRemoteVideoRecorderIfNeeded() {}
+    private func appendRemoteVideoFrame(pixelBuffer: CVPixelBuffer?, timestamp: TimeInterval) {}
+    #endif
+
+    nonisolated private static func exportDirectoryURL() -> URL {
+        let documents = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask)[0]
+        return documents
+            .appendingPathComponent("Aether3D")
+            .appendingPathComponent("exports")
+    }
+
+    nonisolated private static func importsDirectoryURL() -> URL {
+        let documents = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask)[0]
+        return documents
+            .appendingPathComponent("Aether3D")
+            .appendingPathComponent("imports")
+    }
+
+    nonisolated static func relativeArtifactPath(for recordId: UUID) -> String {
+        "exports/\(recordId.uuidString).ply"
+    }
+
+    nonisolated private static func relativeSourceVideoPath(for recordId: UUID, fileExtension: String) -> String {
+        "imports/\(recordId.uuidString).\(fileExtension)"
+    }
+
+    nonisolated private static func status(for stage: GenerateProgressStage) -> ScanRecordStatus {
+        switch stage {
+        case .preparing:
+            return .preparing
+        case .uploading:
+            return .uploading
+        case .queued:
+            return .queued
+        case .reconstructing:
+            return .reconstructing
+        case .training:
+            return .training
+        case .packaging:
+            return .packaging
+        case .downloading:
+            return .downloading
+        case .localFallback:
+            return .localFallback
+        case .completed:
+            return .completed
+        case .failed:
+            return .failed
+        }
+    }
+
+    nonisolated private static func failureDetail(for reason: FailReason) -> String {
+        switch reason {
+        case .networkTimeout, .timeout:
+            return "远端等待超时了。你可以稍后重试，或先返回主页继续别的作品。"
+        case .uploadFailed:
+            return "视频上传没有完成，请检查网络后再试。"
+        case .downloadFailed:
+            return "远端已经生成了结果，但回传到手机时失败了。"
+        case .apiError, .apiNotConfigured:
+            return "丹麦 5090 当前不可用，请稍后重试。"
+        case .inputInvalid:
+            return "这段视频暂时不适合进入当前白盒流程，请换一个角度更完整的视频。"
+        case .outOfMemory:
+            return "远端显存不足，建议缩短视频或降低场景复杂度后重试。"
+        case .stalledProcessing:
+            return "远端长时间没有推进，这次任务已经被停止。"
+        case .jobTimeout, .invalidResponse, .unknownError:
+            return "远端返回了异常结果，请稍后重试。"
+        }
+    }
+
+    private func applyProgressSnapshot(_ snapshot: GenerateProgressSnapshot) {
+        backgroundExportStatusMessage = snapshot.title
+        if let progress = snapshot.progressFraction {
+            trainingProgress = Float(max(0.0, min(1.0, progress)))
+        }
+        trainingActive = snapshot.stage != .completed && snapshot.stage != .failed
+    }
+
+    #if canImport(AVFoundation)
+    nonisolated private static func persistSourceVideoIfNeeded(
+        from temporaryURL: URL,
+        recordId: UUID
+    ) -> (relativePath: String, persistedURL: URL)? {
+        let importsDirectory = importsDirectoryURL()
+        do {
+            try FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
+            let ext = temporaryURL.pathExtension.isEmpty ? "mp4" : temporaryURL.pathExtension.lowercased()
+            let targetURL = importsDirectory.appendingPathComponent("\(recordId.uuidString).\(ext)")
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                try FileManager.default.removeItem(at: targetURL)
+            }
+            if temporaryURL.path != targetURL.path {
+                try FileManager.default.moveItem(at: temporaryURL, to: targetURL)
+            }
+            return (relativeSourceVideoPath(for: recordId, fileExtension: ext), targetURL)
+        } catch {
+            NSLog("[Aether3D] Failed to persist source video: %@", String(describing: error))
+            return nil
+        }
+    }
+    #endif
+
+    #if canImport(AVFoundation) && canImport(UIKit)
+    nonisolated private static func makeThumbnailData(for videoURL: URL) -> Data? {
+        let asset = AVURLAsset(url: videoURL)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+            return nil
+        }
+        let image = UIImage(cgImage: cgImage)
+        return image.jpegData(compressionQuality: 0.82)
+    }
+    #endif
+
+    private struct CaptureIntrinsicsSidecar: Codable {
+        let version: String
+        let fx: Float
+        let fy: Float
+        let cx: Float
+        let cy: Float
+    }
+
+    nonisolated private static func representativeCaptureIntrinsics(
+        from frames: [RawWorldStateFrame]
+    ) -> simd_float3x3? {
+        let valid = frames.compactMap(\.cameraIntrinsics).filter {
+            $0[0][0].isFinite && $0[1][1].isFinite &&
+            $0[0][2].isFinite && $0[1][2].isFinite &&
+            $0[0][0] > 1.0 && $0[1][1] > 1.0
+        }
+        guard !valid.isEmpty else { return nil }
+
+        let count = Float(valid.count)
+        let fx = valid.reduce(0.0) { $0 + $1[0][0] } / count
+        let fy = valid.reduce(0.0) { $0 + $1[1][1] } / count
+        let cx = valid.reduce(0.0) { $0 + $1[0][2] } / count
+        let cy = valid.reduce(0.0) { $0 + $1[1][2] } / count
+
+        return simd_float3x3(
+            SIMD3<Float>(fx, 0, 0),
+            SIMD3<Float>(0, fy, 0),
+            SIMD3<Float>(cx, cy, 1)
+        )
+    }
+
+    nonisolated private static func persistSourceVideoIntrinsicsIfAvailable(
+        for recordId: UUID,
+        worldStateFrames: [RawWorldStateFrame]
+    ) {
+        guard let intrinsics = representativeCaptureIntrinsics(from: worldStateFrames) else {
+            return
+        }
+
+        let sidecarURL = importsDirectoryURL().appendingPathComponent("\(recordId.uuidString).intrinsics.json")
+        let payload = CaptureIntrinsicsSidecar(
+            version: "aether_capture_intrinsics_v1",
+            fx: intrinsics[0][0],
+            fy: intrinsics[1][1],
+            cx: intrinsics[0][2],
+            cy: intrinsics[1][2]
+        )
+
+        do {
+            let data = try JSONEncoder().encode(payload)
+            try data.write(to: sidecarURL, options: .atomic)
+            NSLog("[Aether3D] ✅ Persisted live capture intrinsics sidecar → %@", sidecarURL.path)
+        } catch {
+            NSLog("[Aether3D] ❌ Failed to persist live capture intrinsics sidecar: %@", String(describing: error))
+        }
+    }
+
+    nonisolated static func writeWorldStateIfAvailable(
+        recordId: UUID,
+        exportDir: URL,
+        worldStateFrames: [RawWorldStateFrame],
+        surfaceSamples: [SIMD3<Float>]
+    ) {
+        guard !worldStateFrames.isEmpty else {
+            NSLog("[Aether3D] Background export: world-state recorder empty; skipping JSON export")
+            return
+        }
+
+        let worldStateURL = exportDir.appendingPathComponent("\(recordId.uuidString).world_state.json")
+        do {
+            let exportPayload = makeWorldStateExport(
+                sceneID: recordId.uuidString,
+                frames: worldStateFrames,
+                surfacePoints: surfaceSamples
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(exportPayload)
+            try data.write(to: worldStateURL, options: .atomic)
+            NSLog("[Aether3D] ✅ Background export: world-state JSON → %@", worldStateURL.path)
+        } catch {
+            NSLog("[Aether3D] ❌ Background export: world-state JSON failed: %@", String(describing: error))
+        }
+    }
+
     /// Start background export (non-blocking — viewer navigates immediately).
     /// Training continues → exports PLY when ready → updates ScanRecord artifact path.
-    func startBackgroundExport(recordId: UUID) {
+    func startBackgroundExport(
+        recordId: UUID,
+        processingBackend: ProcessingBackendChoice = .cloud
+    ) {
         let bridge = coordinatorBridge
-        let coverage = coveragePercent
+        let worldStateFrames = worldStateRecorder.snapshot()
+        let selectedFrameSamplingProfile = {
+            let store = ScanRecordStore()
+            if let rawValue = store.record(id: recordId)?.frameSamplingProfile,
+               let profile = FrameSamplingProfile(rawValue: rawValue) {
+                return profile
+            }
+            return FrameSamplingProfile.currentSelection()
+        }()
+        #if canImport(AVFoundation)
+        let remoteVideoRecorder = remoteVideoRecorder
+        self.remoteVideoRecorder = nil
+        #endif
 
         Task.detached(priority: .userInitiated) {
-            NSLog("[Aether3D] Background export: waiting for training convergence...")
+            let exportDir = Self.exportDirectoryURL()
+            try? FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
+            let plyURL = exportDir.appendingPathComponent("\(recordId.uuidString).ply")
+            let store = ScanRecordStore()
+            let surfaceSamples = {
+                let copied = bridge?.copySurfacePoints(
+                    maxPoints: Int(ScanViewModel.worldStateSurfaceMaxPoints)
+                ) ?? []
+                if !copied.isEmpty {
+                    return copied
+                }
+                return ScanViewModel.sampleSurfacePoints(from: bridge?.getRenderData())
+            }()
 
-            // Wait for training (up to 60s — user is already in viewer)
+            #if canImport(AVFoundation)
+            var sourceVideoRelativePath: String?
+            if let temporaryVideoURL = await remoteVideoRecorder?.finish(),
+               let persistedVideo = Self.persistSourceVideoIfNeeded(from: temporaryVideoURL, recordId: recordId) {
+                let persistedSourcePath = persistedVideo.relativePath
+                sourceVideoRelativePath = persistedSourcePath
+                Self.persistSourceVideoIntrinsicsIfAvailable(
+                    for: recordId,
+                    worldStateFrames: worldStateFrames
+                )
+
+                #if canImport(UIKit)
+                if let thumbnailData = Self.makeThumbnailData(for: persistedVideo.persistedURL),
+                   let thumbnailPath = store.saveThumbnail(thumbnailData, for: recordId) {
+                    store.updateThumbnailPath(recordId: recordId, thumbnailPath: thumbnailPath)
+                }
+                #endif
+
+                if processingBackend == .cloud {
+                    store.updateProcessingState(
+                        recordId: recordId,
+                        status: .preparing,
+                        statusMessage: "正在准备远端任务",
+                        detailMessage: "会先把本次视频交给后台上传服务，然后由后端调度可用 GPU 开始训练。",
+                        progressFraction: 0.01,
+                        estimatedRemainingMinutes: nil,
+                        sourceVideoPath: persistedSourcePath
+                    )
+                    await MainActor.run {
+                        self.applyProgressSnapshot(
+                            GenerateProgressSnapshot(
+                                stage: .preparing,
+                                progressFraction: 0.01,
+                                title: "正在准备远端任务",
+                                detail: "你可以留在等待页查看，也可以先回主页稍后继续。",
+                                etaMinutes: nil
+                            )
+                        )
+                    }
+
+                    let remoteRunner = PipelineRunner(backend: .productDefault())
+                    let request = BuildRequest(
+                        source: .file(url: persistedVideo.persistedURL),
+                        requestedMode: .enter,
+                        deviceTier: DeviceTier.current(),
+                        frameSamplingProfile: selectedFrameSamplingProfile,
+                        processingBackend: .cloud
+                    )
+                    let remoteResult = await remoteRunner.runGenerate(request: request) { snapshot in
+                        let progressStore = ScanRecordStore()
+                        progressStore.updateProcessingState(
+                            recordId: recordId,
+                            status: Self.status(for: snapshot.stage),
+                            statusMessage: snapshot.title,
+                            detailMessage: snapshot.detail,
+                            progressFraction: snapshot.progressFraction,
+                            progressBasis: snapshot.progressBasis,
+                            remoteStageKey: snapshot.remoteStageKey,
+                            remotePhaseName: snapshot.remotePhaseName,
+                            currentTier: snapshot.currentTier,
+                            runtimeMetrics: snapshot.runtimeMetrics,
+                            uploadedBytes: snapshot.uploadedBytes,
+                            totalBytes: snapshot.totalBytes,
+                            uploadBytesPerSecond: snapshot.uploadBytesPerSecond,
+                            estimatedRemainingMinutes: snapshot.etaMinutes,
+                            sourceVideoPath: persistedSourcePath,
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            remoteJobId: snapshot.remoteJobId
+                        )
+                        await MainActor.run {
+                            self.applyProgressSnapshot(snapshot)
+                        }
+                    }
+
+                    switch remoteResult {
+                    case .success(let artifact, _):
+                        do {
+                            let payload = try Data(contentsOf: artifact.localPath)
+                            try payload.write(to: plyURL, options: .atomic)
+                            Self.writeWorldStateIfAvailable(
+                                recordId: recordId,
+                                exportDir: exportDir,
+                                worldStateFrames: worldStateFrames,
+                                surfaceSamples: surfaceSamples
+                            )
+                            let artifactPath = Self.relativeArtifactPath(for: recordId)
+                            store.updateArtifactPath(recordId: recordId, artifactPath: artifactPath)
+                            await MainActor.run {
+                                self.backgroundExportStatusMessage = "3DGS 已回传到手机"
+                                self.trainingProgress = 1.0
+                                self.trainingActive = false
+                                NSLog("[Aether3D] Background export: remote artifact=%@", artifactPath)
+                            }
+                            return
+                        } catch {
+                            NSLog("[Aether3D] ❌ Background export: remote artifact copy failed: %@", String(describing: error))
+                        }
+                    case .fail(let reason, _):
+                        NSLog("[Aether3D] Background export: remote pipeline failed (%@), falling back to local export", reason.rawValue)
+                        let remoteFailureDetail = store.record(id: recordId)?.detailMessage ?? Self.failureDetail(for: reason)
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .localFallback,
+                            statusMessage: "远端不可用，正在本地兜底",
+                            detailMessage: remoteFailureDetail,
+                            progressFraction: 0.82,
+                            estimatedRemainingMinutes: nil,
+                            sourceVideoPath: sourceVideoRelativePath,
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            failureReason: reason.rawValue
+                        )
+                        await MainActor.run {
+                            self.applyProgressSnapshot(
+                                GenerateProgressSnapshot(
+                                    stage: .localFallback,
+                                    progressFraction: 0.82,
+                                    title: "远端不可用，正在本地兜底",
+                                    detail: "这次会直接退回到手机本地导出。",
+                                    etaMinutes: nil
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    let localPreviewMetrics = LocalPreviewMetricsArchive.runtimeMetrics(
+                        snapshot: bridge?.getSnapshot(),
+                        sourceVideo: persistedSourcePath,
+                        sourceKind: LocalPreviewProductProfile.directCaptureSourceKind(
+                            sourceVideoRelativePath: persistedSourcePath
+                        )
+                    )
+                    store.updateProcessingState(
+                        recordId: recordId,
+                        status: .training,
+                        statusMessage: LocalPreviewWorkflowPhase.refine.title,
+                        detailMessage: "采集结束后会直接在手机上做 bounded refine，再导出本地 preview。",
+                        progressFraction: LocalPreviewWorkflowPhase.refine.startFraction,
+                        progressBasis: LocalPreviewWorkflowPhase.refine.progressBasis,
+                        remoteStageKey: "local_preview",
+                        remotePhaseName: LocalPreviewWorkflowPhase.refine.phaseName,
+                        runtimeMetrics: localPreviewMetrics,
+                        estimatedRemainingMinutes: nil,
+                        sourceVideoPath: persistedSourcePath,
+                        frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                        clearRemoteJobId: true
+                    )
+                    await MainActor.run {
+                        self.applyProgressSnapshot(
+                            GenerateProgressSnapshot(
+                                stage: .training,
+                                progressFraction: LocalPreviewWorkflowPhase.refine.startFraction,
+                                progressBasis: LocalPreviewWorkflowPhase.refine.progressBasis,
+                                remoteStageKey: "local_preview",
+                                remotePhaseName: LocalPreviewWorkflowPhase.refine.phaseName,
+                                title: LocalPreviewWorkflowPhase.refine.title,
+                                detail: "这次不会走云端，而是直接使用手机上的单目 preview 链路。",
+                                etaMinutes: nil,
+                                runtimeMetrics: localPreviewMetrics
+                            )
+                        )
+                    }
+
+                    guard let bridge else {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .failed,
+                            statusMessage: "本地快速预览没有启动成功",
+                            detailMessage: "本地协调器没有准备好，这次无法继续生成 preview。",
+                            progressFraction: LocalPreviewWorkflowPhase.refine.startFraction,
+                            progressBasis: LocalPreviewWorkflowPhase.refine.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: LocalPreviewWorkflowPhase.refine.phaseName,
+                            runtimeMetrics: localPreviewMetrics,
+                            estimatedRemainingMinutes: nil,
+                            sourceVideoPath: persistedSourcePath,
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            failureReason: "local_preview_bridge_missing"
+                        )
+                        await MainActor.run {
+                            self.backgroundExportStatusMessage = "本地预览失败"
+                            self.trainingActive = false
+                        }
+                        return
+                    }
+
+                    let applyPersistedLocalPreviewPhase: @MainActor @Sendable (LocalPreviewPhaseUpdate) -> Void = { update in
+                        let phaseStore = ScanRecordStore()
+                        phaseStore.updateProcessingState(
+                            recordId: recordId,
+                            status: update.phase == .export ? ScanRecordStatus.packaging : ScanRecordStatus.training,
+                            statusMessage: update.title,
+                            detailMessage: update.detail,
+                            progressFraction: update.progressFraction,
+                            progressBasis: update.phase.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: update.phase.phaseName,
+                            runtimeMetrics: update.runtimeMetrics,
+                            estimatedRemainingMinutes: nil,
+                            sourceVideoPath: persistedSourcePath,
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            clearRemoteJobId: true
+                        )
+                    }
+
+                    let localResult = LocalPreviewCaptureRunner.execute(
+                        recordId: recordId,
+                        bridge: bridge,
+                        exportDir: exportDir,
+                        plyURL: plyURL,
+                        worldStateFrames: worldStateFrames,
+                        surfaceSamples: surfaceSamples,
+                        sourceVideoRelativePath: persistedSourcePath,
+                        onPhaseUpdate: { update in
+                            Task { @MainActor in
+                                applyPersistedLocalPreviewPhase(update)
+                            }
+                        }
+                    )
+
+                    if localResult.exported, let artifactPath = localResult.artifactRelativePath {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .completed,
+                            statusMessage: "本地快速预览已生成",
+                            detailMessage: localResult.detailMessage,
+                            progressFraction: 1.0,
+                            progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
+                            runtimeMetrics: localResult.runtimeMetrics,
+                            estimatedRemainingMinutes: 0,
+                            sourceVideoPath: persistedSourcePath,
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            clearRemoteJobId: true
+                        )
+                        store.updateArtifactPath(recordId: recordId, artifactPath: artifactPath)
+                        await MainActor.run {
+                            self.backgroundExportStatusMessage = "本地导出完成"
+                            self.trainingProgress = 1.0
+                            self.trainingActive = false
+                            NSLog("[Aether3D] Background export: local preview artifact=%@", artifactPath)
+                        }
+                    } else {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .failed,
+                            statusMessage: "本地导出失败了",
+                            detailMessage: localResult.detailMessage,
+                            progressFraction: 0.92,
+                            progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
+                            runtimeMetrics: localResult.runtimeMetrics,
+                            estimatedRemainingMinutes: nil,
+                            sourceVideoPath: persistedSourcePath,
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            failureReason: "local_export_failed"
+                        )
+                        await MainActor.run {
+                            self.backgroundExportStatusMessage = "导出失败"
+                            self.trainingActive = false
+                        }
+                    }
+                    return
+                }
+            } else {
+                if processingBackend == .cloud {
+                    store.updateProcessingState(
+                        recordId: recordId,
+                        status: .localFallback,
+                        statusMessage: "没有拿到可用视频，正在本地兜底",
+                        detailMessage: "本次不会上传远端，会直接退回手机本地导出。",
+                        progressFraction: 0.80,
+                        estimatedRemainingMinutes: nil,
+                        frameSamplingProfile: selectedFrameSamplingProfile.rawValue
+                    )
+                    await MainActor.run {
+                        self.applyProgressSnapshot(
+                            GenerateProgressSnapshot(
+                                stage: .localFallback,
+                                progressFraction: 0.80,
+                                title: "正在本地兜底",
+                                detail: "远端视频没有准备成功，这次会直接在手机端导出结果。",
+                                etaMinutes: nil
+                            )
+                        )
+                    }
+                } else {
+                    let localPreviewMetrics = LocalPreviewMetricsArchive.runtimeMetrics(
+                        snapshot: bridge?.getSnapshot(),
+                        sourceVideo: "memory_only",
+                        sourceKind: LocalPreviewProductProfile.directCaptureSourceKind(
+                            sourceVideoRelativePath: "memory_only"
+                        )
+                    )
+                    store.updateProcessingState(
+                        recordId: recordId,
+                        status: .training,
+                        statusMessage: LocalPreviewWorkflowPhase.refine.title,
+                        detailMessage: "这次会继续使用手机内存里的训练状态直接导出 preview。",
+                        progressFraction: LocalPreviewWorkflowPhase.refine.startFraction,
+                        progressBasis: LocalPreviewWorkflowPhase.refine.progressBasis,
+                        remoteStageKey: "local_preview",
+                        remotePhaseName: LocalPreviewWorkflowPhase.refine.phaseName,
+                        runtimeMetrics: localPreviewMetrics,
+                        estimatedRemainingMinutes: nil,
+                        frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                        clearRemoteJobId: true
+                    )
+                    await MainActor.run {
+                        self.applyProgressSnapshot(
+                            GenerateProgressSnapshot(
+                                stage: .training,
+                                progressFraction: LocalPreviewWorkflowPhase.refine.startFraction,
+                                progressBasis: LocalPreviewWorkflowPhase.refine.progressBasis,
+                                remoteStageKey: "local_preview",
+                                remotePhaseName: LocalPreviewWorkflowPhase.refine.phaseName,
+                                title: LocalPreviewWorkflowPhase.refine.title,
+                                detail: "源视频没有落盘，但本地训练状态还在，会继续导出 preview。",
+                                etaMinutes: nil,
+                                runtimeMetrics: localPreviewMetrics
+                            )
+                        )
+                    }
+
+                    guard let bridge else {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .failed,
+                            statusMessage: "本地快速预览没有启动成功",
+                            detailMessage: "本地协调器没有准备好，这次无法继续生成 preview。",
+                            progressFraction: LocalPreviewWorkflowPhase.refine.startFraction,
+                            progressBasis: LocalPreviewWorkflowPhase.refine.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: LocalPreviewWorkflowPhase.refine.phaseName,
+                            runtimeMetrics: localPreviewMetrics,
+                            estimatedRemainingMinutes: nil,
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            failureReason: "local_preview_bridge_missing"
+                        )
+                        await MainActor.run {
+                            self.backgroundExportStatusMessage = "本地预览失败"
+                            self.trainingActive = false
+                        }
+                        return
+                    }
+
+                    let applyMemoryOnlyLocalPreviewPhase: @MainActor @Sendable (LocalPreviewPhaseUpdate) -> Void = { update in
+                        let phaseStore = ScanRecordStore()
+                        phaseStore.updateProcessingState(
+                            recordId: recordId,
+                            status: update.phase == .export ? ScanRecordStatus.packaging : ScanRecordStatus.training,
+                            statusMessage: update.title,
+                            detailMessage: update.detail,
+                            progressFraction: update.progressFraction,
+                            progressBasis: update.phase.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: update.phase.phaseName,
+                            runtimeMetrics: update.runtimeMetrics,
+                            estimatedRemainingMinutes: nil,
+                            sourceVideoPath: "memory_only",
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            clearRemoteJobId: true
+                        )
+                    }
+
+                    let localResult = LocalPreviewCaptureRunner.execute(
+                        recordId: recordId,
+                        bridge: bridge,
+                        exportDir: exportDir,
+                        plyURL: plyURL,
+                        worldStateFrames: worldStateFrames,
+                        surfaceSamples: surfaceSamples,
+                        sourceVideoRelativePath: "memory_only",
+                        onPhaseUpdate: { update in
+                            Task { @MainActor in
+                                applyMemoryOnlyLocalPreviewPhase(update)
+                            }
+                        }
+                    )
+
+                    if localResult.exported, let artifactPath = localResult.artifactRelativePath {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .completed,
+                            statusMessage: "本地快速预览已生成",
+                            detailMessage: localResult.detailMessage,
+                            progressFraction: 1.0,
+                            progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
+                            runtimeMetrics: localResult.runtimeMetrics,
+                            estimatedRemainingMinutes: 0,
+                            sourceVideoPath: "memory_only",
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            clearRemoteJobId: true
+                        )
+                        store.updateArtifactPath(recordId: recordId, artifactPath: artifactPath)
+                        await MainActor.run {
+                            self.backgroundExportStatusMessage = "本地导出完成"
+                            self.trainingProgress = 1.0
+                            self.trainingActive = false
+                            NSLog("[Aether3D] Background export: local preview artifact=%@", artifactPath)
+                        }
+                    } else {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .failed,
+                            statusMessage: "本地导出失败了",
+                            detailMessage: localResult.detailMessage,
+                            progressFraction: 0.92,
+                            progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
+                            remoteStageKey: "local_preview",
+                            remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
+                            runtimeMetrics: localResult.runtimeMetrics,
+                            estimatedRemainingMinutes: nil,
+                            sourceVideoPath: "memory_only",
+                            frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                            failureReason: "local_export_failed"
+                        )
+                        await MainActor.run {
+                            self.backgroundExportStatusMessage = "导出失败"
+                            self.trainingActive = false
+                        }
+                    }
+                    return
+                }
+            }
+            #endif
+
+            NSLog("[Aether3D] Background export: waiting for local training convergence...")
             let stepsReached = bridge?.waitForTraining(
                 minSteps: 500, timeoutSeconds: 60.0) ?? 0
-            NSLog("[Aether3D] Background export: training reached %d steps", stepsReached)
+            NSLog("[Aether3D] Background export: local training reached %d steps", stepsReached)
 
-            // Export PLY
-            let documents = FileManager.default.urls(
-                for: .documentDirectory, in: .userDomainMask)[0]
-            let exportDir = documents
-                .appendingPathComponent("Aether3D")
-                .appendingPathComponent("exports")
-            try? FileManager.default.createDirectory(
-                at: exportDir, withIntermediateDirectories: true)
-
-            let plyURL = exportDir.appendingPathComponent("\(recordId.uuidString).ply")
-            var exported = false
-
+            let exported: Bool
             if bridge?.exportPLY(path: plyURL.path) == true {
                 exported = true
                 NSLog("[Aether3D] ✅ Background export: trained PLY → %@", plyURL.path)
@@ -871,16 +2381,76 @@ final class ScanViewModel: ObservableObject {
                 exported = true
                 NSLog("[Aether3D] ✅ Background export: point cloud fallback PLY → %@", plyURL.path)
             } else {
+                exported = false
                 NSLog("[Aether3D] ❌ Background export: both exports failed")
             }
 
-            // Update record with artifact path
+            Self.writeWorldStateIfAvailable(
+                recordId: recordId,
+                exportDir: exportDir,
+                worldStateFrames: worldStateFrames,
+                surfaceSamples: surfaceSamples
+            )
+
             if exported {
-                let artifactPath = "exports/\(recordId.uuidString).ply"
+                let localPreviewMetrics = LocalPreviewMetricsArchive.runtimeMetrics(
+                    snapshot: bridge?.getSnapshot(),
+                    sourceVideo: sourceVideoRelativePath ?? "memory_only",
+                    exported: true,
+                    sourceKind: LocalPreviewProductProfile.directCaptureSourceKind(
+                        sourceVideoRelativePath: sourceVideoRelativePath ?? "memory_only"
+                    )
+                )
+                store.updateProcessingState(
+                    recordId: recordId,
+                    status: .completed,
+                    statusMessage: "本地快速预览已生成",
+                    detailMessage: "现在可以进入黑色 3D 空间自由查看",
+                    progressFraction: 1.0,
+                    progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
+                    remoteStageKey: "local_preview",
+                    remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
+                    runtimeMetrics: localPreviewMetrics,
+                    estimatedRemainingMinutes: 0,
+                    sourceVideoPath: sourceVideoRelativePath,
+                    frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                    clearRemoteJobId: true
+                )
+                let artifactPath = Self.relativeArtifactPath(for: recordId)
+                store.updateArtifactPath(recordId: recordId, artifactPath: artifactPath)
                 await MainActor.run {
-                    var store = ScanRecordStore()
-                    store.updateArtifactPath(recordId: recordId, artifactPath: artifactPath)
+                    self.backgroundExportStatusMessage = "本地导出完成"
+                    self.trainingProgress = 1.0
+                    self.trainingActive = false
                     NSLog("[Aether3D] Background export: record updated with artifact=%@", artifactPath)
+                }
+            } else {
+                let localPreviewMetrics = LocalPreviewMetricsArchive.runtimeMetrics(
+                    snapshot: bridge?.getSnapshot(),
+                    sourceVideo: sourceVideoRelativePath ?? "memory_only",
+                    exported: false,
+                    sourceKind: LocalPreviewProductProfile.directCaptureSourceKind(
+                        sourceVideoRelativePath: sourceVideoRelativePath ?? "memory_only"
+                    )
+                )
+                store.updateProcessingState(
+                    recordId: recordId,
+                    status: .failed,
+                    statusMessage: "本地导出失败了",
+                    detailMessage: "这次没有拿到可用的 3DGS 结果，请重新拍一轮。",
+                    progressFraction: 0.92,
+                    progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
+                    remoteStageKey: "local_preview",
+                    remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
+                    runtimeMetrics: localPreviewMetrics,
+                    estimatedRemainingMinutes: nil,
+                    sourceVideoPath: sourceVideoRelativePath,
+                    frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
+                    failureReason: "local_export_failed"
+                )
+                await MainActor.run {
+                    self.backgroundExportStatusMessage = "导出失败"
+                    self.trainingActive = false
                 }
             }
         }
@@ -962,6 +2532,57 @@ final class ScanViewModel: ObservableObject {
         ))
     }
 
+    private func refreshCaptureGuidance() {
+        switch scanState {
+        case .initializing:
+            liveGuidanceTitle = "正在启动扫描环境"
+            liveGuidanceDetail = "第一次进入会做相机和本地引擎准备，请保持手机稳定。"
+        case .ready:
+            if pendingCaptureStartAfterCoordinatorReady || isInitializingCoordinator {
+                liveGuidanceTitle = "相机已就绪，扫描引擎仍在加载"
+                liveGuidanceDetail = "本地预览引擎准备好后会自动开始计时和扫描，请先稳住构图。"
+            } else {
+                liveGuidanceTitle = "可以开始拍摄了"
+                liveGuidanceDetail = "先拍正面，再缓慢绕到侧面和顶部，尽量让物体始终留在画面里。"
+            }
+        case .capturing:
+            if motionWarningActive {
+                liveGuidanceTitle = "移动有点快"
+                liveGuidanceDetail = "请放慢绕拍速度，尽量保持稳定，让远端更容易重建相机轨迹。"
+            } else if exposureWarningActive {
+                liveGuidanceTitle = "当前光线不太理想"
+                liveGuidanceDetail = "尽量避免过暗、过曝和强烈背光，让物体表面纹理更清楚。"
+            } else if stabilityWarningActive {
+                liveGuidanceTitle = "请再稳一点"
+                liveGuidanceDetail = "短暂停一下再继续，让姿态稳定器更快收敛。"
+            } else if coveragePercent < 0.20 {
+                liveGuidanceTitle = "先建立正面覆盖"
+                liveGuidanceDetail = "保持适中距离，围绕物体缓慢横向移动，先把主体正面拍完整。"
+            } else if coveragePercent < 0.45 {
+                liveGuidanceTitle = "继续补侧面"
+                liveGuidanceDetail = "现在可以沿着侧面继续绕拍，避免只在一个方向停留太久。"
+            } else if coveragePercent < 0.75 {
+                liveGuidanceTitle = "补足顶部和背面"
+                liveGuidanceDetail = "轻微抬高视角，补一下顶部、背面和容易漏掉的边角。"
+            } else {
+                liveGuidanceTitle = "覆盖已经不错"
+                liveGuidanceDetail = "再补少量死角就可以结束生成，远端通常还需要 20 到 30 分钟。"
+            }
+        case .paused:
+            liveGuidanceTitle = "扫描已暂停"
+            liveGuidanceDetail = sessionPauseMessage ?? "你可以继续拍摄，也可以直接结束，稍后进入等待页。"
+        case .finishing:
+            liveGuidanceTitle = "正在整理本次拍摄"
+            liveGuidanceDetail = "稍后会自动进入后台上传与远端训练流程，并进入等待页。"
+        case .completed:
+            liveGuidanceTitle = "作品已经准备好"
+            liveGuidanceDetail = "现在可以在黑色空间里自由查看 3DGS。"
+        case .failed:
+            liveGuidanceTitle = "扫描被中断了"
+            liveGuidanceDetail = scanFailureMessage ?? "请返回主页重新开始一次新的拍摄。"
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // MARK: - Motion & Feedback
     // ═══════════════════════════════════════════════════════════════════════
@@ -1027,6 +2648,12 @@ final class ScanViewModel: ObservableObject {
     // ═══════════════════════════════════════════════════════════════════════
 
     private func resetSubsystems() {
+        #if canImport(AVFoundation)
+        remoteVideoRecorder?.cancel()
+        remoteVideoRecorder = nil
+        #endif
+        backgroundExportStatusMessage = nil
+
         // ── 1. Shut down Metal render pipeline (drain semaphore, prevent deadlock) ──
         // Must happen BEFORE coordinator teardown so the MTKView draw loop
         // doesn't block on a semaphore that will never be signaled.
@@ -1045,6 +2672,23 @@ final class ScanViewModel: ObservableObject {
         trainingActive = false
         trainingProgress = 0.0
         coveragePercent = 0.0
+        debugPointCloudCount = 0
+        debugOverlayCount = 0
+        debugSplatCount = 0
+        debugPointCloudAlpha = -1.0
+        debugTrainingStep = 0
+        debugTotalSteps = 0
+        debugLoss = 0.0
+        debugNumGaussians = 0
+        debugAssignedBlocks = 0
+        debugPendingGaussians = 0
+        debugEncodeDrawCount = 0
+        debugEncodeSkipCount = 0
+        debugSelectedFrames = 0
+        debugPipelineFrameCount = 0
+        debugFrameCount = 0
+        debugHasS6Quality = false
+        debugIsGPUTraining = false
         if let stabilizer = poseStabilizer {
             NativePoseStabilizerBridge.reset(stabilizer)
         }
@@ -1052,12 +2696,15 @@ final class ScanViewModel: ObservableObject {
         frameCounter = 0
         lastMotionSample = nil
         isInitializingCoordinator = false
+        pendingCaptureStartAfterCoordinatorReady = false
+        activeCoordinatorBackend = nil
+        worldStateRecorder.reset()
     }
 
     /// Detach C++ coordinator + native handle destruction to a background queue.
     /// Destroy order: coordinator → splatEngine → gpuDevice (each references the next).
     private func teardownCoordinatorAsync() {
-        let bridge = coordinatorBridge
+        let teardown = CoordinatorTeardownBox(coordinatorBridge)
         coordinatorBridge = nil
 
         #if canImport(CAetherNativeBridge) && canImport(Metal)
@@ -1069,16 +2716,179 @@ final class ScanViewModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             // bridge deinit → aether_pipeline_coordinator_destroy → stop_threads → join
             // Releasing bridge forces deallocation at this exact point.
-            _ = bridge  // triggers deinit + thread joins (safe on background queue)
+            teardown.bridge = nil
 
             // Then destroy engine and device (must outlive coordinator)
             if let e = engine { aether_splat_engine_destroy(e.pointer) }
             if let d = device { aether_gpu_device_destroy(d.pointer) }
         }
         #else
-        _ = bridge  // release on current thread (no C++ teardown needed)
+        teardown.bridge = nil
         #endif
     }
 }
+
+#if canImport(AVFoundation) && canImport(CoreVideo)
+private final class ARFrameVideoRecorder: @unchecked Sendable {
+    private let outputURL: URL
+    private let targetFPS: Double
+    private let queue = DispatchQueue(label: "com.aether3d.scan.remote-video-recorder")
+
+    private var writer: AVAssetWriter?
+    private var writerInput: AVAssetWriterInput?
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var didAppendFrame = false
+    private var isFinishing = false
+    private var startTimestamp: TimeInterval?
+    private var lastAppendedPresentationTime: TimeInterval?
+    private var finishContinuations: [CheckedContinuation<URL?, Never>] = []
+
+    init(outputURL: URL, targetFPS: Double = 18.0) {
+        self.outputURL = outputURL
+        self.targetFPS = max(1.0, targetFPS)
+    }
+
+    func appendFrame(pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) {
+        queue.async { [weak self] in
+            guard let self, !self.isFinishing else { return }
+            guard self.prepareWriterIfNeeded(from: pixelBuffer) else { return }
+
+            if self.startTimestamp == nil {
+                self.startTimestamp = timestamp
+                self.writer?.startWriting()
+                self.writer?.startSession(atSourceTime: .zero)
+            }
+
+            let baseTimestamp = self.startTimestamp ?? timestamp
+            let presentationSeconds = max(0.0, timestamp - baseTimestamp)
+            let minStep = 1.0 / self.targetFPS
+            if let last = self.lastAppendedPresentationTime,
+               presentationSeconds - last < minStep {
+                return
+            }
+
+            guard let writerInput = self.writerInput,
+                  let adaptor = self.pixelBufferAdaptor,
+                  writerInput.isReadyForMoreMediaData else {
+                return
+            }
+
+            let presentationTime = CMTime(seconds: presentationSeconds, preferredTimescale: 600)
+            if adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
+                self.didAppendFrame = true
+                self.lastAppendedPresentationTime = presentationSeconds
+            }
+        }
+    }
+
+    func finish() async -> URL? {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                self.finishContinuations.append(continuation)
+                if self.isFinishing {
+                    return
+                }
+                self.isFinishing = true
+
+                guard let writer = self.writer,
+                      let writerInput = self.writerInput,
+                      self.didAppendFrame else {
+                    try? FileManager.default.removeItem(at: self.outputURL)
+                    self.resolveFinishContinuations(with: nil)
+                    return
+                }
+
+                writerInput.markAsFinished()
+                writer.finishWriting { [weak self] in
+                    guard let self else { return }
+                    self.queue.async {
+                        let result: URL?
+                        if writer.status == .completed {
+                            result = self.outputURL
+                        } else {
+                            try? FileManager.default.removeItem(at: self.outputURL)
+                            result = nil
+                        }
+                        self.resolveFinishContinuations(with: result)
+                    }
+                }
+            }
+        }
+    }
+
+    func cancel() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.isFinishing = true
+            self.writerInput?.markAsFinished()
+            self.writer?.cancelWriting()
+            try? FileManager.default.removeItem(at: self.outputURL)
+            self.resolveFinishContinuations(with: nil)
+        }
+    }
+
+    private func prepareWriterIfNeeded(from pixelBuffer: CVPixelBuffer) -> Bool {
+        if writer != nil {
+            return true
+        }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+
+        do {
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                try FileManager.default.removeItem(at: outputURL)
+            }
+
+            let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+            let outputSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: width,
+                AVVideoHeightKey: height,
+            ]
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: outputSettings)
+            input.expectsMediaDataInRealTime = true
+
+            let sourceAttributes: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(pixelFormat),
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height,
+            ]
+            let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: input,
+                sourcePixelBufferAttributes: sourceAttributes
+            )
+
+            guard writer.canAdd(input) else {
+                return false
+            }
+            writer.add(input)
+
+            self.writer = writer
+            self.writerInput = input
+            self.pixelBufferAdaptor = adaptor
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func resolveFinishContinuations(with result: URL?) {
+        let continuations = finishContinuations
+        finishContinuations.removeAll(keepingCapacity: false)
+        continuations.forEach { $0.resume(returning: result) }
+    }
+}
+#endif
 
 #endif

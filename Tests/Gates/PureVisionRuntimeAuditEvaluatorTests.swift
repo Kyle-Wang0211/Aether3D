@@ -76,7 +76,7 @@ final class PureVisionRuntimeAuditEvaluatorTests: XCTestCase {
             durationSeconds: 90,
             metrics: PureVisionRuntimeMetrics(
                 baselinePixels: 10,
-                blurLaplacian: max(200, CoreBlurThresholds.frameRejection + 1),
+                blurLaplacian: max(200, QualityThresholds.laplacianBlurThreshold + 1),
                 orbFeatures: max(500, FrameQualityConstants.MIN_ORB_FEATURES_FOR_SFM + 10),
                 parallaxRatio: max(0.5, PureVisionRuntimeConstants.K_OBS_REQ_PARALLAX_RATIO + 0.01),
                 depthSigmaMeters: max(0.001, PureVisionRuntimeConstants.K_OBS_SIGMA_Z_TARGET_M * 0.5),
@@ -84,8 +84,9 @@ final class PureVisionRuntimeAuditEvaluatorTests: XCTestCase {
                 unknownVoxelRatio: 0.0,
                 thermalCelsius: min(30, ThermalConstants.thermalCriticalC - 1)
             ),
-            guidanceDisplayValue: max(1.0, ScanGuidanceConstants.s4ToS5Threshold + 0.01),
-            softEvidenceValue: max(1.0, ScanGuidanceConstants.s5MinSoftEvidence + 0.01),
+            // Inlined: s4ToS5Threshold = 0.88, s5MinSoftEvidence = 0.75
+            guidanceDisplayValue: max(1.0, 0.88 + 0.01),
+            softEvidenceValue: max(1.0, 0.75 + 0.01),
             replayHashStable: true
         )
 

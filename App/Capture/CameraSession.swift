@@ -49,6 +49,16 @@ struct SelectedCaptureConfig {
 // All time operations must use injected ClockProvider for determinism.
 
 final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
+    private struct CachedFormatSelection {
+        let width: Int32
+        let height: Int32
+        let targetFps: Double
+        let hdrCapable: Bool
+    }
+
+    private static let formatCacheQueue = DispatchQueue(label: "com.aether3d.camera.format-cache")
+    nonisolated(unsafe) private static var cachedFormatSelectionByDeviceID: [String: CachedFormatSelection] = [:]
+
     let captureSession: AVCaptureSession
     private(set) var selectedConfig: SelectedCaptureConfig?
     
@@ -139,54 +149,29 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
             codec: codec
         )
         
-        // Setup session
         captureSession.beginConfiguration()
         defer { captureSession.commitConfiguration() }
-        
-        // Remove existing inputs/outputs
-        for input in captureSession.inputs {
-            captureSession.removeInput(input)
+
+        if !isSessionGraphReusable(for: device) {
+            try rebuildSessionGraph(for: device)
         }
-        for output in captureSession.outputs {
-            captureSession.removeOutput(output)
-        }
-        
-        // Add video input
-        let input = try AVCaptureDeviceInput(device: device)
-        guard captureSession.canAddInput(input) else {
-            throw RecordingError.configurationFailed(.formatSelectionFailed)
-        }
-        captureSession.addInput(input)
-        videoInput = input
-        
+
         // Verify no audio input
         for input in captureSession.inputs {
             guard input.ports.first?.mediaType == .video else {
                 throw RecordingError.configurationFailed(.formatSelectionFailed)
             }
         }
-        
+
         // Disable audio session configuration
         if #available(iOS 13.0, *) {
             captureSession.automaticallyConfiguresApplicationAudioSession = false
         }
-        
-        // Add movie output
-        let output = AVCaptureMovieFileOutput()
-        guard captureSession.canAddOutput(output) else {
-            throw RecordingError.configurationFailed(.formatSelectionFailed)
-        }
-        captureSession.addOutput(output)
-        movieOutput = output
-        
-        // Set output file type
-        output.movieFragmentInterval = .invalid
-        
+
         // Configure video connection orientation
-        if let connection = output.connection(with: .video) {
-            if connection.isVideoOrientationSupported {
-                connection.videoOrientation = orientation
-            }
+        if let connection = movieOutput?.connection(with: .video),
+           connection.isVideoOrientationSupported {
+            connection.videoOrientation = orientation
         }
         
         // Setup focus and exposure
@@ -197,6 +182,48 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
             device.exposureMode = .continuousAutoExposure
         }
     }
+
+    private func isSessionGraphReusable(for device: AVCaptureDevice) -> Bool {
+        guard let videoInput, let movieOutput else {
+            return false
+        }
+
+        guard videoInput.device.uniqueID == device.uniqueID else {
+            return false
+        }
+
+        let hasInstalledInput = captureSession.inputs.contains { input in
+            (input as? AVCaptureDeviceInput)?.device.uniqueID == device.uniqueID
+        }
+        let hasInstalledOutput = captureSession.outputs.contains { output in
+            output === movieOutput
+        }
+        return hasInstalledInput && hasInstalledOutput
+    }
+
+    private func rebuildSessionGraph(for device: AVCaptureDevice) throws {
+        for input in captureSession.inputs {
+            captureSession.removeInput(input)
+        }
+        for output in captureSession.outputs {
+            captureSession.removeOutput(output)
+        }
+
+        let input = try AVCaptureDeviceInput(device: device)
+        guard captureSession.canAddInput(input) else {
+            throw RecordingError.configurationFailed(.formatSelectionFailed)
+        }
+        captureSession.addInput(input)
+        videoInput = input
+
+        let output = AVCaptureMovieFileOutput()
+        guard captureSession.canAddOutput(output) else {
+            throw RecordingError.configurationFailed(.formatSelectionFailed)
+        }
+        captureSession.addOutput(output)
+        output.movieFragmentInterval = .invalid
+        movieOutput = output
+    }
     
     private struct FormatCandidate {
         let format: AVCaptureDevice.Format
@@ -206,6 +233,10 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
     }
     
     private func selectFormat(device: AVCaptureDevice) throws -> FormatCandidate {
+        if let cachedCandidate = cachedFormatCandidate(for: device) {
+            return cachedCandidate
+        }
+
         // Phase 1: Group by resolution tier
         var tierGroups: [ResolutionTier: [AVCaptureDevice.Format]] = [:]
         
@@ -266,6 +297,7 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
             
             // Validate format
             if validateFormat(device: device, candidate: candidate) {
+                cacheFormatCandidate(candidate, for: device)
                 return candidate
             }
         }
@@ -277,37 +309,67 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         do {
             try device.lockForConfiguration()
             defer { device.unlockForConfiguration() }
-            
-            let wasRunning = captureSession.isRunning
+
             let oldFormat = device.activeFormat
             let oldFrameDuration = device.activeVideoMinFrameDuration
-            
+
             device.activeFormat = candidate.format
             device.activeVideoMinFrameDuration = candidate.frameDuration
-            
-            if !wasRunning {
-                captureSession.startRunning()
-                
-                // Wait for session to start (CI-HARDENED: use clock provider)
-                let startTime = clock.now()
-                while !captureSession.isRunning && clock.now().timeIntervalSince(startTime) < CaptureRecordingConstants.sessionRunningCheckMaxSeconds {
-                    Thread.sleep(forTimeInterval: 0.1)
-                }
-            }
-            
-            let isValid = captureSession.isRunning &&
-                          device.activeFormat == candidate.format &&
-                          device.activeVideoMinFrameDuration == candidate.frameDuration
-            
-            if !wasRunning {
-                captureSession.stopRunning()
-                device.activeFormat = oldFormat
-                device.activeVideoMinFrameDuration = oldFrameDuration
-            }
-            
+
+            let isValid =
+                device.activeFormat == candidate.format &&
+                device.activeVideoMinFrameDuration == candidate.frameDuration
+
+            device.activeFormat = oldFormat
+            device.activeVideoMinFrameDuration = oldFrameDuration
+
             return isValid
         } catch {
             return false
+        }
+    }
+
+    private func cachedFormatCandidate(for device: AVCaptureDevice) -> FormatCandidate? {
+        let cachedSelection = Self.formatCacheQueue.sync {
+            Self.cachedFormatSelectionByDeviceID[device.uniqueID]
+        }
+        guard let cachedSelection else { return nil }
+
+        for format in device.formats {
+            let dimensions = format.formatDescription.dimensions
+            guard dimensions.width == cachedSelection.width,
+                  dimensions.height == cachedSelection.height,
+                  format.isVideoHDRSupported == cachedSelection.hdrCapable else {
+                continue
+            }
+
+            for fpsRange in format.videoSupportedFrameRateRanges {
+                if cachedSelection.targetFps >= fpsRange.minFrameRate &&
+                    cachedSelection.targetFps <= fpsRange.maxFrameRate {
+                    let frameDuration = CMTime(value: 1, timescale: Int32(cachedSelection.targetFps))
+                    return FormatCandidate(
+                        format: format,
+                        frameDuration: frameDuration,
+                        targetFps: cachedSelection.targetFps,
+                        score: calculateFormatScore(format: format, fps: cachedSelection.targetFps)
+                    )
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func cacheFormatCandidate(_ candidate: FormatCandidate, for device: AVCaptureDevice) {
+        let dimensions = candidate.format.formatDescription.dimensions
+        let cachedSelection = CachedFormatSelection(
+            width: dimensions.width,
+            height: dimensions.height,
+            targetFps: candidate.targetFps,
+            hdrCapable: candidate.format.isVideoHDRSupported
+        )
+        Self.formatCacheQueue.sync {
+            Self.cachedFormatSelectionByDeviceID[device.uniqueID] = cachedSelection
         }
     }
     
@@ -470,4 +532,3 @@ extension AVCaptureDevice.Format {
         codecType == .hevc || codecType == .h264
     }
 }
-

@@ -15,7 +15,7 @@ int main() {
     int failed = 0;
 
     // Constants parity (Swift TSDFConstants)
-    if (std::abs(aether::tsdf::VOXEL_SIZE_NEAR - 0.005f) > 1e-6f) {
+    if (std::abs(aether::tsdf::VOXEL_SIZE_NEAR - 0.002f) > 1e-6f) {
         std::fprintf(stderr, "VOXEL_SIZE_NEAR mismatch\n");
         failed++;
     }
@@ -23,7 +23,7 @@ int main() {
         std::fprintf(stderr, "BLOCK_SIZE mismatch\n");
         failed++;
     }
-    if (aether::tsdf::MAX_TOTAL_VOXEL_BLOCKS != 100000) {
+    if (aether::tsdf::MAX_TOTAL_VOXEL_BLOCKS != 10000000) {
         std::fprintf(stderr, "MAX_TOTAL_VOXEL_BLOCKS mismatch\n");
         failed++;
     }

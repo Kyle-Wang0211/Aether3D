@@ -6,8 +6,10 @@
 
 #ifdef __cplusplus
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include "aether/core/status.h"
@@ -44,7 +46,7 @@ namespace splat {
 /// Configuration for the splat render engine.
 struct SplatRenderConfig {
     std::size_t max_splats{500000};          // Max Gaussians on GPU
-    std::uint32_t sort_precision_bits{16};   // Radix sort key bits (Spark default)
+    std::uint32_t sort_precision_bits{32};   // Full 32-bit stable radix sort
     float max_screen_radius{1024.0f};        // Max splat screen radius (gsplat.js)
     std::size_t triple_buffer_count{3};      // Frame-in-flight count
 };
@@ -60,7 +62,7 @@ struct SplatCameraState {
     std::uint32_t vp_width;  // viewport width                                   — offset 208
     std::uint32_t vp_height; // viewport height                                  — offset 212
     std::uint32_t splat_count; // total splats to process                        — offset 216
-    std::uint32_t _pad;        // padding to 224 bytes                           — offset 220
+    std::uint32_t render_splat_limit; // 0 = unlimited                          — offset 220
 };
 static_assert(sizeof(SplatCameraState) == 224,
               "SplatCameraState must be 224 bytes to match Metal SplatCameraUniforms");
@@ -69,7 +71,8 @@ static_assert(sizeof(SplatCameraState) == 224,
 struct SplatRenderStats {
     std::size_t total_splats;     // Total splats in buffer
     std::size_t visible_splats;   // Splats passing frustum cull
-    float sort_time_ms;           // GPU sort time (ms)
+    std::uint32_t sort_mode;      // 0=none, 1=CPU stable sort, 2=GPU sort
+    float sort_time_ms;           // Active sort time (ms)
     float render_time_ms;         // GPU render time (ms)
 };
 
@@ -162,7 +165,14 @@ public:
     /// Valid until next push_splats() or clear_splats() call.
     const PackedSplatsBuffer& packed_data() const noexcept { return cpu_buffer_; }
 
+    /// Access the CPU-side SH degree-1 buffer (read-only).
+    /// Layout is float4[splat_count * 3].
+    const std::vector<float>& sh_data() const noexcept { return cpu_sh_data_; }
+
 private:
+    static constexpr std::uint32_t kRadixBuckets = 256;
+    static constexpr std::uint32_t kRadixThreadgroupSize = 256;
+
     render::GPUDevice& device_;
     SplatRenderConfig config_;
     bool initialized_{false};
@@ -170,7 +180,10 @@ private:
     // Splat data
     PackedSplatsBuffer cpu_buffer_;      // CPU-side packed splats
     PackedSplatsBuffer staging_buffer_;  // Staging for push_splats (training thread writes)
+    std::mutex staging_mutex_;           // Protects staging_buffer_, staging_sh_data_,
+                                         // staging_region_ids_, staging_dirty_, pending_clear_
     std::size_t splat_count_{0};
+    std::size_t render_splat_count_{0};
     bool staging_dirty_{false};
     bool pending_clear_{false};          // Thread-safe: set by clear_splats(), consumed by begin_frame()
 
@@ -190,7 +203,7 @@ private:
     // GPU resources
     render::GPUBufferHandle splat_buffer_;        // PackedSplat[] on GPU
     render::GPUBufferHandle sh_buffer_;           // float4[N*3] SH coefficients (degree-1)
-    render::GPUBufferHandle depth_buffer_;        // float[] depths for sorting
+    render::GPUBufferHandle depth_buffer_;        // uint32[] sortable depth keys
     render::GPUBufferHandle index_buffer_;        // uint32[] sorted indices
     render::GPUBufferHandle camera_buffer_;       // SplatCameraState uniform
     render::GPUBufferHandle quad_buffer_;         // Instanced quad vertices
@@ -200,7 +213,7 @@ private:
 
     // Radix sort temporaries
     render::GPUBufferHandle sort_temp_indices_;   // uint32[] ping-pong index buffer
-    render::GPUBufferHandle sort_histogram_;      // uint32[256] histogram / prefix sums / scatter offsets
+    render::GPUBufferHandle sort_histogram_;      // uint32[groupCount * 256] per-group bucket offsets
 
     // Pipeline state handles
     render::GPUComputePipelineHandle depth_pipeline_;
@@ -209,22 +222,25 @@ private:
     render::GPUComputePipelineHandle prefix_sum_pipeline_;    // radixPrefixSum
     render::GPUComputePipelineHandle scatter_pipeline_;       // radixScatter
     render::GPURenderPipelineHandle  render_pipeline_;
-
     // Camera
     SplatCameraState camera_{};
 
     // Stats
     SplatRenderStats stats_{};
 
-    // CPU depth sort (fallback while GPU radix sort is incomplete)
+    // CPU depth sort fallback when GPU radix pipelines are unavailable.
     std::vector<std::uint32_t> cpu_sort_indices_;
     std::vector<float> cpu_sort_depths_;
+    bool cpu_stable_sort_active_{false};
 
     // Internal methods
     core::Status create_gpu_resources() noexcept;
     void destroy_gpu_resources() noexcept;
     void upload_splats_to_gpu() noexcept;
+    bool should_prefer_cpu_stable_sort() const noexcept;
     void cpu_depth_sort() noexcept;
+    void push_splats_locked(const GaussianParams* params,
+                             std::size_t count) noexcept;  // Must hold staging_mutex_
 };
 
 }  // namespace splat

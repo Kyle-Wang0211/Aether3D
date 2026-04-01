@@ -278,9 +278,10 @@ int test_p6_mesh_stability_c_api() {
     }
 
     aether_mesh_stability_query_t query{};
+    // depth=0.5m at identity pose → world z = -0.5 → block_z = floor(-0.5/0.08) = -7
     query.block_x = 0;
     query.block_y = 0;
-    query.block_z = 6;
+    query.block_z = -7;
     query.last_mesh_generation = 0u;
 
     aether_mesh_stability_result_t result{};
@@ -560,7 +561,7 @@ int test_scan_interaction_kernels_c_api() {
         failed++;
     } else if (selected_count != 2 ||
                selected[0] != 0 ||
-               selected[1] != 2) {
+               selected[1] != 3) {
         std::fprintf(stderr, "stable render selection mismatch count=%d [%d,%d]\n",
             selected_count, selected[0], selected[1]);
         failed++;
@@ -1687,7 +1688,7 @@ int test_wedge_geometry_c_api() {
         &vertex_count,
         nullptr,
         &index_count);
-    if (rc != -3 || vertex_count != 6 || index_count != 24) {
+    if (rc != -3 || vertex_count != 4 || index_count != 9) {
         std::fprintf(stderr, "wedge low-lod count query failed rc=%d v=%d i=%d\n",
             rc, vertex_count, index_count);
         failed++;
@@ -1703,7 +1704,7 @@ int test_wedge_geometry_c_api() {
         &vertex_count,
         indices.data(),
         &index_count);
-    if (rc != 0 || vertex_count != 6 || index_count != 24) {
+    if (rc != 0 || vertex_count != 4 || index_count != 9) {
         std::fprintf(stderr, "wedge low-lod build failed rc=%d v=%d i=%d\n",
             rc, vertex_count, index_count);
         failed++;
@@ -1736,7 +1737,7 @@ int test_wedge_geometry_c_api() {
         &full_vertices,
         nullptr,
         &full_indices);
-    if (rc != -3 || full_vertices != 54 || full_indices != 96) {
+    if (rc != -3 || full_vertices != 7 || full_indices != 21) {
         std::fprintf(stderr, "wedge full-lod count query failed rc=%d v=%d i=%d\n",
             rc, full_vertices, full_indices);
         failed++;

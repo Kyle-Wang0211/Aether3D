@@ -1,4 +1,7 @@
 module CAetherNativeBridge {
     header "aether_tsdf_c.h"
+    header "aether/splat/aether_splat_c.h"
+    header "aether/pipeline/aether_streaming_c.h"
+    header "aether/pipeline/aether_coordinator_c.h"
     export *
 }

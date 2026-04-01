@@ -20,7 +20,11 @@ import UIKit
 
 /// Haptic feedback patterns for scan guidance
 public final class GuidanceHapticEngine {
-    
+
+    // Inlined constants (formerly in ScanGuidanceConstants)
+    private static let hapticDebounceS: Double = 5.0
+    private static let hapticMaxPerMinute: Int = 4
+
     public enum HapticPattern: String, CaseIterable {
         case motionTooFast
         case blurDetected
@@ -111,13 +115,13 @@ public final class GuidanceHapticEngine {
     internal func shouldFire(pattern: HapticPattern, at time: TimeInterval) -> Bool {
         // Check debounce (5 seconds per pattern)
         if let lastTime = lastFireTimes[pattern],
-           time - lastTime < ScanGuidanceConstants.hapticDebounceS {
+           time - lastTime < Self.hapticDebounceS {
             return false
         }
         
         // Check rate limit (max 4 per minute)
         let recentCount = recentFireTimestamps.filter { time - $0 < 60.0 }.count
-        if recentCount >= ScanGuidanceConstants.hapticMaxPerMinute {
+        if recentCount >= Self.hapticMaxPerMinute {
             return false
         }
         

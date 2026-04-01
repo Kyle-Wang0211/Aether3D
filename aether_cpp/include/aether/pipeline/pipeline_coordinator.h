@@ -10,13 +10,13 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <mutex>
 #include <thread>
 #include <memory>
 #include <unordered_set>
 #include <vector>
 
+#include "aether_tsdf_c.h"
 #include "aether/core/spsc_queue.h"
 #include "aether/core/status.h"
 #include "aether/core/triple_buffer.h"
@@ -67,12 +67,18 @@ struct FrameInput {
     std::vector<float> ne_depth;     // Dense depth map (float32)
     std::uint32_t ne_depth_w{0};
     std::uint32_t ne_depth_h{0};
+    bool ne_depth_is_metric{false};  // true = values are absolute meters (metric DAv2/Metric3D)
+                                     // false = relative disparity [0,1] → needs affine calibration
 
     // LiDAR depth (optional, NULL-equivalent if no LiDAR)
     std::vector<float> lidar_depth;
     std::uint32_t lidar_w{0};
     std::uint32_t lidar_h{0};
 
+    bool imported_video{false};
+    int imported_intrinsics_source{0};  // 1=real, 2=metadata_35mm, 3=colmap_default
+    std::uint32_t source_frame_index{0};
+    std::uint32_t source_total_frames{0};
     int thermal_state{0};
     double timestamp{0.0};
 };
@@ -113,56 +119,11 @@ struct QualityThresholds {
     float overlay_alpha_max{0.55f};         // Strong coverage indication at S6+ (was 0.45)
 };
 
-/// Maximum overlay vertices (1 tile per active block, 4K × 20B = 80KB)
-/// Capped at 4000 to prevent GPU/CPU overload from rendering too many quads.
-static constexpr std::size_t kMaxOverlayPoints = 4000;
-
-// ─── S6+ Quality-Driven Training Region ───
-// Formed by connected-component clustering of S6+ TSDF blocks.
-// Each region trains independently in temporal order.
-// Part of "破镜重圆" (progressive reveal) architecture.
-
-struct TrainingRegion {
-    std::uint16_t region_id{0};           // uint16, no artificial limit (0..65535)
-
-    // Spatial extent (world space)
-    float aabb_min[3]{};                  // Tight bounding box
-    float aabb_max[3]{};
-    float centroid[3]{};                  // Geometric center
-
-    // TSDF block membership
-    std::vector<tsdf::BlockIndex> blocks; // S6+ blocks in this region
-    std::uint32_t block_count{0};
-
-    // Temporal ordering
-    double first_s6_timestamp{0.0};       // When first block reached S6+
-
-    // Training state machine
-    enum class State : std::uint8_t {
-        kPending = 0,     // S6+ reached, queued for training
-        kTraining = 1,    // Actively being trained by Thread C
-        kConverged = 2,   // Training complete, splats staged as hidden
-        kRevealed = 3,    // Fly-in animation complete (fully visible)
-        kFailed = 4,      // Training failed, region stays as point cloud
-    };
-    State state{State::kPending};
-
-    // Training progress
-    std::uint32_t current_step{0};
-    std::uint32_t max_steps{3000};        // Per-region budget (adaptive)
-    float best_loss{1e9f};
-    std::uint32_t gaussian_count{0};
-
-    // Frame assignment (indices into all_frames pool in training thread)
-    std::vector<std::size_t> frame_indices;
-
-    // Boundary overlap: extended AABB (2 blocks wider for seamless stitching)
-    float extended_aabb_min[3]{};
-    float extended_aabb_max[3]{};
-
-    // Animation timing (set when viewer_entered triggers reveal)
-    double anim_start_time_{0.0};
-};
+/// Overlay vertex budget: NO hard cap.
+/// All qualifying TSDF blocks get an overlay tile.
+/// 32 bytes per vertex; 50K blocks = 1.6MB — well within GPU budget.
+/// Camera-distance sorting ensures nearest blocks are rendered first
+/// for best GPU z-buffer utilization.
 
 /// Snapshot from Thread B → Swift main (lock-free triple buffer).
 struct EvidenceSnapshot {
@@ -173,20 +134,37 @@ struct EvidenceSnapshot {
     std::size_t selected_frames{0};
     std::size_t min_frames_needed{4}; // min_frames_to_start_training (for HUD)
     std::size_t num_gaussians{0};
-    std::size_t converged_regions{0};
-    std::size_t total_regions{0};
     bool training_active{false};
     bool scan_complete{false};
-    bool has_s6_quality{false};    // True when ANY TSDF block reached S6+ (quality ≥ 0.85)
+    bool has_s6_quality{false};    // True when ANY block reached S6+ (composite_quality ≥ 0.85). DISPLAY ONLY.
     thermal::ThermalLevel thermal_level{thermal::ThermalLevel::kNominal};
 
-    // ── 区域化训练状态 (破镜重圆) ──
-    std::uint32_t training_region_total{0};       // Total regions formed
-    std::uint32_t training_region_completed{0};   // Converged + revealed
-    std::uint16_t active_region_id{0xFFFF};       // Currently training (0xFFFF = none)
-    float active_region_progress{0.0f};           // Current region [0, 1]
-    bool is_animating{false};                     // Any region doing fly-in
-    std::uint32_t staged_count{0};                // Regions waiting to fly in
+    // ── 全局训练状态 ──
+    float training_loss{0.0f};                    // Current training loss
+    std::size_t training_step{0};                 // Current global training step
+    std::size_t assigned_blocks{0};               // Surface blocks → Gaussians (geometry gate, separate from S6+)
+    std::size_t pending_gaussian_count{0};        // Gaussians waiting in queue for engine
+
+    // ── Local preview diagnostics (internal archival, cloud leaves zero) ──
+    std::uint64_t preview_elapsed_ms{0};
+    std::uint64_t preview_phase_depth_ms{0};
+    std::uint64_t preview_phase_seed_ms{0};
+    std::uint64_t preview_phase_refine_ms{0};
+    std::uint32_t preview_depth_batches_submitted{0};
+    std::uint32_t preview_depth_results_ready{0};
+    std::uint32_t preview_depth_reuse_frames{0};
+    std::uint32_t preview_prefilter_accepts{0};
+    std::uint32_t preview_prefilter_brightness_rejects{0};
+    std::uint32_t preview_prefilter_blur_rejects{0};
+    std::uint32_t preview_keyframe_gate_accepts{0};
+    std::uint32_t preview_keyframe_gate_rejects{0};
+    std::uint32_t preview_seed_candidates{0};
+    std::uint32_t preview_seed_accepted{0};
+    std::uint32_t preview_seed_rejected{0};
+    float preview_seed_quality_mean{0.0f};
+    std::uint32_t preview_frames_enqueued{0};
+    std::uint32_t preview_frames_ingested{0};
+    std::uint32_t preview_frame_backlog{0};
 };
 
 /// Observation batch from Thread A → Thread B (SPSC queue).
@@ -225,6 +203,7 @@ struct CoordinatorConfig {
     std::size_t min_frames_to_start_training{4};  // 4 frames — start ASAP (heatmap coverage = rendering readiness)
     std::size_t training_batch_size{4};
     float low_quality_loss_weight{0.3f};
+    bool local_preview_mode{false};               // Monocular on-device preview path (bounded/faster)
     capture::FrameSelectionConfig frame_selection;
     training::TrainingConfig training;
 
@@ -240,6 +219,11 @@ struct CoordinatorConfig {
     // Rendering stability
     std::uint32_t max_consecutive_gpu_errors{3};  // → fallback to point cloud
     float nan_check_interval_steps{10};            // Check splats every N steps
+
+    // TSDF→Gaussian creation: geometry-focused gate (NOT composite_quality).
+    // Gaussian creation uses: has_surface (≥12 SDF crossings) + avg_weight ≥ 4.
+    // composite_quality (0.85 S6+) is display-only (overlay heatmap).
+    // See pipeline_coordinator.cpp TSDF→Gaussian section for full criteria.
 
     // Point cloud → 3DGS transition
     float blend_start_splat_count{1000};    // Start fading point cloud
@@ -303,6 +287,18 @@ public:
                  const float* lidar_depth, std::uint32_t lidar_w, std::uint32_t lidar_h,
                  int thermal_state) noexcept;
 
+    /// Submit imported-video frame using native bootstrap pose/intrinsics.
+    /// Local-preview only; cloud path continues to use explicit camera inputs.
+    int on_imported_video_frame(const std::uint8_t* rgba,
+                                std::uint32_t w,
+                                std::uint32_t h,
+                                const float* imported_intrinsics,
+                                int imported_intrinsics_source,
+                                double timestamp_seconds,
+                                std::uint32_t frame_index,
+                                std::uint32_t total_frames,
+                                int thermal_state) noexcept;
+
     /// Get latest evidence snapshot (lock-free read from triple buffer).
     EvidenceSnapshot get_snapshot() const noexcept;
 
@@ -311,6 +307,11 @@ public:
 
     /// Set thermal state. Thread-safe (atomic).
     void set_thermal_state(int level) noexcept;
+
+    /// Set whether the app is currently foreground-active.
+    /// Local-preview training pauses GPU work while inactive to avoid iOS
+    /// background execution denials and quality loss from CPU fallback.
+    void set_foreground_active(bool active) noexcept;
 
     /// Request additional training after scan completion.
     void request_enhance(std::size_t extra_iterations) noexcept;
@@ -323,6 +324,11 @@ public:
     /// Reuses GaussianSplatViewController for orbit-camera 3D viewing.
     core::Status export_point_cloud_ply(const char* path) noexcept;
 
+    /// Copy TSDF surface sample positions for export-time world-state metrics.
+    /// Blocks briefly if Thread A is still accessing the TSDF volume.
+    std::size_t copy_surface_points_xyz(float* out_xyz,
+                                        std::size_t max_points) noexcept;
+
     /// Wait for training to reach a minimum quality threshold before export.
     /// Blocks until training reaches min_steps or timeout_seconds elapses.
     /// Call this after finish_scanning() and before export_ply().
@@ -333,6 +339,11 @@ public:
     /// Check if training is currently active.
     bool is_training_active() const noexcept;
 
+    /// Service async local-preview bootstrap work (e.g. depth prior results)
+    /// even when imported-video ingestion is temporarily idle.
+    /// Returns true once a usable cached depth prior exists.
+    bool service_local_preview_bootstrap() noexcept;
+
     /// Check if training is running on GPU (true) or CPU fallback (false).
     /// Returns false before training starts.
     bool is_gpu_training() const noexcept;
@@ -340,20 +351,7 @@ public:
     /// Get training progress (lock-free).
     training::TrainingProgress training_progress() const noexcept;
 
-    // ─── D4: Temporal Region State ("破镜重圆") ───
-
-    /// Get number of temporal regions being tracked.
-    std::size_t trained_region_count() const noexcept;
-
-    /// Get state of a specific temporal region.
-    /// Returns nullptr if index out of bounds.
-    const training::TemporalRegion* get_region_state(
-        std::size_t region_idx) const noexcept;
-
-    // ─── 区域化训练 (破镜重圆 Progressive Reveal) ───
-
     /// Signal that user has entered the 3D viewer space.
-    /// Triggers sequential fly-in animation for completed regions.
     void signal_viewer_entered() noexcept;
 
 private:
@@ -363,7 +361,7 @@ private:
 
     // ─── Thread A: Frame Ingestion ───
     std::thread frame_thread_;
-    core::SPSCQueue<FrameInput, 8> frame_queue_;  // 8 frames: absorbs thermal hiccups
+    core::SPSCQueue<FrameInput, 256> frame_queue_;  // Imported-video local preview needs a true firehose window.
     void frame_thread_func() noexcept;
 
     // Frame processing helpers
@@ -372,7 +370,7 @@ private:
 
     // ─── Thread B: Evidence + Quality ───
     std::thread evidence_thread_;
-    core::SPSCQueue<ObservationBatch, 8> evidence_queue_;
+    core::SPSCQueue<ObservationBatch, 256> evidence_queue_;
     void evidence_thread_func() noexcept;
 
     // Evidence state
@@ -387,7 +385,7 @@ private:
     // Training data
     capture::FrameSelector frame_selector_;
     training::GaussianTrainingEngine* training_engine_{nullptr};
-    core::SPSCQueue<pipeline::SelectedFrame, 64> selected_queue_;  // Thread A → C
+    core::SPSCQueue<pipeline::SelectedFrame, 256> selected_queue_;  // Thread A → C (imported-video preview needs wider bootstrap headroom)
 
     // ─── Shared State (lock-free) ───
     core::TripleBuffer<EvidenceSnapshot> evidence_snapshot_;
@@ -396,20 +394,46 @@ private:
 
     // ─── Control Flags ───
     std::atomic<bool> running_{false};
+    std::atomic<bool> renderer_alive_{true};   // False after stop_threads(); guards renderer_ access
     std::atomic<bool> scanning_active_{false};
+    std::atomic<bool> foreground_active_{true};
     std::atomic<bool> training_started_{false};
     std::atomic<bool> features_frozen_{false};  // Set in finish_scanning; blocks Thread A accumulation
     std::atomic<bool> tsdf_idle_{true};          // Thread A clears during TSDF ops; export waits for idle
     std::atomic<bool> has_s6_quality_{false};    // Thread A sets when ANY TSDF block reaches S6+ (quality ≥ 0.85)
+    std::atomic<bool> training_converged_{false}; // Thread C sets on convergence; progress() reads for 100%
     std::atomic<std::size_t> enhance_iters_{0};
+    // Dynamic training budget (core-owned): progress denominator adapts to scene scale.
+    // Keeps UI progress meaningful for small scans while allowing large scenes to run longer.
+    std::atomic<std::size_t> training_target_steps_{20000};
+    std::atomic<std::size_t> training_hard_cap_steps_{120000};
     std::atomic<std::uint32_t> frame_counter_{0};
     std::atomic<std::uint32_t> frame_drop_count_{0};  // Frames dropped due to queue overflow
     std::atomic<std::size_t> selected_frame_count_{0};
+    std::chrono::steady_clock::time_point preview_started_at_{};
+    std::atomic<std::uint64_t> preview_depth_phase_ms_{0};
+    std::atomic<std::uint64_t> preview_seed_phase_ms_{0};
+    std::atomic<std::uint64_t> preview_refine_phase_ms_{0};
+    std::atomic<std::uint32_t> preview_depth_batches_submitted_{0};
+    std::atomic<std::uint32_t> preview_depth_results_ready_{0};
+    std::atomic<std::uint32_t> preview_depth_reuse_frames_{0};
+    std::atomic<std::uint32_t> preview_prefilter_accepts_{0};
+    std::atomic<std::uint32_t> preview_prefilter_brightness_rejects_{0};
+    std::atomic<std::uint32_t> preview_prefilter_blur_rejects_{0};
+    std::atomic<std::uint32_t> preview_keyframe_gate_accepts_{0};
+    std::atomic<std::uint32_t> preview_keyframe_gate_rejects_{0};
+    std::atomic<std::uint32_t> preview_seed_candidates_{0};
+    std::atomic<std::uint32_t> preview_seed_accepted_{0};
+    std::atomic<std::uint32_t> preview_seed_rejected_{0};
+    std::atomic<std::uint64_t> preview_seed_quality_milli_sum_{0};
+    std::atomic<std::uint32_t> preview_frames_enqueued_{0};
+    std::atomic<std::uint32_t> preview_frames_ingested_{0};
 
     // Mutex protecting training_engine_ params during export.
     // Prevents data race: training thread writes params_ while
     // export_ply() reads them on the main thread.
     mutable std::mutex training_export_mutex_;
+    mutable std::mutex depth_cache_mutex_;
 
     // ─── DAv2 Depth Inference — Dual-Model Cross-Validation ───
     // Replaces Swift-layer DepthAnythingV2Bridge.
@@ -428,12 +452,16 @@ private:
     std::unique_ptr<DepthInferenceEngine> depth_engine_small_;
     std::unique_ptr<DepthInferenceEngine> depth_engine_large_;
     std::uint32_t frame_counter_for_large_{0};   // Counts frames since last Large inference
+    std::uint32_t preview_depth_frames_since_submit_{0};
 
     // Cross-validated depth cache (latest from each model)
     DepthInferenceResult latest_small_depth_;
     DepthInferenceResult latest_large_depth_;
     bool has_small_depth_{false};
     bool has_large_depth_{false};
+    float preview_last_depth_request_pos_[3]{0.0f, 0.0f, 0.0f};
+    float preview_last_depth_request_fwd_[3]{0.0f, 0.0f, -1.0f};
+    bool has_preview_depth_request_{false};
 
     /// Cross-validate Small vs Large depth maps, output consensus depth.
     /// If only one model available, pass through its depth.
@@ -455,48 +483,115 @@ private:
     std::uint32_t no_depth_consecutive_{0};  // Consecutive frames without any depth
     bool lidar_scale_bootstrapped_{false};   // Risk C: LiDAR-bootstrapped metric scale
 
-    // ─── DAv2 Relative-to-Metric Depth Scale (online estimation) ───
-    // DAv2 outputs relative depth in [0,1]. To backproject to metric world
-    // coordinates, we multiply by this estimated scale.
-    // estimate_metric_scale_online() updates this from ARKit baselines.
-    float dav2_metric_scale_{2.0f};       // Default: assume 2m mean depth
+    // ─── DAv2 Relative-to-Metric Depth: Per-Frame Affine Alignment ───
+    // DAv2 outputs min-max normalized [0,1] values. The normalization
+    // subtracts the per-frame minimum, introducing a SHIFT that varies
+    // every frame. A single scale factor is WRONG — we need full affine:
+    //   metric_depth = scale * d_pred + shift
+    //
+    // Per-frame affine parameters recovered from ARKit feature points via
+    // robust iterative least-squares. Feature points provide metric 3D
+    // positions (z-depth in camera space) paired with DAv2 depth values.
+    //
+    // References:
+    //   - Murre (2025): RANSAC affine alignment for TSDF fusion
+    //   - VIMD (2026): per-pixel scale refinement via ConvGRU
+    //   - Prior Depth Anything (2025): coarse-to-fine pixel-level alignment
+    //
+    // ─── CRITICAL: DAv2 outputs INVERSE DEPTH (disparity-like) ───
+    // The model outputs values where larger = closer, smaller = farther.
+    // After min-max normalization: d_pred ∈ [0,1], where 1.0 = closest pixel.
+    // The correct conversion is RECIPROCAL AFFINE in inverse-depth space:
+    //   1/metric_depth = scale * d_pred + shift
+    //   metric_depth   = 1 / (scale * d_pred + shift)
+    //
+    // The WRONG linear model (metric = scale*d + shift) causes ~0.6m errors
+    // in mid-range depths because it approximates a hyperbola with a line.
+    // This manifests as TSDF blocks placed at wrong positions → floating tiles.
+    float dav2_affine_scale_{2.8f};       // Inverse-depth affine: 1/z = scale * d + shift
+    float dav2_affine_shift_{0.2f};       // Default: 1/z_max ≈ 1/5m = 0.2
+    bool dav2_affine_valid_{false};       // True once first affine fit succeeds
     float prev_cam_x_{0}, prev_cam_y_{0}, prev_cam_z_{0};  // Previous camera position
     bool has_prev_cam_{false};
-    std::vector<float> scale_samples_;    // Running scale estimates for median
+    std::vector<float> scale_samples_;    // Running scale estimates for diagnostics
 
     // ─── Overlay throttle cache ───
     // Regenerating overlay from TSDF blocks every frame is CPU-heavy.
     // Cache result and only regenerate every 100ms (was 500ms).
     std::vector<OverlayVertex> overlay_cache_;
+    // Last depth-backed surface overlay (TSDF confirmed). Used as a hold frame
+    // during temporary no-depth windows so we do not emit floating fallback tiles.
+    std::vector<OverlayVertex> last_stable_surface_overlay_;
     std::chrono::steady_clock::time_point overlay_last_gen_time_{};
 
-    // ─── 区域化训练 (破镜重圆) ───
-    // Connected-component clustering of S6+ TSDF blocks → per-region training.
-    std::vector<TrainingRegion> training_regions_;
-    std::deque<std::uint16_t> region_queue_;           // Pending region IDs (temporal order)
-    std::uint16_t next_region_id_{0};
-    std::unordered_set<std::int64_t> assigned_blocks_; // Spatial hash of blocks already assigned
-    std::mutex regions_mutex_;                          // Protects training_regions_ + staged_regions_
+    // ─── Monotonic tile confirmation (prevents overlay "state regression") ───
+    // Once a grid cell passes the depth consistency filter, it is permanently
+    // confirmed. Subsequent frames never remove confirmed tiles — only update
+    // quality (Lyapunov monotonic: quality only increases). This prevents the
+    // visual "flickering" caused by borderline tiles toggling pass/fail as
+    // new depth keyframes are added.
+    struct ConfirmedTile {
+        float position[3];   // Grid-center-snapped position (for rendering)
+        float normal[3];     // Smoothed surface normal
+        float quality;       // Peak quality (only increases)
+        float support_count{1.0f};   // WildGS-style multi-view support count
+        float stability{1.0f};       // Bounded anchor stability score [0,1]
+        double last_update_ts{0.0};  // Timestamp of last geometric refinement
+    };
+    std::unordered_map<std::int64_t, ConfirmedTile> confirmed_overlay_cells_;
 
-    // ── Animation orchestration ──
-    std::atomic<bool> viewer_entered_{false};           // Set by signal_viewer_entered()
-    std::vector<std::uint16_t> staged_regions_;         // Completed but not yet animated regions
+    // Camera state for overlay frustum culling (updated by Thread A each frame)
+    float overlay_cam_pos_[3]{0.0f, 0.0f, 0.0f};
+    float overlay_cam_fwd_[3]{0.0f, 0.0f, -1.0f};  // Camera forward (ARKit -col2)
 
-    /// Form training regions from S6+ TSDF blocks (connected-component clustering).
-    /// Called from generate_overlay_vertices() every 500ms.
-    void form_training_regions(
-        const std::vector<tsdf::BlockQualitySample>& samples) noexcept;
+    // ─── Depth keyframe ring buffer for overlay depth-consistency filter ───
+    // Stores recent depth frames from different viewpoints to detect phantom tiles.
+    // A tile is "depth-consistent" if its projected depth matches the actual depth
+    // frame value from multiple cameras. Phantom tiles (from depth estimation errors)
+    // float in air and won't match the real surface depth from different angles.
+    struct DepthKeyframe {
+        std::vector<float> depth;       // Metric depth map (row-major)
+        std::vector<unsigned char> conf; // Per-pixel confidence (0=invalid,1=low,2=high)
+        int width{0}, height{0};
+        float fx{0}, fy{0}, cx{0}, cy{0};  // Intrinsics (scaled to depth resolution)
+        float pose[16]{};               // Camera-to-world (column-major, ARKit convention)
+        // Color data for Gaussian seed initialization (fix colorHit=0% bug)
+        std::vector<unsigned char> rgba;  // Full-res BGRA color frame
+        int rgba_w{0}, rgba_h{0};
+        float rgba_intrinsics[9]{};        // fx,0,cx,0,fy,cy,0,0,1
+    };
+    std::vector<DepthKeyframe> depth_keyframes_;
+    static constexpr std::size_t kMaxDepthKeyframes = 24;
+    float last_keyframe_pos_[3]{0.0f, 0.0f, 0.0f};
+    float last_keyframe_fwd_[3]{0.0f, 0.0f, -1.0f};
+    bool has_keyframe_{false};
+    float preview_last_selected_pos_[3]{0.0f, 0.0f, 0.0f};
+    float preview_last_selected_fwd_[3]{0.0f, 0.0f, -1.0f};
+    bool has_preview_selected_keyframe_{false};
+    bool imported_video_bootstrap_pose_initialized_{false};
+    float imported_video_bootstrap_pose_[16]{};
+    std::vector<aether_icp_point_t> imported_video_bootstrap_target_points_world_;
+    std::vector<aether_icp_point_t> imported_video_bootstrap_target_normals_world_;
+    bool imported_video_bootstrap_intrinsics_initialized_{false};
+    float imported_video_bootstrap_intrinsics_[9]{};
 
-    /// Train a single region (called from training_thread_func).
-    void train_single_region(
-        TrainingRegion& region,
-        const std::vector<pipeline::SelectedFrame>& all_frames) noexcept;
+    // ─── 全局训练 (TSDF 直接初始化) ───
+    // S6+ TSDF blocks → Gaussian creation via add_gaussians() (no region clustering).
+    std::unordered_set<std::int64_t> assigned_blocks_; // Spatial hash of blocks already assigned Gaussians
+    std::unordered_set<std::int64_t> gsf_seeded_cells_; // GSFusion 5mm spatial hash for per-frame dedup
+    std::mutex training_mutex_;                         // Protects pending_gaussians_ handoff
+    std::vector<splat::GaussianParams> pending_gaussians_; // Thread A → Thread C (TSDF S6+ → Gaussian)
 
-    /// Publish region's trained splats to GPU (initially hidden).
-    void publish_region_splats(TrainingRegion& region) noexcept;
-
-    /// Update fly-in animations for all revealed regions (called per-frame).
-    void update_region_animations(double dt) noexcept;
+    // ─── Gaussian Creation Rate Limiter (Token Bucket) ───
+    // Prevents burst creation of Gaussians when many blocks qualify simultaneously.
+    // Smooth flow: max kGaussianBucketCapacity per second, refilled continuously.
+    std::size_t gaussian_bucket_tokens_{0};
+    std::chrono::steady_clock::time_point gaussian_bucket_last_refill_{};
+    bool gaussian_bucket_initialized_{false};
+    static constexpr std::size_t kGaussianBucketCapacity = 2000000;  // 2M burst (million-seed target)
+    static constexpr std::size_t kGaussianRefillRate = 500000;       // 500K/s (fast refill for bursts)
+    bool preview_dav2_seed_initialized_{false};
+    std::size_t preview_last_seed_attempt_depth_frames_{0};
 
     /// Pack block coordinates into int64 spatial hash key.
     static std::int64_t block_hash_key(const tsdf::BlockIndex& idx) noexcept {
@@ -514,8 +609,20 @@ private:
     // ─── TSDF-driven Quality Overlay ───
     QualityThresholds quality_thresholds_;
 
-    /// Generate overlay billboard vertices from TSDF block weights into pc_data.
-    void generate_overlay_vertices(PointCloudData& pc_data) noexcept;
+    /// Generate overlay billboard vertices and TSDF→Gaussian seeds.
+    /// Uses current frame for world→image color sampling of new Gaussian seeds.
+    void generate_overlay_vertices(PointCloudData& pc_data,
+                                   const FrameInput& frame_input) noexcept;
+
+    /// GSFusion per-frame quadtree Gaussian seeding.
+    /// Builds quadtree on RGB frame, backprojects leaf centres via depth,
+    /// deduplicates at 5mm hash cells, pushes to pending_gaussians_.
+    void seed_gaussians_per_frame_gsf(
+        const unsigned char* bgra, int img_w, int img_h,
+        const float* depth, int depth_w, int depth_h,
+        float fx, float fy, float cx, float cy,
+        const float* cam2world,
+        bool imported_video) noexcept;
 
     // ─── Rendering Stability ───
     std::atomic<std::uint32_t> consecutive_gpu_errors_{0};

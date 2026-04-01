@@ -58,14 +58,14 @@ void test_golden_path_s0_to_s5() {
 
     // S0: coverage = 0
     {
-        auto r = sm.evaluate(coverage_only(0.0));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.0));
         assert(r.state == ColorState::kBlack);
         assert(!r.transitioned);
     }
 
     // S1: coverage = 0.10  (S1 and S2 both map to kDarkGray)
     {
-        auto r = sm.evaluate(coverage_only(0.10));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.10));
         assert(r.state == ColorState::kDarkGray);
         assert(r.transitioned);
         assert(r.previous_state == ColorState::kBlack);
@@ -73,14 +73,14 @@ void test_golden_path_s0_to_s5() {
 
     // S2: coverage = 0.25 — still kDarkGray (same visual), no transition
     {
-        auto r = sm.evaluate(coverage_only(0.25));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.25));
         assert(r.state == ColorState::kDarkGray);
         assert(!r.transitioned);  // same order value
     }
 
     // S3: coverage = 0.50
     {
-        auto r = sm.evaluate(coverage_only(0.50));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.50));
         assert(r.state == ColorState::kLightGray);
         assert(r.transitioned);
         assert(r.previous_state == ColorState::kDarkGray);
@@ -88,7 +88,7 @@ void test_golden_path_s0_to_s5() {
 
     // S4: coverage = 0.75
     {
-        auto r = sm.evaluate(coverage_only(0.75));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.75));
         assert(r.state == ColorState::kWhite);
         assert(r.transitioned);
         assert(r.previous_state == ColorState::kLightGray);
@@ -96,7 +96,7 @@ void test_golden_path_s0_to_s5() {
 
     // S5: all 6 gates satisfied
     {
-        auto r = sm.evaluate(s5_certified_input());
+        [[maybe_unused]] auto r = sm.evaluate(s5_certified_input());
         assert(r.state == ColorState::kOriginal);
         assert(r.transitioned);
         assert(r.previous_state == ColorState::kWhite);
@@ -117,28 +117,28 @@ void test_monotonic_never_retreats() {
 
     // Try to go back with coverage = 0 → should stay at kWhite
     {
-        auto r = sm.evaluate(coverage_only(0.0));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.0));
         assert(r.state == ColorState::kWhite);
         assert(!r.transitioned);
     }
 
     // Try coverage = 0.30 → still kWhite
     {
-        auto r = sm.evaluate(coverage_only(0.30));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.30));
         assert(r.state == ColorState::kWhite);
         assert(!r.transitioned);
     }
 
     // Advance to S5
     {
-        auto r = sm.evaluate(s5_certified_input());
+        [[maybe_unused]] auto r = sm.evaluate(s5_certified_input());
         assert(r.state == ColorState::kOriginal);
         assert(r.transitioned);
     }
 
     // Try to go back from S5 — stays at kOriginal
     {
-        auto r = sm.evaluate(coverage_only(0.0));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.0));
         assert(r.state == ColorState::kOriginal);
         assert(!r.transitioned);
     }
@@ -160,7 +160,7 @@ void test_s5_six_gate() {
         in.high_observation_ratio = 0.40;
         in.lyapunov_rate = 0.02;
         // dim_scores all 0 → Choquet = 0, min_super_dim = 0
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kWhite);  // S4, not S5
     }
 
@@ -169,7 +169,7 @@ void test_s5_six_gate() {
         EvidenceStateMachine sm;
         auto in = s5_certified_input();
         in.uncertainty_width = 0.30;  // exceeds 0.15 threshold
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kWhite);
     }
 
@@ -178,7 +178,7 @@ void test_s5_six_gate() {
         EvidenceStateMachine sm;
         auto in = s5_certified_input();
         in.lyapunov_rate = 0.20;  // exceeds 0.05 threshold
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kWhite);
     }
 
@@ -187,7 +187,7 @@ void test_s5_six_gate() {
         EvidenceStateMachine sm;
         auto in = s5_certified_input();
         in.high_observation_ratio = 0.20;  // below 0.30 threshold
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kWhite);
     }
 
@@ -199,7 +199,7 @@ void test_s5_six_gate() {
         // D_view = min(viewGain, viewDiversity) will be low
         in.dim_scores[0] = 0.30;
         in.dim_scores[9] = 0.30;
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         // D_view = min(0.30, 0.30) = 0.30 < 0.45 threshold
         assert(r.state == ColorState::kWhite);
     }
@@ -209,14 +209,14 @@ void test_s5_six_gate() {
         EvidenceStateMachine sm;
         auto in = s5_certified_input();
         in.coverage = 0.879;  // below 0.88
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kWhite);
     }
 
     // Case G: All 6 gates satisfied → S5
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(s5_certified_input());
+        [[maybe_unused]] auto r = sm.evaluate(s5_certified_input());
         assert(r.state == ColorState::kOriginal);
     }
 
@@ -225,7 +225,7 @@ void test_s5_six_gate() {
         EvidenceStateMachine sm;
         auto in = s5_certified_input();
         in.coverage = 0.50;  // only S3 level coverage
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kLightGray);  // S3
     }
 
@@ -244,7 +244,7 @@ void test_reset() {
     assert(sm.current_state() == ColorState::kBlack);
 
     // Can progress again from S0
-    auto r = sm.evaluate(coverage_only(0.60));
+    [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.60));
     assert(r.state == ColorState::kLightGray);
     assert(r.transitioned);
 
@@ -259,19 +259,19 @@ void test_nan_infinity_handling() {
 
     // NaN coverage
     {
-        auto r = sm.evaluate(coverage_only(std::nan("")));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(std::nan("")));
         assert(r.state == ColorState::kBlack);
     }
 
     // Infinity coverage — not isfinite, maps to 0.0
     {
-        auto r = sm.evaluate(coverage_only(1.0 / 0.0));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(1.0 / 0.0));
         assert(r.state == ColorState::kBlack);
     }
 
     // Negative coverage
     {
-        auto r = sm.evaluate(coverage_only(-0.5));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(-0.5));
         assert(r.state == ColorState::kBlack);  // clamped to 0
     }
 
@@ -281,7 +281,7 @@ void test_nan_infinity_handling() {
         auto in = s5_certified_input();
         in.dim_scores[0] = std::nan("");
         in.dim_scores[3] = 1.0 / 0.0;  // infinity
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         // Should not crash; NaN dims → super_dim may drop below threshold
         // Result could be S4 or S5 depending on which dims affected
         assert(r.state == ColorState::kWhite || r.state == ColorState::kOriginal);
@@ -292,7 +292,7 @@ void test_nan_infinity_handling() {
         EvidenceStateMachine sm2;
         auto in = s5_certified_input();
         in.plausibility_coverage = std::nan("");
-        auto r = sm2.evaluate(in);
+        [[maybe_unused]] auto r = sm2.evaluate(in);
         // plausibility NaN → clamped to 0.0, but coverage_cert based on bel_cov
         // Bel=0.90 >= 0.88 → coverage_cert=Certified (bel-based check unaffected)
         // The test verifies no crash
@@ -323,13 +323,13 @@ void test_custom_config() {
 
     // Coverage 0.05 → S1 with custom threshold (default would be S0)
     {
-        auto r = sm.evaluate(coverage_only(0.05));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.05));
         assert(r.state == ColorState::kDarkGray);
     }
 
     // Coverage 0.60 + custom threshold → S4
     {
-        auto r = sm.evaluate(coverage_only(0.60));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.60));
         assert(r.state == ColorState::kWhite);
     }
 
@@ -342,7 +342,7 @@ void test_custom_config() {
             0.25,   // high_obs (over custom 0.20)
             0.08,   // lyapunov_rate (under custom 0.10)
             0.60);  // all_dims → Choquet ~0.6 (over custom 0.50)
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kOriginal);
     }
 
@@ -376,39 +376,39 @@ void test_exact_thresholds() {
     // Test that >= comparison is correct (not >)
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(coverage_only(0.10));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.10));
         assert(r.state == ColorState::kDarkGray);  // exactly 0.10 triggers S1
     }
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(coverage_only(0.25));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.25));
         assert(r.state == ColorState::kDarkGray);  // S2 = same visual as S1
     }
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(coverage_only(0.50));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.50));
         assert(r.state == ColorState::kLightGray);
     }
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(coverage_only(0.75));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.75));
         assert(r.state == ColorState::kWhite);
     }
 
     // Just below each threshold
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(coverage_only(0.099));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.099));
         assert(r.state == ColorState::kBlack);
     }
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(coverage_only(0.499));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.499));
         assert(r.state == ColorState::kDarkGray);
     }
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(coverage_only(0.749));
+        [[maybe_unused]] auto r = sm.evaluate(coverage_only(0.749));
         assert(r.state == ColorState::kLightGray);
     }
 
@@ -424,7 +424,7 @@ void test_exact_thresholds() {
             0.80);  // dims → Choquet ~0.80 > 0.72, min_dim ~0.80 > 0.45
         // First reach S4 (monotonic, so we need to go through)
         sm.evaluate(coverage_only(0.80));
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.state == ColorState::kOriginal);
     }
 
@@ -436,7 +436,7 @@ void test_exact_thresholds() {
 // ---------------------------------------------------------------------------
 void test_rapid_monotonic_stress() {
     EvidenceStateMachine sm;
-    int last_order = -1;
+    [[maybe_unused]] int last_order = -1;
 
     // Build up gradually with coverage_only, then hit S5 with full input
     const double coverages[] = {
@@ -453,7 +453,7 @@ void test_rapid_monotonic_stress() {
             in = s5_certified_input(coverages[i]);
         }
 
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         int order = color_state_order(r.state);
         assert(order >= last_order);
         last_order = order;
@@ -475,7 +475,7 @@ void test_choquet_aggregation() {
     {
         double dims[10];
         for (int i = 0; i < 10; ++i) dims[i] = 0.80;
-        auto r = choquet_aggregate_5(dims, mu);
+        [[maybe_unused]] auto r = choquet_aggregate_5(dims, mu);
         // All super-dims = 0.8 (max/min/mean of 0.8 = 0.8)
         // Choquet with uniform values = value * mu({all}) = 0.8 * 1.0 = 0.8
         assert(r.aggregated > 0.75 && r.aggregated < 0.85);
@@ -490,7 +490,7 @@ void test_choquet_aggregation() {
     // Should show synergy bonus (D_geo + D_view together > sum of parts)
     {
         double dims[10] = {1.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1.0};
-        auto r = choquet_aggregate_5(dims, mu);
+        [[maybe_unused]] auto r = choquet_aggregate_5(dims, mu);
         // D_view = min(1.0, 1.0) = 1.0
         // D_geo  = max(0.5, 0.5) = 0.5
         // D_semantic = mean(0.5, 0.5) = 0.5
@@ -505,7 +505,7 @@ void test_choquet_aggregation() {
     // Case 3: All zeros → Choquet = 0
     {
         double dims[10]{};
-        auto r = choquet_aggregate_5(dims, mu);
+        [[maybe_unused]] auto r = choquet_aggregate_5(dims, mu);
         assert(r.aggregated < 0.01);
         assert(r.additive < 0.01);
         for (int i = 0; i < 5; ++i) {
@@ -517,7 +517,7 @@ void test_choquet_aggregation() {
     {
         double dims[10];
         for (int i = 0; i < 10; ++i) dims[i] = 1.0;
-        auto r = choquet_aggregate_5(dims, mu);
+        [[maybe_unused]] auto r = choquet_aggregate_5(dims, mu);
         assert(r.aggregated > 0.99 && r.aggregated <= 1.0);
     }
 
@@ -526,7 +526,7 @@ void test_choquet_aggregation() {
         double dims[10];
         for (int i = 0; i < 10; ++i) dims[i] = 0.80;
         dims[0] = std::nan("");  // viewGain → affects D_view
-        auto r = choquet_aggregate_5(dims, mu);
+        [[maybe_unused]] auto r = choquet_aggregate_5(dims, mu);
         // D_view = min(0.0, 0.8) = 0.0 (NaN→0)
         assert(r.super_dims[1] < 0.01);  // D_view bottlenecked
         // Result should still be a valid number
@@ -544,7 +544,7 @@ void test_ds_interval_certification() {
     {
         EvidenceStateMachine sm;
         auto in = s5_certified_input(0.90, 0.95, 0.05, 0.35, 0.03, 0.80);
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.coverage_cert == CertifiedState::kCertified);
         assert(r.state == ColorState::kOriginal);
     }
@@ -556,7 +556,7 @@ void test_ds_interval_certification() {
         in.coverage = 0.80;
         in.plausibility_coverage = 0.92;
         in.uncertainty_width = 0.12;
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.coverage_cert == CertifiedState::kUncertain);
         // Bel not certified → can't be S5
         assert(r.state == ColorState::kWhite);  // S4
@@ -569,7 +569,7 @@ void test_ds_interval_certification() {
         in.coverage = 0.70;
         in.plausibility_coverage = 0.85;
         in.uncertainty_width = 0.15;
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.coverage_cert == CertifiedState::kImpossible);
         assert(r.state == ColorState::kLightGray);  // S3
     }
@@ -578,7 +578,7 @@ void test_ds_interval_certification() {
     {
         EvidenceStateMachine sm;
         auto in = s5_certified_input(0.90, 0.95, 0.05, 0.35, 0.03, 0.80);
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.choquet_cert == CertifiedState::kCertified);
         assert(r.choquet_value > 0.70);  // All dims=0.80 → Choquet ~0.80
     }
@@ -593,7 +593,7 @@ void test_ds_interval_certification() {
         in.high_observation_ratio = 0.35;
         in.lyapunov_rate = 0.03;
         for (int i = 0; i < 10; ++i) in.dim_scores[i] = 0.40;
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.choquet_cert == CertifiedState::kUncertain);
         assert(r.choquet_value < 0.72);  // Below threshold
     }
@@ -608,7 +608,7 @@ void test_certification_margin() {
     // All gates well above threshold → positive margin
     {
         EvidenceStateMachine sm;
-        auto r = sm.evaluate(s5_certified_input());
+        [[maybe_unused]] auto r = sm.evaluate(s5_certified_input());
         assert(r.certification_margin > 0.0);
         assert(r.state == ColorState::kOriginal);
     }
@@ -618,7 +618,7 @@ void test_certification_margin() {
         EvidenceStateMachine sm;
         auto in = s5_certified_input();
         in.high_observation_ratio = 0.28;  // 0.28 < 0.30 → margin = -0.02
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         assert(r.certification_margin < 0.0);
         assert(r.state == ColorState::kWhite);
     }
@@ -628,7 +628,7 @@ void test_certification_margin() {
         EvidenceStateMachine sm;
         auto in = s5_certified_input();
         in.high_observation_ratio = 0.30;  // exactly at threshold
-        auto r = sm.evaluate(in);
+        [[maybe_unused]] auto r = sm.evaluate(in);
         // Margin should be ~0 (this gate is the bottleneck at 0.0)
         // Other gates have positive margin, so overall margin = 0.0
         assert(r.certification_margin >= 0.0);
@@ -648,7 +648,7 @@ void test_min_super_dim_diagnostic() {
     auto in = s5_certified_input();
     in.dim_scores[7] = 0.20;  // coverageTrackerScore
     in.dim_scores[8] = 0.25;  // resolutionQuality
-    auto r = sm.evaluate(in);
+    [[maybe_unused]] auto r = sm.evaluate(in);
 
     // D_tracker = min(0.20, 0.25) = 0.20
     assert(r.min_super_dim < 0.25);

@@ -30,6 +30,16 @@ struct VoxelBlock {
     uint32_t mesh_generation{0};
     double last_observed_timestamp{0.0};
     float voxel_size{VOXEL_SIZE_MID};
+    uint16_t training_obs_count{0};       // How many selected training frames cover this block
+
+    // ── Angular Diversity Tracking (24θ × 12φ directional bitmask) ──
+    // Each bit = one directional bucket that has been observed.
+    // Used to compute angular diversity quality score per block.
+    // theta: 24 buckets (15° each, horizontal, 0-360°). Bit i = seen from θ∈[i*15°, (i+1)*15°).
+    // phi:   12 buckets (15° each, vertical, -90°→+90°). Bit j = seen from φ∈[-90+j*15°, -90+(j+1)*15°).
+    // Total: 6 bytes. O(1) insert (bit-OR), O(1) diversity query (popcount + span).
+    std::uint32_t view_theta_bits{0};    // 24 horizontal direction buckets (bits 0-23)
+    std::uint16_t view_phi_bits{0};      // 12 vertical direction buckets (bits 0-11)
 
     void clear(float voxel_size_in = VOXEL_SIZE_MID) {
         for (int i = 0; i < kVoxelCount; ++i) {
@@ -39,6 +49,9 @@ struct VoxelBlock {
         mesh_generation = 0;
         last_observed_timestamp = 0.0;
         voxel_size = voxel_size_in;
+        training_obs_count = 0;
+        view_theta_bits = 0;
+        view_phi_bits = 0;
     }
 };
 

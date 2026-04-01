@@ -9,10 +9,10 @@
 namespace aether {
 namespace tsdf {
 
-// Section 1: Adaptive voxel resolution.
-constexpr float VOXEL_SIZE_NEAR = 0.005f;
-constexpr float VOXEL_SIZE_MID = 0.01f;
-constexpr float VOXEL_SIZE_FAR = 0.02f;
+// Section 1: Adaptive voxel resolution (fine-grained for million-seed targets).
+constexpr float VOXEL_SIZE_NEAR = 0.002f;   // 2mm (< 1m depth)
+constexpr float VOXEL_SIZE_MID = 0.004f;    // 4mm (1-3m depth)
+constexpr float VOXEL_SIZE_FAR = 0.008f;    // 8mm (> 3m depth)
 constexpr float DEPTH_NEAR_THRESHOLD = 1.0f;
 constexpr float DEPTH_FAR_THRESHOLD = 3.0f;
 
@@ -35,8 +35,8 @@ constexpr float DEPTH_MAX = 5.0f;
 constexpr float MIN_VALID_PIXEL_RATIO = 0.3f;
 constexpr bool SKIP_LOW_CONFIDENCE_PIXELS = true;
 
-// Section 5: Performance budget.
-constexpr int MAX_VOXELS_PER_FRAME = 500000;
+// Section 5: Performance budget (uncapped for million-seed targets).
+constexpr int MAX_VOXELS_PER_FRAME = 50000000;   // 50M (effectively unlimited)
 constexpr int MAX_TRIANGLES_PER_CYCLE = 50000;
 constexpr double INTEGRATION_TIMEOUT_MS = 10.0;
 constexpr int COMPUTE_WORKGROUP_SIZE = 8;
@@ -45,14 +45,14 @@ constexpr int GPU_INFLIGHT_BUFFER_COUNT = 3;
 constexpr int METAL_THREADGROUP_SIZE = COMPUTE_WORKGROUP_SIZE;
 constexpr int INFLIGHT_BUFFER_COUNT = GPU_INFLIGHT_BUFFER_COUNT;
 
-// Section 6: Memory management.
-constexpr int MAX_TOTAL_VOXEL_BLOCKS = 100000;
+// Section 6: Memory management (uncapped for fine voxels).
+constexpr int MAX_TOTAL_VOXEL_BLOCKS = 10000000;  // 10M blocks (effectively unlimited)
 constexpr int HASH_TABLE_INITIAL_SIZE = 65536;
 constexpr float HASH_TABLE_MAX_LOAD_FACTOR = 0.7f;
 constexpr int HASH_MAX_PROBE_LENGTH = 128;
 constexpr float DIRTY_THRESHOLD_MULTIPLIER = 0.5f;
-constexpr double STALE_BLOCK_EVICTION_AGE_S = 30.0;
-constexpr double STALE_BLOCK_FORCE_EVICTION_AGE_S = 60.0;
+constexpr double STALE_BLOCK_EVICTION_AGE_S = 3600.0;       // 1 hour (effectively disabled for scans)
+constexpr double STALE_BLOCK_FORCE_EVICTION_AGE_S = 7200.0; // 2 hours (effectively disabled)
 
 // Section 7: Block geometry.
 constexpr int BLOCK_SIZE = 8;
@@ -68,7 +68,7 @@ constexpr float LOOP_CLOSURE_DRIFT_THRESHOLD = 0.02f;
 constexpr int KEYFRAME_INTERVAL = 6;
 constexpr float KEYFRAME_ANGULAR_TRIGGER_DEG = 15.0f;
 constexpr float KEYFRAME_TRANSLATION_TRIGGER = 0.3f;
-constexpr int MAX_KEYFRAMES_PER_SESSION = 30;
+constexpr int MAX_KEYFRAMES_PER_SESSION = 100000;  // effectively unlimited
 
 // Section 10: GPU safety.
 constexpr double SEMAPHORE_WAIT_TIMEOUT_MS = 100.0;

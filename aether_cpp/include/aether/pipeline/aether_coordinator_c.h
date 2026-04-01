@@ -36,10 +36,11 @@ typedef struct {
     float min_quality_score;                   // Default: 0.08 (permissive)
 
     // Training params — Student-t + MCMC for S6+ quality
-    size_t max_gaussians;                      // Default: 1000000 (1M Student-t ≈ 5M Gaussian)
-    size_t max_iterations;                     // Default: 20000 (3DGS-MCMC: 30K)
+    size_t max_gaussians;                      // Default: 100M (no cap); device preset determines real limit
+    size_t max_iterations;                     // Default: 3000 (global engine: TSDF init + MCMC converges fast)
     uint32_t render_width;                     // Default: 800
     uint32_t render_height;                    // Default: 600
+    uint32_t local_preview_mode;              // Default: 0 (cloud/default), 1 = bounded monocular preview
 
     // Thermal — predictive management
     float thermal_recovery_delay_s;            // Default: 3.0
@@ -52,6 +53,10 @@ typedef struct {
     // Rendering stability
     uint32_t max_consecutive_gpu_errors;       // Default: 5
     float nan_check_interval_steps;            // Default: 10
+
+    // TSDF→Gaussian: geometry-focused gate (has_surface + avg_weight ≥ 8).
+    // composite_quality (0.85 S6+) is display-only. See pipeline_coordinator.cpp.
+    // (No configurable threshold — gate is geometry-based, not quality-score-based.)
 
     // Point cloud → 3DGS blend — faster transition
     float blend_start_splat_count;             // Default: 500
@@ -75,20 +80,37 @@ typedef struct {
     size_t selected_frames;
     size_t min_frames_needed;    // min_frames_to_start_training (for HUD)
     size_t num_gaussians;
-    size_t converged_regions;
-    size_t total_regions;
     int training_active;         // 0 or 1
     int scan_complete;           // 0 or 1
-    int has_s6_quality;          // 0 or 1 — ANY TSDF block reached S6+ (training gate)
+    int has_s6_quality;          // 0 or 1 — ANY TSDF block reached S6+ (display only, 0.85)
     int thermal_level;           // 0-3
 
-    // ── 区域化训练状态 (破镜重圆 progressive reveal) ──
-    uint32_t training_region_total;       // Total regions formed (no limit)
-    uint32_t training_region_completed;   // Converged + revealed
-    uint16_t active_region_id;            // Currently training (0xFFFF = none)
-    float active_region_progress;         // Current region progress [0, 1]
-    int is_animating;                     // 0 or 1 — any region doing fly-in
-    uint32_t staged_count;                // Regions waiting to fly in
+    // ── 全局训练状态 ──
+    float training_loss;                  // Current training loss
+    size_t training_step;                 // Current global training step
+    size_t assigned_blocks;               // Surface blocks → Gaussians (geometry gate, NOT S6+)
+    size_t pending_gaussian_count;        // Gaussians waiting in queue for engine
+
+    // Local preview diagnostics (internal archival only)
+    uint64_t preview_elapsed_ms;
+    uint64_t preview_phase_depth_ms;
+    uint64_t preview_phase_seed_ms;
+    uint64_t preview_phase_refine_ms;
+    uint32_t preview_depth_batches_submitted;
+    uint32_t preview_depth_results_ready;
+    uint32_t preview_depth_reuse_frames;
+    uint32_t preview_prefilter_accepts;
+    uint32_t preview_prefilter_brightness_rejects;
+    uint32_t preview_prefilter_blur_rejects;
+    uint32_t preview_keyframe_gate_accepts;
+    uint32_t preview_keyframe_gate_rejects;
+    uint32_t preview_seed_candidates;
+    uint32_t preview_seed_accepted;
+    uint32_t preview_seed_rejected;
+    float preview_seed_quality_mean;
+    uint32_t preview_frames_enqueued;
+    uint32_t preview_frames_ingested;
+    uint32_t preview_frame_backlog;
 } aether_evidence_snapshot_t;
 
 /// Training progress (from existing streaming pipeline).
@@ -97,8 +119,6 @@ typedef struct {
     size_t total_steps;
     float loss;
     size_t num_gaussians;
-    size_t converged_regions;
-    size_t total_regions;
     int is_complete;
 } aether_coordinator_training_progress_t;
 
@@ -163,6 +183,18 @@ int aether_pipeline_coordinator_on_frame(
     uint32_t lidar_h,
     int thermal_state);              // ProcessInfo.ThermalState raw value
 
+/// Submit imported-video frame for local preview using native bootstrap pose/intrinsics.
+/// Returns: 0=accepted, 1=dropped (queue full).
+int aether_pipeline_coordinator_on_imported_video_frame(
+    aether_pipeline_coordinator_t* coordinator,
+    const uint8_t* rgba, uint32_t w, uint32_t h,
+    const float* intrinsics,         // optional float[9], 3x3 camera matrix
+    int intrinsics_source,           // 1=real, 2=metadata_35mm, 3=colmap_default
+    double timestamp_seconds,
+    uint32_t frame_index,
+    uint32_t total_frames,
+    int thermal_state);
+
 /// Get latest evidence snapshot (lock-free read).
 int aether_pipeline_coordinator_get_snapshot(
     aether_pipeline_coordinator_t* coordinator,
@@ -176,6 +208,12 @@ int aether_pipeline_coordinator_finish_scanning(
 void aether_pipeline_coordinator_set_thermal(
     aether_pipeline_coordinator_t* coordinator,
     int level);
+
+/// Set whether the host app is currently foreground-active.
+/// Local-preview training pauses GPU refine while inactive.
+void aether_pipeline_coordinator_set_foreground_active(
+    aether_pipeline_coordinator_t* coordinator,
+    int active);
 
 /// Request additional training iterations after scan.
 int aether_pipeline_coordinator_enhance(
@@ -194,6 +232,11 @@ size_t aether_pipeline_coordinator_wait_for_training(
 /// Check if training is active (lock-free).
 int aether_pipeline_coordinator_is_training(
     const aether_pipeline_coordinator_t* coordinator);
+
+/// Service imported-video local-preview bootstrap work (async depth prior polling).
+/// Returns 1 once a usable cached depth prior exists, 0 otherwise.
+int aether_pipeline_coordinator_service_local_preview_bootstrap(
+    aether_pipeline_coordinator_t* coordinator);
 
 /// Check if training is running on GPU (1) or CPU fallback (0).
 /// Returns -1 if coordinator is invalid, 0 before training starts.
@@ -222,51 +265,16 @@ int aether_pipeline_coordinator_export_point_cloud_ply(
     aether_pipeline_coordinator_t* coordinator,
     const char* path);
 
-// ═══════════════════════════════════════════════════════════════════════
-// D4: Temporal Region State API ("破镜重圆" Progressive Reveal)
-// ═══════════════════════════════════════════════════════════════════════
-// Swift reads region state to control per-region fade-in rendering.
-// All queries are lock-free reads.
-
-/// Temporal region state (C-safe mirror).
-typedef struct {
-    uint32_t start_frame;
-    uint32_t end_frame;
-    uint32_t steps_trained;
-    float best_loss;
-    int geometry_ready;      // 0 or 1
-    int detail_ready;        // 0 or 1
-    float fade_alpha;        // [0, 1] — current fade-in progress
-} aether_temporal_region_t;
-
-/// Get the number of trained temporal regions.
-int aether_get_trained_region_count(
-    const aether_pipeline_coordinator_t* coordinator);
-
-/// Get the state of a specific temporal region.
-/// Returns 0 on success, -1 on error (invalid index).
-int aether_get_region_state(
-    const aether_pipeline_coordinator_t* coordinator,
-    int region_idx,
-    aether_temporal_region_t* out);
-
-/// Check if a region's geometry is ready for rendering.
-/// Returns 1 if ready, 0 if not, -1 on error.
-int aether_get_region_geometry_ready(
-    const aether_pipeline_coordinator_t* coordinator,
-    int region_idx);
-
-/// Get the fade-in alpha for a region.
-/// Returns alpha [0, 1], or -1.0 on error.
-float aether_get_region_fade_alpha(
-    const aether_pipeline_coordinator_t* coordinator,
-    int region_idx);
+/// Copy TSDF surface sample positions as tightly packed xyz triplets.
+/// Returns the number of points written to out_xyz.
+size_t aether_pipeline_coordinator_copy_surface_points_xyz(
+    aether_pipeline_coordinator_t* coordinator,
+    float* out_xyz,
+    size_t max_points);
 
 // ═══════════════════════════════════════════════════════════════════════
-// 区域化训练: Viewer Entry Signal
+// Viewer Entry Signal
 // ═══════════════════════════════════════════════════════════════════════
-// Call when user enters the 3D viewer black space.
-// Triggers sequential fly-in animation of completed regions.
 
 void aether_pipeline_coordinator_signal_viewer_entered(
     aether_pipeline_coordinator_t* coordinator);

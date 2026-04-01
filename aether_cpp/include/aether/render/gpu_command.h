@@ -101,6 +101,18 @@ public:
     virtual GPUComputeEncoder* make_compute_encoder() noexcept = 0;
     virtual GPURenderEncoder* make_render_encoder(
         const GPURenderTargetDesc& target) noexcept = 0;
+    virtual GPURenderEncoder* make_render_encoder(
+        const GPURenderPassDesc& pass) noexcept = 0;
+
+    /// Create a render encoder from a platform-native render pass descriptor.
+    /// On Metal: native_rpd is void* to MTLRenderPassDescriptor (via __bridge).
+    /// This renders directly into the drawable (no offscreen textures created).
+    /// Default returns nullptr (unsupported on non-Metal backends).
+    virtual GPURenderEncoder* make_render_encoder_native(
+        void* native_rpd) noexcept {
+        (void)native_rpd;
+        return nullptr;
+    }
 
     // Submit to GPU and begin execution.
     virtual void commit() noexcept = 0;

@@ -147,35 +147,10 @@ final class GridResolutionPolicyTests: XCTestCase {
         XCTAssertFalse(GridResolutionPolicy.validateResolution(invalid, for: .standard))
     }
     
-    // MARK: - Digest Input Tests
-    
-    func testDigestInput() throws {
-        let digestInput = GridResolutionPolicy.digestInput(schemaVersionId: SSOTVersion.schemaVersionId)
-        XCTAssertEqual(digestInput.schemaVersionId, SSOTVersion.schemaVersionId)
-        XCTAssertFalse(digestInput.allowedGridCellSizes.isEmpty)
-        XCTAssertFalse(digestInput.recommendedCaptureFloors.isEmpty)
-        XCTAssertFalse(digestInput.profileMappings.isEmpty)
-    }
-    
-    func testDigestInputDeterministic() throws {
-        let digest1 = try CanonicalDigest.computeDigest(
-            GridResolutionPolicy.digestInput(schemaVersionId: SSOTVersion.schemaVersionId)
-        )
-        let digest2 = try CanonicalDigest.computeDigest(
-            GridResolutionPolicy.digestInput(schemaVersionId: SSOTVersion.schemaVersionId)
-        )
-        XCTAssertEqual(digest1, digest2, "Digest must be deterministic")
-    }
-    
-    func testDigestInputContainsAllProfiles() throws {
-        let digestInput = GridResolutionPolicy.digestInput(schemaVersionId: SSOTVersion.schemaVersionId)
-        
+    func testRecommendedCaptureFloorCoversAllProfiles() {
         for profile in CaptureProfile.allCases {
-            let floorFound = digestInput.recommendedCaptureFloors.contains { $0.key == profile.profileId }
-            XCTAssertTrue(floorFound, "Must include floor for \(profile.name)")
-            
-            let mappingFound = digestInput.profileMappings.contains { $0.key == profile.profileId }
-            XCTAssertTrue(mappingFound, "Must include mapping for \(profile.name)")
+            let floor = GridResolutionPolicy.recommendedCaptureFloor(for: profile)
+            XCTAssertTrue(GridResolutionPolicy.allowedGridCellSizes.contains(floor), "Recommended floor must be from closed set for \(profile.name)")
         }
     }
 }

@@ -1519,6 +1519,7 @@ typedef struct aether_wedge_input_triangle {
     float display;
     float thickness;
     uint32_t triangle_id;
+    uint8_t edge_mask;  // 3 bits: bit0=v0v1, bit1=v1v2, bit2=v2v0. Default=0x07 (all outer).
 } aether_wedge_input_triangle_t;
 
 typedef struct aether_wedge_vertex {
@@ -1529,6 +1530,7 @@ typedef struct aether_wedge_vertex {
     float display;
     float thickness;
     uint32_t triangle_id;
+    uint8_t edge_mask;  // 3 bits marking outer boundary edges.
 } aether_wedge_vertex_t;
 
 typedef struct aether_fragment_visual_params {
@@ -3706,6 +3708,14 @@ typedef struct {
 
 // ─── GPU Device lifecycle ───
 aether_gpu_device_t* aether_gpu_device_create_null(void);
+
+/// Create a GPU device backed by Apple Metal.
+/// @param mtl_device_ptr  Pointer to id<MTLDevice> (__bridge void*).
+///                        Caller retains ownership; the device is retained internally.
+/// @return Opaque device handle, or NULL on failure. Free with aether_gpu_device_destroy().
+/// Only available on Apple platforms (iOS/macOS).
+aether_gpu_device_t* aether_gpu_device_create_metal(void* mtl_device_ptr);
+
 void aether_gpu_device_destroy(aether_gpu_device_t* device);
 int aether_gpu_device_get_backend(const aether_gpu_device_t* device);
 int aether_gpu_device_get_caps(const aether_gpu_device_t* device, aether_gpu_caps_t* out);

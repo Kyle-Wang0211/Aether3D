@@ -44,7 +44,13 @@ final class FakeRemoteB1Client: RemoteB1Client {
         self.simulateProgressRegression = simulateProgressRegression
     }
     
-    func upload(videoURL: URL) async throws -> String {
+    func upload(
+        videoURL: URL,
+        onProgress: (@Sendable (RemoteUploadProgress) async -> Void)?
+    ) async throws -> String {
+        if let onProgress {
+            await onProgress(RemoteUploadProgress(uploadedBytes: 1, totalBytes: 1))
+        }
         return Self.fixedAssetId
     }
     
@@ -55,30 +61,86 @@ final class FakeRemoteB1Client: RemoteB1Client {
     
     func pollStatus(jobId: String) async throws -> JobStatus {
         pollCount += 1
+        let progress = RemoteJobProgress(
+            progressFraction: Double(min(pollCount, 4)) * 0.25,
+            stageKey: "train",
+            detail: "测试桩正在模拟远端训练。",
+            etaMinutes: max(1, 5 - pollCount),
+            elapsedSeconds: pollCount * 15,
+            progressBasis: "fake_fixture"
+        )
         
         // Simulate normal progress increments
         if pollCount <= 2 {
-            return .processing(progress: Double(pollCount) * 30.0)
+            return .processing(progress)
         } else if pollCount == 3 {
             if simulateProgressRegression {
                 // Simulate progress regression (should be ignored by client)
-                return .processing(progress: 50.0)  // Lower than previous 60.0
+                return .processing(
+                    RemoteJobProgress(
+                        progressFraction: 0.5,
+                        stageKey: "train",
+                        detail: "测试桩模拟进度回退。",
+                        etaMinutes: 2,
+                        elapsedSeconds: pollCount * 15,
+                        progressBasis: "fake_fixture"
+                    )
+                )
             }
-            return .processing(progress: 90.0)
+            return .processing(
+                RemoteJobProgress(
+                    progressFraction: 0.9,
+                    stageKey: "packaging",
+                    detail: "测试桩正在导出结果。",
+                    etaMinutes: 1,
+                    elapsedSeconds: pollCount * 15,
+                    progressBasis: "fake_fixture"
+                )
+            )
         } else if pollCount == 4 {
             if simulateStall {
                 // Simulate stall: return same progress value
-                return .processing(progress: 90.0)
+                return .processing(
+                    RemoteJobProgress(
+                        progressFraction: 0.9,
+                        stageKey: "packaging",
+                        detail: "测试桩模拟长时间停滞。",
+                        etaMinutes: nil,
+                        elapsedSeconds: pollCount * 15,
+                        progressBasis: "fake_fixture"
+                    )
+                )
             }
-            return .completed
+            return .completed(
+                RemoteJobProgress(
+                    progressFraction: 1.0,
+                    stageKey: "complete",
+                    detail: "测试桩已经完成。",
+                    etaMinutes: 0,
+                    elapsedSeconds: pollCount * 15,
+                    progressBasis: "fake_fixture"
+                )
+            )
         } else {
             // After completion, always return completed
-            return .completed
+            return .completed(
+                RemoteJobProgress(
+                    progressFraction: 1.0,
+                    stageKey: "complete",
+                    detail: "测试桩已经完成。",
+                    etaMinutes: 0,
+                    elapsedSeconds: pollCount * 15,
+                    progressBasis: "fake_fixture"
+                )
+            )
         }
     }
     
     func download(jobId: String) async throws -> (data: Data, format: ArtifactFormat) {
         return (Self.fixedPlyContent, .splatPly)
     }
-}
 
+    func cancel(jobId: String) async throws {
+        pollCount = 0
+    }
+}

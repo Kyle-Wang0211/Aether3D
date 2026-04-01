@@ -43,13 +43,13 @@ class ContractConstants:
     QUEUED_TIMEOUT_SECONDS = 3600
     QUEUED_WARNING_SECONDS = 1800
     
-    # PR1 C-Class Capacity Control Constants
-    SOFT_LIMIT_PATCH_COUNT = 5000
-    HARD_LIMIT_PATCH_COUNT = 8000
-    EEB_BASE_BUDGET = 10000.0
+    # PR1 C-Class Capacity Control Constants — unlimited scanning mode (百万级种子)
+    SOFT_LIMIT_PATCH_COUNT = 2**63 - 1   # sys.maxsize equivalent (unlimited)
+    HARD_LIMIT_PATCH_COUNT = 2**63 - 1   # sys.maxsize equivalent (unlimited)
+    EEB_BASE_BUDGET = float('inf')        # effectively unlimited
     EEB_MIN_QUANTUM = 1.0
-    SOFT_BUDGET_THRESHOLD = 2000.0
-    HARD_BUDGET_THRESHOLD = 500.0
+    SOFT_BUDGET_THRESHOLD = 0.0           # never triggers
+    HARD_BUDGET_THRESHOLD = 0.0           # never triggers
     IG_MIN_SOFT = 0.1
     NOVELTY_MIN_SOFT = 0.1
     

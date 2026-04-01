@@ -53,11 +53,12 @@ int aether_coordinator_default_config(aether_coordinator_config_t* config) {
     config->min_blur_score = 0.15f;               // Accept more frames (DAv2 depth compensates blur)
     config->min_quality_score = 0.08f;            // Very permissive (more data > less noise)
 
-    // Training budget: device preset overrides, but default for 6GB tier
-    config->max_gaussians = 1000000;              // 1M Student-t primitives (effective ~5M Gaussian)
-    config->max_iterations = 20000;               // 20K iters (3DGS-MCMC standard: 30K)
+    // Training budget: no artificial cap — device preset determines real limit
+    config->max_gaussians = 100000000;            // 100M = unlimited; preset caps to device capacity
+    config->max_iterations = 3000;                // Global engine: TSDF init + MCMC converges fast
     config->render_width = 800;                   // Higher than PocketGS
     config->render_height = 600;
+    config->local_preview_mode = 0;
 
     // Thermal: robust recovery with predictive management
     config->thermal_recovery_delay_s = 3.0f;      // Faster recovery (was 5.0)
@@ -70,6 +71,8 @@ int aether_coordinator_default_config(aether_coordinator_config_t* config) {
     // Rendering stability
     config->max_consecutive_gpu_errors = 5;       // More tolerance (was 3)
     config->nan_check_interval_steps = 10.0f;
+
+    // TSDF→Gaussian: geometry-based gate (has_surface + avg_weight ≥ 8), no quality score threshold
 
     // Point cloud → 3DGS transition: faster blend
     config->blend_start_splat_count = 500.0f;     // Start blending sooner (was 1000)
@@ -112,6 +115,7 @@ aether_pipeline_coordinator_t* aether_pipeline_coordinator_create(
     cpp_config.training.max_iterations = config->max_iterations;
     cpp_config.training.render_width = config->render_width;
     cpp_config.training.render_height = config->render_height;
+    cpp_config.local_preview_mode = config->local_preview_mode != 0;
 
     cpp_config.thermal.recovery_delay_s = config->thermal_recovery_delay_s;
     cpp_config.thermal.transition_duration_s = config->thermal_transition_s;
@@ -120,6 +124,7 @@ aether_pipeline_coordinator_t* aether_pipeline_coordinator_create(
     cpp_config.low_light_blur_strictness = config->low_light_blur_strictness;
     cpp_config.max_consecutive_gpu_errors = config->max_consecutive_gpu_errors;
     cpp_config.nan_check_interval_steps = config->nan_check_interval_steps;
+    // TSDF→Gaussian gate is geometry-based (has_surface + avg_weight), no configurable threshold
     cpp_config.blend_start_splat_count = config->blend_start_splat_count;
     cpp_config.blend_end_splat_count = config->blend_end_splat_count;
     cpp_config.depth_model_path = config->depth_model_path;            // DAv2 Small
@@ -175,6 +180,31 @@ int aether_pipeline_coordinator_on_frame(
         thermal_state);
 }
 
+int aether_pipeline_coordinator_on_imported_video_frame(
+    aether_pipeline_coordinator_t* coordinator,
+    const uint8_t* rgba, uint32_t w, uint32_t h,
+    const float* intrinsics,
+    int intrinsics_source,
+    double timestamp_seconds,
+    uint32_t frame_index,
+    uint32_t total_frames,
+    int thermal_state) {
+
+    if (!coordinator || !coordinator->coordinator) return -1;
+    if (!rgba || w == 0 || h == 0) return -1;
+
+    return coordinator->coordinator->on_imported_video_frame(
+        rgba,
+        w,
+        h,
+        intrinsics,
+        intrinsics_source,
+        timestamp_seconds,
+        frame_index,
+        total_frames,
+        thermal_state);
+}
+
 int aether_pipeline_coordinator_get_snapshot(
     aether_pipeline_coordinator_t* coordinator,
     aether_evidence_snapshot_t* out) {
@@ -189,20 +219,35 @@ int aether_pipeline_coordinator_get_snapshot(
     out->selected_frames = snapshot.selected_frames;
     out->min_frames_needed = snapshot.min_frames_needed;
     out->num_gaussians = snapshot.num_gaussians;
-    out->converged_regions = snapshot.converged_regions;
-    out->total_regions = snapshot.total_regions;
     out->training_active = snapshot.training_active ? 1 : 0;
     out->scan_complete = snapshot.scan_complete ? 1 : 0;
     out->has_s6_quality = snapshot.has_s6_quality ? 1 : 0;
     out->thermal_level = static_cast<int>(snapshot.thermal_level);
 
-    // 区域化训练状态 (破镜重圆)
-    out->training_region_total = snapshot.training_region_total;
-    out->training_region_completed = snapshot.training_region_completed;
-    out->active_region_id = snapshot.active_region_id;
-    out->active_region_progress = snapshot.active_region_progress;
-    out->is_animating = snapshot.is_animating ? 1 : 0;
-    out->staged_count = snapshot.staged_count;
+    // 全局训练状态
+    out->training_loss = snapshot.training_loss;
+    out->training_step = snapshot.training_step;
+    out->assigned_blocks = snapshot.assigned_blocks;
+    out->pending_gaussian_count = snapshot.pending_gaussian_count;
+    out->preview_elapsed_ms = snapshot.preview_elapsed_ms;
+    out->preview_phase_depth_ms = snapshot.preview_phase_depth_ms;
+    out->preview_phase_seed_ms = snapshot.preview_phase_seed_ms;
+    out->preview_phase_refine_ms = snapshot.preview_phase_refine_ms;
+    out->preview_depth_batches_submitted = snapshot.preview_depth_batches_submitted;
+    out->preview_depth_results_ready = snapshot.preview_depth_results_ready;
+    out->preview_depth_reuse_frames = snapshot.preview_depth_reuse_frames;
+    out->preview_prefilter_accepts = snapshot.preview_prefilter_accepts;
+    out->preview_prefilter_brightness_rejects = snapshot.preview_prefilter_brightness_rejects;
+    out->preview_prefilter_blur_rejects = snapshot.preview_prefilter_blur_rejects;
+    out->preview_keyframe_gate_accepts = snapshot.preview_keyframe_gate_accepts;
+    out->preview_keyframe_gate_rejects = snapshot.preview_keyframe_gate_rejects;
+    out->preview_seed_candidates = snapshot.preview_seed_candidates;
+    out->preview_seed_accepted = snapshot.preview_seed_accepted;
+    out->preview_seed_rejected = snapshot.preview_seed_rejected;
+    out->preview_seed_quality_mean = snapshot.preview_seed_quality_mean;
+    out->preview_frames_enqueued = snapshot.preview_frames_enqueued;
+    out->preview_frames_ingested = snapshot.preview_frames_ingested;
+    out->preview_frame_backlog = snapshot.preview_frame_backlog;
 
     return 0;
 }
@@ -219,6 +264,13 @@ void aether_pipeline_coordinator_set_thermal(
     int level) {
     if (!coordinator || !coordinator->coordinator) return;
     coordinator->coordinator->set_thermal_state(level);
+}
+
+void aether_pipeline_coordinator_set_foreground_active(
+    aether_pipeline_coordinator_t* coordinator,
+    int active) {
+    if (!coordinator || !coordinator->coordinator) return;
+    coordinator->coordinator->set_foreground_active(active != 0);
 }
 
 int aether_pipeline_coordinator_enhance(
@@ -243,6 +295,12 @@ int aether_pipeline_coordinator_is_training(
     return coordinator->coordinator->is_training_active() ? 1 : 0;
 }
 
+int aether_pipeline_coordinator_service_local_preview_bootstrap(
+    aether_pipeline_coordinator_t* coordinator) {
+    if (!coordinator || !coordinator->coordinator) return -1;
+    return coordinator->coordinator->service_local_preview_bootstrap() ? 1 : 0;
+}
+
 int aether_pipeline_coordinator_is_gpu_training(
     const aether_pipeline_coordinator_t* coordinator) {
     if (!coordinator || !coordinator->coordinator) return -1;
@@ -259,8 +317,6 @@ int aether_pipeline_coordinator_get_training_progress(
     out->total_steps = progress.total_steps;
     out->loss = progress.loss;
     out->num_gaussians = progress.num_gaussians;
-    out->converged_regions = progress.converged_regions;
-    out->total_regions = progress.total_regions;
     out->is_complete = progress.is_complete ? 1 : 0;
 
     return 0;
@@ -309,63 +365,18 @@ int aether_pipeline_coordinator_export_point_cloud_ply(
     return static_cast<int>(status);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// D4: Temporal Region State API ("破镜重圆" Progressive Reveal)
-// ═══════════════════════════════════════════════════════════════════════
-
-int aether_get_trained_region_count(
-    const aether_pipeline_coordinator_t* coordinator) {
-    if (!coordinator || !coordinator->coordinator) return 0;
-    return static_cast<int>(coordinator->coordinator->trained_region_count());
-}
-
-int aether_get_region_state(
-    const aether_pipeline_coordinator_t* coordinator,
-    int region_idx,
-    aether_temporal_region_t* out) {
-    if (!coordinator || !coordinator->coordinator || !out || region_idx < 0) return -1;
-
-    auto region = coordinator->coordinator->get_region_state(
-        static_cast<std::size_t>(region_idx));
-    if (!region) return -1;
-
-    out->start_frame = region->start_frame;
-    out->end_frame = region->end_frame;
-    out->steps_trained = region->steps_trained;
-    out->best_loss = region->best_loss;
-    out->geometry_ready = region->geometry_ready ? 1 : 0;
-    out->detail_ready = region->detail_ready ? 1 : 0;
-    out->fade_alpha = region->fade_alpha;
-
-    return 0;
-}
-
-int aether_get_region_geometry_ready(
-    const aether_pipeline_coordinator_t* coordinator,
-    int region_idx) {
-    if (!coordinator || !coordinator->coordinator || region_idx < 0) return -1;
-
-    auto region = coordinator->coordinator->get_region_state(
-        static_cast<std::size_t>(region_idx));
-    if (!region) return -1;
-
-    return region->geometry_ready ? 1 : 0;
-}
-
-float aether_get_region_fade_alpha(
-    const aether_pipeline_coordinator_t* coordinator,
-    int region_idx) {
-    if (!coordinator || !coordinator->coordinator || region_idx < 0) return -1.0f;
-
-    auto region = coordinator->coordinator->get_region_state(
-        static_cast<std::size_t>(region_idx));
-    if (!region) return -1.0f;
-
-    return region->fade_alpha;
+size_t aether_pipeline_coordinator_copy_surface_points_xyz(
+    aether_pipeline_coordinator_t* coordinator,
+    float* out_xyz,
+    size_t max_points) {
+    if (!coordinator || !coordinator->coordinator || !out_xyz || max_points == 0) {
+        return 0;
+    }
+    return coordinator->coordinator->copy_surface_points_xyz(out_xyz, max_points);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 区域化训练: Viewer Entry Signal
+// Viewer Entry Signal
 // ═══════════════════════════════════════════════════════════════════════
 
 void aether_pipeline_coordinator_signal_viewer_entered(

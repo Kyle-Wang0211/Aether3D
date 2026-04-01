@@ -9,6 +9,10 @@
 
 import Foundation
 
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
+
 #if canImport(UIKit) || canImport(AppKit)
 
 /// Thread-safe JSON persistence for scan records
@@ -16,113 +20,674 @@ import Foundation
 /// Storage layout:
 ///   Documents/Aether3D/scans.json       — JSON array of ScanRecord
 ///   Documents/Aether3D/thumbnails/      — JPEG thumbnails (one per scan)
-///
-/// Safety:
-///   - Atomic writes via temp file + rename (prevents corruption on crash)
-///   - Queue serialization (prevents concurrent write corruption)
-///   - ISO 8601 date encoding (portable across locales)
-///   - Maximum 1000 records (prevents unbounded storage growth)
+///   Documents/Aether3D/exports/         — Final PLY / JSON outputs
+///   Documents/Aether3D/imports/         — Imported or staged videos for retry
 public final class ScanRecordStore {
 
-    /// Storage directory: Documents/Aether3D/
     private let baseDirectory: URL
-
-    /// JSON file: Documents/Aether3D/scans.json
     private let jsonFileURL: URL
-
-    /// Thumbnails directory: Documents/Aether3D/thumbnails/
     private let thumbnailsDirectory: URL
-
-    /// In-memory cache
-    private var cachedRecords: [ScanRecord]?
-
-    /// Serial queue for thread safety
+    private let exportsDirectory: URL
+    private let importsDirectory: URL
     private let queue = DispatchQueue(label: "com.aether3d.scanrecordstore", qos: .utility)
-
-    /// Maximum stored records (prevents unbounded growth)
     private let maxRecords = 1000
+    private var cachedRecords: [ScanRecord]?
 
     public init() {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         self.baseDirectory = documents.appendingPathComponent("Aether3D")
         self.jsonFileURL = baseDirectory.appendingPathComponent("scans.json")
         self.thumbnailsDirectory = baseDirectory.appendingPathComponent("thumbnails")
+        self.exportsDirectory = baseDirectory.appendingPathComponent("exports")
+        self.importsDirectory = baseDirectory.appendingPathComponent("imports")
 
-        // Create directories if needed
         try? FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: thumbnailsDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: exportsDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
     }
 
-    /// Load all scan records (cached or from disk)
-    ///
-    /// - Returns: Array of scan records, newest first. Returns empty on parse failure.
+    public func baseDirectoryURL() -> URL {
+        baseDirectory
+    }
+
     public func loadRecords() -> [ScanRecord] {
-        return queue.sync {
-            if let cached = cachedRecords { return cached }
+        queue.sync {
+            if let cachedRecords {
+                return cachedRecords
+            }
 
             guard FileManager.default.fileExists(atPath: jsonFileURL.path) else {
-                cachedRecords = []
-                return []
+                let recoveredRecords = normalizedLoadedRecords(recoverRecordsFromFilesystem())
+                cachedRecords = recoveredRecords
+                return recoveredRecords
             }
 
             do {
                 let data = try Data(contentsOf: jsonFileURL)
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                let records = try decoder.decode([ScanRecord].self, from: data)
+                let records = normalizedLoadedRecords(try decodeRecords(from: data))
                 cachedRecords = records
                 return records
             } catch {
-                // JSON parse failed — return empty, don't crash
-                cachedRecords = []
-                return []
+                let recoveredRecords = normalizedLoadedRecords(recoverRecordsFromFilesystem())
+                cachedRecords = recoveredRecords
+                return recoveredRecords
             }
         }
     }
 
-    /// Save a new scan record (append + atomic write)
-    ///
-    /// - Parameter record: The scan record to save
-    public func saveRecord(_ record: ScanRecord) {
+    @discardableResult
+    public func freezeStaleProcessingRecords(
+        now: Date = Date(),
+        localPendingGraceSeconds: TimeInterval = 5 * 60,
+        remotePendingGraceSeconds: TimeInterval = 6 * 60 * 60
+    ) -> Bool {
         queue.sync {
             var records = cachedRecords ?? loadRecordsUnsafe()
-            records.append(record)
+            var didMutate = false
 
-            // Enforce max records (remove oldest)
-            if records.count > maxRecords {
-                let overflow = records.count - maxRecords
-                let removed = Array(records.prefix(overflow))
-                records = Array(records.suffix(maxRecords))
-                // Cleanup thumbnails for removed records
-                for r in removed {
-                    cleanupThumbnail(for: r.id)
+            for index in records.indices {
+                guard records[index].artifactPath == nil, records[index].isProcessing else {
+                    continue
+                }
+
+                let age = now.timeIntervalSince(records[index].updatedAt)
+                let remoteJobId = records[index].remoteJobId?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let hasRemoteJob = !(remoteJobId?.isEmpty ?? true)
+
+                if !hasRemoteJob, age >= localPendingGraceSeconds {
+                    records[index].status = .cancelled
+                    records[index].statusMessage = "这条旧素材不会自动上传"
+                    records[index].detailMessage = "这是之前停在本地准备阶段的旧记录。为了避免过去的素材一打开 app 就自动排队，系统已经把它冻结了。原始视频仍保留在手机里；只有你手动点“重新发送到丹麦 5090”时才会再次上传。"
+                    records[index].progressFraction = nil
+                    records[index].uploadedBytes = nil
+                    records[index].totalBytes = nil
+                    records[index].uploadBytesPerSecond = nil
+                    records[index].estimatedRemainingMinutes = nil
+                    records[index].remoteJobId = nil
+                    records[index].failureReason = "stale_local_processing_frozen"
+                    didMutate = true
+                    continue
+                }
+
+                if hasRemoteJob, age >= remotePendingGraceSeconds {
+                    records[index].status = .cancelled
+                    records[index].statusMessage = "这条旧远端任务已停止自动恢复"
+                    records[index].detailMessage = "这是较早之前的历史远端任务。为了避免 app 每次打开都自动继续轮询，这条记录已经被冻结。原始视频仍保留在手机里；如果你还想继续，请手动重新发送。"
+                    records[index].progressFraction = nil
+                    records[index].uploadedBytes = nil
+                    records[index].totalBytes = nil
+                    records[index].uploadBytesPerSecond = nil
+                    records[index].estimatedRemainingMinutes = nil
+                    records[index].remoteJobId = nil
+                    records[index].failureReason = "stale_remote_processing_frozen"
+                    didMutate = true
+                }
+            }
+
+            if didMutate {
+                cachedRecords = records
+                writeRecordsToDisk(records)
+            }
+
+            return didMutate
+        }
+    }
+
+    @discardableResult
+    public func purgeExpiredFrozenPlaceholderRecords(
+        now: Date = Date(),
+        maxAgeSeconds: TimeInterval = 24 * 60 * 60
+    ) -> Int {
+        queue.sync {
+            var records = cachedRecords ?? loadRecordsUnsafe()
+            let originalCount = records.count
+            let removableIDs = Set(
+                records.compactMap { record -> UUID? in
+                    guard record.artifactPath == nil else { return nil }
+                    guard now.timeIntervalSince(record.updatedAt) >= maxAgeSeconds else { return nil }
+                    switch record.failureReason {
+                    case "stale_local_processing_frozen", "stale_remote_processing_frozen":
+                        return record.id
+                    default:
+                        return nil
+                    }
+                }
+            )
+
+            guard !removableIDs.isEmpty else { return 0 }
+
+            let removedRecords = records.filter { removableIDs.contains($0.id) }
+            records.removeAll { removableIDs.contains($0.id) }
+
+            for removedRecord in removedRecords {
+                cleanupThumbnail(for: removedRecord.id)
+                if let artifactPath = removedRecord.artifactPath {
+                    cleanupArtifact(relativePath: artifactPath)
+                }
+                if let sourceVideoPath = removedRecord.sourceVideoPath {
+                    cleanupArtifact(relativePath: sourceVideoPath)
                 }
             }
 
             cachedRecords = records
             writeRecordsToDisk(records)
+            return originalCount - records.count
         }
     }
 
-    /// Delete a scan record by ID
-    ///
-    /// - Parameter id: UUID of the record to delete
+    public func record(id: UUID) -> ScanRecord? {
+        queue.sync {
+            let records = cachedRecords ?? loadRecordsUnsafe()
+            return records.first(where: { $0.id == id })
+        }
+    }
+
+    public func saveRecord(_ record: ScanRecord) {
+        queue.sync {
+            var records = cachedRecords ?? loadRecordsUnsafe()
+            records.removeAll { $0.id == record.id }
+            records.append(record)
+            if records.count > maxRecords {
+                let overflow = records.count - maxRecords
+                let removed = Array(records.prefix(overflow))
+                records = Array(records.suffix(maxRecords))
+                for removedRecord in removed {
+                    cleanupThumbnail(for: removedRecord.id)
+                    if let artifactPath = removedRecord.artifactPath {
+                        cleanupArtifact(relativePath: artifactPath)
+                    }
+                }
+            }
+            cachedRecords = records
+            writeRecordsToDisk(records)
+        }
+    }
+
+    public func updateArtifactPath(recordId: UUID, artifactPath: String) {
+        queue.sync {
+            mutateRecord(id: recordId) { record in
+                let now = Date()
+                record.artifactPath = artifactPath
+                record.viewerInitialPose = nil
+                record.remoteJobId = nil
+                record.status = .completed
+                record.statusMessage = ScanRecord.defaultStatusMessage(for: .completed)
+                record.detailMessage = "现在可以进入黑色 3D 空间自由查看"
+                record.progressFraction = 1.0
+                record.uploadedBytes = nil
+                record.totalBytes = nil
+                record.uploadBytesPerSecond = nil
+                record.failureReason = nil
+                record.estimatedRemainingMinutes = 0
+                let startedAt = record.processingStartedAt ?? record.createdAt
+                record.processingStartedAt = startedAt
+                record.processingCompletedAt = now
+                record.processingElapsedSeconds = max(0, now.timeIntervalSince(startedAt))
+                record.updatedAt = now
+            }
+        }
+    }
+
+    public func updateViewerInitialPose(recordId: UUID, viewerInitialPose: ViewerInitialPose) {
+        queue.sync {
+            var records = cachedRecords ?? loadRecordsUnsafe()
+            guard let index = records.firstIndex(where: { $0.id == recordId }) else {
+                return
+            }
+            if records[index].viewerInitialPose == viewerInitialPose {
+                return
+            }
+            records[index].viewerInitialPose = viewerInitialPose
+            cachedRecords = records
+            writeRecordsToDisk(records)
+        }
+    }
+
+    public func updateThumbnailPath(recordId: UUID, thumbnailPath: String?) {
+        queue.sync {
+            mutateRecord(id: recordId) { record in
+                record.thumbnailPath = thumbnailPath
+                record.updatedAt = Date()
+            }
+        }
+    }
+
+    public func updateProcessingState(
+        recordId: UUID,
+        status: ScanRecordStatus,
+        statusMessage: String? = nil,
+        detailMessage: String? = nil,
+        progressFraction: Double? = nil,
+        progressBasis: String? = nil,
+        remoteStageKey: String? = nil,
+        remotePhaseName: String? = nil,
+        currentTier: String? = nil,
+        runtimeMetrics: [String: String]? = nil,
+        uploadedBytes: Int64? = nil,
+        totalBytes: Int64? = nil,
+        uploadBytesPerSecond: Double? = nil,
+        estimatedRemainingMinutes: Int? = nil,
+        sourceVideoPath: String? = nil,
+        frameSamplingProfile: String? = nil,
+        remoteJobId: String? = nil,
+        clearRemoteJobId: Bool = false,
+        failureReason: String? = nil
+    ) {
+        queue.sync {
+            mutateRecord(id: recordId) { record in
+                let now = Date()
+                let normalizedIncomingStageKey = remoteStageKey?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let isIncomingLocalPreview = normalizedIncomingStageKey == "local_preview"
+                let incomingIsAuthoritativeRemoteRuntime = Self.shouldTrustIncomingRemoteRuntime(
+                    incomingStatus: status,
+                    progressBasis: progressBasis,
+                    remoteStageKey: remoteStageKey,
+                    remotePhaseName: remotePhaseName,
+                    runtimeMetrics: runtimeMetrics,
+                    detailMessage: detailMessage
+                )
+                let resolvedStatus = Self.mergedStatus(
+                    existing: record,
+                    incomingStatus: status,
+                    progressBasis: progressBasis,
+                    remoteStageKey: remoteStageKey,
+                    remotePhaseName: remotePhaseName,
+                    runtimeMetrics: runtimeMetrics,
+                    detailMessage: detailMessage,
+                    clearRemoteJobId: clearRemoteJobId
+                )
+                let regressedStage = resolvedStatus != status
+                let authoritativeIncomingRegression = Self.isAuthoritativeIncomingRegression(
+                    existing: record,
+                    incomingStatus: resolvedStatus,
+                    incomingIsAuthoritativeRemoteRuntime: incomingIsAuthoritativeRemoteRuntime,
+                    clearRemoteJobId: clearRemoteJobId
+                )
+                let normalizedIncomingProgressBasis = progressBasis?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let isUploadFinalizing = resolvedStatus == .uploading &&
+                    normalizedIncomingProgressBasis == "upload_finalizing"
+                let shouldResetProcessingClock = clearRemoteJobId && Self.isInFlightStatus(resolvedStatus)
+                let shouldFinalizeProcessingClock = Self.shouldFinalizeProcessingClock(
+                    for: resolvedStatus,
+                    failureReason: failureReason
+                )
+
+                if shouldResetProcessingClock {
+                    record.processingStartedAt = now
+                    record.processingCompletedAt = nil
+                    record.processingElapsedSeconds = nil
+                    if isIncomingLocalPreview {
+                        record.progressBasis = nil
+                        record.remoteStageKey = nil
+                        record.remotePhaseName = nil
+                        record.currentTier = nil
+                        record.runtimeMetrics = nil
+                    }
+                } else if record.processingStartedAt == nil {
+                    record.processingStartedAt = record.createdAt
+                }
+
+                record.status = resolvedStatus
+                if regressedStage {
+                    record.statusMessage = record.statusMessage
+                        ?? statusMessage
+                        ?? ScanRecord.defaultStatusMessage(for: resolvedStatus)
+                    record.detailMessage = record.detailMessage ?? detailMessage
+                } else {
+                    record.statusMessage = statusMessage ?? ScanRecord.defaultStatusMessage(for: resolvedStatus)
+                    record.detailMessage = detailMessage
+                }
+                record.progressFraction = Self.mergedProgressFraction(
+                    existing: record,
+                    incomingStatus: resolvedStatus,
+                    incomingProgress: progressFraction,
+                    clearRemoteJobId: clearRemoteJobId,
+                    regressedStage: regressedStage,
+                    authoritativeIncomingRegression: authoritativeIncomingRegression
+                )
+                if !regressedStage {
+                    if incomingIsAuthoritativeRemoteRuntime {
+                        record.progressBasis = progressBasis
+                        record.remoteStageKey = remoteStageKey
+                        record.remotePhaseName = remotePhaseName
+                        record.currentTier = currentTier
+                        record.runtimeMetrics = runtimeMetrics
+                    } else {
+                        record.progressBasis = progressBasis ?? record.progressBasis
+                        record.remoteStageKey = remoteStageKey ?? record.remoteStageKey
+                        record.remotePhaseName = remotePhaseName ?? record.remotePhaseName
+                        record.currentTier = currentTier ?? record.currentTier
+                        record.runtimeMetrics = runtimeMetrics ?? record.runtimeMetrics
+                    }
+                }
+                if resolvedStatus == .uploading && !regressedStage {
+                    record.uploadedBytes = uploadedBytes
+                    record.totalBytes = totalBytes
+                    if isUploadFinalizing {
+                        record.uploadBytesPerSecond = nil
+                    } else if let uploadBytesPerSecond,
+                       uploadBytesPerSecond.isFinite,
+                       uploadBytesPerSecond > 0 {
+                        record.uploadBytesPerSecond = uploadBytesPerSecond
+                    }
+                } else {
+                    record.uploadedBytes = nil
+                    record.totalBytes = nil
+                    record.uploadBytesPerSecond = nil
+                }
+                if resolvedStatus == .uploading && !regressedStage {
+                    if isUploadFinalizing {
+                        record.estimatedRemainingMinutes = nil
+                    } else if let estimatedRemainingMinutes {
+                        record.estimatedRemainingMinutes = estimatedRemainingMinutes
+                    }
+                } else {
+                    record.estimatedRemainingMinutes = estimatedRemainingMinutes
+                }
+                if let sourceVideoPath {
+                    record.sourceVideoPath = sourceVideoPath
+                }
+                if let frameSamplingProfile {
+                    record.frameSamplingProfile = frameSamplingProfile
+                }
+                if clearRemoteJobId {
+                    record.remoteJobId = nil
+                    if !isIncomingLocalPreview {
+                        record.progressBasis = nil
+                        record.remoteStageKey = nil
+                        record.remotePhaseName = nil
+                        record.currentTier = nil
+                        record.runtimeMetrics = nil
+                    }
+                } else if status == .preparing && !regressedStage {
+                    record.remoteJobId = nil
+                    record.remoteStageKey = nil
+                    record.remotePhaseName = nil
+                    record.currentTier = nil
+                    record.progressBasis = progressBasis
+                    record.runtimeMetrics = runtimeMetrics
+                } else if let remoteJobId {
+                    record.remoteJobId = remoteJobId
+                }
+                record.failureReason = failureReason
+                if resolvedStatus == .failed {
+                    record.artifactPath = nil
+                    record.viewerInitialPose = nil
+                }
+                if record.artifactPath == nil {
+                    record.viewerInitialPose = nil
+                }
+                if shouldFinalizeProcessingClock {
+                    let startedAt = record.processingStartedAt ?? record.createdAt
+                    record.processingStartedAt = startedAt
+                    record.processingCompletedAt = now
+                    record.processingElapsedSeconds = max(0, now.timeIntervalSince(startedAt))
+                } else if Self.isInFlightStatus(resolvedStatus) {
+                    record.processingCompletedAt = nil
+                }
+                record.updatedAt = now
+            }
+        }
+    }
+
+    private static func mergedProgressFraction(
+        existing: ScanRecord,
+        incomingStatus: ScanRecordStatus,
+        incomingProgress: Double?,
+        clearRemoteJobId: Bool,
+        regressedStage: Bool,
+        authoritativeIncomingRegression: Bool
+    ) -> Double? {
+        let normalizedIncoming = normalizedProgressFraction(incomingProgress, for: incomingStatus)
+
+        switch incomingStatus {
+        case .completed:
+            return 1.0
+        case .failed, .cancelled, .preparing:
+            return normalizedIncoming
+        default:
+            break
+        }
+
+        if clearRemoteJobId {
+            return normalizedIncoming
+        }
+
+        if authoritativeIncomingRegression {
+            return normalizedIncoming
+        }
+
+        if regressedStage {
+            switch (existing.progressFraction, normalizedIncoming) {
+            case let (existing?, incoming?):
+                return max(existing, incoming)
+            case let (existing?, nil):
+                return existing
+            case let (nil, incoming?):
+                return incoming
+            case (nil, nil):
+                return nil
+            }
+        }
+
+        guard existing.isProcessing else {
+            return normalizedIncoming
+        }
+
+        switch (existing.progressFraction, normalizedIncoming) {
+        case let (existing?, incoming?):
+            return max(existing, incoming)
+        case let (existing?, nil):
+            return existing
+        case let (nil, incoming?):
+            return incoming
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private static func mergedStatus(
+        existing: ScanRecord,
+        incomingStatus: ScanRecordStatus,
+        progressBasis: String?,
+        remoteStageKey: String?,
+        remotePhaseName: String?,
+        runtimeMetrics: [String: String]?,
+        detailMessage: String?,
+        clearRemoteJobId: Bool
+    ) -> ScanRecordStatus {
+        if clearRemoteJobId {
+            return incomingStatus
+        }
+
+        guard existing.isProcessing,
+              let existingRank = visibleStageRank(existing.status),
+              let incomingRank = visibleStageRank(incomingStatus) else {
+            return incomingStatus
+        }
+
+        if shouldTrustIncomingRemoteRuntime(
+            incomingStatus: incomingStatus,
+            progressBasis: progressBasis,
+            remoteStageKey: remoteStageKey,
+            remotePhaseName: remotePhaseName,
+            runtimeMetrics: runtimeMetrics,
+            detailMessage: detailMessage
+        ) {
+            return incomingStatus
+        }
+
+        return incomingRank < existingRank ? existing.status : incomingStatus
+    }
+
+    private static func isAuthoritativeIncomingRegression(
+        existing: ScanRecord,
+        incomingStatus: ScanRecordStatus,
+        incomingIsAuthoritativeRemoteRuntime: Bool,
+        clearRemoteJobId: Bool
+    ) -> Bool {
+        guard !clearRemoteJobId, incomingIsAuthoritativeRemoteRuntime, existing.isProcessing else {
+            return false
+        }
+        guard let existingRank = visibleStageRank(existing.status),
+              let incomingRank = visibleStageRank(incomingStatus) else {
+            return false
+        }
+        return incomingRank < existingRank
+    }
+
+    private static func shouldTrustIncomingRemoteRuntime(
+        incomingStatus: ScanRecordStatus,
+        progressBasis: String?,
+        remoteStageKey: String?,
+        remotePhaseName: String?,
+        runtimeMetrics: [String: String]?,
+        detailMessage: String?
+    ) -> Bool {
+        switch incomingStatus {
+        case .preparing, .uploading, .queued, .reconstructing, .training, .packaging, .downloading, .localFallback:
+            break
+        case .completed, .cancelled, .failed:
+            return false
+        }
+
+        let normalizedBasis = progressBasis?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let normalizedStageKey = remoteStageKey?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let normalizedPhaseName = remotePhaseName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let hasRuntimeMetrics = !(runtimeMetrics?.isEmpty ?? true)
+        let hasRuntimeStage = !(normalizedStageKey?.isEmpty ?? true) || !(normalizedPhaseName?.isEmpty ?? true)
+        let hasUsefulDetail = !(detailMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+
+        let uploadOnlyBases: Set<String> = [
+            "created",
+            "upload_bytes",
+            "chunked_upload_bytes",
+            "chunk_part_uploaded",
+            "object_storage_visible",
+            "upload_finalizing",
+            "control_plane_upload_complete",
+            "upload_complete",
+            "multipart_upload_complete",
+            "chunked_upload_complete",
+        ]
+
+        let isAuthoritativeRemoteWork =
+            normalizedBasis == "worker_assigned"
+            || normalizedBasis == "worker_assigned_streaming_input"
+            || normalizedBasis == "prep_ready_waiting_gpu"
+            || normalizedBasis == "active_worker_without_runtime"
+            || (normalizedBasis?.hasPrefix("prep_") ?? false)
+            || (normalizedBasis?.hasPrefix("runtime_") ?? false)
+            || ["sfm", "sfm_extract", "sfm_match", "sfm_reconstruct", "train", "export"].contains(normalizedStageKey)
+            || ["streaming_input", "stream_probe_live", "extract_frames_live", "audit_live", "sfm_wait_live", "live_sfm_retry_wait", "live_sfm_ready", "feature_extractor", "matcher", "mapper"].contains(normalizedPhaseName)
+
+        guard hasRuntimeStage || hasRuntimeMetrics || hasUsefulDetail else {
+            return false
+        }
+
+        if let normalizedBasis, uploadOnlyBases.contains(normalizedBasis) {
+            return false
+        }
+
+        return isAuthoritativeRemoteWork
+    }
+
+    private static func visibleStageRank(_ status: ScanRecordStatus) -> Int? {
+        switch status {
+        case .preparing:
+            return 0
+        case .uploading, .queued:
+            return 1
+        case .reconstructing:
+            return 2
+        case .training, .localFallback:
+            return 3
+        case .packaging, .downloading, .completed:
+            return 4
+        case .cancelled, .failed:
+            return nil
+        }
+    }
+
+    private static func normalizedProgressFraction(_ value: Double?, for status: ScanRecordStatus) -> Double? {
+        switch status {
+        case .completed:
+            return 1.0
+        case .failed, .cancelled:
+            if let value {
+                return max(0.0, min(1.0, value))
+            }
+            return nil
+        default:
+            guard let value else { return nil }
+            return max(0.0, min(0.99, value))
+        }
+    }
+
+    private static func isInFlightStatus(_ status: ScanRecordStatus) -> Bool {
+        switch status {
+        case .completed, .cancelled, .failed:
+            return false
+        default:
+            return true
+        }
+    }
+
+    private static func shouldFinalizeProcessingClock(
+        for status: ScanRecordStatus,
+        failureReason: String?
+    ) -> Bool {
+        switch status {
+        case .completed, .failed:
+            return true
+        case .cancelled:
+            let normalizedFailureReason = failureReason?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return normalizedFailureReason != "cancel_requested_unconfirmed"
+                && normalizedFailureReason != "cancel_requested"
+        default:
+            return false
+        }
+    }
+
+    private static func isFilesystemRecoveredRecord(_ record: ScanRecord) -> Bool {
+        let normalizedStatusMessage = record.statusMessage?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalizedStatusMessage == "已从本地恢复作品"
+            || normalizedStatusMessage == "已从本地恢复历史素材"
+    }
+
     public func deleteRecord(id: UUID) {
         queue.sync {
             var records = cachedRecords ?? loadRecordsUnsafe()
+            let artifactRelPath = records.first(where: { $0.id == id })?.artifactPath
+            let sourceVideoPath = records.first(where: { $0.id == id })?.sourceVideoPath
             records.removeAll { $0.id == id }
             cachedRecords = records
             writeRecordsToDisk(records)
             cleanupThumbnail(for: id)
+            if let artifactRelPath {
+                cleanupArtifact(relativePath: artifactRelPath)
+            }
+            if let sourceVideoPath {
+                cleanupArtifact(relativePath: sourceVideoPath)
+            }
         }
     }
 
-    /// Save thumbnail image data
-    ///
-    /// - Parameters:
-    ///   - imageData: JPEG image data
-    ///   - recordId: UUID of the associated scan record
-    /// - Returns: Relative path to thumbnail, or nil on failure
     public func saveThumbnail(_ imageData: Data, for recordId: UUID) -> String? {
         let filename = "\(recordId.uuidString).jpg"
         let fileURL = thumbnailsDirectory.appendingPathComponent(filename)
@@ -134,53 +699,259 @@ public final class ScanRecordStore {
         }
     }
 
-    /// Get full URL for a thumbnail relative path
     public func thumbnailURL(for relativePath: String) -> URL {
-        return baseDirectory.appendingPathComponent(relativePath)
+        baseDirectory.appendingPathComponent(relativePath)
     }
 
-    // MARK: - Private Helpers
+    private func mutateRecord(id: UUID, mutate: (inout ScanRecord) -> Void) {
+        var records = cachedRecords ?? loadRecordsUnsafe()
+        guard let index = records.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        mutate(&records[index])
+        cachedRecords = records
+        writeRecordsToDisk(records)
+    }
 
-    /// Load records without queue synchronization (must be called within queue.sync)
     private func loadRecordsUnsafe() -> [ScanRecord] {
-        guard FileManager.default.fileExists(atPath: jsonFileURL.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: jsonFileURL.path) else { return normalizedLoadedRecords(recoverRecordsFromFilesystem()) }
         do {
             let data = try Data(contentsOf: jsonFileURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            return try decoder.decode([ScanRecord].self, from: data)
+            return normalizedLoadedRecords(try decodeRecords(from: data))
         } catch {
-            return []
+            return normalizedLoadedRecords(recoverRecordsFromFilesystem())
         }
     }
 
-    /// Atomic write to disk
+    private func decodeRecords(from data: Data) throws -> [ScanRecord] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        if let decoded = try? decoder.decode([ScanRecord].self, from: data) {
+            return decoded
+        }
+
+        guard let rawArray = try JSONSerialization.jsonObject(with: data) as? [Any] else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        var salvaged: [ScanRecord] = []
+        salvaged.reserveCapacity(rawArray.count)
+
+        for rawValue in rawArray {
+            guard JSONSerialization.isValidJSONObject(rawValue) else {
+                continue
+            }
+            let itemData = try JSONSerialization.data(withJSONObject: rawValue)
+            if let record = try? decoder.decode(ScanRecord.self, from: itemData) {
+                salvaged.append(record)
+            }
+        }
+
+        if !salvaged.isEmpty {
+            writeRecordsToDisk(salvaged)
+            return salvaged
+        }
+
+        throw CocoaError(.fileReadCorruptFile)
+    }
+
     private func writeRecordsToDisk(_ records: [ScanRecord]) {
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(records)
-
-            // Atomic write: write to temp file, then rename
             let tempURL = jsonFileURL.appendingPathExtension("tmp")
             try data.write(to: tempURL, options: [.atomic])
 
-            // If original exists, remove it first
             if FileManager.default.fileExists(atPath: jsonFileURL.path) {
                 try FileManager.default.removeItem(at: jsonFileURL)
             }
             try FileManager.default.moveItem(at: tempURL, to: jsonFileURL)
         } catch {
-            // Write failed — cached records still valid, will retry on next save
+            // Ignore write failures to avoid blocking the capture loop.
         }
     }
 
-    /// Remove thumbnail file for a record
+    private func normalizedLoadedRecords(_ records: [ScanRecord]) -> [ScanRecord] {
+        var didMutate = false
+        var normalizedRecords = records
+
+        for index in normalizedRecords.indices {
+            if Self.isFilesystemRecoveredRecord(normalizedRecords[index]) {
+                if normalizedRecords[index].processingStartedAt != nil
+                    || normalizedRecords[index].processingCompletedAt != nil
+                    || normalizedRecords[index].processingElapsedSeconds != nil {
+                    normalizedRecords[index].processingStartedAt = nil
+                    normalizedRecords[index].processingCompletedAt = nil
+                    normalizedRecords[index].processingElapsedSeconds = nil
+                    didMutate = true
+                }
+            } else if normalizedRecords[index].processingStartedAt == nil {
+                normalizedRecords[index].processingStartedAt = normalizedRecords[index].createdAt
+                didMutate = true
+            }
+
+            if normalizedRecords[index].durationSeconds <= 0,
+               let sourceVideoPath = normalizedRecords[index].sourceVideoPath {
+                let sourceURL = baseDirectory.appendingPathComponent(sourceVideoPath)
+                let derivedDuration = Self.sourceVideoDuration(at: sourceURL)
+                if derivedDuration > 0 {
+                    normalizedRecords[index].durationSeconds = derivedDuration
+                    didMutate = true
+                }
+            }
+
+            if !Self.isFilesystemRecoveredRecord(normalizedRecords[index]),
+               normalizedRecords[index].processingElapsedSeconds == nil,
+               let startedAt = normalizedRecords[index].processingStartedAt {
+                let completedAt = normalizedRecords[index].processingCompletedAt
+                    ?? (Self.shouldFinalizeProcessingClock(
+                        for: normalizedRecords[index].status,
+                        failureReason: normalizedRecords[index].failureReason
+                    ) ? normalizedRecords[index].updatedAt : nil)
+                if let completedAt, completedAt >= startedAt {
+                    normalizedRecords[index].processingCompletedAt = completedAt
+                    normalizedRecords[index].processingElapsedSeconds = max(0, completedAt.timeIntervalSince(startedAt))
+                    didMutate = true
+                }
+            }
+        }
+
+        if didMutate {
+            writeRecordsToDisk(normalizedRecords)
+        }
+
+        return normalizedRecords
+    }
+
+    private func recoverRecordsFromFilesystem() -> [ScanRecord] {
+        struct RecoveryRecord {
+            var createdAt: Date = .distantFuture
+            var updatedAt: Date = .distantPast
+            var thumbnailPath: String?
+            var artifactPath: String?
+            var sourceVideoPath: String?
+            var durationSeconds: TimeInterval = 0
+        }
+
+        let fileManager = FileManager.default
+        var recoveredById: [UUID: RecoveryRecord] = [:]
+
+        func registerFile(at url: URL, relativePrefix: String, assign: (inout RecoveryRecord, String) -> Void) {
+            let stem = url.deletingPathExtension().lastPathComponent
+            guard let id = UUID(uuidString: stem) else { return }
+            let relativePath = "\(relativePrefix)/\(url.lastPathComponent)"
+            var recovered = recoveredById[id] ?? RecoveryRecord()
+
+            if let attributes = try? fileManager.attributesOfItem(atPath: url.path) {
+                let createdAt = (attributes[.creationDate] as? Date) ?? (attributes[.modificationDate] as? Date) ?? Date()
+                let updatedAt = (attributes[.modificationDate] as? Date) ?? createdAt
+                recovered.createdAt = min(recovered.createdAt, createdAt)
+                recovered.updatedAt = max(recovered.updatedAt, updatedAt)
+            }
+
+            assign(&recovered, relativePath)
+            recoveredById[id] = recovered
+        }
+
+        if let thumbnailFiles = try? fileManager.contentsOfDirectory(
+            at: thumbnailsDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in thumbnailFiles {
+                registerFile(at: url, relativePrefix: "thumbnails") { recovered, relativePath in
+                    recovered.thumbnailPath = relativePath
+                }
+            }
+        }
+
+        if let exportFiles = try? fileManager.contentsOfDirectory(
+            at: exportsDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in exportFiles where url.pathExtension.lowercased() == "ply" {
+                registerFile(at: url, relativePrefix: "exports") { recovered, relativePath in
+                    recovered.artifactPath = relativePath
+                }
+            }
+        }
+
+        if let importFiles = try? fileManager.contentsOfDirectory(
+            at: importsDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in importFiles {
+                registerFile(at: url, relativePrefix: "imports") { recovered, relativePath in
+                    recovered.sourceVideoPath = relativePath
+                    recovered.durationSeconds = max(recovered.durationSeconds, Self.sourceVideoDuration(at: url))
+                }
+            }
+        }
+
+        let recoveredRecords = recoveredById.map { id, recovered -> ScanRecord in
+            let createdAt = recovered.createdAt == .distantFuture ? Date() : recovered.createdAt
+            let updatedAt = recovered.updatedAt == .distantPast ? createdAt : recovered.updatedAt
+            let status: ScanRecordStatus = recovered.artifactPath != nil ? .completed : .cancelled
+            let statusMessage = recovered.artifactPath != nil ? "已从本地恢复作品" : "已从本地恢复历史素材"
+            let detailMessage = recovered.artifactPath != nil
+                ? "记录文件损坏后，已根据本地导出结果重新恢复这件作品。"
+                : "记录文件损坏后，已根据本地保留素材恢复这条历史记录。"
+            return ScanRecord(
+                id: id,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                thumbnailPath: recovered.thumbnailPath,
+                artifactPath: recovered.artifactPath,
+                sourceVideoPath: recovered.sourceVideoPath,
+                durationSeconds: recovered.durationSeconds,
+                processingStartedAt: nil,
+                processingCompletedAt: nil,
+                processingElapsedSeconds: nil,
+                status: status,
+                statusMessage: statusMessage,
+                detailMessage: detailMessage,
+                progressFraction: recovered.artifactPath != nil ? 1.0 : nil
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.updatedAt == rhs.updatedAt {
+                return lhs.createdAt > rhs.createdAt
+            }
+            return lhs.updatedAt > rhs.updatedAt
+        }
+
+        if !recoveredRecords.isEmpty {
+            writeRecordsToDisk(recoveredRecords)
+        }
+
+        return recoveredRecords
+    }
+
     private func cleanupThumbnail(for recordId: UUID) {
         let filename = "\(recordId.uuidString).jpg"
         let fileURL = thumbnailsDirectory.appendingPathComponent(filename)
         try? FileManager.default.removeItem(at: fileURL)
+    }
+
+    private func cleanupArtifact(relativePath: String) {
+        let url = baseDirectory.appendingPathComponent(relativePath)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private static func sourceVideoDuration(at url: URL) -> TimeInterval {
+        #if canImport(AVFoundation)
+        let asset = AVURLAsset(url: url)
+        let seconds = CMTimeGetSeconds(asset.duration)
+        if seconds.isFinite, seconds > 0 {
+            return seconds
+        }
+        #endif
+        return 0
     }
 }
 

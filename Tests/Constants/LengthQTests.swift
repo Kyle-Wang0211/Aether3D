@@ -50,22 +50,11 @@ final class LengthQTests: XCTestCase {
         XCTAssertEqual(length1, length3)  // Same length, different scales
     }
     
-    // MARK: - Digest Input Tests
-    
-    func testDigestInput() {
-        let length = LengthQ(scaleId: .geomId, quanta: 42)
-        let digestInput = length.digestInput()
-        
-        XCTAssertEqual(digestInput.scaleId, LengthScale.geomId.rawValue)
-        XCTAssertEqual(digestInput.quanta, 42)
-    }
-    
-    func testDigestInputNoFloats() throws {
-        let length = LengthQ(scaleId: .geomId, quanta: 42)
-        let digestInput = length.digestInput()
-        
-        // Should encode without errors (no floats)
-        let digest = try CanonicalDigest.computeDigest(digestInput)
-        XCTAssertFalse(digest.isEmpty)
+    func testLengthQHashableIdentity() {
+        let lhs = LengthQ(scaleId: .geomId, quanta: 5)
+        let rhs = LengthQ(scaleId: .geomId, quanta: 5)
+        let set: Set<LengthQ> = [lhs, rhs]
+
+        XCTAssertEqual(set.count, 1)
     }
 }

@@ -20,6 +20,11 @@ import CoreVideo
 
 import simd
 
+public enum PipelineCoordinatorProfile: String, Sendable {
+    case cloudDefault = "cloud_default"
+    case localPreviewMonocular = "local_preview_monocular"
+}
+
 /// Swift bridge to the C++ PipelineCoordinator via C API.
 /// Manages the 3-thread pipeline lifecycle with MAESTRO thermal management.
 public final class PipelineCoordinatorBridge: @unchecked Sendable {
@@ -27,82 +32,24 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
     private var coordinator: OpaquePointer?
     #endif
 
-    /// Create a pipeline coordinator with default config.
-    /// Automatically configures DAv2 depth model path from app bundle.
+    /// Create a pipeline coordinator with a named runtime profile.
+    /// Automatically configures bundled monocular depth priors from app resources.
     public init?(gpuDevicePtr: UnsafeMutableRawPointer,
-                 splatEnginePtr: UnsafeMutableRawPointer) {
+                 splatEnginePtr: UnsafeMutableRawPointer,
+                 profile: PipelineCoordinatorProfile = .cloudDefault) {
         #if canImport(CAetherNativeBridge)
-        var config = aether_coordinator_config_t()
-        _ = aether_coordinator_default_config(&config)
+        guard var config = Self.makeConfig(for: profile) else { return nil }
 
-        // ─── DAv2 depth model paths: tell C++ where to find .mlmodelc ───
-        // C++ PipelineCoordinator creates its own DepthInferenceEngines
-        // via CoreML Obj-C++ bridge. Swift just passes bundle paths.
-        //
-        // Model selection by device capability:
-        //   A14 (iPhone 12, 4GB): Small only — Large fails ANE compilation,
-        //     CPU fallback starves ARKit tracking + causes OOM crash.
-        //   A15+ (iPhone 13+, 6GB+): Small + Large cross-validation.
-        let smallURL = Bundle.main.url(
-            forResource: "DepthAnythingV2Small",
-            withExtension: "mlmodelc")
-        let smallPath = smallURL?.path
-        NSLog("[Aether3D] DAv2 Small model: %@",
-              smallPath != nil ? "found in bundle" : "NOT FOUND")
-
-        // Gate Large model on physical memory — strict check.
-        // iPhone 12 (A14): 4GB → MUST skip Large (ANE compile fails, CPU fallback OOM).
-        // iPhone 13+ (A15+): 6GB+ → Large enabled for cross-validation.
-        let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
-        NSLog("[Aether3D] Device RAM: %.2fGB (threshold for Large model: 5.5GB)", memoryGB)
-
-        let largePath: String? = {
-            guard memoryGB >= 5.5 else {
-                NSLog("[Aether3D] RAM %.2fGB < 5.5GB — BLOCKING Large depth model", memoryGB)
-                return nil
-            }
-            let url = Bundle.main.url(
-                forResource: "DepthAnythingV2Large",
-                withExtension: "mlmodelc")
-            NSLog("[Aether3D] Large model: %@",
-                  url != nil ? "found in bundle, will load" : "NOT FOUND in bundle")
-            return url?.path
-        }()
-
-        NSLog("[Aether3D] Model config: small=%@, large=%@",
-              smallPath != nil ? "YES" : "NO",
-              largePath != nil ? "YES" : "NO")
-
-        // Helper to set paths and create coordinator
-        // Using withCString safely: both paths need to be alive during create()
-        // IMPORTANT: Never pass Large model path on low-RAM devices.
-        let result: OpaquePointer? = {
-            if let sp = smallPath, let lp = largePath {
-                return sp.withCString { sCStr in
-                    lp.withCString { lCStr in
-                        config.depth_model_path = sCStr
-                        config.depth_model_path_large = lCStr
-                        return aether_pipeline_coordinator_create(
-                            gpuDevicePtr, splatEnginePtr, &config)
-                    }
-                }
-            } else if let sp = smallPath {
-                return sp.withCString { sCStr in
-                    config.depth_model_path = sCStr
-                    config.depth_model_path_large = nil
-                    return aether_pipeline_coordinator_create(
-                        gpuDevicePtr, splatEnginePtr, &config)
-                }
-            } else {
-                // No Small model → go MVS-only. Never load Large alone
-                // (Large without Small wastes memory on single slow inference).
-                config.depth_model_path = nil
-                config.depth_model_path_large = nil
-                NSLog("[Aether3D] WARNING: No Small model, falling back to MVS-only")
-                return aether_pipeline_coordinator_create(
-                    gpuDevicePtr, splatEnginePtr, &config)
-            }
-        }()
+        let result: OpaquePointer? = Self.withConfiguredModelPaths(
+            profile: profile,
+            config: &config
+        ) { configuredConfig in
+            aether_pipeline_coordinator_create(
+                gpuDevicePtr,
+                splatEnginePtr,
+                configuredConfig
+            )
+        }
 
         guard let ptr = result else { return nil }
         self.coordinator = ptr
@@ -124,6 +71,109 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         return nil
         #endif
     }
+
+    #if canImport(CAetherNativeBridge)
+    private static func makeConfig(
+        for profile: PipelineCoordinatorProfile
+    ) -> aether_coordinator_config_t? {
+        var config = aether_coordinator_config_t()
+        guard aether_coordinator_default_config(&config) == 0 else {
+            return nil
+        }
+
+        switch profile {
+        case .cloudDefault:
+            config.local_preview_mode = 0
+            break
+        case .localPreviewMonocular:
+            // Preview-first local path: bias toward faster on-device convergence
+            // while keeping the existing cloud path untouched.
+            config.local_preview_mode = 1
+            config.max_iterations = 1400
+            config.min_frames_to_start_training = 3
+            config.render_width = 640
+            config.render_height = 480
+            config.low_quality_loss_weight = 0.45
+            config.blend_start_splat_count = 250.0
+            config.blend_end_splat_count = 12000.0
+            config.large_model_interval = 9
+        }
+
+        return config
+    }
+
+    private static func withConfiguredModelPaths<T>(
+        profile: PipelineCoordinatorProfile,
+        config: inout aether_coordinator_config_t,
+        body: (UnsafeMutablePointer<aether_coordinator_config_t>) -> T
+    ) -> T {
+        let smallURL = Bundle.main.url(
+            forResource: "DepthAnythingV2Small",
+            withExtension: "mlmodelc"
+        )
+        let smallPath = smallURL?.path
+        NSLog(
+            "[Aether3D] Depth prior profile=%@ small=%@",
+            profile.rawValue,
+            smallPath != nil ? "found" : "missing"
+        )
+
+        let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
+        let largePath: String? = {
+            guard profile == .cloudDefault else { return nil }
+            guard memoryGB >= 8.0 else {
+                NSLog(
+                    "[Aether3D] RAM %.2fGB < 8.0GB — blocking Large depth model for %@",
+                    memoryGB,
+                    profile.rawValue
+                )
+                return nil
+            }
+            let url = Bundle.main.url(
+                forResource: "DepthAnythingV2Large",
+                withExtension: "mlmodelc"
+            )
+            NSLog(
+                "[Aether3D] Large depth model for %@: %@",
+                profile.rawValue,
+                url != nil ? "found" : "missing"
+            )
+            return url?.path
+        }()
+
+        if let sp = smallPath, let lp = largePath {
+            return sp.withCString { sCStr in
+                lp.withCString { lCStr in
+                    config.depth_model_path = sCStr
+                    config.depth_model_path_large = lCStr
+                    return withUnsafeMutablePointer(to: &config) { configPtr in
+                        body(configPtr)
+                    }
+                }
+            }
+        }
+
+        if let sp = smallPath {
+            return sp.withCString { sCStr in
+                config.depth_model_path = sCStr
+                config.depth_model_path_large = nil
+                return withUnsafeMutablePointer(to: &config) { configPtr in
+                    body(configPtr)
+                }
+            }
+        }
+
+        config.depth_model_path = nil
+        config.depth_model_path_large = nil
+        NSLog(
+            "[Aether3D] WARNING: no bundled monocular depth model, profile=%@ → MVS-only fallback",
+            profile.rawValue
+        )
+        return withUnsafeMutablePointer(to: &config) { configPtr in
+            body(configPtr)
+        }
+    }
+    #endif
 
     deinit {
         #if canImport(CAetherNativeBridge)
@@ -172,6 +222,57 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
+    /// Submit imported-video frame for local_preview using native bootstrap pose/intrinsics.
+    public func onImportedVideoFrame(
+        rgba: UnsafePointer<UInt8>,
+        width: UInt32,
+        height: UInt32,
+        cameraIntrinsics: simd_float3x3? = nil,
+        intrinsicsSource: Int32 = 0,
+        timestampSeconds: Double,
+        frameIndex: UInt32,
+        totalFrames: UInt32,
+        thermalState: Int
+    ) -> Bool {
+        #if canImport(CAetherNativeBridge)
+        guard let coordinator = coordinator else { return false }
+        var intrinsicsArray = cameraIntrinsics.map { simdToRowMajor3x3($0) }
+        let rc: Int32
+        if var intrinsicsArray {
+            rc = intrinsicsArray.withUnsafeMutableBufferPointer { iPtr in
+                aether_pipeline_coordinator_on_imported_video_frame(
+                    coordinator,
+                    rgba,
+                    width,
+                    height,
+                    iPtr.baseAddress,
+                    intrinsicsSource,
+                    timestampSeconds,
+                    frameIndex,
+                    totalFrames,
+                    Int32(thermalState)
+                )
+            }
+        } else {
+            rc = aether_pipeline_coordinator_on_imported_video_frame(
+                coordinator,
+                rgba,
+                width,
+                height,
+                nil,
+                intrinsicsSource,
+                timestampSeconds,
+                frameIndex,
+                totalFrames,
+                Int32(thermalState)
+            )
+        }
+        return rc == 0
+        #else
+        return false
+        #endif
+    }
+
     // MARK: - Evidence Snapshot (lock-free read)
 
     /// Get latest evidence snapshot from Thread B.
@@ -206,6 +307,16 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
+    /// Tell the native local-preview pipeline whether the host app is currently
+    /// foreground-active. Training uses this to pause GPU refine instead of
+    /// tripping iOS background GPU execution denial and degrading to CPU.
+    public func setForegroundActive(_ active: Bool) {
+        #if canImport(CAetherNativeBridge)
+        guard let coordinator = coordinator else { return }
+        aether_pipeline_coordinator_set_foreground_active(coordinator, active ? 1 : 0)
+        #endif
+    }
+
     /// Request additional training iterations.
     public func requestEnhance(iterations: Int = 200) -> Bool {
         #if canImport(CAetherNativeBridge)
@@ -221,6 +332,17 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #if canImport(CAetherNativeBridge)
         guard let coordinator = coordinator else { return false }
         return aether_pipeline_coordinator_is_training(coordinator) != 0
+        #else
+        return false
+        #endif
+    }
+
+    /// Service local-preview bootstrap work so async depth prior results can be
+    /// consumed even while imported-video ingestion is temporarily idle.
+    public func serviceLocalPreviewBootstrap() -> Bool {
+        #if canImport(CAetherNativeBridge)
+        guard let coordinator = coordinator else { return false }
+        return aether_pipeline_coordinator_service_local_preview_bootstrap(coordinator) == 1
         #else
         return false
         #endif
@@ -287,53 +409,34 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
-    // MARK: - D4: Temporal Region State ("破镜重圆" Progressive Reveal)
-
-    /// Get the number of trained temporal regions.
-    public var trainedRegionCount: Int {
+    /// Copy TSDF surface sample positions for export-time world-state metrics.
+    public func copySurfacePoints(maxPoints: Int) -> [SIMD3<Float>] {
         #if canImport(CAetherNativeBridge)
-        guard let coordinator = coordinator else { return 0 }
-        return Int(aether_get_trained_region_count(coordinator))
+        guard let coordinator = coordinator, maxPoints > 0 else { return [] }
+        var xyz = [Float](repeating: 0, count: maxPoints * 3)
+        let count = xyz.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let baseAddress = buffer.baseAddress else { return 0 }
+            return Int(aether_pipeline_coordinator_copy_surface_points_xyz(
+                coordinator,
+                baseAddress,
+                maxPoints
+            ))
+        }
+        guard count > 0 else { return [] }
+        var points: [SIMD3<Float>] = []
+        points.reserveCapacity(count)
+        for index in 0..<count {
+            let base = index * 3
+            points.append(SIMD3<Float>(xyz[base + 0], xyz[base + 1], xyz[base + 2]))
+        }
+        return points
         #else
-        return 0
-        #endif
-    }
-
-    /// Get the state of a specific temporal region.
-    public func getRegionState(index: Int) -> aether_temporal_region_t? {
-        #if canImport(CAetherNativeBridge)
-        guard let coordinator = coordinator else { return nil }
-        var region = aether_temporal_region_t()
-        let rc = aether_get_region_state(coordinator, Int32(index), &region)
-        return rc == 0 ? region : nil
-        #else
-        return nil
-        #endif
-    }
-
-    /// Check if a region's geometry is ready for rendering.
-    public func isRegionGeometryReady(index: Int) -> Bool {
-        #if canImport(CAetherNativeBridge)
-        guard let coordinator = coordinator else { return false }
-        return aether_get_region_geometry_ready(coordinator, Int32(index)) == 1
-        #else
-        return false
-        #endif
-    }
-
-    /// Get the fade-in alpha for a region [0, 1].
-    public func regionFadeAlpha(index: Int) -> Float {
-        #if canImport(CAetherNativeBridge)
-        guard let coordinator = coordinator else { return 0.0 }
-        let alpha = aether_get_region_fade_alpha(coordinator, Int32(index))
-        return alpha >= 0.0 ? alpha : 0.0
-        #else
-        return 0.0
+        _ = maxPoints
+        return []
         #endif
     }
 
     /// Signal that the user has entered the 3D viewer space.
-    /// Triggers sequential fly-in animation for completed regions.
     public func signalViewerEntered() {
         #if canImport(CAetherNativeBridge)
         guard let coordinator = coordinator else { return }

@@ -86,7 +86,9 @@ int main() {
 
         DisplayFragment fragments[8]{};
         std::uint8_t count = 0;
-        voronoi_subdivide_triangle(a, b, c, 12345ULL, 0.05f, fragments, &count);
+        voronoi_subdivide_triangle(a, b, c, 12345ULL, 0.05f,
+                                   3, 8, 0.1f,  // min/max fragments, inner jitter
+                                   fragments, &count);
 
         if (count == 0) {
             std::fprintf(stderr,
@@ -103,7 +105,9 @@ int main() {
 
         DisplayFragment fragments[8]{};
         std::uint8_t count = 0;
-        voronoi_subdivide_triangle(a, b, c, 99ULL, 0.0f, fragments, &count);
+        voronoi_subdivide_triangle(a, b, c, 99ULL, 0.0f,
+                                   3, 8, 0.1f,  // min/max fragments, inner jitter
+                                   fragments, &count);
 
         if (count == 0) {
             std::fprintf(stderr,

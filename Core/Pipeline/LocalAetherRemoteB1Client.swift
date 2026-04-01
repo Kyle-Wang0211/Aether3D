@@ -20,9 +20,16 @@ actor LocalAetherRemoteB1Client: RemoteB1Client {
     private var assets: [String: URL] = [:]
     private var jobs: [String: LocalJob] = [:]
 
-    func upload(videoURL: URL) async throws -> String {
+    func upload(
+        videoURL: URL,
+        onProgress: (@Sendable (RemoteUploadProgress) async -> Void)?
+    ) async throws -> String {
         guard FileManager.default.fileExists(atPath: videoURL.path) else {
             throw RemoteB1ClientError.uploadFailed("Input file does not exist")
+        }
+        let fileSize = Int64((try? FileManager.default.attributesOfItem(atPath: videoURL.path)[.size] as? NSNumber)?.int64Value ?? 0)
+        if let onProgress {
+            await onProgress(RemoteUploadProgress(uploadedBytes: fileSize, totalBytes: max(fileSize, 1)))
         }
         let assetId = "local-asset-\(UUID().uuidString)"
         assets[assetId] = videoURL
@@ -55,19 +62,74 @@ actor LocalAetherRemoteB1Client: RemoteB1Client {
 
         switch job.result {
         case .failure(let error):
-            return .failed(reason: self.describe(error))
+            return .failed(
+                reason: self.describe(error),
+                progress: RemoteJobProgress(
+                    progressFraction: nil,
+                    stageKey: "train",
+                    detail: "本地 fallback 生成失败。",
+                    etaMinutes: nil,
+                    elapsedSeconds: job.pollCount * 10,
+                    progressBasis: "local_fixture"
+                )
+            )
         case .success:
             switch job.pollCount {
             case 0...1:
-                return .pending(progress: nil)
+                return .pending(
+                    RemoteJobProgress(
+                        progressFraction: nil,
+                        stageKey: "queued",
+                        detail: "本地 fallback 正在准备任务。",
+                        etaMinutes: nil,
+                        elapsedSeconds: job.pollCount * 10,
+                        progressBasis: "local_fixture"
+                    )
+                )
             case 2:
-                return .processing(progress: 35.0)
+                return .processing(
+                    RemoteJobProgress(
+                        progressFraction: 0.35,
+                        stageKey: "train",
+                        detail: "本地 fallback 正在训练模型。",
+                        etaMinutes: 3,
+                        elapsedSeconds: job.pollCount * 10,
+                        progressBasis: "local_fixture"
+                    )
+                )
             case 3:
-                return .processing(progress: 70.0)
+                return .processing(
+                    RemoteJobProgress(
+                        progressFraction: 0.70,
+                        stageKey: "train",
+                        detail: "本地 fallback 正在继续训练。",
+                        etaMinutes: 2,
+                        elapsedSeconds: job.pollCount * 10,
+                        progressBasis: "local_fixture"
+                    )
+                )
             case 4:
-                return .processing(progress: 95.0)
+                return .processing(
+                    RemoteJobProgress(
+                        progressFraction: 0.95,
+                        stageKey: "export",
+                        detail: "本地 fallback 正在导出结果。",
+                        etaMinutes: 1,
+                        elapsedSeconds: job.pollCount * 10,
+                        progressBasis: "local_fixture"
+                    )
+                )
             default:
-                return .completed
+                return .completed(
+                    RemoteJobProgress(
+                        progressFraction: 1.0,
+                        stageKey: "complete",
+                        detail: "本地 fallback 已完成。",
+                        etaMinutes: 0,
+                        elapsedSeconds: job.pollCount * 10,
+                        progressBasis: "local_fixture"
+                    )
+                )
             }
         }
     }
@@ -84,13 +146,17 @@ actor LocalAetherRemoteB1Client: RemoteB1Client {
         }
     }
 
+    func cancel(jobId: String) async throws {
+        jobs.removeValue(forKey: jobId)
+    }
+
     private func generateDeterministicPLY(from inputURL: URL) throws -> Data {
         let inputData = try Data(contentsOf: inputURL)
         guard !inputData.isEmpty else {
             throw RemoteB1ClientError.uploadFailed("Input file is empty")
         }
 
-        let digest = _SHA256.hash(data: inputData)
+        let digest = ArtifactSHA256.hash(data: inputData)
         let digestBytes = Array(digest)
         let vertexCount = max(300, min(6000, inputData.count / 1024 + 300))
 

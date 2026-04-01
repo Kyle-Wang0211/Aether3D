@@ -4,7 +4,6 @@
 //
 // PR#7 Scan Guidance UI — Scan Capture Controls
 // Apple-platform only (SwiftUI)
-// Phase 4: Full implementation
 //
 
 import Foundation
@@ -13,19 +12,13 @@ import Foundation
 import SwiftUI
 #endif
 
-#if canImport(UIKit)
-import UIKit
-#endif
-
 #if canImport(SwiftUI)
-/// Scan capture control button
 public struct ScanCaptureControls: View {
-    @State private var showMenu = false
     let isCapturing: Bool
     let onStart: () -> Void
     let onStop: () -> Void
     let onPause: () -> Void
-    
+
     public init(
         isCapturing: Bool = false,
         onStart: @escaping () -> Void,
@@ -37,70 +30,75 @@ public struct ScanCaptureControls: View {
         self.onStop = onStop
         self.onPause = onPause
     }
-    
+
     public var body: some View {
-        VStack {
-            Spacer()
-            HStack {
-                Spacer()
-                
-                // Main capture button (white border, black fill)
-                Button(action: {
-                    if isCapturing {
-                        onStop()
-                    } else {
-                        onStart()
-                    }
-                }) {
-                    Circle()
-                        .fill(Color.black)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white, lineWidth: 3)
-                        )
-                        .frame(width: 60, height: 60)
-                        .overlay(
-                            Circle()
-                                .fill(isCapturing ? Color.red : Color.white)
-                                .frame(width: 20, height: 20)
-                        )
+        VStack(spacing: 14) {
+            if isCapturing {
+                HStack(spacing: 14) {
+                    secondaryButton(
+                        title: "暂停",
+                        systemImage: "pause.fill",
+                        tint: .white.opacity(0.12),
+                        action: onPause
+                    )
+
+                    mainCaptureButton(isCapturing: true, action: onStop)
                 }
-                .buttonStyle(PlainButtonStyle())
-                .simultaneousGesture(
-                    LongPressGesture(minimumDuration: 0.5)
-                        .onEnded { _ in
-                            showMenu.toggle()
-                        }
-                )
-                
-                Spacer()
-            }
-            .padding(.bottom, 50)
-            
-            // Long-press menu
-            if showMenu {
-                VStack(spacing: 12) {
-                    Button("暂停") {
-                        onPause()
-                        showMenu = false
-                    }
-                    .foregroundColor(.white)
-                    .padding()
-                    .background(Color.black.opacity(0.8))
-                    .cornerRadius(8)
-                    
-                    Button("停止") {
-                        onStop()
-                        showMenu = false
-                    }
-                    .foregroundColor(.white)
-                    .padding()
-                    .background(Color.black.opacity(0.8))
-                    .cornerRadius(8)
-                }
-                .padding(.bottom, 120)
+            } else {
+                mainCaptureButton(isCapturing: false, action: onStart)
             }
         }
+        .padding(.bottom, 42)
+    }
+
+    private func mainCaptureButton(isCapturing: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color.black.opacity(0.80))
+                    .frame(width: 74, height: 74)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white, lineWidth: 3)
+                    )
+
+                if isCapturing {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.red)
+                        .frame(width: 24, height: 24)
+                } else {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 24, height: 24)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func secondaryButton(
+        title: String,
+        systemImage: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 18)
+            .frame(height: 48)
+            .background(tint)
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 #endif

@@ -20,6 +20,149 @@ public struct VideoAsset {
 }
 #endif
 
+public enum BuildMode: String, Codable, CaseIterable, Sendable {
+    case enter
+    case publish
+    case failSoft
+    case NORMAL
+    case DAMPING
+    case SATURATED
+}
+
+public enum DeviceTier: Codable, Sendable {
+    case low
+    case medium
+    case high
+
+    static func detect() -> DeviceTier {
+        let physicalMemory = ProcessInfo.processInfo.physicalMemory
+        let memoryGB = Double(physicalMemory) / (1024 * 1024 * 1024)
+
+        if memoryGB < 4.0 {
+            return .low
+        } else if memoryGB <= 8.0 {
+            return .medium
+        } else {
+            return .high
+        }
+    }
+
+    public static func current() -> DeviceTier {
+        detect()
+    }
+}
+
+public enum FrameSamplingProfile: String, Codable, CaseIterable, Sendable {
+    case full
+    case half
+    case third
+
+    public static let userDefaultsKey = "aether.frameSamplingProfile"
+
+    public static func currentSelection(userDefaults: UserDefaults = .standard) -> FrameSamplingProfile {
+        let rawValue = userDefaults.string(forKey: userDefaultsKey)
+        return FrameSamplingProfile(rawValue: rawValue ?? "") ?? .full
+    }
+
+    public var title: String {
+        switch self {
+        case .full:
+            return "全量"
+        case .half:
+            return "1/2"
+        case .third:
+            return "1/3"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .full:
+            return "200 帧"
+        case .half:
+            return "100 帧"
+        case .third:
+            return "67 帧"
+        }
+    }
+
+    public var displayLabel: String {
+        switch self {
+        case .full:
+            return "全量采集"
+        case .half:
+            return "半量采集"
+        case .third:
+            return "三分之一采集"
+        }
+    }
+
+    public var pipelineProfilePayload: [String: String] {
+        let fractionText: String
+        switch self {
+        case .full:
+            fractionText = "1.0"
+        case .half:
+            fractionText = "0.5"
+        case .third:
+            fractionText = "0.3333333333"
+        }
+        return [
+            "frame_sampling_profile": rawValue,
+            "requested_preset_title": displayLabel,
+            "requested_frame_fraction": fractionText,
+        ]
+    }
+}
+
+public enum ProcessingBackendChoice: String, Codable, CaseIterable, Sendable {
+    case cloud
+    case localPreview = "local_preview"
+
+    public static let userDefaultsKey = "aether.processingBackendChoice"
+
+    public static func currentSelection(userDefaults: UserDefaults = .standard) -> ProcessingBackendChoice {
+        let rawValue = userDefaults.string(forKey: userDefaultsKey)
+        return ProcessingBackendChoice(rawValue: rawValue ?? "") ?? .cloud
+    }
+
+    public var title: String {
+        switch self {
+        case .cloud:
+            return "云端"
+        case .localPreview:
+            return "本地"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .cloud:
+            return "高质量"
+        case .localPreview:
+            return "快速预览"
+        }
+    }
+
+    public var displayLabel: String {
+        switch self {
+        case .cloud:
+            return "云端高质量"
+        case .localPreview:
+            return "本地快速预览"
+        }
+    }
+
+    public var supportsImportedVideoPreview: Bool {
+        switch self {
+        case .cloud:
+            return true
+        case .localPreview:
+            return true
+        }
+    }
+}
+
 public struct BuildRequest {
     public enum Source {
         case video(asset: VideoAsset)
@@ -30,11 +173,20 @@ public struct BuildRequest {
     public let source: Source
     public let requestedMode: BuildMode
     public let deviceTier: DeviceTier
+    public let frameSamplingProfile: FrameSamplingProfile
+    public let processingBackend: ProcessingBackendChoice
 
-    public init(source: Source, requestedMode: BuildMode, deviceTier: DeviceTier) {
+    public init(
+        source: Source,
+        requestedMode: BuildMode,
+        deviceTier: DeviceTier,
+        frameSamplingProfile: FrameSamplingProfile = .full,
+        processingBackend: ProcessingBackendChoice = .cloud
+    ) {
         self.source = source
         self.requestedMode = requestedMode
         self.deviceTier = deviceTier
+        self.frameSamplingProfile = frameSamplingProfile
+        self.processingBackend = processingBackend
     }
 }
-

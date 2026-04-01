@@ -13,9 +13,25 @@ import Foundation
 @preconcurrency import SwiftUI
 @preconcurrency import ARKit
 import SceneKit
-#if canImport(MetalKit)
-@preconcurrency import MetalKit
+#if canImport(simd)
+import simd
 #endif
+
+struct LightEstimateSnapshot: Sendable {
+    let ambientIntensity: Float
+    let primaryLightDirection: SIMD3<Float>?
+    let sphericalHarmonicsCoefficients: [SIMD3<Float>]?
+
+    init(
+        ambientIntensity: Float,
+        primaryLightDirection: SIMD3<Float>? = nil,
+        sphericalHarmonicsCoefficients: [SIMD3<Float>]? = nil
+    ) {
+        self.ambientIntensity = ambientIntensity
+        self.primaryLightDirection = primaryLightDirection
+        self.sphericalHarmonicsCoefficients = sphericalHarmonicsCoefficients
+    }
+}
 
 /// UIViewRepresentable wrapping ARSCNView
 ///
@@ -23,10 +39,8 @@ import SceneKit
 ///   - ARSCNView handles real-time camera + SceneKit rendering
 ///   - Coordinator acts as both ARSCNViewDelegate and ARSessionDelegate
 ///   - Per-frame ARSession delegate forwards to ScanViewModel.processARFrame()
-///   - Metal mesh overlay will be injected via ARSCNView delegate (future PR)
-///
 /// Safety:
-///   - supportsSceneReconstruction(.mesh) check before enabling LiDAR mesh
+///   - Camera feed remains clean; scan guidance is shown via HUD toasts/haptics only
 ///   - dismantleUIView pauses AR session (prevents resource leak)
 ///   - sessionWasInterrupted auto-pauses capture (phone call safety)
 ///   - session(didFailWithError:) transitions to .failed (prevents stuck state)
@@ -44,9 +58,6 @@ struct ARCameraPreview: UIViewRepresentable {
 
         // Configure AR session
         let configuration = ARWorldTrackingConfiguration()
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-            configuration.sceneReconstruction = .mesh
-        }
         configuration.environmentTexturing = .automatic
         configuration.isLightEstimationEnabled = true
 
@@ -73,34 +84,6 @@ struct ARCameraPreview: UIViewRepresentable {
             captureBlackout.topAnchor.constraint(equalTo: arView.topAnchor),
             captureBlackout.bottomAnchor.constraint(equalTo: arView.bottomAnchor)
         ])
-
-        #if canImport(MetalKit)
-        // Metal overlay for unified scan-guidance backend output.
-        if let device = MTLCreateSystemDefaultDevice() {
-            let overlay = MTKView(frame: .zero, device: device)
-            overlay.translatesAutoresizingMaskIntoConstraints = false
-            overlay.clearColor = MTLClearColorMake(0, 0, 0, 0)
-            overlay.colorPixelFormat = .bgra8Unorm
-            overlay.depthStencilPixelFormat = .depth32Float
-            overlay.isOpaque = false
-            overlay.backgroundColor = .clear
-            overlay.framebufferOnly = false
-            overlay.enableSetNeedsDisplay = false
-            overlay.isPaused = false
-            overlay.preferredFramesPerSecond = 60
-            overlay.isUserInteractionEnabled = false
-
-            context.coordinator.configureOverlay(mtkView: overlay, device: device)
-            context.coordinator.configureOverlayAppearance(policy: viewModel.scanState.renderPresentationPolicy)
-            arView.addSubview(overlay)
-            NSLayoutConstraint.activate([
-                overlay.leadingAnchor.constraint(equalTo: arView.leadingAnchor),
-                overlay.trailingAnchor.constraint(equalTo: arView.trailingAnchor),
-                overlay.topAnchor.constraint(equalTo: arView.topAnchor),
-                overlay.bottomAnchor.constraint(equalTo: arView.bottomAnchor)
-            ])
-        }
-        #endif
 
         // Notify ViewModel that ARKit is ready
         Task { @MainActor in
@@ -132,14 +115,6 @@ struct ARCameraPreview: UIViewRepresentable {
         let viewModel: ScanViewModel
         private weak var captureBlackoutView: UIView?
         private var lastOverlayPolicySignature: String = ""
-        #if canImport(MetalKit)
-        private weak var overlayView: MTKView?
-        private var overlayCommandQueue: MTLCommandQueue?
-        private var overlayPipeline: ScanGuidanceRenderPipeline?
-        // Cached display properties — updated on main thread via draw(in:), read from ARSession delegate
-        nonisolated(unsafe) private var cachedOrientation: UIInterfaceOrientation = .portrait
-        nonisolated(unsafe) private var cachedDrawableSize: CGSize = CGSize(width: 1080, height: 1920)
-        #endif
         private let frameLock = NSLock()
         private var isProcessingFrame = false
         private var tearingDown = false
@@ -161,12 +136,6 @@ struct ARCameraPreview: UIViewRepresentable {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.captureBlackoutView = nil
-                #if canImport(MetalKit)
-                self.overlayView?.delegate = nil
-                self.overlayView = nil
-                self.overlayPipeline = nil
-                self.overlayCommandQueue = nil
-                #endif
             }
         }
 
@@ -189,12 +158,6 @@ struct ARCameraPreview: UIViewRepresentable {
         @MainActor
         func configureOverlayAppearance(policy: ScanRenderPresentationPolicy) {
             captureBlackoutView?.isHidden = !policy.forceBlackBackground
-            #if canImport(MetalKit)
-            guard let overlayView else { return }
-            overlayView.isOpaque = policy.overlayOpaque
-            overlayView.backgroundColor = policy.forceBlackBackground ? .black : .clear
-            overlayView.clearColor = MTLClearColorMake(0, 0, 0, policy.overlayClearAlpha)
-            #endif
             #if DEBUG
             let alphaText = String(format: "%.2f", policy.overlayClearAlpha)
             let signature =
@@ -212,31 +175,24 @@ struct ARCameraPreview: UIViewRepresentable {
             #endif
         }
 
-        #if canImport(MetalKit)
-        func configureOverlay(mtkView: MTKView, device: MTLDevice) {
-            overlayView = mtkView
-            overlayCommandQueue = device.makeCommandQueue()
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                mtkView.delegate = self
-            }
-        }
-        #endif
-
         // ARSessionDelegate — called per frame (~60 FPS)
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             if shouldDropFrame() {
                 return
             }
-            // Collect mesh anchors from current frame
-            let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
             let timestamp = frame.timestamp
             let cameraTransform = frame.camera.transform
             let lightEstimateSnapshot = makeLightEstimateSnapshot(frame.lightEstimate)
+            // Snapshot sparse feature points on delegate thread so we never
+            // retain ARFrame/ARPointCloud objects across actor hops.
+            let featurePointsSnapshot: [SIMD3<Float>] = {
+                guard let cloud = frame.rawFeaturePoints else { return [] }
+                let maxPoints = min(cloud.points.count, 512)
+                return Array(cloud.points.prefix(maxPoints))
+            }()
             #if os(iOS)
-            // Use cached values (updated on main thread in draw(in:)) to avoid MainActor isolation
-            let orientation = cachedOrientation
-            let viewportSize = cachedDrawableSize
+            let orientation = UIInterfaceOrientation.portrait
+            let viewportSize = CGSize(width: 1080, height: 1920)
             let viewMatrix = frame.camera.viewMatrix(for: orientation)
             let projectionMatrix = frame.camera.projectionMatrix(
                 for: orientation,
@@ -249,19 +205,28 @@ struct ARCameraPreview: UIViewRepresentable {
             let projectionMatrix = matrix_identity_float4x4
             #endif
 
+            // Extract frame data on ARKit background thread BEFORE Task dispatch.
+            // CVPixelBuffers are retained by local variables until Task completes.
+            let pixelBuffer = frame.capturedImage
+            let cameraIntrinsics = frame.camera.intrinsics
+            // LiDAR depth: sceneDepth on LiDAR devices, nil on non-LiDAR (pure DAv2 path)
+            let lidarDepthBuffer: CVPixelBuffer? = frame.sceneDepth?.depthMap
+                ?? frame.smoothedSceneDepth?.depthMap
+
             Task { @MainActor in
                 self.configureOverlayAppearance(policy: self.viewModel.scanState.renderPresentationPolicy)
                 viewModel.processARFrame(
                     timestamp: timestamp,
                     cameraTransform: cameraTransform,
                     lightEstimate: lightEstimateSnapshot,
-                    meshAnchors: meshAnchors,
+                    meshAnchors: [],
                     viewMatrix: viewMatrix,
-                    projectionMatrix: projectionMatrix
+                    projectionMatrix: projectionMatrix,
+                    pixelBuffer: pixelBuffer,
+                    cameraIntrinsics: cameraIntrinsics,
+                    lidarDepthBuffer: lidarDepthBuffer,
+                    featurePoints: featurePointsSnapshot
                 )
-                #if canImport(MetalKit)
-                overlayPipeline = viewModel.currentRenderPipelineForOverlay()
-                #endif
                 self.releaseFrameProcessingLock()
             }
         }
@@ -269,17 +234,14 @@ struct ARCameraPreview: UIViewRepresentable {
         // ARSession error handling
         func session(_ session: ARSession, didFailWithError error: Error) {
             Task { @MainActor in
-                let plan = viewModel.scanState.actionPlan(for: .abort)
-                viewModel.executeScanActionPlan(plan)
+                viewModel.handleSessionFailure("相机会话中断了，请返回主页重新开始一次扫描。")
             }
         }
 
         // Session interrupted (phone call, notification, etc.)
         func sessionWasInterrupted(_ session: ARSession) {
             Task { @MainActor in
-                if viewModel.scanState.isActive {
-                    viewModel.pauseCapture()
-                }
+                viewModel.handleSessionInterrupted()
             }
         }
 
@@ -326,35 +288,5 @@ struct ARCameraPreview: UIViewRepresentable {
         }
     }
 }
-
-#if canImport(MetalKit)
-extension ARCameraPreview.Coordinator: MTKViewDelegate {
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        cachedDrawableSize = size
-    }
-
-    func draw(in view: MTKView) {
-        // Update cached display properties on main thread for ARSession delegate to read
-        cachedOrientation = view.window?.windowScene?.interfaceOrientation ?? .portrait
-        cachedDrawableSize = view.drawableSize
-
-        guard let pipeline = overlayPipeline,
-              let renderPass = view.currentRenderPassDescriptor,
-              let drawable = view.currentDrawable else {
-            return
-        }
-        if overlayCommandQueue == nil {
-            overlayCommandQueue = view.device?.makeCommandQueue()
-        }
-        guard let queue = overlayCommandQueue,
-              let commandBuffer = queue.makeCommandBuffer() else {
-            return
-        }
-        pipeline.encode(into: commandBuffer, renderPassDescriptor: renderPass)
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
-    }
-}
-#endif
 
 #endif

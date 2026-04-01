@@ -34,18 +34,22 @@ def test_capacity_saturated_transition_exists():
 
 
 def test_soft_limit_patch_count():
-    """Test that SOFT_LIMIT_PATCH_COUNT equals 5000."""
-    assert ContractConstants.SOFT_LIMIT_PATCH_COUNT == 5000, "SOFT_LIMIT_PATCH_COUNT must be 5000"
+    """Test that SOFT_LIMIT_PATCH_COUNT is effectively unlimited (百万级种子)."""
+    assert ContractConstants.SOFT_LIMIT_PATCH_COUNT >= 10**9, \
+        f"SOFT_LIMIT_PATCH_COUNT must be effectively unlimited, got {ContractConstants.SOFT_LIMIT_PATCH_COUNT}"
 
 
 def test_hard_limit_patch_count():
-    """Test that HARD_LIMIT_PATCH_COUNT equals 8000."""
-    assert ContractConstants.HARD_LIMIT_PATCH_COUNT == 8000, "HARD_LIMIT_PATCH_COUNT must be 8000"
+    """Test that HARD_LIMIT_PATCH_COUNT is effectively unlimited (百万级种子)."""
+    assert ContractConstants.HARD_LIMIT_PATCH_COUNT >= 10**9, \
+        f"HARD_LIMIT_PATCH_COUNT must be effectively unlimited, got {ContractConstants.HARD_LIMIT_PATCH_COUNT}"
 
 
 def test_eeb_base_budget():
-    """Test that EEB_BASE_BUDGET equals 10000.0."""
-    assert ContractConstants.EEB_BASE_BUDGET == 10000.0, "EEB_BASE_BUDGET must be 10000.0"
+    """Test that EEB_BASE_BUDGET is effectively unlimited (百万级种子)."""
+    import math
+    assert math.isinf(ContractConstants.EEB_BASE_BUDGET) or ContractConstants.EEB_BASE_BUDGET >= 1e15, \
+        f"EEB_BASE_BUDGET must be effectively unlimited, got {ContractConstants.EEB_BASE_BUDGET}"
 
 
 def test_capacity_saturated_is_terminal():

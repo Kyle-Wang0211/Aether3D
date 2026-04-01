@@ -77,11 +77,11 @@ public struct ScanRenderPresentationPolicy: Sendable {
     }
 
     public static func fallback(for state: ScanState) -> ScanRenderPresentationPolicy {
-        let black = (state == .capturing || state == .paused || state == .finishing)
+        // Camera feed always visible — no blackout during scanning.
         return ScanRenderPresentationPolicy(
-            forceBlackBackground: black,
-            overlayOpaque: black,
-            overlayClearAlpha: black ? 1.0 : 0.0,
+            forceBlackBackground: false,
+            overlayOpaque: false,
+            overlayClearAlpha: 0.0,
             borderDepthMode: .lessEqual
         )
     }
@@ -230,14 +230,11 @@ public enum ScanState: String, Sendable {
     ) -> ScanActionPlan {
         switch reason {
         case .presentation:
-            let shouldForceBlack = state == .capturing || state == .paused || state == .finishing
-            var mask: ScanActionMask = [.setBorderDepthLessEqual]
-            if shouldForceBlack {
-                mask.formUnion([.setBlackBackground, .setOverlayOpaque])
-            }
+            // Camera feed always visible — no blackout during scanning.
+            let mask: ScanActionMask = [.setBorderDepthLessEqual]
             return ScanActionPlan(
                 actionMask: mask,
-                overlayClearAlpha: shouldForceBlack ? 1.0 : 0.0
+                overlayClearAlpha: 0.0
             )
         case .abort:
             return ScanActionPlan(actionMask: [])

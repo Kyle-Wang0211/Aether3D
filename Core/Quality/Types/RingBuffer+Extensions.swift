@@ -34,26 +34,3 @@ extension RingBuffer where T == Double {
         return minVal / maxVal
     }
 }
-
-// MARK: - LabColor Extensions
-
-extension RingBuffer where T == LabColor {
-    /// Compute ΔE*ab variance (CIE76)
-    func labVariance() -> Double {
-        guard currentCount >= 2 else { return 0.0 }
-        let values = getAll()
-
-        let meanL = values.map { $0.l }.reduce(0.0, +) / Double(values.count)
-        let meanA = values.map { $0.a }.reduce(0.0, +) / Double(values.count)
-        let meanB = values.map { $0.b }.reduce(0.0, +) / Double(values.count)
-
-        let deltaEs = values.map { lab -> Double in
-            let dL = lab.l - meanL
-            let dA = lab.a - meanA
-            let dB = lab.b - meanB
-            return (dL*dL + dA*dA + dB*dB).squareRoot()
-        }
-
-        return deltaEs.reduce(0.0, +) / Double(deltaEs.count)
-    }
-}
