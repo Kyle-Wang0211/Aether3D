@@ -188,6 +188,10 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         pinchGesture.delegate = self
         metalView.addGestureRecognizer(pinchGesture)
 
+        let rotationGesture = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
+        rotationGesture.delegate = self
+        metalView.addGestureRecognizer(rotationGesture)
+
         let resetTapGesture = UITapGestureRecognizer(target: self, action: #selector(handleResetTap(_:)))
         resetTapGesture.numberOfTapsRequired = 2
         metalView.addGestureRecognizer(resetTapGesture)
@@ -231,6 +235,22 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         case .ended, .cancelled, .failed:
             isPinching = false
             gesture.scale = 1.0
+        default:
+            break
+        }
+    }
+
+    @objc private func handleRotation(_ gesture: UIRotationGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            guard gesture.numberOfTouches >= 2 else {
+                gesture.rotation = 0.0
+                return
+            }
+            navigationState.applyTwoFingerRotation(rotationRadians: Float(gesture.rotation))
+            gesture.rotation = 0.0
+        case .ended, .cancelled, .failed:
+            gesture.rotation = 0.0
         default:
             break
         }
@@ -1348,6 +1368,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
 
         let allowsTwoFingerBlend: (UIGestureRecognizer) -> Bool = { recognizer in
             recognizer is UIPinchGestureRecognizer ||
+            recognizer is UIRotationGestureRecognizer ||
             ((recognizer as? UIPanGestureRecognizer)?.minimumNumberOfTouches ?? 0) >= 2
         }
 

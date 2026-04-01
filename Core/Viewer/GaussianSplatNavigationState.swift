@@ -15,12 +15,20 @@ public struct GaussianSplatNavigationState: Sendable {
         public var distance: Float
         public var azimuth: Float
         public var pitch: Float
+        public var roll: Float
 
-        public init(target: SIMD3<Float>, distance: Float, azimuth: Float, pitch: Float) {
+        public init(
+            target: SIMD3<Float>,
+            distance: Float,
+            azimuth: Float,
+            pitch: Float,
+            roll: Float = 0.0
+        ) {
             self.target = target
             self.distance = distance
             self.azimuth = azimuth
             self.pitch = pitch
+            self.roll = roll
         }
     }
 
@@ -52,7 +60,7 @@ public struct GaussianSplatNavigationState: Sendable {
     public private(set) var activeNavigationMode: ViewerNavigationMode = .orbit
 
     public init() {
-        let orbit = OrbitState(target: .zero, distance: 3.0, azimuth: 0.0, pitch: 0.0)
+        let orbit = OrbitState(target: .zero, distance: 3.0, azimuth: 0.0, pitch: 0.0, roll: 0.0)
         self.orbit = orbit
         self.defaultOrbit = orbit
     }
@@ -72,6 +80,7 @@ public struct GaussianSplatNavigationState: Sendable {
         distance: Float,
         azimuth: Float,
         pitch: Float,
+        roll: Float = 0.0,
         suggestedMode: ViewerNavigationMode
     ) {
         let clampedDistance = max(distance, 0.05)
@@ -79,7 +88,8 @@ public struct GaussianSplatNavigationState: Sendable {
             target: target,
             distance: clampedDistance,
             azimuth: azimuth,
-            pitch: Self.softClampedPitchRadians(pitch)
+            pitch: Self.softClampedPitchRadians(pitch),
+            roll: roll
         )
         _ = suggestedMode
         defaultNavigationMode = .orbit
@@ -106,7 +116,8 @@ public struct GaussianSplatNavigationState: Sendable {
     public mutating func applySingleFingerDrag(screenTranslation: SIMD2<Float>) {
         let delta = orbitGestureDelta(from: screenTranslation)
         activeNavigationMode = .orbit
-        orbit.azimuth += delta.x
+        // Use direct-manipulation semantics so the model follows the finger.
+        orbit.azimuth -= delta.x
         orbit.pitch = Self.softClampedPitchRadians(orbit.pitch - delta.y)
     }
 
@@ -133,6 +144,13 @@ public struct GaussianSplatNavigationState: Sendable {
         orbit.distance = max(0.05, min(maxDistance, orbit.distance))
     }
 
+    public mutating func applyTwoFingerRotation(rotationRadians: Float) {
+        activeNavigationMode = .orbit
+        // Match direct-manipulation semantics so the scene appears to twist
+        // with the user's two-finger rotation.
+        orbit.roll -= rotationRadians
+    }
+
     public var cameraPose: CameraPose {
         let sceneUp = Self.leveledVerticalAxis(matching: sceneUpAxis)
         let forward = Self.forwardVector(
@@ -148,13 +166,23 @@ public struct GaussianSplatNavigationState: Sendable {
             simd_cross(right, forward),
             fallback: sceneUp
         )
+        let rolledBasis: (right: SIMD3<Float>, up: SIMD3<Float>)
+        if abs(orbit.roll) > 1e-5 {
+            let rollRotation = simd_quatf(angle: orbit.roll, axis: forward)
+            rolledBasis = (
+                right: Self.normalizedOrFallback(rollRotation.act(right), fallback: right),
+                up: Self.normalizedOrFallback(rollRotation.act(up), fallback: up)
+            )
+        } else {
+            rolledBasis = (right, up)
+        }
         let eye = orbit.target - forward * orbit.distance
         return CameraPose(
             eye: eye,
             center: orbit.target,
             forward: forward,
-            up: up,
-            right: right
+            up: rolledBasis.up,
+            right: rolledBasis.right
         )
     }
 

@@ -487,6 +487,31 @@ vertex SplatVertexOutput splatVertex(
         radius = DEBUG_MIN_RADIUS;
     }
 
+    // Apply only a very light screen-space ceiling to the largest projected
+    // splats. This keeps the current "official/plain" renderer direction, but
+    // reins in the handful of huge quads that smear broad areas of the frame.
+    constexpr float kSoftCeilingStartPx = 80.0f;
+    constexpr float kSoftCeilingEndPx = 160.0f;
+    constexpr float kSoftCeilingExcessScale = 0.58f;
+    if (radius > kSoftCeilingStartPx) {
+        float excess = radius - kSoftCeilingStartPx;
+        float ceiling_t = clamp(excess /
+                                    max(kSoftCeilingEndPx - kSoftCeilingStartPx,
+                                        1e-5f),
+                                0.0f,
+                                1.0f);
+        float excess_scale = mix(1.0f, kSoftCeilingExcessScale, ceiling_t);
+        float softened_radius = kSoftCeilingStartPx + excess * excess_scale;
+        float screen_scale = softened_radius / max(radius, 1e-5f);
+        float cov_scale = screen_scale * screen_scale;
+        c00 *= cov_scale;
+        c01 *= cov_scale;
+        c11 *= cov_scale;
+        radius_major *= screen_scale;
+        radius_minor *= screen_scale;
+        radius = softened_radius;
+    }
+
     // Max screen radius cull
     if (radius > 1024.0) {
         out.position = float4(0, 0, -2, 1);

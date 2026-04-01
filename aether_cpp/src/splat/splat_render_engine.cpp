@@ -23,7 +23,7 @@ namespace {
 constexpr std::uint32_t kRadixBuckets = 256;
 constexpr std::uint32_t kRadixThreadgroupSize = 256;
 constexpr std::size_t kStableCpuSortThreshold = 250000;
-constexpr float kStableDepthQuantizationMeters = 0.08f;
+constexpr float kStableDepthQuantizationMeters = 0.015f;
 
 struct ViewerOutlierClipResult {
     std::vector<GaussianParams> gaussians;
