@@ -90,11 +90,16 @@ fragment float4 pointCloudFragment(
     float edge = smoothstep(0.5, 0.35, dist);
     float finalAlpha = in.alpha * edge;
 
+    float3 srgbColor = clamp(in.color, 0.0, 1.0);
+    if (!all(isfinite(srgbColor)) || max(srgbColor.r, max(srgbColor.g, srgbColor.b)) < 0.02) {
+        srgbColor = float3(1.0, 0.82, 0.12);
+    }
+
     // sRGB → linear for correct blending
     float3 linearColor = float3(
-        (in.color.r <= 0.04045) ? in.color.r / 12.92 : pow((in.color.r + 0.055) / 1.055, 2.4),
-        (in.color.g <= 0.04045) ? in.color.g / 12.92 : pow((in.color.g + 0.055) / 1.055, 2.4),
-        (in.color.b <= 0.04045) ? in.color.b / 12.92 : pow((in.color.b + 0.055) / 1.055, 2.4)
+        (srgbColor.r <= 0.04045) ? srgbColor.r / 12.92 : pow((srgbColor.r + 0.055) / 1.055, 2.4),
+        (srgbColor.g <= 0.04045) ? srgbColor.g / 12.92 : pow((srgbColor.g + 0.055) / 1.055, 2.4),
+        (srgbColor.b <= 0.04045) ? srgbColor.b / 12.92 : pow((srgbColor.b + 0.055) / 1.055, 2.4)
     );
 
     return float4(linearColor * finalAlpha, finalAlpha);

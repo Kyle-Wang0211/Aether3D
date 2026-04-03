@@ -479,7 +479,8 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
         case ProcessingBackendChoice.cloud.rawValue,
-             ProcessingBackendChoice.localPreview.rawValue:
+             ProcessingBackendChoice.localPreview.rawValue,
+             ProcessingBackendChoice.localSubjectFirst.rawValue:
             return normalized
         default:
             return nil
@@ -496,7 +497,12 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
               let backend = ProcessingBackendChoice(rawValue: processingBackend) else {
             return .cloud
         }
-        return backend
+        switch backend {
+        case .localPreview:
+            return .localSubjectFirst
+        case .cloud, .localSubjectFirst:
+            return backend
+        }
     }
 
     public var isProcessing: Bool {
@@ -785,19 +791,24 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private var isLocalPreviewWorkflow: Bool {
-        resolvedProcessingBackend == .localPreview
+        resolvedProcessingBackend.usesLocalPreviewPipeline
+    }
+
+    private var localWorkflowPhases: [LocalPreviewWorkflowPhase] {
+        LocalPreviewProductProfile.workflowPhases(for: resolvedProcessingBackend)
     }
 
     private var localPreviewPhase: LocalPreviewWorkflowPhase? {
         guard isLocalPreviewWorkflow else { return nil }
         return LocalPreviewProductProfile.phase(
             for: normalizedProgressBasis,
-            phaseName: normalizedRemotePhaseName
+            phaseName: normalizedRemotePhaseName,
+            processingBackend: resolvedProcessingBackend
         )
     }
 
     private func localPreviewPhaseIndex(_ phase: LocalPreviewWorkflowPhase) -> Int {
-        LocalPreviewProductProfile.workflowPhases.firstIndex(of: phase) ?? 0
+        localWorkflowPhases.firstIndex(of: phase) ?? 0
     }
 
     private func localPreviewPhaseElapsedMs(_ phase: LocalPreviewWorkflowPhase) -> Int? {
@@ -808,6 +819,10 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             return runtimeMetricInt("preview_phase_seed_ms")
         case .refine:
             return runtimeMetricInt("preview_phase_refine_ms")
+        case .cutout:
+            return runtimeMetricInt("preview_phase_cutout_ms")
+        case .cleanup:
+            return runtimeMetricInt("preview_phase_cleanup_ms")
         case .export:
             return runtimeMetricInt("preview_export_ms")
         }
@@ -847,15 +862,30 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return liveText
             }
+            if let accepted = runtimeMetricInt("preview_seed_accepted"),
+               accepted > 0 {
+                let selected = runtimeMetricInt("preview_selected_frames") ?? 0
+                if selected > 0 {
+                    return "seed \(accepted) · 帧 \(selected)"
+                }
+                let candidates = runtimeMetricInt("preview_seed_candidates") ?? 0
+                if candidates > 0 {
+                    return "seed \(accepted) · 候选 \(candidates)"
+                }
+                return "seed \(accepted)"
+            }
             if let selected = runtimeMetricInt("preview_selected_frames"),
                let minimum = runtimeMetricInt("preview_live_min_selected_frames"),
                minimum > 0 {
-                return "\(selected) / \(minimum)"
+                if selected < minimum {
+                    return "关键帧 \(selected) / \(minimum)"
+                }
+                return "关键帧 \(selected) · 已达标"
             }
             if let accepted = runtimeMetricInt("preview_seed_accepted"),
                let candidates = runtimeMetricInt("preview_seed_candidates"),
                candidates > 0 {
-                return "\(accepted) / \(candidates)"
+                return "seed \(accepted) · 候选 \(candidates)"
             }
         case .refine:
             if let liveText = runtimeMetrics?["preview_refine_phase_metric_text"],
@@ -867,6 +897,25 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             }
             if let gaussians = runtimeMetricInt("preview_gaussians"), gaussians > 0 {
                 return "\(gaussians) 个高斯"
+            }
+        case .cutout:
+            if let liveText = runtimeMetrics?["preview_cutout_phase_metric_text"],
+               !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return liveText
+            }
+            if let kept = runtimeMetricInt("preview_subject_cutout_kept"),
+               let input = runtimeMetricInt("preview_subject_input_splats"),
+               input > 0 {
+                return "\(kept) / \(input)"
+            }
+        case .cleanup:
+            if let liveText = runtimeMetrics?["preview_cleanup_phase_metric_text"],
+               !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return liveText
+            }
+            if let kept = runtimeMetricInt("preview_subject_cleanup_kept"),
+               let removed = runtimeMetricInt("preview_subject_cleanup_removed") {
+                return "保留 \(kept) · 删除 \(removed)"
             }
         case .export:
             if let liveText = runtimeMetrics?["preview_export_phase_metric_text"],
@@ -915,6 +964,14 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         case .refine:
             if let trainingProgress = runtimeMetricString("preview_training_progress"),
                !trainingProgress.isEmpty {
+                return .completed
+            }
+        case .cutout:
+            if let kept = runtimeMetricInt("preview_subject_cutout_kept"), kept > 0 {
+                return .completed
+            }
+        case .cleanup:
+            if let kept = runtimeMetricInt("preview_subject_cleanup_kept"), kept > 0 {
                 return .completed
             }
         case .export:
@@ -1133,7 +1190,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     private var activeWorkflowTrackTitles: [String] {
         if isLocalPreviewWorkflow {
-            return LocalPreviewProductProfile.workflowPhases.compactMap { phase in
+            return localWorkflowPhases.compactMap { phase in
                 localPreviewMilestoneState(for: phase) == .active ? phase.title : nil
             }
         }
@@ -1163,13 +1220,13 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         if isLocalPreviewWorkflow {
             switch status {
             case .completed:
-                return "本地快速预览已生成"
+                return "本地结果已生成"
             case .failed:
-                return "本地快速预览失败了"
+                return "本地处理失败了"
             case .cancelled:
-                return "本地快速预览已取消"
+                return "本地处理已取消"
             default:
-                return localPreviewPhase?.title ?? "正在生成本地快速预览"
+                return localPreviewPhase?.title ?? "正在生成本地结果"
             }
         }
         if isAuthoritativeGpuWaitRuntime {
@@ -1316,7 +1373,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     public var workflowMilestones: [WorkflowMilestone] {
         if isLocalPreviewWorkflow {
-            return LocalPreviewProductProfile.workflowPhases.map { phase in
+            return localWorkflowPhases.map { phase in
                 WorkflowMilestone(
                     id: phase.rawValue,
                     title: phase.title,
@@ -1335,7 +1392,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     public var workflowStepProgresses: [WorkflowStepProgress] {
         if isLocalPreviewWorkflow {
-            return LocalPreviewProductProfile.workflowPhases.map { phase in
+            return localWorkflowPhases.map { phase in
                 let state = localPreviewMilestoneState(for: phase)
                 return WorkflowStepProgress(
                     id: phase.rawValue,
@@ -1366,12 +1423,21 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     private var weightedWorkflowOverallFraction: Double? {
         if isLocalPreviewWorkflow {
-            let weights: [(String, Double)] = [
-                (LocalPreviewWorkflowPhase.depth.rawValue, 0.24),
-                (LocalPreviewWorkflowPhase.seed.rawValue, 0.18),
-                (LocalPreviewWorkflowPhase.refine.rawValue, 0.40),
-                (LocalPreviewWorkflowPhase.export.rawValue, 0.18),
-            ]
+            let weights: [(String, Double)] = resolvedProcessingBackend == .localSubjectFirst
+                ? [
+                    (LocalPreviewWorkflowPhase.depth.rawValue, 0.20),
+                    (LocalPreviewWorkflowPhase.seed.rawValue, 0.14),
+                    (LocalPreviewWorkflowPhase.refine.rawValue, 0.32),
+                    (LocalPreviewWorkflowPhase.cutout.rawValue, 0.14),
+                    (LocalPreviewWorkflowPhase.cleanup.rawValue, 0.10),
+                    (LocalPreviewWorkflowPhase.export.rawValue, 0.10),
+                ]
+                : [
+                    (LocalPreviewWorkflowPhase.depth.rawValue, 0.24),
+                    (LocalPreviewWorkflowPhase.seed.rawValue, 0.18),
+                    (LocalPreviewWorkflowPhase.refine.rawValue, 0.40),
+                    (LocalPreviewWorkflowPhase.export.rawValue, 0.18),
+                ]
             let progressByID = Dictionary(uniqueKeysWithValues: workflowStepProgresses.map { ($0.id, $0.progressFraction) })
             guard progressByID.isEmpty == false else { return nil }
             let weighted = weights.reduce(0.0) { partial, entry in
@@ -1449,7 +1515,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     public var diagnosticStageText: String {
         if isLocalPreviewWorkflow {
-            return localPreviewPhase?.title ?? "本地快速预览"
+            return localPreviewPhase?.title ?? "本地处理"
         }
         if isStreamingLiveSfm {
             return "上传 + 增量 SfM 并行"
@@ -1529,8 +1595,8 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         switch resolvedProcessingBackend {
         case .cloud:
             return "处理 云端高质量"
-        case .localPreview:
-            return "处理 本地快速预览"
+        case .localPreview, .localSubjectFirst:
+            return "处理 本地方案"
         }
     }
 
@@ -1608,8 +1674,48 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                 metrics.append(
                     WorkflowActivityMetric(
                         id: "preview_gaussians",
-                        title: Self.countString(Double(gaussians)),
+                        title: "\(gaussians)",
                         subtitle: "当前高斯数"
+                    )
+                )
+            }
+            if status == .failed, let attempts = runtimeMetricInt("preview_export_attempts"), attempts > 0 {
+                metrics.append(
+                    WorkflowActivityMetric(
+                        id: "preview_export_attempts",
+                        title: "\(attempts)",
+                        subtitle: "导出尝试次数"
+                    )
+                )
+            }
+            if status == .failed, let fileSize = runtimeMetricInt("preview_export_file_size_bytes"), fileSize >= 0 {
+                let fileSizeText = ByteCountFormatter.string(
+                    fromByteCount: Int64(fileSize),
+                    countStyle: .file
+                )
+                metrics.append(
+                    WorkflowActivityMetric(
+                        id: "preview_export_file_size_bytes",
+                        title: fileSizeText,
+                        subtitle: "导出文件大小"
+                    )
+                )
+            }
+            if status == .failed, let waitSteps = runtimeMetricInt("preview_export_wait_steps"), waitSteps > 0 {
+                metrics.append(
+                    WorkflowActivityMetric(
+                        id: "preview_export_wait_steps",
+                        title: "\(waitSteps)",
+                        subtitle: "导出等待步数"
+                    )
+                )
+            }
+            if status == .failed, let statusCode = runtimeMetricInt("preview_export_status_code") {
+                metrics.append(
+                    WorkflowActivityMetric(
+                        id: "preview_export_status_code",
+                        title: "\(statusCode)",
+                        subtitle: runtimeMetricString("preview_export_failure_reason") ?? "导出状态码"
                     )
                 )
             }
@@ -2078,13 +2184,13 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         if isLocalPreviewWorkflow {
             switch status {
             case .completed:
-                return "本地预览已完成"
+                return "本地处理已完成"
             case .failed:
-                return "本地预览失败了"
+                return "本地处理失败了"
             case .cancelled:
-                return "本地预览已取消"
+                return "本地处理已取消"
             default:
-                return localPreviewPhase?.title ?? "正在生成本地快速预览"
+                return localPreviewPhase?.title ?? "正在生成本地结果"
             }
         }
         switch effectiveWorkflowStatus {
@@ -2209,8 +2315,8 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                     return 1.0
                 }
                 let nextIndex = localPreviewPhaseIndex(phase) + 1
-                if nextIndex < LocalPreviewProductProfile.workflowPhases.count {
-                    return LocalPreviewProductProfile.workflowPhases[nextIndex].startFraction
+                if nextIndex < localWorkflowPhases.count {
+                    return localWorkflowPhases[nextIndex].startFraction
                 }
                 return 1.0
             }()
@@ -2512,7 +2618,11 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     private var normalizedProgressBasis: String? {
         let trimmed = progressBasis?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return nil }
-        return trimmed.lowercased()
+        let normalized = trimmed.lowercased()
+        if normalized.hasPrefix("local_preview_") {
+            return normalized.replacingOccurrences(of: "local_preview_", with: "local_subject_first_", options: [.anchored])
+        }
+        return normalized
     }
 
     private var effectiveWorkflowStatus: ScanRecordStatus {
@@ -2689,7 +2799,14 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     private var normalizedFailureReason: String? {
         let trimmed = failureReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return nil }
-        return trimmed
+        switch trimmed.lowercased() {
+        case "local_preview_import_failed":
+            return "local_subject_first_import_failed"
+        case "local_preview_bridge_missing":
+            return "local_subject_first_bridge_missing"
+        default:
+            return trimmed
+        }
     }
 
     private var currentStepActualRatio: (current: Double, total: Double)? {
@@ -2766,7 +2883,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             case .completed:
                 return 1.0
             case .active:
-                if let nextPhase = LocalPreviewProductProfile.workflowPhases.drop(while: { $0 != phase }).dropFirst().first,
+                if let nextPhase = localWorkflowPhases.drop(while: { $0 != phase }).dropFirst().first,
                    let fraction = segmentProgress(from: progressFraction, start: phase.startFraction, end: nextPhase.startFraction) {
                     return max(fraction, 0.10)
                 }
@@ -3623,6 +3740,14 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             return "处理卡住"
         case "unknown_error":
             return "未分类异常"
+        case "local_subject_first_bridge_missing":
+            return "本地引擎未启动"
+        case "local_subject_first_import_failed":
+            return "本地处理失败"
+        case "local_subject_first_insufficient_parallax":
+            return "本地视差不足"
+        case "local_subject_first_duplicate_views":
+            return "近重复视角过多"
         case "copy_failed":
             return "本地落盘失败"
         case "cancel_requested":

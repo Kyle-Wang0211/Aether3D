@@ -37,6 +37,7 @@ private func makeSourceVideoThumbnailJPEGData(for url: URL) -> Data? {
 struct ScanRecordCell: View {
     let record: ScanRecord
     let relativeTime: String
+    let useEnglish: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -57,7 +58,7 @@ struct ScanRecordCell: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
 
-            Text(record.displayStatusMessage)
+            Text(localizedStatusMessage)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(statusColor.opacity(0.92))
                 .lineLimit(2)
@@ -111,11 +112,11 @@ struct ScanRecordCell: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white.opacity(0.42))
                 } else if let etaSummary = record.estimatedRemainingSummaryText, record.status != .completed {
-                    Text("约 \(etaSummary)")
+                    Text(useEnglish ? "About \(etaSummary)" : "约 \(etaSummary)")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white.opacity(0.42))
                 } else {
-                    Text("等待统计")
+                    Text(useEnglish ? "Waiting for stats" : "等待统计")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white.opacity(0.32))
                 }
@@ -131,7 +132,7 @@ struct ScanRecordCell: View {
                 )
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(record.name)，\(record.displayStatusMessage)，\(relativeTime)")
+        .accessibilityLabel("\(record.name)，\(localizedStatusMessage)，\(relativeTime)")
     }
 
     @ViewBuilder
@@ -225,6 +226,32 @@ struct ScanRecordCell: View {
     }
 
     private var statusTitle: String {
+        if useEnglish {
+            switch record.status {
+            case .completed:
+                return "Done"
+            case .cancelled:
+                return "Cancelled"
+            case .failed:
+                return "Failed"
+            case .localFallback:
+                return "Local"
+            case .uploading:
+                return "Uploading"
+            case .queued:
+                return "Queued"
+            case .reconstructing:
+                return "Rebuild"
+            case .training:
+                return "Training"
+            case .packaging:
+                return "Exporting"
+            case .downloading:
+                return "Downloading"
+            case .preparing:
+                return "Preparing"
+            }
+        }
         switch record.status {
         case .completed:
             return "已完成"
@@ -248,6 +275,43 @@ struct ScanRecordCell: View {
             return "回传中"
         case .preparing:
             return "准备中"
+        }
+    }
+
+    private var localizedStatusMessage: String {
+        guard useEnglish else { return record.displayStatusMessage }
+        let message = record.displayStatusMessage
+        let fallback = ScanRecord.defaultStatusMessage(for: record.status)
+        if message == fallback {
+            return englishDefaultStatusMessage(for: record.status)
+        }
+        return message
+    }
+
+    private func englishDefaultStatusMessage(for status: ScanRecordStatus) -> String {
+        switch status {
+        case .preparing:
+            return "Organizing captured footage"
+        case .uploading:
+            return "Uploading to object storage"
+        case .queued:
+            return "Queued in the backend, waiting for GPU"
+        case .reconstructing:
+            return "Remote preprocessing and reconstruction setup"
+        case .training:
+            return "Remote training is building the 3D model"
+        case .packaging:
+            return "Exporting and packaging the 3DGS"
+        case .downloading:
+            return "Returning the 3DGS to your phone"
+        case .localFallback:
+            return "Remote unavailable, switching to local fallback"
+        case .completed:
+            return "Result is ready to open"
+        case .cancelled:
+            return "You cancelled this remote job"
+        case .failed:
+            return "This generation failed"
         }
     }
 

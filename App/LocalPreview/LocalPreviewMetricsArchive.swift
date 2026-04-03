@@ -20,13 +20,16 @@ enum LocalPreviewMetricsArchive {
         sourceVideo: String? = nil,
         exported: Bool? = nil,
         sourceKind: String = "direct_capture",
+        processingBackend: ProcessingBackendChoice = .localSubjectFirst,
         thermalState: ProcessInfo.ThermalState? = nil,
         exportElapsedMs: UInt64? = nil
     ) -> [String: String] {
+        let processingBackend: ProcessingBackendChoice =
+            processingBackend == .localPreview ? .localSubjectFirst : processingBackend
         let currentThermal = thermalState ?? ProcessInfo.processInfo.thermalState
         var metrics: [String: String] = [
-            "processing_backend": ProcessingBackendChoice.localPreview.rawValue,
-            "preview_mode": LocalPreviewProductProfile.previewMode,
+            "processing_backend": processingBackend.rawValue,
+            "preview_mode": LocalPreviewProductProfile.previewMode(for: processingBackend),
             "depth_prior_source": LocalPreviewProductProfile.depthPriorSource,
             "depth_prior_transport": LocalPreviewProductProfile.depthPriorTransport,
             "depth_prior_profile": LocalPreviewProductProfile.depthPriorProfile,
@@ -35,6 +38,17 @@ enum LocalPreviewMetricsArchive {
             "thermal_state_raw": String(currentThermal.rawValue),
             "thermal_state_label": thermalStateLabel(currentThermal),
         ]
+        if processingBackend == .localSubjectFirst {
+            metrics["preview_subject_first_enabled"] = "1"
+            metrics["preview_subject_depth_prior_current"] =
+                LocalPreviewProductProfile.subjectFirstCurrentDepthPrior
+            metrics["preview_subject_depth_prior_target"] =
+                LocalPreviewProductProfile.subjectFirstTargetDepthPrior
+            metrics["preview_subject_bootstrap_current"] =
+                LocalPreviewProductProfile.subjectFirstCurrentBootstrap
+            metrics["preview_subject_bootstrap_target"] =
+                LocalPreviewProductProfile.subjectFirstTargetBootstrap
+        }
         if let sourceVideo {
             metrics["source_video"] = sourceVideo
         }
@@ -58,6 +72,22 @@ enum LocalPreviewMetricsArchive {
         metrics["preview_prefilter_blur_rejects"] = String(snapshot.preview_prefilter_blur_rejects)
         metrics["preview_keyframe_gate_accepts"] = String(snapshot.preview_keyframe_gate_accepts)
         metrics["preview_keyframe_gate_rejects"] = String(snapshot.preview_keyframe_gate_rejects)
+        metrics["preview_imported_frames_evaluated"] = String(snapshot.preview_imported_frames_evaluated)
+        metrics["preview_imported_low_parallax_rejects"] = String(snapshot.preview_imported_low_parallax_rejects)
+        metrics["preview_imported_near_duplicate_rejects"] = String(snapshot.preview_imported_near_duplicate_rejects)
+        metrics["preview_imported_selected_keyframes"] = String(snapshot.preview_imported_selected_keyframes)
+        metrics["preview_imported_selected_translation_mean_mm"] = String(
+            format: "%.2f",
+            snapshot.preview_imported_selected_translation_mean_mm
+        )
+        metrics["preview_imported_selected_rotation_mean_deg"] = String(
+            format: "%.2f",
+            snapshot.preview_imported_selected_rotation_mean_deg
+        )
+        metrics["preview_imported_selected_overlap_mean"] = String(
+            format: "%.4f",
+            snapshot.preview_imported_selected_overlap_mean
+        )
         metrics["preview_seed_candidates"] = String(snapshot.preview_seed_candidates)
         metrics["preview_seed_accepted"] = String(snapshot.preview_seed_accepted)
         metrics["preview_seed_rejected"] = String(snapshot.preview_seed_rejected)

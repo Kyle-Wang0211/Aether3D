@@ -118,19 +118,37 @@ public enum FrameSamplingProfile: String, Codable, CaseIterable, Sendable {
 public enum ProcessingBackendChoice: String, Codable, CaseIterable, Sendable {
     case cloud
     case localPreview = "local_preview"
+    case localSubjectFirst = "local_subject_first"
 
     public static let userDefaultsKey = "aether.processingBackendChoice"
 
     public static func currentSelection(userDefaults: UserDefaults = .standard) -> ProcessingBackendChoice {
         let rawValue = userDefaults.string(forKey: userDefaultsKey)
-        return ProcessingBackendChoice(rawValue: rawValue ?? "") ?? .cloud
+        guard let rawValue else { return .cloud }
+        switch ProcessingBackendChoice(rawValue: rawValue) {
+        case .localPreview:
+            return .localSubjectFirst
+        case let backend?:
+            return backend
+        case nil:
+            return .cloud
+        }
+    }
+
+    public var normalizedForActiveUse: ProcessingBackendChoice {
+        switch self {
+        case .localPreview:
+            return .localSubjectFirst
+        case .cloud, .localSubjectFirst:
+            return self
+        }
     }
 
     public var title: String {
         switch self {
         case .cloud:
             return "云端"
-        case .localPreview:
+        case .localPreview, .localSubjectFirst:
             return "本地"
         }
     }
@@ -139,8 +157,8 @@ public enum ProcessingBackendChoice: String, Codable, CaseIterable, Sendable {
         switch self {
         case .cloud:
             return "高质量"
-        case .localPreview:
-            return "快速预览"
+        case .localPreview, .localSubjectFirst:
+            return "本地处理"
         }
     }
 
@@ -148,8 +166,8 @@ public enum ProcessingBackendChoice: String, Codable, CaseIterable, Sendable {
         switch self {
         case .cloud:
             return "云端高质量"
-        case .localPreview:
-            return "本地快速预览"
+        case .localPreview, .localSubjectFirst:
+            return "本地处理"
         }
     }
 
@@ -158,6 +176,26 @@ public enum ProcessingBackendChoice: String, Codable, CaseIterable, Sendable {
         case .cloud:
             return true
         case .localPreview:
+            return true
+        case .localSubjectFirst:
+            return true
+        }
+    }
+
+    public var localWorkflowStageKey: String? {
+        switch self {
+        case .cloud:
+            return nil
+        case .localPreview, .localSubjectFirst:
+            return "local_subject_first"
+        }
+    }
+
+    public var usesLocalPreviewPipeline: Bool {
+        switch self {
+        case .cloud:
+            return false
+        case .localPreview, .localSubjectFirst:
             return true
         }
     }
@@ -187,6 +225,6 @@ public struct BuildRequest {
         self.requestedMode = requestedMode
         self.deviceTier = deviceTier
         self.frameSamplingProfile = frameSamplingProfile
-        self.processingBackend = processingBackend
+        self.processingBackend = processingBackend.normalizedForActiveUse
     }
 }

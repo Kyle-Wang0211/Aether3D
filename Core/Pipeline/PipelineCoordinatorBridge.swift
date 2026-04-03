@@ -23,6 +23,27 @@ import simd
 public enum PipelineCoordinatorProfile: String, Sendable {
     case cloudDefault = "cloud_default"
     case localPreviewMonocular = "local_preview_monocular"
+    case localSubjectFirstMonocular = "local_subject_first_monocular"
+
+    public var normalizedForActiveUse: PipelineCoordinatorProfile {
+        switch self {
+        case .localPreviewMonocular:
+            return .localSubjectFirstMonocular
+        case .cloudDefault, .localSubjectFirstMonocular:
+            return self
+        }
+    }
+}
+
+public struct PipelinePLYExportResult: Sendable {
+    public let statusCode: Int32
+    public let statusReason: String
+    public let fileSizeBytes: UInt64
+    public let outputPath: String
+
+    public var succeeded: Bool {
+        statusCode == 0 && fileSizeBytes > 0
+    }
 }
 
 /// Swift bridge to the C++ PipelineCoordinator via C API.
@@ -38,10 +59,11 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
                  splatEnginePtr: UnsafeMutableRawPointer,
                  profile: PipelineCoordinatorProfile = .cloudDefault) {
         #if canImport(CAetherNativeBridge)
-        guard var config = Self.makeConfig(for: profile) else { return nil }
+        let normalizedProfile = profile.normalizedForActiveUse
+        guard var config = Self.makeConfig(for: normalizedProfile) else { return nil }
 
         let result: OpaquePointer? = Self.withConfiguredModelPaths(
-            profile: profile,
+            profile: normalizedProfile,
             config: &config
         ) { configuredConfig in
             aether_pipeline_coordinator_create(
@@ -81,12 +103,12 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
             return nil
         }
 
-        switch profile {
+        switch profile.normalizedForActiveUse {
         case .cloudDefault:
             config.local_preview_mode = 0
             break
-        case .localPreviewMonocular:
-            // Preview-first local path: bias toward faster on-device convergence
+        case .localPreviewMonocular, .localSubjectFirstMonocular:
+            // Subject-first local path: bias toward faster on-device convergence
             // while keeping the existing cloud path untouched.
             config.local_preview_mode = 1
             config.max_iterations = 1400
@@ -112,20 +134,37 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
             withExtension: "mlmodelc"
         )
         let smallPath = smallURL?.path
+        let normalizedProfile = profile.normalizedForActiveUse
         NSLog(
             "[Aether3D] Depth prior profile=%@ small=%@",
-            profile.rawValue,
+            normalizedProfile.rawValue,
             smallPath != nil ? "found" : "missing"
         )
 
+        let videoPath: String? = {
+            guard normalizedProfile == .localSubjectFirstMonocular else { return nil }
+            let candidates = [
+                Bundle.main.url(forResource: "VideoDepthAnythingSmall", withExtension: "mlmodelc"),
+                Bundle.main.url(forResource: "VideoDepthAnythingV2Small", withExtension: "mlmodelc"),
+                Bundle.main.url(forResource: "VideoDepthAnything", withExtension: "mlmodelc")
+            ]
+            let found = candidates.compactMap { $0?.path }.first
+            NSLog(
+                "[Aether3D] Video depth model for %@: %@",
+                normalizedProfile.rawValue,
+                found != nil ? "found" : "missing"
+            )
+            return found
+        }()
+
         let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
         let largePath: String? = {
-            guard profile == .cloudDefault else { return nil }
+            guard normalizedProfile == .cloudDefault else { return nil }
             guard memoryGB >= 8.0 else {
                 NSLog(
                     "[Aether3D] RAM %.2fGB < 8.0GB — blocking Large depth model for %@",
                     memoryGB,
-                    profile.rawValue
+                    normalizedProfile.rawValue
                 )
                 return nil
             }
@@ -135,39 +174,55 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
             )
             NSLog(
                 "[Aether3D] Large depth model for %@: %@",
-                profile.rawValue,
+                normalizedProfile.rawValue,
                 url != nil ? "found" : "missing"
             )
             return url?.path
         }()
 
-        if let sp = smallPath, let lp = largePath {
-            return sp.withCString { sCStr in
-                lp.withCString { lCStr in
-                    config.depth_model_path = sCStr
+        func withLargePath<R>(_ body2: () -> R) -> R {
+            if let lp = largePath {
+                return lp.withCString { lCStr in
                     config.depth_model_path_large = lCStr
-                    return withUnsafeMutablePointer(to: &config) { configPtr in
-                        body(configPtr)
-                    }
+                    return body2()
                 }
+            } else {
+                config.depth_model_path_large = nil
+                return body2()
+            }
+        }
+
+        func withVideoPath<R>(_ body2: () -> R) -> R {
+            if let vp = videoPath {
+                return vp.withCString { vCStr in
+                    config.depth_model_path_video = vCStr
+                    return body2()
+                }
+            } else {
+                config.depth_model_path_video = nil
+                return body2()
             }
         }
 
         if let sp = smallPath {
             return sp.withCString { sCStr in
                 config.depth_model_path = sCStr
-                config.depth_model_path_large = nil
-                return withUnsafeMutablePointer(to: &config) { configPtr in
-                    body(configPtr)
+                return withLargePath {
+                    withVideoPath {
+                        withUnsafeMutablePointer(to: &config) { configPtr in
+                            body(configPtr)
+                        }
+                    }
                 }
             }
         }
 
         config.depth_model_path = nil
         config.depth_model_path_large = nil
+        config.depth_model_path_video = nil
         NSLog(
             "[Aether3D] WARNING: no bundled monocular depth model, profile=%@ → MVS-only fallback",
-            profile.rawValue
+            normalizedProfile.rawValue
         )
         return withUnsafeMutablePointer(to: &config) { configPtr in
             body(configPtr)
@@ -222,7 +277,7 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
-    /// Submit imported-video frame for local_preview using native bootstrap pose/intrinsics.
+    /// Submit imported-video frame for local subject-first processing using native bootstrap pose/intrinsics.
     public func onImportedVideoFrame(
         rgba: UnsafePointer<UInt8>,
         width: UInt32,
@@ -337,15 +392,20 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
-    /// Service local-preview bootstrap work so async depth prior results can be
-    /// consumed even while imported-video ingestion is temporarily idle.
-    public func serviceLocalPreviewBootstrap() -> Bool {
+    /// Service local subject-first bootstrap work so async depth prior results
+    /// can be consumed even while imported-video ingestion is temporarily idle.
+    public func serviceLocalSubjectFirstBootstrap() -> Bool {
         #if canImport(CAetherNativeBridge)
         guard let coordinator = coordinator else { return false }
-        return aether_pipeline_coordinator_service_local_preview_bootstrap(coordinator) == 1
+        return aether_pipeline_coordinator_service_local_subject_first_bootstrap(coordinator) == 1
         #else
         return false
         #endif
+    }
+
+    /// Compatibility wrapper for older local-preview naming.
+    public func serviceLocalPreviewBootstrap() -> Bool {
+        serviceLocalSubjectFirstBootstrap()
     }
 
     /// Whether training is running on GPU (true) or CPU fallback (false).
@@ -387,13 +447,43 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
 
     /// Export final PLY (trained Gaussians).
     public func exportPLY(path: String) -> Bool {
+        exportPLYResult(path: path).succeeded
+    }
+
+    /// Export final PLY (trained Gaussians) with diagnostics.
+    public func exportPLYResult(path: String) -> PipelinePLYExportResult {
         #if canImport(CAetherNativeBridge)
-        guard let coordinator = coordinator else { return false }
-        return path.withCString { cStr in
-            aether_pipeline_coordinator_export_ply(coordinator, cStr) == 0
+        guard let coordinator = coordinator else {
+            return PipelinePLYExportResult(
+                statusCode: -999,
+                statusReason: "coordinator_unavailable",
+                fileSizeBytes: 0,
+                outputPath: path
+            )
         }
+        let statusCode: Int32 = path.withCString { cStr in
+            aether_pipeline_coordinator_export_ply(coordinator, cStr)
+        }
+        let fileSizeBytes: UInt64 = {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+                  let fileSize = (attributes[.size] as? NSNumber)?.uint64Value else {
+                return 0
+            }
+            return fileSize
+        }()
+        return PipelinePLYExportResult(
+            statusCode: statusCode,
+            statusReason: Self.exportPLYStatusReason(statusCode: statusCode, fileSizeBytes: fileSizeBytes),
+            fileSizeBytes: fileSizeBytes,
+            outputPath: path
+        )
         #else
-        return false
+        return PipelinePLYExportResult(
+            statusCode: -999,
+            statusReason: "bridge_unavailable",
+            fileSizeBytes: 0,
+            outputPath: path
+        )
         #endif
     }
 
@@ -407,6 +497,21 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #else
         return false
         #endif
+    }
+
+    private static func exportPLYStatusReason(statusCode: Int32, fileSizeBytes: UInt64) -> String {
+        switch statusCode {
+        case 0:
+            return fileSizeBytes > 0 ? "ok" : "native_ok_but_empty_or_missing_file"
+        case -1:
+            return "native_invalid_argument"
+        case -2:
+            return "native_out_of_range"
+        case -3:
+            return "native_resource_exhausted"
+        default:
+            return "native_status_\(statusCode)"
+        }
     }
 
     /// Copy TSDF surface sample positions for export-time world-state metrics.

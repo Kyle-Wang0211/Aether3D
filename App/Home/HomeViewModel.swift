@@ -71,8 +71,9 @@ final class HomeViewModel: ObservableObject {
         !completedRecords.isEmpty
     }
 
-    func loadRecords(scheduleRemoteResume: Bool = true) {
-        isLoading = true
+    func loadRecords(scheduleRemoteResume: Bool = true, showLoadingOverlay: Bool? = nil) {
+        let shouldShowLoadingOverlay = showLoadingOverlay ?? scanRecords.isEmpty
+        isLoading = shouldShowLoadingOverlay
         loadRecordsTask?.cancel()
         let store = self.store
         loadRecordsTask = Task(priority: .userInitiated) { [weak self] in
@@ -167,12 +168,22 @@ final class HomeViewModel: ObservableObject {
                 triangleCount: 0,
                 durationSeconds: durationSeconds,
                 status: .preparing,
-                statusMessage: effectiveProcessingBackend == .localPreview
-                    ? "正在准备本地快速预览"
-                    : "正在准备后台上传任务",
-                detailMessage: processingBackend == .localPreview
-                    ? "这次会直接在手机本地走单目 preview 链路，不会提交云端训练。"
-                    : "只有这次你手动选择的视频会进入后台上传与训练队列；过去的旧素材不会自动重发。",
+                statusMessage: {
+                    switch effectiveProcessingBackend {
+                    case .cloud:
+                        return "正在准备后台上传任务"
+                    case .localPreview, .localSubjectFirst:
+                        return "正在准备本地处理"
+                    }
+                }(),
+                detailMessage: {
+                    switch effectiveProcessingBackend {
+                    case .cloud:
+                        return "只有这次你手动选择的视频会进入后台上传与训练队列；过去的旧素材不会自动重发。"
+                    case .localPreview, .localSubjectFirst:
+                        return "这次会先在手机上走本地处理链路：单目点图、cutout，再做保守 cleanup。"
+                    }
+                }(),
                 progressFraction: 0.01,
                 estimatedRemainingMinutes: nil
             )
@@ -181,16 +192,25 @@ final class HomeViewModel: ObservableObject {
             loadRecords(scheduleRemoteResume: false)
 
             Task {
-                if effectiveProcessingBackend == .localPreview {
-                    await self.runLocalPreviewImport(for: recordId, sourceVideoURL: targetURL)
+                if effectiveProcessingBackend.usesLocalPreviewPipeline {
+                    await self.runLocalPreviewImport(
+                        for: recordId,
+                        sourceVideoURL: targetURL,
+                        processingBackend: effectiveProcessingBackend
+                    )
                 } else {
                     await self.runRemoteBuild(for: recordId, sourceVideoURL: targetURL, allowLocalFallback: false)
                 }
             }
 
-            busyMessage = effectiveProcessingBackend == .localPreview
-                ? "正在启动本地快速预览..."
-                : nil
+            busyMessage = {
+                switch effectiveProcessingBackend {
+                case .cloud:
+                    return nil
+                case .localPreview, .localSubjectFirst:
+                    return "正在启动本地处理..."
+                }
+            }()
             isImportingVideo = false
             return record
         } catch {
@@ -213,13 +233,15 @@ final class HomeViewModel: ObservableObject {
             return
         }
 
-        let backend = ProcessingBackendChoice(rawValue: record.processingBackend ?? "") ?? .cloud
+        let backend = record.resolvedProcessingBackend
         store.updateProcessingState(
             recordId: record.id,
             status: .preparing,
-            statusMessage: backend == .localPreview ? "正在重新启动本地快速预览" : "正在重新发起远端训练",
-            detailMessage: backend == .localPreview
-                ? "这次会重新走手机本地的单目 preview 链路。"
+            statusMessage: backend.usesLocalPreviewPipeline
+                ? "正在重新启动本地处理"
+                : "正在重新发起远端训练",
+            detailMessage: backend.usesLocalPreviewPipeline
+                ? "这次会重新走手机本地处理链路。"
                 : "这次会重新走后台上传与远端调度流程。",
             progressFraction: 0.01,
             estimatedRemainingMinutes: nil,
@@ -229,8 +251,12 @@ final class HomeViewModel: ObservableObject {
         loadRecords(scheduleRemoteResume: false)
 
         Task {
-            if backend == .localPreview {
-                await self.runLocalPreviewImport(for: record.id, sourceVideoURL: sourceURL)
+            if backend.usesLocalPreviewPipeline {
+                await self.runLocalPreviewImport(
+                    for: record.id,
+                    sourceVideoURL: sourceURL,
+                    processingBackend: backend
+                )
             } else {
                 await self.runRemoteBuild(for: record.id, sourceVideoURL: sourceURL, allowLocalFallback: false)
             }
@@ -238,11 +264,18 @@ final class HomeViewModel: ObservableObject {
     }
 
     #if canImport(AVFoundation)
-    private func runLocalPreviewImport(for recordId: UUID, sourceVideoURL: URL) async {
+    private func runLocalPreviewImport(
+        for recordId: UUID,
+        sourceVideoURL: URL,
+        processingBackend: ProcessingBackendChoice
+    ) async {
+        let processingBackend = processingBackend.normalizedForActiveUse
         let frameSamplingProfile = selectedFrameSamplingProfile(for: recordId)
         let artifactRelativePath = "exports/\(recordId.uuidString).ply"
         let artifactURL = store.baseDirectoryURL().appendingPathComponent(artifactRelativePath)
         let sourceRelativePath = store.record(id: recordId)?.sourceVideoPath ?? "imports/\(sourceVideoURL.lastPathComponent)"
+        let stageKey = processingBackend.localWorkflowStageKey ?? ProcessingBackendChoice.localSubjectFirst.localWorkflowStageKey!
+        let initialPhaseModel = "depth_seed_refine_cutout_cleanup_export"
         final class LocalPreviewUiRefreshThrottle {
             var lastRefreshAt: CFAbsoluteTime = 0.0
             var lastPhaseName = ""
@@ -254,12 +287,19 @@ final class HomeViewModel: ObservableObject {
         let applyLocalPreviewPhase: @MainActor @Sendable (LocalPreviewPhaseUpdate) -> Void = { [self] update in
             self.store.updateProcessingState(
                 recordId: recordId,
-                status: update.phase == .export ? .packaging : .training,
+                status: {
+                    switch update.phase {
+                    case .depth, .seed, .refine:
+                        return .training
+                    case .cutout, .cleanup, .export:
+                        return .packaging
+                    }
+                }(),
                 statusMessage: update.title,
                 detailMessage: update.detail,
                 progressFraction: update.progressFraction,
                 progressBasis: update.phase.progressBasis,
-                remoteStageKey: "local_preview",
+                remoteStageKey: stageKey,
                 remotePhaseName: update.phase.phaseName,
                 runtimeMetrics: update.runtimeMetrics,
                 estimatedRemainingMinutes: nil,
@@ -301,16 +341,16 @@ final class HomeViewModel: ObservableObject {
             recordId: recordId,
             status: .training,
             statusMessage: LocalPreviewWorkflowPhase.depth.title,
-            detailMessage: LocalPreviewWorkflowPhase.depth.detailMessage,
+            detailMessage: "正在建立本地单目深度先验，后面会继续做 cutout 和保守 cleanup。",
             progressFraction: LocalPreviewWorkflowPhase.depth.startFraction,
             progressBasis: LocalPreviewWorkflowPhase.depth.progressBasis,
-            remoteStageKey: "local_preview",
+            remoteStageKey: stageKey,
             remotePhaseName: LocalPreviewWorkflowPhase.depth.phaseName,
             runtimeMetrics: [
-                "processing_backend": ProcessingBackendChoice.localPreview.rawValue,
+                "processing_backend": processingBackend.rawValue,
                 "preview_source_kind": "imported_video",
                 "preview_active_phase": LocalPreviewWorkflowPhase.depth.phaseName,
-                "preview_phase_model": "depth_seed_refine_export",
+                "preview_phase_model": initialPhaseModel,
             ],
             estimatedRemainingMinutes: nil,
             clearRemoteJobId: true
@@ -323,6 +363,7 @@ final class HomeViewModel: ObservableObject {
                 artifactURL: artifactURL,
                 sourceRelativePath: sourceRelativePath,
                 frameSamplingProfile: frameSamplingProfile,
+                processingBackend: processingBackend,
                 onPhaseUpdate: { update in
                     Task { @MainActor in
                         applyLocalPreviewPhase(update)
@@ -335,11 +376,11 @@ final class HomeViewModel: ObservableObject {
             store.updateProcessingState(
                 recordId: recordId,
                 status: .completed,
-                statusMessage: "本地快速预览已生成",
+                statusMessage: "本地结果已生成",
                 detailMessage: result.detailMessage,
                 progressFraction: 1.0,
                 progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
-                remoteStageKey: "local_preview",
+                remoteStageKey: stageKey,
                 remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
                 runtimeMetrics: result.runtimeMetrics,
                 estimatedRemainingMinutes: 0,
@@ -352,17 +393,17 @@ final class HomeViewModel: ObservableObject {
             store.updateProcessingState(
                 recordId: recordId,
                 status: .failed,
-                statusMessage: "本地快速预览失败了",
+                statusMessage: "本地处理失败了",
                 detailMessage: result.detailMessage,
                 progressFraction: result.terminalProgressFraction,
                 progressBasis: result.terminalPhase.progressBasis,
-                remoteStageKey: "local_preview",
+                remoteStageKey: stageKey,
                 remotePhaseName: result.terminalPhase.phaseName,
                 runtimeMetrics: result.runtimeMetrics,
                 estimatedRemainingMinutes: nil,
                 sourceVideoPath: sourceRelativePath,
                 frameSamplingProfile: frameSamplingProfile.rawValue,
-                failureReason: "local_preview_import_failed"
+                failureReason: result.runtimeMetrics["preview_failure_reason"] ?? "local_subject_first_import_failed"
             )
         }
         loadRecords(scheduleRemoteResume: false)

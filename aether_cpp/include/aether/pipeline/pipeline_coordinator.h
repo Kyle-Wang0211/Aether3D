@@ -13,6 +13,7 @@
 #include <mutex>
 #include <thread>
 #include <memory>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -158,6 +159,13 @@ struct EvidenceSnapshot {
     std::uint32_t preview_prefilter_blur_rejects{0};
     std::uint32_t preview_keyframe_gate_accepts{0};
     std::uint32_t preview_keyframe_gate_rejects{0};
+    std::uint32_t preview_imported_frames_evaluated{0};
+    std::uint32_t preview_imported_low_parallax_rejects{0};
+    std::uint32_t preview_imported_near_duplicate_rejects{0};
+    std::uint32_t preview_imported_selected_keyframes{0};
+    float preview_imported_selected_translation_mean_mm{0.0f};
+    float preview_imported_selected_rotation_mean_deg{0.0f};
+    float preview_imported_selected_overlap_mean{0.0f};
     std::uint32_t preview_seed_candidates{0};
     std::uint32_t preview_seed_accepted{0};
     std::uint32_t preview_seed_rejected{0};
@@ -203,9 +211,13 @@ struct CoordinatorConfig {
     std::size_t min_frames_to_start_training{4};  // 4 frames — start ASAP (heatmap coverage = rendering readiness)
     std::size_t training_batch_size{4};
     float low_quality_loss_weight{0.3f};
-    bool local_preview_mode{false};               // Monocular on-device preview path (bounded/faster)
+    bool local_preview_mode{false};               // ABI-compat flag for subject-first on-device path (bounded/faster)
     capture::FrameSelectionConfig frame_selection;
     training::TrainingConfig training;
+
+    bool is_local_subject_first_mode() const noexcept {
+        return local_preview_mode;
+    }
 
     // Thermal management
     thermal::ThermalConfig thermal;
@@ -239,8 +251,9 @@ struct CoordinatorConfig {
     //   Large (~638MB, ~80ms on A14): high quality, every Nth frame
     //   Cross-validation: compare depth maps where both available,
     //   use consensus to filter outliers, improve confidence.
-    const char* depth_model_path{nullptr};           // Small model (primary, fast)
-    const char* depth_model_path_large{nullptr};     // Large model (cross-validation)
+    std::string depth_model_path{};                  // Small model (primary, fast)
+    std::string depth_model_path_large{};            // Large model (cross-validation)
+    std::string depth_model_path_video{};            // Video model (imported-video local subject-first)
     std::uint32_t large_model_interval{5};           // Run Large every N frames (saves NE bandwidth)
 };
 
@@ -339,9 +352,17 @@ public:
     /// Check if training is currently active.
     bool is_training_active() const noexcept;
 
-    /// Service async local-preview bootstrap work (e.g. depth prior results)
+    /// Active local runtime semantic: subject-first on-device processing.
+    bool is_local_subject_first_mode() const noexcept {
+        return config_.local_preview_mode;
+    }
+
+    /// Service async local subject-first bootstrap work (e.g. depth prior results)
     /// even when imported-video ingestion is temporarily idle.
     /// Returns true once a usable cached depth prior exists.
+    bool service_local_subject_first_bootstrap() noexcept;
+
+    /// Compatibility wrapper for older local_preview naming.
     bool service_local_preview_bootstrap() noexcept;
 
     /// Check if training is running on GPU (true) or CPU fallback (false).
@@ -422,6 +443,13 @@ private:
     std::atomic<std::uint32_t> preview_prefilter_blur_rejects_{0};
     std::atomic<std::uint32_t> preview_keyframe_gate_accepts_{0};
     std::atomic<std::uint32_t> preview_keyframe_gate_rejects_{0};
+    std::atomic<std::uint32_t> preview_imported_frames_evaluated_{0};
+    std::atomic<std::uint32_t> preview_imported_low_parallax_rejects_{0};
+    std::atomic<std::uint32_t> preview_imported_near_duplicate_rejects_{0};
+    std::atomic<std::uint32_t> preview_imported_selected_keyframes_{0};
+    std::atomic<std::uint64_t> preview_imported_selected_translation_mm_sum_{0};
+    std::atomic<std::uint64_t> preview_imported_selected_rotation_mdeg_sum_{0};
+    std::atomic<std::uint64_t> preview_imported_selected_overlap_milli_sum_{0};
     std::atomic<std::uint32_t> preview_seed_candidates_{0};
     std::atomic<std::uint32_t> preview_seed_accepted_{0};
     std::atomic<std::uint32_t> preview_seed_rejected_{0};
@@ -451,16 +479,23 @@ private:
     // On iPhone 14+: both models concurrently on Neural Engine.
     std::unique_ptr<DepthInferenceEngine> depth_engine_small_;
     std::unique_ptr<DepthInferenceEngine> depth_engine_large_;
+    std::unique_ptr<DepthInferenceEngine> depth_engine_video_;
     std::uint32_t frame_counter_for_large_{0};   // Counts frames since last Large inference
     std::uint32_t preview_depth_frames_since_submit_{0};
 
     // Cross-validated depth cache (latest from each model)
     DepthInferenceResult latest_small_depth_;
     DepthInferenceResult latest_large_depth_;
+    DepthInferenceResult latest_video_depth_;
+    DepthInferenceResult preview_temporal_depth_;
     bool has_small_depth_{false};
     bool has_large_depth_{false};
+    bool has_video_depth_{false};
+    bool has_preview_temporal_depth_{false};
     float preview_last_depth_request_pos_[3]{0.0f, 0.0f, 0.0f};
     float preview_last_depth_request_fwd_[3]{0.0f, 0.0f, -1.0f};
+    float preview_last_temporal_depth_pos_[3]{0.0f, 0.0f, 0.0f};
+    float preview_last_temporal_depth_fwd_[3]{0.0f, 0.0f, -1.0f};
     bool has_preview_depth_request_{false};
 
     /// Cross-validate Small vs Large depth maps, output consensus depth.
@@ -471,6 +506,12 @@ private:
         const DepthInferenceResult& large_result,
         bool have_small, bool have_large,
         DepthInferenceResult& consensus_out) noexcept;
+
+    bool make_video_consistent_preview_depth(
+        const DepthInferenceResult& current_depth,
+        const float current_cam_pos[3],
+        const float current_cam_fwd[3],
+        DepthInferenceResult& stabilized_out) noexcept;
 
     // ─── Thermal Management ───
     thermal::ThermalPredictor thermal_predictor_;
@@ -539,6 +580,43 @@ private:
         double last_update_ts{0.0};  // Timestamp of last geometric refinement
     };
     std::unordered_map<std::int64_t, ConfirmedTile> confirmed_overlay_cells_;
+
+    // ─── Monotonic dense-map confirmation (prevents live point-cloud rollback) ───
+    // The sparse dense-map shown during capture must not be rebuilt from scratch
+    // every frame; otherwise cells flicker, drift, and "rewind" to weaker states
+    // whenever the current frame under-observes a region. This cache keeps one
+    // confirmed dense sample per grid cell and only lets evidence/quality grow.
+    struct ConfirmedDenseCell {
+        float position[3];       // Weighted pointmap anchor
+        float normal[3];         // Weighted surface normal
+        float best_position[3];  // Highest-confidence observation anchor (surface adherence)
+        float best_normal[3];    // Highest-confidence observation normal
+        float quality{0.0f};     // Peak composite quality (only increases)
+        float avg_weight{0.0f};  // Peak TSDF support/evidence (only increases)
+        float confidence_accum{0.0f}; // MASt3R-SLAM weighted_pointmap-style running confidence
+        float display_quality_peak{0.0f}; // Monotonic color state (prevents rollback)
+        float best_confidence{0.0f}; // MASt3R-SLAM best_score-style anchor keeper
+        float support_count{1.0f};
+        float stability{1.0f};
+        std::uint32_t unique_keyframes_seen{0};
+        std::uint32_t last_keyframe_id{0};
+        std::uint32_t update_count{0};
+        double last_update_ts{0.0};
+    };
+    std::unordered_map<std::int64_t, ConfirmedDenseCell> confirmed_dense_cells_;
+    std::vector<PointCloudVertex> last_stable_dense_vertices_;
+
+    struct PointmapKeyframeMemory {
+        std::uint32_t id{0};
+        float pose[16]{};
+        float forward[3]{0.0f, 0.0f, -1.0f};
+        float average_confidence{0.0f};
+        std::uint32_t observed_cell_count{0};
+        double timestamp_s{0.0};
+    };
+    std::vector<PointmapKeyframeMemory> pointmap_keyframes_;
+    std::uint32_t next_pointmap_keyframe_id_{1};
+    std::uint32_t active_pointmap_keyframe_id_{0};
 
     // Camera state for overlay frustum culling (updated by Thread A each frame)
     float overlay_cam_pos_[3]{0.0f, 0.0f, 0.0f};

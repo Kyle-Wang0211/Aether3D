@@ -40,7 +40,7 @@ typedef struct {
     size_t max_iterations;                     // Default: 3000 (global engine: TSDF init + MCMC converges fast)
     uint32_t render_width;                     // Default: 800
     uint32_t render_height;                    // Default: 600
-    uint32_t local_preview_mode;              // Default: 0 (cloud/default), 1 = bounded monocular preview
+    uint32_t local_preview_mode;              // ABI-compat flag: 0 (cloud/default), 1 = bounded local subject-first monocular mode
 
     // Thermal — predictive management
     float thermal_recovery_delay_s;            // Default: 3.0
@@ -68,6 +68,7 @@ typedef struct {
     // NULL → that model unavailable. Both NULL → fallback to MVS-only.
     const char* depth_model_path;              // Small model (primary). Default: NULL
     const char* depth_model_path_large;        // Large model (cross-validation). Default: NULL
+    const char* depth_model_path_video;        // Video model (imported-video local subject-first). Default: NULL
     uint32_t large_model_interval;             // Run Large every N frames. Default: 5
 } aether_coordinator_config_t;
 
@@ -104,6 +105,13 @@ typedef struct {
     uint32_t preview_prefilter_blur_rejects;
     uint32_t preview_keyframe_gate_accepts;
     uint32_t preview_keyframe_gate_rejects;
+    uint32_t preview_imported_frames_evaluated;
+    uint32_t preview_imported_low_parallax_rejects;
+    uint32_t preview_imported_near_duplicate_rejects;
+    uint32_t preview_imported_selected_keyframes;
+    float preview_imported_selected_translation_mean_mm;
+    float preview_imported_selected_rotation_mean_deg;
+    float preview_imported_selected_overlap_mean;
     uint32_t preview_seed_candidates;
     uint32_t preview_seed_accepted;
     uint32_t preview_seed_rejected;
@@ -183,7 +191,7 @@ int aether_pipeline_coordinator_on_frame(
     uint32_t lidar_h,
     int thermal_state);              // ProcessInfo.ThermalState raw value
 
-/// Submit imported-video frame for local preview using native bootstrap pose/intrinsics.
+/// Submit imported-video frame for local subject-first processing using native bootstrap pose/intrinsics.
 /// Returns: 0=accepted, 1=dropped (queue full).
 int aether_pipeline_coordinator_on_imported_video_frame(
     aether_pipeline_coordinator_t* coordinator,
@@ -233,7 +241,11 @@ size_t aether_pipeline_coordinator_wait_for_training(
 int aether_pipeline_coordinator_is_training(
     const aether_pipeline_coordinator_t* coordinator);
 
-/// Service imported-video local-preview bootstrap work (async depth prior polling).
+/// Service imported-video local subject-first bootstrap work (async depth prior polling).
+int aether_pipeline_coordinator_service_local_subject_first_bootstrap(
+    aether_pipeline_coordinator_t* coordinator);
+
+/// Compatibility wrapper for older local_preview naming.
 /// Returns 1 once a usable cached depth prior exists, 0 otherwise.
 int aether_pipeline_coordinator_service_local_preview_bootstrap(
     aether_pipeline_coordinator_t* coordinator);

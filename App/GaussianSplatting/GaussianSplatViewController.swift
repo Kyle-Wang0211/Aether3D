@@ -111,6 +111,10 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         .orbit
     }
 
+    private var viewerPathLabel: String {
+        oitViewerReady ? "mobileOIT" : "nativeLegacy"
+    }
+
     /// URL of the file to load (.ply or .spz).
     var fileURL: URL?
     var viewerInitialPose: ViewerInitialPose?
@@ -274,6 +278,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         splatBridge = NativeSplatEngineBridge(
             gpuDevicePtr: UnsafeMutableRawPointer(gpuDevice)
         )
+        setupOITViewer()
         #else
         #if DEBUG
         print("[Aether3D][Viewer] ERROR: CAetherNativeBridge not available")
@@ -293,7 +298,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
                 options: .storageModeShared
             ) else {
                 oitViewerReady = false
-            NSLog("%@", "[Aether3D][Viewer][LegacyOIT] init_failed=buffer_allocation")
+            NSLog("%@", "[Aether3D][Viewer][MobileOIT] init_failed=buffer_allocation")
                 return
             }
 
@@ -307,10 +312,10 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
             }
 
             oitViewerReady = oitAccumPSO != nil && oitCompositePSO != nil
-            NSLog("%@", "[Aether3D][Viewer][LegacyOIT] pipeline=\(oitViewerReady ? "ready" : "fallback") cameraUniformStride=\(MemoryLayout<OITSplatCameraUniforms>.stride)")
+            NSLog("%@", "[Aether3D][Viewer][MobileOIT] pipeline=\(oitViewerReady ? "ready" : "fallback") cameraUniformStride=\(MemoryLayout<OITSplatCameraUniforms>.stride)")
         } catch {
             oitViewerReady = false
-            NSLog("%@", "[Aether3D][Viewer][LegacyOIT] init_failed=\(error.localizedDescription)")
+            NSLog("%@", "[Aether3D][Viewer][MobileOIT] init_failed=\(error.localizedDescription)")
         }
     }
 
@@ -374,7 +379,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
             oitRegionIDBuffer = nil
             oitSplatCount = 0
             oitViewerReady = false
-            NSLog("%@", "[Aether3D][Viewer][LegacyOIT] scene_ready=no reason=no_packed_data")
+            NSLog("%@", "[Aether3D][Viewer][MobileOIT] scene_ready=no reason=no_packed_data")
             return
         }
 
@@ -382,21 +387,30 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         let shFloatCount = max(actualSHFloatCount, packedCount * Self.shFloatCountPerSplat)
         let packedByteCount = packedCount * Self.packedSplatStride
         let shByteCount = shFloatCount * MemoryLayout<Float>.stride
+        let packedRaw = UnsafeRawBufferPointer(start: packedBase, count: packedByteCount)
+        let selectedIndices = Self.selectMobileOITIndices(
+            from: packedRaw,
+            totalCount: packedCount,
+            keepMass: Self.mobileContributionKeepMass
+        )
+        let renderIndices = selectedIndices.isEmpty
+            ? (0..<packedCount).map { UInt32($0) }
+            : selectedIndices
+        let renderCount = renderIndices.count
 
         guard let packedBuffer = device.makeBuffer(length: packedByteCount, options: .storageModeShared),
-              let indexBuffer = device.makeBuffer(length: packedCount * MemoryLayout<UInt32>.stride, options: .storageModeShared),
+              let indexBuffer = device.makeBuffer(length: renderCount * MemoryLayout<UInt32>.stride, options: .storageModeShared),
               let shBuffer = device.makeBuffer(length: shByteCount, options: .storageModeShared),
-              let regionIDBuffer = device.makeBuffer(length: packedCount, options: .storageModeShared)
+              let regionIDBuffer = device.makeBuffer(length: renderCount, options: .storageModeShared)
         else {
             oitViewerReady = false
-            NSLog("%@", "[Aether3D][Viewer][LegacyOIT] scene_ready=no reason=buffer_alloc")
+            NSLog("%@", "[Aether3D][Viewer][MobileOIT] scene_ready=no reason=buffer_alloc")
             return
         }
 
         memcpy(packedBuffer.contents(), packedBase, packedByteCount)
 
-        let identityIndices = (0..<packedCount).map { UInt32($0) }
-        identityIndices.withUnsafeBytes { bytes in
+        renderIndices.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return }
             memcpy(indexBuffer.contents(), base, bytes.count)
         }
@@ -410,18 +424,18 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         }
 
         let ridRaw = regionIDBuffer.contents().assumingMemoryBound(to: UInt8.self)
-        ridRaw.initialize(repeating: 0, count: packedCount)
+        ridRaw.initialize(repeating: 0, count: renderCount)
 
         oitPackedBuffer = packedBuffer
         oitIndexBuffer = indexBuffer
         oitSHBuffer = shBuffer
         oitRegionIDBuffer = regionIDBuffer
-        oitSplatCount = packedCount
+        oitSplatCount = renderCount
         oitViewerReady = true
 
         NSLog(
             "%@",
-            "[Aether3D][Viewer][LegacyOIT] scene_ready=yes splats=\(packedCount) shFloats=\(shFloatCount)"
+            "[Aether3D][Viewer][MobileOIT] scene_ready=yes splats=\(renderCount)/\(packedCount) keepMass=\(Self.format(Self.mobileContributionKeepMass, digits: 2)) shFloats=\(shFloatCount)"
         )
     }
 
@@ -563,6 +577,11 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
             return false
         }
 
+        let renderSplatCount = viewerWarmupActive
+            ? min(oitSplatCount, Self.viewerWarmupSplatCap)
+            : oitSplatCount
+        guard renderSplatCount > 0 else { return false }
+
         var cameraUniforms = OITSplatCameraUniforms()
         cameraUniforms.viewMatrix = viewMatrix
         cameraUniforms.projMatrix = projectionMatrix
@@ -573,7 +592,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         cameraUniforms.cy = Float(vpHeight) * 0.5
         cameraUniforms.vpWidth = vpWidth
         cameraUniforms.vpHeight = vpHeight
-        cameraUniforms.splatCount = UInt32(oitSplatCount)
+        cameraUniforms.splatCount = UInt32(renderSplatCount)
         memcpy(cameraBuffer.contents(), &cameraUniforms, MemoryLayout<OITSplatCameraUniforms>.stride)
 
         let accumRPD = MTLRenderPassDescriptor()
@@ -597,7 +616,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         accumEncoder.setVertexBuffer(shBuffer, offset: 0, index: 3)
         accumEncoder.setVertexBuffer(regionIDBuffer, offset: 0, index: 4)
         accumEncoder.setVertexBuffer(regionFadeBuffer, offset: 0, index: 5)
-        accumEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: oitSplatCount)
+        accumEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: renderSplatCount)
         accumEncoder.endEncoding()
 
         let compositeRPD = MTLRenderPassDescriptor()
@@ -646,6 +665,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
 
         dataLoaded = true
         hasReportedModelLoaded = false
+        rebuildOITResources(from: bridge)
 
         // Auto-center camera on bounding sphere
         if let bounds = bridge.getBounds() {
@@ -768,6 +788,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
     private static let maxOrientationSamples = 4096
     private static let packedSplatStride = 16
     private static let shFloatCountPerSplat = 12
+    private static let mobileContributionKeepMass: Float = 0.96
     private static let oitRegionFadeCount = 32
     private static let observationLogInterval: TimeInterval = 2.0
     private static let slowFrameThresholdMs: Double = 20.0
@@ -1057,7 +1078,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
 
     private func logLoadObservation(fileURL: URL, bridge: NativeSplatEngineBridge) {
         let center = sceneCenter
-        let viewerPath = "nativeLegacy"
+        let viewerPath = viewerPathLabel
         if let estimate = sceneOrientationEstimate {
             let message = "[Aether3D][Viewer][Load] file=\(fileURL.lastPathComponent) " +
                 "splats=\(bridge.splatCount) radius=\(Self.format(sceneRadius)) " +
@@ -1172,7 +1193,7 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
             "cpuMax=\(Self.format(observationWindowMaxCPUFrameMs))ms " +
             "slow=\(observationWindowSlowFrames)/\(observationWindowFrames) " +
             "splats=\(oitSplatCount) visible=\(oitSplatCount) " +
-            "sortMode=htgsCoreTail sort=n/a gpuRender=n/a " +
+            "sortMode=mobileOIT sort=n/a gpuRender=n/a " +
             "mode=\(activeNavigationMode.rawValue) dist=\(Self.format(activeNavigationDistance())) near=\(Self.format(nearPlaneMm))mm pitch=\(Self.format(pitchDegrees, digits: 1))deg " +
             "thermal=\(Self.thermalLabel(for: ProcessInfo.processInfo.thermalState))\(sceneSummary)"
         NSLog("%@", message)
@@ -1285,8 +1306,76 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         Float(Float16(bitPattern: bitPattern))
     }
 
+    private static func decodeLogScaleByte(_ encoded: UInt8) -> Float {
+        let normalized = Float(encoded) / 255.0
+        return exp(normalized * 16.0 - 8.0)
+    }
+
     private static func readUInt16LE(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
         UInt16(raw[offset]) | (UInt16(raw[offset + 1]) << 8)
+    }
+
+    private static func mobileContributionScore(
+        from raw: UnsafeRawBufferPointer,
+        at base: Int
+    ) -> Float {
+        let opacity = Float(raw[base + 3]) / 255.0
+        guard opacity > 0 else { return 0 }
+
+        let sx = decodeLogScaleByte(raw[base + 12])
+        let sy = decodeLogScaleByte(raw[base + 13])
+        let sz = decodeLogScaleByte(raw[base + 14])
+        let geometricMeanScale = pow(max(sx * sy * sz, 1e-12), 1.0 / 3.0)
+        return max(opacity * geometricMeanScale, 0)
+    }
+
+    private static func selectMobileOITIndices(
+        from raw: UnsafeRawBufferPointer,
+        totalCount: Int,
+        keepMass: Float
+    ) -> [UInt32] {
+        guard totalCount > 0, keepMass < 1 else {
+            return (0..<totalCount).map { UInt32($0) }
+        }
+
+        var scored: [(index: UInt32, score: Float)] = []
+        scored.reserveCapacity(totalCount)
+        var totalScore: Float = 0
+
+        for index in 0..<totalCount {
+            let base = index * packedSplatStride
+            guard base + (packedSplatStride - 1) < raw.count else { break }
+            let score = mobileContributionScore(from: raw, at: base)
+            scored.append((UInt32(index), score))
+            totalScore += score
+        }
+
+        guard totalScore > 1e-8, !scored.isEmpty else {
+            return (0..<totalCount).map { UInt32($0) }
+        }
+
+        scored.sort { lhs, rhs in
+            if lhs.score == rhs.score {
+                return lhs.index < rhs.index
+            }
+            return lhs.score > rhs.score
+        }
+
+        let targetMass = totalScore * max(0.0, min(keepMass, 1.0))
+        var cumulative: Float = 0
+        var selected: [UInt32] = []
+        selected.reserveCapacity(scored.count)
+
+        for entry in scored {
+            selected.append(entry.index)
+            cumulative += entry.score
+            if cumulative >= targetMass {
+                break
+            }
+        }
+
+        selected.sort()
+        return selected.isEmpty ? (0..<totalCount).map { UInt32($0) } : selected
     }
 
     private static func format<T: BinaryFloatingPoint>(_ value: T, digits: Int = 3) -> String {
@@ -1428,6 +1517,26 @@ extension GaussianSplatViewController: MTKViewDelegate {
         let fx = fy
 
         guard let rpd = view.currentRenderPassDescriptor else {
+            return
+        }
+
+        if oitViewerReady {
+            let rendered = encodeOITFrame(
+                commandBuffer: commandBuffer,
+                drawable: drawable,
+                viewMatrix: viewMat,
+                projectionMatrix: projMat,
+                fx: fx,
+                fy: fy,
+                vpWidth: vpWidth,
+                vpHeight: vpHeight
+            )
+            guard rendered else { return }
+
+            let cpuFrameMs = (ProcessInfo.processInfo.systemUptime - cpuFrameStart) * 1000.0
+            observeOITFrame(cpuFrameMs: cpuFrameMs)
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
             return
         }
 

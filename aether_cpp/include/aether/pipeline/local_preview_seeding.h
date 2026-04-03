@@ -51,6 +51,63 @@ PreviewSeedStats build_preview_sampled_seeds_from_depth(
     std::vector<splat::GaussianParams>& out_new_gaussians) noexcept;
 
 }  // namespace local_preview_seeding
+
+// Active local product semantics are subject-first. Keep the older
+// local_preview_seeding namespace as the compatibility implementation while
+// exposing clearer native wrappers for new code.
+namespace local_subject_first_seeding {
+
+using SubjectFirstSeedStats = local_preview_seeding::PreviewSeedStats;
+
+inline std::uint32_t synthesize_subject_first_feature_points_from_depth(
+    FrameInput& input,
+    const float* depth,
+    std::uint32_t depth_w,
+    std::uint32_t depth_h,
+    bool init_pass) noexcept
+{
+    return local_preview_seeding::synthesize_preview_feature_points_from_depth(
+        input,
+        depth,
+        depth_w,
+        depth_h,
+        init_pass);
+}
+
+inline SubjectFirstSeedStats build_subject_first_sampled_seeds_from_depth(
+    const unsigned char* bgra,
+    int img_w,
+    int img_h,
+    const float* depth,
+    int depth_w,
+    int depth_h,
+    float fx,
+    float fy,
+    float cx,
+    float cy,
+    const float* cam2world,
+    bool init_pass,
+    std::unordered_set<std::int64_t>& seeded_cells,
+    std::vector<splat::GaussianParams>& out_new_gaussians) noexcept
+{
+    return local_preview_seeding::build_preview_sampled_seeds_from_depth(
+        bgra,
+        img_w,
+        img_h,
+        depth,
+        depth_w,
+        depth_h,
+        fx,
+        fy,
+        cx,
+        cy,
+        cam2world,
+        init_pass,
+        seeded_cells,
+        out_new_gaussians);
+}
+
+}  // namespace local_subject_first_seeding
 }  // namespace pipeline
 }  // namespace aether
 

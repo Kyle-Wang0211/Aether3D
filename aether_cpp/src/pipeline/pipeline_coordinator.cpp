@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #ifdef __APPLE__
+#include <mach/mach.h>
 #include <sys/sysctl.h>
 #endif
 
@@ -29,6 +30,52 @@ namespace pipeline {
 
 // ─── sRGB → Linear LUT (256 entries, built at static init) ───
 namespace {
+struct ProcessMemoryUsageBytes {
+    std::uint64_t resident{0};
+    std::uint64_t footprint{0};
+    bool valid{false};
+};
+
+double duration_ms(
+    std::chrono::steady_clock::time_point start,
+    std::chrono::steady_clock::time_point end) noexcept {
+    return static_cast<double>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()) / 1000.0;
+}
+
+double bytes_to_mib(std::uint64_t bytes) noexcept {
+    return static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
+
+ProcessMemoryUsageBytes query_process_memory_usage_bytes() noexcept {
+    ProcessMemoryUsageBytes usage;
+#ifdef __APPLE__
+    mach_task_basic_info_data_t basic_info{};
+    mach_msg_type_number_t basic_count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            reinterpret_cast<task_info_t>(&basic_info),
+            &basic_count) == KERN_SUCCESS) {
+        usage.resident = static_cast<std::uint64_t>(basic_info.resident_size);
+        usage.valid = true;
+    }
+#if defined(TASK_VM_INFO)
+    task_vm_info_data_t vm_info{};
+    mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
+    if (task_info(
+            mach_task_self(),
+            TASK_VM_INFO,
+            reinterpret_cast<task_info_t>(&vm_info),
+            &vm_count) == KERN_SUCCESS) {
+        usage.footprint = static_cast<std::uint64_t>(vm_info.phys_footprint);
+        usage.valid = true;
+    }
+#endif
+#endif
+    return usage;
+}
+
 struct SRGBToLinearLUT {
     float table[256];
     SRGBToLinearLUT() noexcept {
@@ -1302,11 +1349,11 @@ inline bool sample_selected_frame_color_linear(
 struct GsfQTLeaf { int x0, y0, w, h; };
 
 inline std::size_t compute_hard_cap_steps_for_mode(
-    bool local_preview_mode,
+    bool local_subject_first_mode,
     std::size_t current_hard_cap_steps,
     std::size_t base_steps) noexcept
 {
-    if (local_preview_mode) {
+    if (local_subject_first_mode) {
         const std::size_t preview_floor = std::max<std::size_t>(
             base_steps * 2, kPreviewTrainingHardCapSteps);
         return std::min(
@@ -1319,13 +1366,13 @@ inline std::size_t compute_hard_cap_steps_for_mode(
 }
 
 inline std::size_t compute_target_steps_for_mode(
-    bool local_preview_mode,
+    bool local_subject_first_mode,
     std::size_t gaussian_count,
     std::size_t frame_count,
     std::size_t base_steps,
     std::size_t hard_cap_steps) noexcept
 {
-    if (!local_preview_mode) {
+    if (!local_subject_first_mode) {
         return compute_dynamic_training_target_steps(
             gaussian_count, frame_count, base_steps, hard_cap_steps);
     }
@@ -1393,18 +1440,19 @@ static void gsf_qtree_subdivide(
 
 }  // namespace
 
-using local_preview_runtime::PreviewPrefilterDecision;
-using local_preview_runtime::bootstrap_imported_video_intrinsics;
-using local_preview_runtime::evaluate_preview_import_prefilter;
-using local_preview_runtime::extract_camera_pose_metrics;
-using local_preview_runtime::preview_frame_selection_config;
-using local_preview_runtime::sanitize_frame_selection_config;
-using local_preview_runtime::should_accept_preview_keyframe;
-using local_preview_runtime::should_submit_preview_depth_prior;
-using local_preview_runtime::update_imported_video_bootstrap_pose;
-using local_preview_seeding::PreviewSeedStats;
-using local_preview_seeding::build_preview_sampled_seeds_from_depth;
-using local_preview_seeding::synthesize_preview_feature_points_from_depth;
+using local_subject_first_runtime::ImportedSubjectFirstKeyframeDecision;
+using local_subject_first_runtime::SubjectFirstPrefilterDecision;
+using local_subject_first_runtime::bootstrap_imported_subject_first_intrinsics;
+using local_subject_first_runtime::evaluate_subject_first_import_prefilter;
+using local_subject_first_runtime::extract_subject_first_camera_pose_metrics;
+using local_subject_first_runtime::sanitize_subject_first_frame_selection_config;
+using local_subject_first_runtime::should_accept_subject_first_keyframe;
+using local_subject_first_runtime::should_submit_subject_first_depth_prior;
+using local_subject_first_runtime::subject_first_frame_selection_config;
+using local_subject_first_runtime::update_imported_video_subject_first_bootstrap_pose;
+using local_subject_first_seeding::SubjectFirstSeedStats;
+using local_subject_first_seeding::build_subject_first_sampled_seeds_from_depth;
+using local_subject_first_seeding::synthesize_subject_first_feature_points_from_depth;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Construction / Destruction
@@ -1417,9 +1465,9 @@ PipelineCoordinator::PipelineCoordinator(
     : device_(device),
       renderer_(renderer),
       config_(config),
-      frame_selector_(config.local_preview_mode
-          ? preview_frame_selection_config(config.frame_selection)
-          : sanitize_frame_selection_config(config.frame_selection)),
+      frame_selector_(config.is_local_subject_first_mode()
+          ? subject_first_frame_selection_config(config.frame_selection)
+          : sanitize_subject_first_frame_selection_config(config.frame_selection)),
       thermal_predictor_(config.thermal) {
     std::fprintf(
         stderr,
@@ -1438,7 +1486,7 @@ PipelineCoordinator::PipelineCoordinator(
     // If model_path is nullptr or model fails to load: graceful fallback.
     // Both fail → MVS-only initialization (no crash).
 
-    if (config_.local_preview_mode) {
+    if (config_.is_local_subject_first_mode()) {
         config_.training.max_iterations = std::min<std::size_t>(
             std::max<std::size_t>(config_.training.max_iterations, kPreviewTrainingTargetSteps),
             kPreviewTrainingHardCapSteps);
@@ -1447,9 +1495,9 @@ PipelineCoordinator::PipelineCoordinator(
     }
 
     // ── Small model (primary, every frame) ──
-    if (config.depth_model_path) {
+    if (!config.depth_model_path.empty()) {
         depth_engine_small_ = create_depth_inference_engine(
-            config.depth_model_path, "Small");
+            config.depth_model_path.c_str(), "Small");
         if (depth_engine_small_ && depth_engine_small_->is_available()) {
             std::fprintf(stderr,
                 "[Aether3D] DAv2 Small engine: available (%ux%u, Neural Engine)\n",
@@ -1458,12 +1506,32 @@ PipelineCoordinator::PipelineCoordinator(
         } else {
             std::fprintf(stderr,
                 "[Aether3D] DAv2 Small engine: load failed at %s\n",
-                config.depth_model_path);
+                config.depth_model_path.c_str());
             depth_engine_small_.reset();
         }
     } else {
         std::fprintf(stderr,
             "[Aether3D] DAv2 Small engine: no model path configured\n");
+    }
+
+    // ── Video model (imported-video local preview priority) ──
+    if (config_.is_local_subject_first_mode() && !config.depth_model_path_video.empty()) {
+        depth_engine_video_ = create_depth_inference_engine(
+            config.depth_model_path_video.c_str(), "VideoDepth");
+        if (depth_engine_video_ && depth_engine_video_->is_available()) {
+            std::fprintf(stderr,
+                "[Aether3D] Video depth engine: available (%ux%u, imported-video priority)\n",
+                depth_engine_video_->model_input_width(),
+                depth_engine_video_->model_input_height());
+        } else {
+            std::fprintf(stderr,
+                "[Aether3D] Video depth engine: load failed at %s\n",
+                config.depth_model_path_video.c_str());
+            depth_engine_video_.reset();
+        }
+    } else if (config_.is_local_subject_first_mode()) {
+        std::fprintf(stderr,
+            "[Aether3D] Video depth engine: no model path configured (using DAv2 temporal fallback)\n");
     }
 
     // ── Large model (cross-validation, every N frames) ──
@@ -1494,13 +1562,13 @@ PipelineCoordinator::PipelineCoordinator(
             }
         }
 #endif
-        if (config.local_preview_mode && config.depth_model_path_large) {
+        if (config.is_local_subject_first_mode() && !config.depth_model_path_large.empty()) {
             std::fprintf(stderr,
-                "[Aether3D] DAv2 Large engine: disabled for local_preview_mode "
+                "[Aether3D] DAv2 Large engine: disabled for local_subject_first_mode "
                 "(small monocular prior only)\n");
-        } else if (config.depth_model_path_large && !large_blocked_by_memory) {
+        } else if (!config.depth_model_path_large.empty() && !large_blocked_by_memory) {
             depth_engine_large_ = create_depth_inference_engine(
-                config.depth_model_path_large, "Large");
+                config.depth_model_path_large.c_str(), "Large");
             if (depth_engine_large_ && depth_engine_large_->is_available()) {
                 std::fprintf(stderr,
                     "[Aether3D] DAv2 Large engine: available (%ux%u, interval=%u)\n",
@@ -1510,11 +1578,11 @@ PipelineCoordinator::PipelineCoordinator(
             } else {
                 std::fprintf(stderr,
                     "[Aether3D] DAv2 Large engine: load failed at %s\n",
-                    config.depth_model_path_large);
+                    config.depth_model_path_large.c_str());
                 depth_engine_large_.reset();
             }
         } else {
-            if (large_blocked_by_memory && config.depth_model_path_large) {
+            if (large_blocked_by_memory && !config.depth_model_path_large.empty()) {
                 std::fprintf(stderr,
                     "[Aether3D] DAv2 Large engine: BLOCKED by C++ RAM gate "
                     "(path was provided but device has insufficient RAM)\n");
@@ -1526,30 +1594,33 @@ PipelineCoordinator::PipelineCoordinator(
         }
     }
 
-    if (!depth_engine_small_ && !depth_engine_large_) {
+    if (!depth_engine_small_ && !depth_engine_large_ && !depth_engine_video_) {
         std::fprintf(stderr,
-            "[Aether3D] DAv2: both models unavailable → fallback to MVS-only\n");
+            "[Aether3D] Depth models unavailable → fallback to MVS-only\n");
     }
 
     // Initialize TSDF volume (replaces point cloud accumulation + quality grid)
     tsdf_volume_ = std::make_unique<tsdf::TSDFVolume>();
 
-    const std::size_t base_steps = config_.local_preview_mode
+    const std::size_t base_steps = config_.is_local_subject_first_mode()
         ? std::max<std::size_t>(config_.training.max_iterations, kPreviewTrainingTargetSteps)
         : std::max<std::size_t>(config_.training.max_iterations, kDefaultTrainingTargetSteps);
     const std::size_t hard_cap_steps = compute_hard_cap_steps_for_mode(
-        config_.local_preview_mode, training_hard_cap_steps_.load(std::memory_order_relaxed), base_steps);
+        config_.is_local_subject_first_mode(),
+        training_hard_cap_steps_.load(std::memory_order_relaxed),
+        base_steps);
     training_target_steps_.store(base_steps, std::memory_order_relaxed);
     training_hard_cap_steps_.store(hard_cap_steps, std::memory_order_relaxed);
 
     std::fprintf(stderr,
-        "[Aether3D][PreviewMode] local_preview=%s min_frames=%zu max_iter=%zu "
-        "frame_window=%zu large_depth=%s target=%zu hard_cap=%zu\n",
-        config_.local_preview_mode ? "YES" : "NO",
+        "[Aether3D][SubjectFirstMode] local_subject_first=%s min_frames=%zu max_iter=%zu "
+        "frame_window=%zu large_depth=%s video_depth=%s target=%zu hard_cap=%zu\n",
+        config_.is_local_subject_first_mode() ? "YES" : "NO",
         config_.min_frames_to_start_training,
         config_.training.max_iterations,
-        config_.local_preview_mode ? kPreviewMaxTrainingFrames : std::size_t(30),
+        config_.is_local_subject_first_mode() ? kPreviewMaxTrainingFrames : std::size_t(30),
         depth_engine_large_ ? "enabled" : "disabled",
+        depth_engine_video_ ? "enabled" : "disabled",
         training_target_steps_.load(std::memory_order_relaxed),
         training_hard_cap_steps_.load(std::memory_order_relaxed));
 
@@ -1665,7 +1736,7 @@ int PipelineCoordinator::on_imported_video_frame(
     std::uint32_t frame_index,
     std::uint32_t total_frames,
     int thermal_state) noexcept {
-    if (!config_.local_preview_mode) return -1;
+    if (!is_local_subject_first_mode()) return -1;
     if (!rgba || w == 0 || h == 0) return -1;
 
     if (frame_index == 0u) {
@@ -1676,6 +1747,10 @@ int PipelineCoordinator::on_imported_video_frame(
         imported_video_bootstrap_intrinsics_initialized_ = false;
         std::memset(imported_video_bootstrap_intrinsics_, 0, sizeof(imported_video_bootstrap_intrinsics_));
         depth_keyframes_.clear();
+        pointmap_keyframes_.clear();
+        next_pointmap_keyframe_id_ = 1;
+        active_pointmap_keyframe_id_ = 0;
+        last_stable_dense_vertices_.clear();
         has_keyframe_ = false;
         has_preview_selected_keyframe_ = false;
         preview_dav2_seed_initialized_ = false;
@@ -1691,6 +1766,13 @@ int PipelineCoordinator::on_imported_video_frame(
         preview_prefilter_blur_rejects_.store(0, std::memory_order_relaxed);
         preview_keyframe_gate_accepts_.store(0, std::memory_order_relaxed);
         preview_keyframe_gate_rejects_.store(0, std::memory_order_relaxed);
+        preview_imported_frames_evaluated_.store(0, std::memory_order_relaxed);
+        preview_imported_low_parallax_rejects_.store(0, std::memory_order_relaxed);
+        preview_imported_near_duplicate_rejects_.store(0, std::memory_order_relaxed);
+        preview_imported_selected_keyframes_.store(0, std::memory_order_relaxed);
+        preview_imported_selected_translation_mm_sum_.store(0, std::memory_order_relaxed);
+        preview_imported_selected_rotation_mdeg_sum_.store(0, std::memory_order_relaxed);
+        preview_imported_selected_overlap_milli_sum_.store(0, std::memory_order_relaxed);
         preview_seed_candidates_.store(0, std::memory_order_relaxed);
         preview_seed_accepted_.store(0, std::memory_order_relaxed);
         preview_seed_rejected_.store(0, std::memory_order_relaxed);
@@ -1699,6 +1781,16 @@ int PipelineCoordinator::on_imported_video_frame(
         preview_frames_ingested_.store(0, std::memory_order_relaxed);
         preview_depth_frames_since_submit_ = 0;
         has_preview_depth_request_ = false;
+        has_video_depth_ = false;
+        latest_video_depth_.depth_map.clear();
+        latest_video_depth_.width = 0;
+        latest_video_depth_.height = 0;
+        latest_video_depth_.is_metric = false;
+        has_preview_temporal_depth_ = false;
+        preview_temporal_depth_.depth_map.clear();
+        preview_temporal_depth_.width = 0;
+        preview_temporal_depth_.height = 0;
+        preview_temporal_depth_.is_metric = false;
         no_depth_consecutive_ = 0;
         frame_selector_.reset();
         selected_frame_count_.store(0, std::memory_order_relaxed);
@@ -1745,7 +1837,7 @@ int PipelineCoordinator::on_imported_video_frame(
     } else if (has_imported_intrinsics) {
         std::memcpy(intrinsics, imported_intrinsics, sizeof(intrinsics));
     } else {
-        bootstrap_imported_video_intrinsics(w, h, intrinsics);
+        bootstrap_imported_subject_first_intrinsics(w, h, intrinsics);
     }
     const char* intrinsics_source_label = "colmap_default";
     if (use_self_calibrated_intrinsics) {
@@ -1878,10 +1970,10 @@ PipelineCoordinator::RenderSnapshot PipelineCoordinator::get_render_snapshot() n
 
 void PipelineCoordinator::finish_scanning() noexcept {
     const bool imported_video_preview_pending =
-        config_.local_preview_mode &&
+        is_local_subject_first_mode() &&
         preview_frames_enqueued_.load(std::memory_order_acquire) >
             preview_frames_ingested_.load(std::memory_order_acquire);
-    // Imported-video local_preview submits frames in a burst. We should stop
+    // Imported-video local subject-first submits frames in a burst. We should stop
     // accepting new frames now, but defer the actual feature/depth freeze
     // until Thread A has drained the queued imported-video frames. Freezing
     // immediately here cuts off the tail of the queue and leaves later frames
@@ -1921,7 +2013,7 @@ void PipelineCoordinator::request_enhance(std::size_t extra_iterations) noexcept
 }
 
 core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
-    if (!training_started_.load(std::memory_order_acquire))
+    if (!path || path[0] == '\0')
         return core::Status::kInvalidArgument;
 
     // Lock to prevent data race with training thread's train_step() and
@@ -1930,6 +2022,34 @@ core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
     std::lock_guard<std::mutex> lock(training_export_mutex_);
     if (!training_engine_)
         return core::Status::kInvalidArgument;
+
+    const bool training_started =
+        training_started_.load(std::memory_order_acquire);
+    if (!training_started) {
+        std::fprintf(stderr,
+            "[Aether3D][Export] export_ply: using retained training engine after refine thread stopped path=%s\n",
+            path);
+    }
+
+    // Local preview / subject-first exports should emit the current trained
+    // Gaussians directly. Product-specific cutout / cleanup runs afterwards
+    // in Swift, so re-entering the older export cleanup stack here only adds
+    // extra failure surface and memory pressure.
+    if (is_local_subject_first_mode()) {
+        std::vector<splat::GaussianParams> raw_splats;
+        training_engine_->export_gaussians(raw_splats);
+        if (raw_splats.empty()) {
+            std::fprintf(stderr,
+                "[Aether3D][Export] local_subject_first raw export FAILED: no gaussians path=%s\n",
+                path ? path : "(null)");
+            return core::Status::kInvalidArgument;
+        }
+        std::fprintf(stderr,
+            "[Aether3D][Export] local_subject_first raw export: gaussians=%zu path=%s\n",
+            raw_splats.size(),
+            path ? path : "(null)");
+        return splat::write_ply(path, raw_splats.data(), raw_splats.size());
+    }
 
     // Diagnostic: log color statistics before export
     std::vector<splat::GaussianParams> diag_splats;
@@ -2057,17 +2177,17 @@ core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
 std::size_t PipelineCoordinator::wait_for_training(
     std::size_t min_steps, double timeout_seconds) noexcept
 {
-    if (!training_started_.load(std::memory_order_acquire) || !training_engine_) {
+    if (!training_engine_) {
         // Training hasn't started — wait briefly for it to initialize.
         // Check training_started_ (acquire) BEFORE training_engine_ to establish
         // happens-before with Thread C's release after creating the engine.
         auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(static_cast<int>(timeout_seconds * 1000));
-        while (!training_started_.load(std::memory_order_acquire) &&
+        while (!training_engine_ &&
                std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        if (!training_started_.load(std::memory_order_relaxed) || !training_engine_) {
+        if (!training_engine_) {
             std::fprintf(stderr,
                 "[Aether3D][Coordinator] wait_for_training: training never started\n");
             return 0;
@@ -2256,8 +2376,8 @@ bool PipelineCoordinator::is_training_active() const noexcept {
     return training_started_.load(std::memory_order_relaxed);
 }
 
-bool PipelineCoordinator::service_local_preview_bootstrap() noexcept {
-    if (!config_.local_preview_mode) {
+bool PipelineCoordinator::service_local_subject_first_bootstrap() noexcept {
+    if (!is_local_subject_first_mode()) {
         return false;
     }
 
@@ -2286,6 +2406,10 @@ bool PipelineCoordinator::service_local_preview_bootstrap() noexcept {
     }
 
     return ready || has_small_depth_ || has_large_depth_;
+}
+
+bool PipelineCoordinator::service_local_preview_bootstrap() noexcept {
+    return service_local_subject_first_bootstrap();
 }
 
 bool PipelineCoordinator::is_gpu_training() const noexcept {
@@ -2359,7 +2483,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
             continue;
         }
 
-        if (config_.local_preview_mode && input.imported_video) {
+        if (is_local_subject_first_mode() && input.imported_video) {
             preview_frames_ingested_.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -2391,22 +2515,22 @@ void PipelineCoordinator::frame_thread_func() noexcept {
         float blur = compute_blur_score(
             input.rgba.data(), input.width, input.height);
 
-        if (config_.local_preview_mode && input.imported_video) {
-            const auto preview_prefilter = evaluate_preview_import_prefilter(
+        if (is_local_subject_first_mode() && input.imported_video) {
+            const auto preview_prefilter = evaluate_subject_first_import_prefilter(
                 brightness,
                 blur,
                 config_.low_light_brightness_threshold,
                 config_.frame_selection.min_blur_score,
                 config_.low_light_blur_strictness);
             switch (preview_prefilter) {
-            case PreviewPrefilterDecision::kAccept:
+            case SubjectFirstPrefilterDecision::kAccept:
                 preview_prefilter_accepts_.fetch_add(1, std::memory_order_relaxed);
                 break;
-            case PreviewPrefilterDecision::kRejectLowBrightness:
+            case SubjectFirstPrefilterDecision::kRejectLowBrightness:
                 preview_prefilter_brightness_rejects_.fetch_add(1, std::memory_order_relaxed);
                 preview_prefilter_accepts_.fetch_add(1, std::memory_order_relaxed);
                 break;
-            case PreviewPrefilterDecision::kRejectBlur:
+            case SubjectFirstPrefilterDecision::kRejectBlur:
                 preview_prefilter_blur_rejects_.fetch_add(1, std::memory_order_relaxed);
                 preview_prefilter_accepts_.fetch_add(1, std::memory_order_relaxed);
                 break;
@@ -2448,6 +2572,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
         }
 
         bool have_depth = false;
+        bool cached_video_depth_available = false;
         bool cached_small_depth_available = false;
         bool cached_large_depth_available = false;
         if (!has_lidar_depth_frame || !lidar_depth_usable) {
@@ -2468,31 +2593,62 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
             float current_cam_pos[3];
             float current_cam_fwd[3];
-            extract_camera_pose_metrics(
+            extract_subject_first_camera_pose_metrics(
                 input.transform,
                 current_cam_pos,
                 current_cam_fwd);
 
             bool small_result_updated = false;
-            const auto preview_depth_phase_t0 = config_.local_preview_mode
+            const auto preview_depth_phase_t0 = is_local_subject_first_mode()
                 ? std::chrono::steady_clock::now()
                 : std::chrono::steady_clock::time_point{};
             DepthInferenceResult consensus_depth;
             {
                 std::lock_guard<std::mutex> depth_lock(depth_cache_mutex_);
 
-                // Small model: imported-video local_preview is a preview-first path.
+                const bool imported_video_sync_depth =
+                    is_local_subject_first_mode() &&
+                    input.imported_video;
+
+                if (imported_video_sync_depth && depth_engine_video_) {
+                    DepthInferenceResult video_result;
+                    const auto video_status = depth_engine_video_->infer(
+                        input.rgba.data(), input.width, input.height, video_result);
+                    if (video_status == core::Status::kOk &&
+                        !video_result.depth_map.empty()) {
+                        latest_video_depth_ = std::move(video_result);
+                        has_video_depth_ = true;
+                        cached_video_depth_available = true;
+                        consensus_depth = latest_video_depth_;
+                        have_depth = true;
+                        preview_depth_batches_submitted_.fetch_add(
+                            1, std::memory_order_relaxed);
+                        preview_depth_results_ready_.fetch_add(
+                            1, std::memory_order_relaxed);
+                        static std::uint32_t imported_video_video_depth_log_count = 0;
+                        imported_video_video_depth_log_count++;
+                        if (imported_video_video_depth_log_count <= 12 ||
+                            imported_video_video_depth_log_count % 30 == 0) {
+                            std::fprintf(
+                                stderr,
+                                "[Aether3D][VideoDepth] imported-video frame=%u depth_ready=%u (%ux%u)\n",
+                                input.source_frame_index + 1u,
+                                preview_depth_results_ready_.load(std::memory_order_relaxed),
+                                latest_video_depth_.width,
+                                latest_video_depth_.height);
+                        }
+                    }
+                }
+
+                // Small model: imported-video local subject-first is a bounded on-device path.
                 // Do not reuse the live-capture motion cadence here; album videos
                 // need depth on every queued frame to keep pose/depth aligned all
                 // the way through training bootstrap. If we fall back to the async
                 // "latest pending frame" path after the first few frames, later
                 // poses get paired with stale depth and the geometry collapses into
                 // elongated sticks/cigars.
-                if (depth_engine_small_) {
+                if (!have_depth && depth_engine_small_) {
                     bool submit_small = true;
-                    const bool imported_video_sync_depth =
-                        config_.local_preview_mode &&
-                        input.imported_video;
 
                     if (imported_video_sync_depth) {
                         DepthInferenceResult bootstrap_small_result;
@@ -2534,13 +2690,13 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                     }
 
                     if (!small_result_updated) {
-                        if (config_.local_preview_mode && input.imported_video) {
+                        if (is_local_subject_first_mode() && input.imported_video) {
                             // Keep imported-video depth and pose aligned on the
                             // same frame. Do not fall back to the lossy async
                             // "latest pending frame" queue for album videos.
                             submit_small = false;
-                        } else if (config_.local_preview_mode) {
-                            submit_small = should_submit_preview_depth_prior(
+                        } else if (is_local_subject_first_mode()) {
+                            submit_small = should_submit_subject_first_depth_prior(
                                 has_small_depth_,
                                 preview_depth_frames_since_submit_,
                                 has_preview_depth_request_,
@@ -2553,7 +2709,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                         if (submit_small) {
                             depth_engine_small_->submit_async(
                                 input.rgba.data(), input.width, input.height);
-                            if (config_.local_preview_mode) {
+                            if (is_local_subject_first_mode()) {
                                 preview_depth_batches_submitted_.fetch_add(
                                     1, std::memory_order_relaxed);
                                 preview_depth_frames_since_submit_ = 0;
@@ -2567,7 +2723,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                                     sizeof(preview_last_depth_request_fwd_));
                                 has_preview_depth_request_ = true;
                             }
-                        } else if (config_.local_preview_mode) {
+                        } else if (is_local_subject_first_mode()) {
                             preview_depth_frames_since_submit_++;
                         }
 
@@ -2577,11 +2733,11 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                             latest_small_depth_ = std::move(small_result);
                             has_small_depth_ = true;
                             small_result_updated = true;
-                            if (config_.local_preview_mode) {
+                            if (is_local_subject_first_mode()) {
                                 preview_depth_results_ready_.fetch_add(
                                     1, std::memory_order_relaxed);
                             }
-                        } else if (config_.local_preview_mode &&
+                        } else if (is_local_subject_first_mode() &&
                                    input.imported_video &&
                                    has_small_depth_) {
                             preview_depth_reuse_frames_.fetch_add(
@@ -2609,13 +2765,29 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
                 cached_small_depth_available = has_small_depth_;
                 cached_large_depth_available = has_large_depth_;
-                have_depth = cross_validate_depth(
-                    latest_small_depth_, latest_large_depth_,
-                    has_small_depth_, has_large_depth_,
-                    consensus_depth);
+                if (!have_depth) {
+                    have_depth = cross_validate_depth(
+                        latest_small_depth_, latest_large_depth_,
+                        has_small_depth_, has_large_depth_,
+                        consensus_depth);
+                }
+                if (have_depth &&
+                    is_local_subject_first_mode() &&
+                    input.imported_video &&
+                    !cached_video_depth_available &&
+                    !consensus_depth.depth_map.empty()) {
+                    DepthInferenceResult stabilized_depth;
+                    if (make_video_consistent_preview_depth(
+                            consensus_depth,
+                            current_cam_pos,
+                            current_cam_fwd,
+                            stabilized_depth)) {
+                        consensus_depth = std::move(stabilized_depth);
+                    }
+                }
             }
             if (have_depth) {
-                if (config_.local_preview_mode &&
+                if (is_local_subject_first_mode() &&
                     cached_small_depth_available &&
                     depth_engine_small_ &&
                     !small_result_updated &&
@@ -2638,7 +2810,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                     }
                 }
             }
-            if (config_.local_preview_mode) {
+            if (is_local_subject_first_mode()) {
                 const auto preview_depth_phase_t1 = std::chrono::steady_clock::now();
                 const auto preview_depth_elapsed_ms = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2666,12 +2838,14 @@ void PipelineCoordinator::frame_thread_func() noexcept {
             depth_diag_counter++;
             if (depth_diag_counter <= 10 || depth_diag_counter % 60 == 0) {
                 std::fprintf(stderr,
-                    "[Aether3D] Frame %u: DAv2 small=%s large=%s | "
-                    "has_small=%d has_large=%d | depth=%s %ux%u | "
+                    "[Aether3D] Frame %u: depth video=%s small=%s large=%s | "
+                    "has_video=%d has_small=%d has_large=%d | depth=%s %ux%u | "
                     "ne_depth=%zu affine=[%.2f,%.2f]\n",
                     depth_diag_counter,
+                    depth_engine_video_ ? "loaded" : "NULL",
                     depth_engine_small_ ? "loaded" : "NULL",
                     depth_engine_large_ ? "loaded" : "NULL",
+                    cached_video_depth_available ? 1 : 0,
                     cached_small_depth_available ? 1 : 0,
                     cached_large_depth_available ? 1 : 0,
                     have_depth ? "YES" : "NO",
@@ -3166,7 +3340,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
         std::uint32_t preview_metric_depth_h = 0;
         bool preview_metric_depth_valid = false;
         const bool imported_video_preview =
-            config_.local_preview_mode && input.imported_video;
+            is_local_subject_first_mode() && input.imported_video;
         const std::uint32_t preview_keyframes_ready =
             preview_keyframe_gate_accepts_.load(std::memory_order_relaxed);
         const std::uint32_t imported_video_min_keyframes_for_bootstrap =
@@ -3299,8 +3473,8 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 }
             }
 
-            if (config_.local_preview_mode && input.imported_video) {
-                update_imported_video_bootstrap_pose(
+            if (is_local_subject_first_mode() && input.imported_video) {
+                update_imported_video_subject_first_bootstrap_pose(
                     input,
                     metric_depth.data(),
                     depth_w,
@@ -3313,7 +3487,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                     imported_video_bootstrap_intrinsics_);
             }
 
-            if (config_.local_preview_mode &&
+            if (is_local_subject_first_mode() &&
                 input.imported_video &&
                 !metric_depth.empty()) {
                 // Imported album videos must carry per-frame metric depth all
@@ -3328,13 +3502,13 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 preview_metric_depth_valid = true;
             }
 
-            if (config_.local_preview_mode &&
+            if (is_local_subject_first_mode() &&
                 input.imported_video &&
                 input.feature_count == 0 &&
                 !metric_depth.empty()) {
                 const bool init_pass =
                     preview_keyframes_ready < imported_video_min_keyframes_for_bootstrap;
-                std::uint32_t synthesized = synthesize_preview_feature_points_from_depth(
+                std::uint32_t synthesized = synthesize_subject_first_feature_points_from_depth(
                     input,
                     metric_depth.data(),
                     depth_w,
@@ -3347,7 +3521,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                     // sparse geometric evidence every frame. Retry with the
                     // denser bootstrap sampling instead of silently dropping to
                     // feat=0 / overlap=1.000 behavior.
-                    synthesized = synthesize_preview_feature_points_from_depth(
+                    synthesized = synthesize_subject_first_feature_points_from_depth(
                         input,
                         metric_depth.data(),
                         depth_w,
@@ -3530,7 +3704,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                  !preview_bootstrap_needed &&
                  !imported_video_sparse_fusion_frame);
             if (run_full_imported_video_fusion) {
-                // Imported-video local_preview is a speed-critical path.
+                // Imported-video local subject-first is a speed-critical path.
                 // Do not run full TSDF/overlay work on every frame; it starves
                 // native ingestion and makes the app look stuck at 1/54. We
                 // still fuse periodic frames so degraded fallback remains
@@ -3596,6 +3770,19 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                     }
                     depth_keyframes_.push_back(std::move(kf));
 
+                    PointmapKeyframeMemory pointmap_kf;
+                    pointmap_kf.id = next_pointmap_keyframe_id_++;
+                    std::memcpy(pointmap_kf.pose, input.transform, 16 * sizeof(float));
+                    pointmap_kf.forward[0] = fwd_x;
+                    pointmap_kf.forward[1] = fwd_y;
+                    pointmap_kf.forward[2] = fwd_z;
+                    pointmap_kf.timestamp_s = input.timestamp;
+                    if (pointmap_keyframes_.size() >= kMaxDepthKeyframes) {
+                        pointmap_keyframes_.erase(pointmap_keyframes_.begin());
+                    }
+                    pointmap_keyframes_.push_back(pointmap_kf);
+                    active_pointmap_keyframe_id_ = pointmap_kf.id;
+
                     last_keyframe_pos_[0] = overlay_cam_pos_[0];
                     last_keyframe_pos_[1] = overlay_cam_pos_[1];
                     last_keyframe_pos_[2] = overlay_cam_pos_[2];
@@ -3620,7 +3807,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 !metric_depth.empty() &&
                 !imported_video_preview_fast_path &&
                 run_full_imported_video_fusion) {
-                const auto preview_seed_phase_t0 = config_.local_preview_mode
+                const auto preview_seed_phase_t0 = is_local_subject_first_mode()
                     ? std::chrono::steady_clock::now()
                     : std::chrono::steady_clock::time_point{};
                 seed_gaussians_per_frame_gsf(
@@ -3634,7 +3821,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                     tsdf_input.cx, tsdf_input.cy,
                     input.transform,
                     input.imported_video);
-                if (config_.local_preview_mode) {
+                if (is_local_subject_first_mode()) {
                     const auto preview_seed_phase_t1 = std::chrono::steady_clock::now();
                     const auto preview_seed_elapsed_ms = static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3717,8 +3904,12 @@ void PipelineCoordinator::frame_thread_func() noexcept {
         // TSDF access complete — signal idle so export_point_cloud_ply() can proceed.
         tsdf_idle_.store(true, std::memory_order_release);
 
-        // ─── ARKit feature points (ALWAYS rendered, independent of depth) ───
-        if (!features_frozen_.load(std::memory_order_acquire) &&
+        // ─── ARKit feature points (legacy non-preview visualization only) ───
+        // The local preview / subject-first pointmap trunk must not mix raw
+        // ARKit feature points into the rendered point layer; they produce the
+        // black/blue drifting dots that are not attached to real surfaces.
+        if (!is_local_subject_first_mode() &&
+            !features_frozen_.load(std::memory_order_acquire) &&
             input.feature_count > 0) {
             for (std::uint32_t i = 0; i < input.feature_count; ++i) {
                 float px = input.feature_points[i * 3 + 0];
@@ -3782,7 +3973,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
         bool frame_selected = false;
         const bool allow_frame_selection =
             scanning_active_.load(std::memory_order_relaxed) ||
-            (config_.local_preview_mode && input.imported_video);
+            (is_local_subject_first_mode() && input.imported_video);
         if (allow_frame_selection) {
             capture::FrameCandidate candidate;
             candidate.rgba_ptr = input.rgba.data();
@@ -3803,7 +3994,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
             float current_pos[3];
             float current_fwd[3];
-            extract_camera_pose_metrics(
+            extract_subject_first_camera_pose_metrics(
                 input.transform,
                 current_pos,
                 current_fwd);
@@ -3885,41 +4076,78 @@ void PipelineCoordinator::frame_thread_func() noexcept {
             const bool has_depth_prior =
                 (!input.ne_depth.empty() && input.ne_depth_w > 0 && input.ne_depth_h > 0) ||
                 (!input.lidar_depth.empty() && input.lidar_w > 0 && input.lidar_h > 0);
-            const std::uint32_t imported_video_bootstrap_force_select_target =
-                static_cast<std::uint32_t>(kPreviewMaxTrainingFrames);
-            const bool imported_video_bootstrap_force_select =
-                config_.local_preview_mode &&
-                input.imported_video &&
-                has_depth_prior &&
-                selected_frame_count_.load(std::memory_order_relaxed) <
-                    imported_video_bootstrap_force_select_target;
+            const bool imported_video_bootstrap_force_select = false;
+            ImportedSubjectFirstKeyframeDecision imported_preview_decision{};
+            const bool imported_preview_stats_enabled =
+                is_local_subject_first_mode() && input.imported_video;
+            if (imported_preview_stats_enabled) {
+                preview_imported_frames_evaluated_.fetch_add(1, std::memory_order_relaxed);
+                imported_preview_decision =
+                    local_subject_first_runtime::decide_imported_subject_first_keyframe(
+                        has_depth_prior,
+                        sel_result,
+                        has_preview_selected_keyframe_,
+                        current_pos,
+                        current_fwd,
+                        preview_last_selected_pos_,
+                        preview_last_selected_fwd_);
+                if (!sel_result.selected || !imported_preview_decision.accept) {
+                    if (imported_preview_decision.near_duplicate) {
+                        preview_imported_near_duplicate_rejects_.fetch_add(
+                            1, std::memory_order_relaxed);
+                    } else if (imported_preview_decision.low_parallax) {
+                        preview_imported_low_parallax_rejects_.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
+                }
+            }
 
             if ((sel_result.selected || imported_video_bootstrap_force_select) &&
-                config_.local_preview_mode) {
-                // Imported-video local_preview already goes through the repo-native
-                // MonoGS-style FrameSelector (quality + blur + overlap/translation
-                // keyframe gate). Do not stack an extra preview-only motion gate on
-                // top of it; that double-gating was our own engineering layer and
-                // made imported album videos under-select frames, collapsing the
-                // geometry into thin shells. Keep the additional preview gate only
-                // for live capture, where it still acts as a bounded-budget guard.
+                is_local_subject_first_mode()) {
+                // Imported-video local subject-first already goes through the repo-native
+                // MonoGS-style FrameSelector, but subject-first imported video
+                // now adds a stronger object-mode gate on top: reject
+                // near-duplicate / low-parallax viewpoints instead of forcing
+                // weak frames through just to hit the preview budget.
                 if (input.imported_video) {
-                    preview_keyframe_gate_accepts_.fetch_add(
-                        1, std::memory_order_relaxed);
-                    std::memcpy(
-                        preview_last_selected_pos_,
-                        current_pos,
-                        sizeof(preview_last_selected_pos_));
-                    std::memcpy(
-                        preview_last_selected_fwd_,
-                        current_fwd,
-                        sizeof(preview_last_selected_fwd_));
-                    has_preview_selected_keyframe_ = true;
+                    preview_gate_accepted = imported_preview_decision.accept;
+                    if (preview_gate_accepted) {
+                        preview_keyframe_gate_accepts_.fetch_add(
+                            1, std::memory_order_relaxed);
+                        preview_imported_selected_keyframes_.fetch_add(
+                            1, std::memory_order_relaxed);
+                        preview_imported_selected_translation_mm_sum_.fetch_add(
+                            static_cast<std::uint64_t>(
+                                std::llround(std::max(0.0f, sel_result.translation_m) * 1000.0f)),
+                            std::memory_order_relaxed);
+                        preview_imported_selected_rotation_mdeg_sum_.fetch_add(
+                            static_cast<std::uint64_t>(
+                                std::llround(std::max(
+                                    0.0f,
+                                    sel_result.rotation_rad * 180.0f / 3.14159265f) * 1000.0f)),
+                            std::memory_order_relaxed);
+                        preview_imported_selected_overlap_milli_sum_.fetch_add(
+                            static_cast<std::uint64_t>(
+                                std::llround(std::clamp(sel_result.overlap_ratio, 0.0f, 1.0f) * 1000.0f)),
+                            std::memory_order_relaxed);
+                        std::memcpy(
+                            preview_last_selected_pos_,
+                            current_pos,
+                            sizeof(preview_last_selected_pos_));
+                        std::memcpy(
+                            preview_last_selected_fwd_,
+                            current_fwd,
+                            sizeof(preview_last_selected_fwd_));
+                        has_preview_selected_keyframe_ = true;
+                    } else {
+                        preview_keyframe_gate_rejects_.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
                 } else {
                     const bool has_depth_prior =
                         (!input.ne_depth.empty() && input.ne_depth_w > 0 && input.ne_depth_h > 0) ||
                         (!input.lidar_depth.empty() && input.lidar_w > 0 && input.lidar_h > 0);
-                    preview_gate_accepted = should_accept_preview_keyframe(
+                    preview_gate_accepted = should_accept_subject_first_keyframe(
                         has_depth_prior,
                         sel_result,
                         has_preview_selected_keyframe_,
@@ -3967,7 +4195,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 sf.imported_video = input.imported_video;
 
                 // Carry DAv2 depth to training thread (key for initialization)
-                if (config_.local_preview_mode &&
+                if (is_local_subject_first_mode() &&
                     input.imported_video &&
                     preview_metric_depth_valid &&
                     !preview_metric_depth_for_training.empty()) {
@@ -3995,7 +4223,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
                     // Mark TSDF blocks covered by this training frame → heatmap
                     if (tsdf_volume_ &&
-                        !(config_.local_preview_mode && input.imported_video)) {
+                        !(is_local_subject_first_mode() && input.imported_video)) {
                         tsdf_volume_->mark_training_coverage(
                             input.transform,
                             input.intrinsics[0], input.intrinsics[4],
@@ -4053,7 +4281,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
         evidence_queue_.try_push(std::move(obs));
 
-        if (config_.local_preview_mode &&
+        if (is_local_subject_first_mode() &&
             input.imported_video &&
             !scanning_active_.load(std::memory_order_acquire) &&
             !features_frozen_.load(std::memory_order_acquire)) {
@@ -4066,7 +4294,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 frame_queue_.size_approx() == 0u) {
                 features_frozen_.store(true, std::memory_order_release);
                 std::fprintf(stderr,
-                    "[Aether3D][PreviewMode] imported-video queue drained: freezing features after %u/%u ingested frames\n",
+                    "[Aether3D][SubjectFirstMode] imported-video queue drained: freezing features after %u/%u ingested frames\n",
                     ingested,
                     enqueued);
             }
@@ -4088,7 +4316,7 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
         snapshot.frame_count = evidence_frame_count_;
         snapshot.selected_frames = selected_frame_count_.load(std::memory_order_relaxed);
         const bool imported_video_preview_active =
-            config_.local_preview_mode &&
+            is_local_subject_first_mode() &&
             preview_frames_enqueued_.load(std::memory_order_relaxed) > 0u;
         snapshot.min_frames_needed =
             imported_video_preview_active
@@ -4122,7 +4350,7 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
              snapshot.assigned_blocks > 0);
 
         float effective_coverage = accumulated_coverage_;
-        if (config_.local_preview_mode) {
+        if (is_local_subject_first_mode()) {
             const bool has_preview_evidence =
                 snapshot.frame_count > 0 ||
                 snapshot.selected_frames > 0 ||
@@ -4174,7 +4402,7 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
 
         const auto preview_seed_accepted =
             preview_seed_accepted_.load(std::memory_order_relaxed);
-        snapshot.preview_elapsed_ms = config_.local_preview_mode
+        snapshot.preview_elapsed_ms = is_local_subject_first_mode()
             ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - preview_started_at_).count())
             : 0;
@@ -4200,6 +4428,37 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
             preview_keyframe_gate_accepts_.load(std::memory_order_relaxed);
         snapshot.preview_keyframe_gate_rejects =
             preview_keyframe_gate_rejects_.load(std::memory_order_relaxed);
+        snapshot.preview_imported_frames_evaluated =
+            preview_imported_frames_evaluated_.load(std::memory_order_relaxed);
+        snapshot.preview_imported_low_parallax_rejects =
+            preview_imported_low_parallax_rejects_.load(std::memory_order_relaxed);
+        snapshot.preview_imported_near_duplicate_rejects =
+            preview_imported_near_duplicate_rejects_.load(std::memory_order_relaxed);
+        const auto preview_imported_selected_keyframes =
+            preview_imported_selected_keyframes_.load(std::memory_order_relaxed);
+        snapshot.preview_imported_selected_keyframes =
+            preview_imported_selected_keyframes;
+        snapshot.preview_imported_selected_translation_mean_mm =
+            preview_imported_selected_keyframes > 0
+                ? static_cast<float>(
+                      static_cast<double>(
+                          preview_imported_selected_translation_mm_sum_.load(std::memory_order_relaxed)) /
+                      static_cast<double>(preview_imported_selected_keyframes))
+                : 0.0f;
+        snapshot.preview_imported_selected_rotation_mean_deg =
+            preview_imported_selected_keyframes > 0
+                ? static_cast<float>(
+                      static_cast<double>(
+                          preview_imported_selected_rotation_mdeg_sum_.load(std::memory_order_relaxed)) /
+                      static_cast<double>(preview_imported_selected_keyframes) / 1000.0)
+                : 0.0f;
+        snapshot.preview_imported_selected_overlap_mean =
+            preview_imported_selected_keyframes > 0
+                ? static_cast<float>(
+                      static_cast<double>(
+                          preview_imported_selected_overlap_milli_sum_.load(std::memory_order_relaxed)) /
+                      static_cast<double>(preview_imported_selected_keyframes) / 1000.0)
+                : 0.0f;
         snapshot.preview_seed_candidates =
             preview_seed_candidates_.load(std::memory_order_relaxed);
         snapshot.preview_seed_accepted = preview_seed_accepted;
@@ -4276,7 +4535,7 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
         if (obs.frame_selected) {
             // Each selected frame with good depth adds ~2% coverage.
             accumulated_coverage_ = std::min(1.0f, accumulated_coverage_ + 0.02f);
-        } else if (config_.local_preview_mode &&
+        } else if (is_local_subject_first_mode() &&
                    std::isfinite(obs.depth_mean) &&
                    obs.depth_mean > 0.1f &&
                    obs.blur_score >= config_.frame_selection.min_blur_score * 0.75f) {
@@ -4284,10 +4543,10 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
             // depth and pose evidence is already accumulating but the strict
             // keyframe gate has not admitted a frame yet.
             accumulated_coverage_ = std::min(1.0f, accumulated_coverage_ + 0.004f);
-        } else if (config_.local_preview_mode &&
+        } else if (is_local_subject_first_mode() &&
                    std::isfinite(obs.blur_score) &&
                    obs.blur_score > 0.03f) {
-            // Real-camera local_preview should still show scan momentum as soon
+            // Real-camera local subject-first should still show scan momentum as soon
             // as frames are being ingested, even before the first good depth
             // prior or admitted keyframe lands.
             accumulated_coverage_ = std::min(1.0f, accumulated_coverage_ + 0.0015f);
@@ -4318,7 +4577,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
     SelectedFrame sf;
 
     // ── Memory cap: prevent OOM (pre-scaled frames ~0.5MB each) ──
-    const std::size_t max_training_frames = config_.local_preview_mode
+    const std::size_t max_training_frames = is_local_subject_first_mode()
         ? kPreviewMaxTrainingFrames
         : std::size_t(30);
 
@@ -4354,10 +4613,11 @@ void PipelineCoordinator::training_thread_func() noexcept {
     std::size_t last_published_step = 0;
     bool published_initial_splats = false;
     bool foreground_pause_logged = false;
+    bool capture_hold_logged = false;
 
     auto add_frame_to_engine = [this](const SelectedFrame& f) {
         const bool preview_metric_depth =
-            config_.local_preview_mode &&
+            is_local_subject_first_mode() &&
             f.ne_depth_is_metric &&
             !f.ne_depth.empty() &&
             f.ne_depth_w > 0 &&
@@ -4462,6 +4722,31 @@ void PipelineCoordinator::training_thread_func() noexcept {
             }
         }
 
+        // ── Capture hard-hold for local preview on thermally constrained devices ──
+        // During live capture we only want recording + frame gating + sparse TSDF /
+        // overlay evidence. Heavy bootstrap / engine creation / refine is deferred
+        // until finish_scanning() flips scanning_active_ to false.
+        if (is_local_subject_first_mode() &&
+            scanning_active_.load(std::memory_order_acquire)) {
+            {
+                std::lock_guard<std::mutex> lock(training_mutex_);
+                pending_gaussians_.clear();
+            }
+            pending_gaussians.clear();
+            if (!capture_hold_logged) {
+                std::fprintf(stderr,
+                    "[Aether3D][TrainThread] local_subject_first capture hold: deferring bootstrap/refine until capture stops\n");
+                capture_hold_logged = true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            continue;
+        }
+        if (capture_hold_logged) {
+            std::fprintf(stderr,
+                "[Aether3D][TrainThread] local_subject_first capture hold released: bootstrap/refine may begin\n");
+            capture_hold_logged = false;
+        }
+
         // Diagnostic
         if (all_frames.size() != last_reported_frame_count) {
             last_reported_frame_count = all_frames.size();
@@ -4492,7 +4777,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
 
         if (!engine_created &&
             pending_gaussians.empty() &&
-            config_.local_preview_mode &&
+            is_local_subject_first_mode() &&
             !preview_dav2_seed_initialized_ &&
             !all_frames.empty()) {
             const bool has_any_imported_video_frames =
@@ -4730,7 +5015,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
             const bool scan_finished =
                 !scanning_active_.load(std::memory_order_acquire);
             const bool imported_video_preview_only =
-                config_.local_preview_mode &&
+                is_local_subject_first_mode() &&
                 !all_frames.empty() &&
                 std::all_of(
                     all_frames.begin(),
@@ -4743,7 +5028,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
             const std::uint32_t preview_selected_frames =
                 selected_frame_count_.load(std::memory_order_relaxed);
             const std::uint64_t preview_elapsed_ms =
-                config_.local_preview_mode
+                is_local_subject_first_mode()
                     ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - preview_started_at_).count())
                     : 0;
@@ -4777,7 +5062,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
                 const std::size_t seeded =
                     build_tsdf_fallback_gaussians(
                         pending_gaussians,
-                        config_.local_preview_mode ? kPreviewFallbackSeedCount : std::size_t(20000));
+                        is_local_subject_first_mode() ? kPreviewFallbackSeedCount : std::size_t(20000));
                 if (seeded > 0) {
                     std::fprintf(stderr,
                         imported_video_preview_only
@@ -4789,12 +5074,12 @@ void PipelineCoordinator::training_thread_func() noexcept {
         }
 
         // ── Step 4: Create global engine on first Gaussians ──
-        // Imported-video local_preview must not start training from a single
+        // Imported-video local subject-first must not start training from a single
         // selected frame. Wait until the repo-native keyframe path has
         // admitted at least min_frames_to_start_training frames; otherwise the
         // preview collapses into a colored billboard/sheet.
         const bool imported_video_preview_only =
-            config_.local_preview_mode &&
+            is_local_subject_first_mode() &&
             !all_frames.empty() &&
             std::all_of(
                 all_frames.begin(),
@@ -4806,8 +5091,12 @@ void PipelineCoordinator::training_thread_func() noexcept {
             preview_depth_results_ready_.load(std::memory_order_relaxed);
         const std::uint32_t preview_selected_frames =
             selected_frame_count_.load(std::memory_order_relaxed);
+        const std::uint32_t preview_seed_candidates =
+            preview_seed_candidates_.load(std::memory_order_relaxed);
+        const std::uint32_t preview_seed_accepted =
+            preview_seed_accepted_.load(std::memory_order_relaxed);
         const std::uint64_t preview_elapsed_ms =
-            config_.local_preview_mode
+            is_local_subject_first_mode()
                 ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - preview_started_at_).count())
                 : 0;
@@ -4844,24 +5133,48 @@ void PipelineCoordinator::training_thread_func() noexcept {
             (!imported_video_preview_only ||
              imported_video_primary_ready ||
              imported_video_degraded_ready);
+        if (!engine_created &&
+            imported_video_preview_only &&
+            !ready_to_create_engine) {
+            static std::uint32_t imported_video_gate_diag = 0;
+            imported_video_gate_diag++;
+            if (imported_video_gate_diag <= 12 || imported_video_gate_diag % 30 == 0) {
+                std::fprintf(stderr,
+                    "[Aether3D][TrainGate] waiting imported-video: selected=%u/%u "
+                    "accepted_seed=%u pending=%zu/%zu candidates=%u ingested=%u depth_ready=%u "
+                    "elapsed=%.1fs frozen=%d tsdf_idle=%d degraded_ready=%d\n",
+                    preview_selected_frames,
+                    imported_video_min_training_frames,
+                    preview_seed_accepted,
+                    pending_gaussians.size(),
+                    imported_video_min_seed_gaussians,
+                    preview_seed_candidates,
+                    preview_frames_ingested,
+                    preview_depth_results_ready,
+                    static_cast<double>(preview_elapsed_ms) / 1000.0,
+                    features_frozen_.load(std::memory_order_acquire) ? 1 : 0,
+                    tsdf_idle_.load(std::memory_order_acquire) ? 1 : 0,
+                    imported_video_degraded_ready ? 1 : 0);
+            }
+        }
         if (!engine_created && ready_to_create_engine) {
             try {
                 std::lock_guard<std::mutex> lock(training_export_mutex_);
-                if (config_.local_preview_mode &&
+                if (is_local_subject_first_mode() &&
                     pending_gaussians.size() > preview_initial_seed_cap) {
                     pending_gaussians.resize(preview_initial_seed_cap);
                 }
 
-                const std::size_t base_steps = config_.local_preview_mode
+                const std::size_t base_steps = is_local_subject_first_mode()
                     ? std::max<std::size_t>(config_.training.max_iterations, kPreviewTrainingTargetSteps)
                     : std::max<std::size_t>(config_.training.max_iterations, kDefaultTrainingTargetSteps);
                 const std::size_t hard_cap_steps = compute_hard_cap_steps_for_mode(
-                    config_.local_preview_mode,
+                    is_local_subject_first_mode(),
                     training_hard_cap_steps_.load(std::memory_order_relaxed),
                     base_steps);
                 training_hard_cap_steps_.store(hard_cap_steps, std::memory_order_relaxed);
                 const std::size_t dynamic_target_steps = compute_target_steps_for_mode(
-                    config_.local_preview_mode,
+                    is_local_subject_first_mode(),
                     pending_gaussians.size(),
                     all_frames.size(),
                     base_steps,
@@ -4871,7 +5184,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
                 auto runtime_training_config = config_.training;
                 runtime_training_config.max_iterations = dynamic_target_steps;
                 runtime_training_config.align_to_baseline_3dgs =
-                    config_.local_preview_mode;
+                    is_local_subject_first_mode();
                 training_engine_ = new training::GaussianTrainingEngine(
                     device_, runtime_training_config);
 
@@ -4911,7 +5224,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
                     training_engine_->gaussian_count(),
                     training_engine_->frame_count(),
                     training_target_steps_.load(std::memory_order_relaxed),
-                    config_.local_preview_mode ? "local_preview" : "cloud_default");
+                    is_local_subject_first_mode() ? "local_subject_first" : "cloud_default");
 
                 if (renderer_alive_.load(std::memory_order_acquire)) {
                     std::vector<splat::GaussianParams> initial_splats;
@@ -4966,16 +5279,16 @@ void PipelineCoordinator::training_thread_func() noexcept {
                         pending_gaussians.data(), pending_gaussians.size());
                 }
 
-                const std::size_t base_steps = config_.local_preview_mode
+                const std::size_t base_steps = is_local_subject_first_mode()
                     ? std::max<std::size_t>(config_.training.max_iterations, kPreviewTrainingTargetSteps)
                     : std::max<std::size_t>(config_.training.max_iterations, kDefaultTrainingTargetSteps);
                 const std::size_t hard_cap_steps = compute_hard_cap_steps_for_mode(
-                    config_.local_preview_mode,
+                    is_local_subject_first_mode(),
                     training_hard_cap_steps_.load(std::memory_order_relaxed),
                     base_steps);
                 training_hard_cap_steps_.store(hard_cap_steps, std::memory_order_relaxed);
                 dynamic_target_steps = compute_target_steps_for_mode(
-                    config_.local_preview_mode,
+                    is_local_subject_first_mode(),
                     training_engine_->gaussian_count(),
                     training_engine_->frame_count(),
                     base_steps,
@@ -5017,11 +5330,11 @@ void PipelineCoordinator::training_thread_func() noexcept {
         constexpr std::size_t kTrainBatchSize = 8;    // Max steps per batch
         constexpr int kBatchTimeBudgetMs = 200;       // Max time per batch
         if (engine_created && training_engine_ && !scan_done_refinement) {
-            if (config_.local_preview_mode &&
+            if (is_local_subject_first_mode() &&
                 !foreground_active_.load(std::memory_order_acquire)) {
                 if (!foreground_pause_logged) {
                     std::fprintf(stderr,
-                        "[Aether3D][TrainThread] local_preview paused: app inactive, holding GPU refine until foreground resumes\n");
+                        "[Aether3D][TrainThread] local_subject_first paused: app inactive, holding GPU refine until foreground resumes\n");
                     foreground_pause_logged = true;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -5029,11 +5342,11 @@ void PipelineCoordinator::training_thread_func() noexcept {
             }
             if (foreground_pause_logged) {
                 std::fprintf(stderr,
-                    "[Aether3D][TrainThread] local_preview resumed: foreground active, continuing refine\n");
+                    "[Aether3D][TrainThread] local_subject_first resumed: foreground active, continuing refine\n");
                 foreground_pause_logged = false;
             }
             try {
-                const auto preview_refine_phase_t0 = config_.local_preview_mode
+                const auto preview_refine_phase_t0 = is_local_subject_first_mode()
                     ? std::chrono::steady_clock::now()
                     : std::chrono::steady_clock::time_point{};
                 core::Status status = core::Status::kOk;
@@ -5173,7 +5486,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
                         "[Aether3D][TrainPerf] non-OK status=%d batch_ms=%lld\n",
                         static_cast<int>(status), err_ms);
                 }
-                if (config_.local_preview_mode) {
+                if (is_local_subject_first_mode()) {
                     const auto preview_refine_phase_t1 = std::chrono::steady_clock::now();
                     const auto preview_refine_elapsed_ms = static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -5435,6 +5748,187 @@ bool PipelineCoordinator::cross_validate_depth(
     return true;
 }
 
+bool PipelineCoordinator::make_video_consistent_preview_depth(
+    const DepthInferenceResult& current_depth,
+    const float current_cam_pos[3],
+    const float current_cam_fwd[3],
+    DepthInferenceResult& stabilized_out) noexcept
+{
+    if (current_depth.depth_map.empty() ||
+        current_depth.width == 0 ||
+        current_depth.height == 0) {
+        return false;
+    }
+
+    auto adopt_current = [&]() noexcept {
+        stabilized_out = current_depth;
+        preview_temporal_depth_ = current_depth;
+        has_preview_temporal_depth_ = true;
+        std::memcpy(preview_last_temporal_depth_pos_,
+                    current_cam_pos,
+                    sizeof(preview_last_temporal_depth_pos_));
+        std::memcpy(preview_last_temporal_depth_fwd_,
+                    current_cam_fwd,
+                    sizeof(preview_last_temporal_depth_fwd_));
+        return true;
+    };
+
+    if (!has_preview_temporal_depth_ ||
+        preview_temporal_depth_.depth_map.empty() ||
+        preview_temporal_depth_.width != current_depth.width ||
+        preview_temporal_depth_.height != current_depth.height ||
+        preview_temporal_depth_.is_metric != current_depth.is_metric) {
+        return adopt_current();
+    }
+
+    const float dx = current_cam_pos[0] - preview_last_temporal_depth_pos_[0];
+    const float dy = current_cam_pos[1] - preview_last_temporal_depth_pos_[1];
+    const float dz = current_cam_pos[2] - preview_last_temporal_depth_pos_[2];
+    const float translation_m = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    float dot =
+        current_cam_fwd[0] * preview_last_temporal_depth_fwd_[0] +
+        current_cam_fwd[1] * preview_last_temporal_depth_fwd_[1] +
+        current_cam_fwd[2] * preview_last_temporal_depth_fwd_[2];
+    dot = std::clamp(dot, -1.0f, 1.0f);
+    const float rotation_rad = std::acos(dot);
+
+    constexpr float kHardResetTranslationM = 0.025f;
+    constexpr float kHardResetRotationRad = 0.10f;
+    if (translation_m > kHardResetTranslationM ||
+        rotation_rad > kHardResetRotationRad) {
+        return adopt_current();
+    }
+
+    float affine_alpha = 1.0f;
+    float affine_beta = 0.0f;
+    if (!current_depth.is_metric) {
+        double sum_prev = 0.0;
+        double sum_curr = 0.0;
+        double sum_prev_curr = 0.0;
+        double sum_prev_sq = 0.0;
+        std::size_t n_valid = 0;
+        const std::size_t count = static_cast<std::size_t>(current_depth.width) * current_depth.height;
+        for (std::size_t i = 0; i < count; i += 4) {
+            const float prev = preview_temporal_depth_.depth_map[i];
+            const float curr = current_depth.depth_map[i];
+            if (prev > 0.01f && prev < 0.99f && curr > 0.01f && curr < 0.99f) {
+                sum_prev += prev;
+                sum_curr += curr;
+                sum_prev_curr += static_cast<double>(prev) * curr;
+                sum_prev_sq += static_cast<double>(prev) * prev;
+                n_valid++;
+            }
+        }
+        if (n_valid >= 128) {
+            const double denom =
+                static_cast<double>(n_valid) * sum_prev_sq - sum_prev * sum_prev;
+            if (std::abs(denom) > 1e-6) {
+                affine_alpha = static_cast<float>(
+                    (static_cast<double>(n_valid) * sum_prev_curr - sum_prev * sum_curr) / denom);
+                affine_beta = static_cast<float>(
+                    (sum_curr - static_cast<double>(affine_alpha) * sum_prev) /
+                    static_cast<double>(n_valid));
+            }
+        }
+    }
+
+    const float translation_stability = std::clamp(
+        (kHardResetTranslationM - translation_m) / kHardResetTranslationM,
+        0.0f,
+        1.0f);
+    const float rotation_stability = std::clamp(
+        (kHardResetRotationRad - rotation_rad) / kHardResetRotationRad,
+        0.0f,
+        1.0f);
+    const float stability = std::min(translation_stability, rotation_stability);
+    const float prev_weight_base = 0.18f + 0.52f * stability;
+
+    stabilized_out = current_depth;
+    const std::size_t count = static_cast<std::size_t>(current_depth.width) * current_depth.height;
+    stabilized_out.depth_map.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const float curr = current_depth.depth_map[i];
+        float prev = preview_temporal_depth_.depth_map[i];
+        if (!current_depth.is_metric) {
+            prev = affine_alpha * prev + affine_beta;
+            prev = std::clamp(prev, 0.0f, 1.0f);
+        } else {
+            prev = std::max(prev, 0.0f);
+        }
+
+        const bool curr_valid = current_depth.is_metric
+            ? std::isfinite(curr) && curr > 0.01f
+            : std::isfinite(curr) && curr > 0.01f && curr < 0.99f;
+        const bool prev_valid = current_depth.is_metric
+            ? std::isfinite(prev) && prev > 0.01f
+            : std::isfinite(prev) && prev > 0.01f && prev < 0.99f;
+
+        if (!curr_valid && prev_valid) {
+            stabilized_out.depth_map[i] = prev;
+            continue;
+        }
+        if (curr_valid && !prev_valid) {
+            stabilized_out.depth_map[i] = curr;
+            continue;
+        }
+        if (!curr_valid && !prev_valid) {
+            stabilized_out.depth_map[i] = 0.0f;
+            continue;
+        }
+
+        float local_prev_weight = prev_weight_base;
+        if (current_depth.is_metric) {
+            const float denom = std::max(0.05f, std::max(curr, prev));
+            const float disagreement = std::abs(curr - prev) / denom;
+            if (disagreement > 0.35f) {
+                local_prev_weight = 0.0f;
+            } else if (disagreement > 0.18f) {
+                local_prev_weight *= 0.20f;
+            } else if (disagreement > 0.10f) {
+                local_prev_weight *= 0.45f;
+            }
+        } else {
+            const float disagreement = std::abs(curr - prev);
+            if (disagreement > 0.16f) {
+                local_prev_weight = 0.0f;
+            } else if (disagreement > 0.08f) {
+                local_prev_weight *= 0.20f;
+            } else if (disagreement > 0.04f) {
+                local_prev_weight *= 0.45f;
+            }
+        }
+        stabilized_out.depth_map[i] =
+            curr * (1.0f - local_prev_weight) + prev * local_prev_weight;
+    }
+
+    preview_temporal_depth_ = stabilized_out;
+    has_preview_temporal_depth_ = true;
+    std::memcpy(preview_last_temporal_depth_pos_,
+                current_cam_pos,
+                sizeof(preview_last_temporal_depth_pos_));
+    std::memcpy(preview_last_temporal_depth_fwd_,
+                current_cam_fwd,
+                sizeof(preview_last_temporal_depth_fwd_));
+
+    static std::uint32_t temporal_depth_diag_counter = 0;
+    temporal_depth_diag_counter++;
+    if (temporal_depth_diag_counter <= 10 || temporal_depth_diag_counter % 30 == 0) {
+        std::fprintf(stderr,
+            "[Aether3D][VideoDepthLite] motion=%.3fm %.2fdeg stability=%.2f prev_w=%.2f "
+            "affine=[%.3f, %.3f] metric=%d\n",
+            translation_m,
+            rotation_rad * 57.2957795f,
+            stability,
+            prev_weight_base,
+            affine_alpha,
+            affine_beta,
+            current_depth.is_metric ? 1 : 0);
+    }
+
+    return true;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // TSDF-driven Quality Overlay
 // ═══════════════════════════════════════════════════════════════════════
@@ -5444,6 +5938,58 @@ void PipelineCoordinator::generate_overlay_vertices(
     const FrameInput& frame_input) noexcept {
     pc_data.overlay.clear();
     if (!tsdf_volume_) return;
+    const auto overlay_build_started = std::chrono::steady_clock::now();
+    const bool capture_sparse_dense_map =
+        is_local_subject_first_mode() &&
+        scanning_active_.load(std::memory_order_acquire);
+    // iPhone 12-class headroom:
+    //   32k visible dense points × 32 B ≈ 1 MB CPU-side vertex payload.
+    //   This is still small relative to the preview pipeline budget, but gives
+    //   room-scale scans enough visible headroom before long-horizon LOD kicks in.
+    constexpr std::size_t kCaptureDenseSampleBlocks = 8192u;
+    constexpr std::size_t kCaptureDenseVisibleCap = 32000u;
+    constexpr std::size_t kCaptureDenseReserveCap = 65536u;
+    constexpr float kCaptureDenseVisibleBucketNear = 0.024f;  // 2.4 cm
+    constexpr float kCaptureDenseVisibleBucketMid  = 0.040f;  // 4.0 cm
+    constexpr float kCaptureDenseVisibleBucketFar  = 0.060f;  // 6.0 cm
+    constexpr float kCaptureDenseVisibleBucketVeryFar = 0.085f;  // 8.5 cm
+    constexpr float kCaptureDenseQualifiedQuality = 0.58f;
+    constexpr float kCaptureDenseFarSoftDistanceM = 1.6f;
+    constexpr float kCaptureDenseFarMidDistanceM  = 2.0f;
+    constexpr float kCaptureDenseFarHardDistanceM = 2.6f;
+    static double capture_prev_overlay_total_ms = 0.0;
+    std::size_t capture_dense_sample_blocks = kCaptureDenseSampleBlocks;
+    bool capture_dense_bucketing_enabled = false;
+    if (capture_sparse_dense_map) {
+        const std::size_t dense_confirmed_count = confirmed_dense_cells_.size();
+        if (dense_confirmed_count >= 180000u) {
+            capture_dense_sample_blocks = 3072u;
+            capture_dense_bucketing_enabled = true;
+        } else if (dense_confirmed_count >= 90000u) {
+            capture_dense_sample_blocks = 4096u;
+            capture_dense_bucketing_enabled = true;
+        } else if (dense_confirmed_count >= 45000u) {
+            capture_dense_sample_blocks = 6144u;
+            capture_dense_bucketing_enabled = true;
+        }
+        if (capture_prev_overlay_total_ms > 160.0) {
+            capture_dense_sample_blocks = std::min<std::size_t>(capture_dense_sample_blocks, 3072u);
+        } else if (capture_prev_overlay_total_ms > 105.0) {
+            capture_dense_sample_blocks = std::min<std::size_t>(capture_dense_sample_blocks, 4096u);
+        } else if (capture_prev_overlay_total_ms > 70.0) {
+            capture_dense_sample_blocks = std::min<std::size_t>(capture_dense_sample_blocks, 6144u);
+        }
+    }
+    const char* capture_perf_tier = "full";
+    if (capture_sparse_dense_map) {
+        if (capture_dense_sample_blocks <= 3072u) {
+            capture_perf_tier = "sample_3072";
+        } else if (capture_dense_sample_blocks <= 4096u) {
+            capture_perf_tier = "sample_4096";
+        } else if (capture_dense_sample_blocks <= 6144u) {
+            capture_perf_tier = "sample_6144";
+        }
+    }
 
     // ── THROTTLE: minimum interval between expensive TSDF quality scans ──
     // get_block_quality_samples() is O(N_blocks × 512 voxels/block).
@@ -5458,9 +6004,18 @@ void PipelineCoordinator::generate_overlay_vertices(
     const auto now = std::chrono::steady_clock::now();
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - overlay_last_gen_time_);
-    const int throttle_ms = 3000;  // 3s: prevents consumer starvation with large TSDF
+    const int throttle_ms = !capture_sparse_dense_map
+        ? 3000
+        : (capture_dense_sample_blocks <= 3072u
+            ? 260
+            : (capture_dense_sample_blocks <= 4096u
+                ? 300
+                : (capture_dense_sample_blocks <= 6144u ? 340 : 380)));
     if (elapsed.count() < throttle_ms && !overlay_cache_.empty()) {
         pc_data.overlay = overlay_cache_;
+        if (capture_sparse_dense_map && !last_stable_dense_vertices_.empty()) {
+            pc_data.vertices = last_stable_dense_vertices_;
+        }
         return;
     }
     // NOTE: overlay_last_gen_time_ updated AFTER the expensive work below (see end of function)
@@ -5477,13 +6032,20 @@ void PipelineCoordinator::generate_overlay_vertices(
     // toward the first-created blocks (from early-scan camera positions) and
     // ensures uniform spatial coverage of the full TSDF volume.
     std::vector<tsdf::BlockQualitySample> samples;
-    constexpr std::size_t kMaxOverlaySampleBlocks = 50000;
+    const auto overlay_sample_started = std::chrono::steady_clock::now();
+    const std::size_t kMaxOverlaySampleBlocks =
+        capture_sparse_dense_map ? capture_dense_sample_blocks : 50000u;
     static std::size_t overlay_sample_offset = 0;  // consumer thread only
     tsdf_volume_->get_block_quality_samples(samples, kMaxOverlaySampleBlocks,
                                              overlay_sample_offset);
+    const auto overlay_sample_finished = std::chrono::steady_clock::now();
+    auto overlay_dense_started = overlay_sample_finished;
     overlay_sample_offset += kMaxOverlaySampleBlocks;  // advance for next rebuild
     if (samples.empty()) {
         pc_data.overlay = overlay_cache_;
+        if (capture_sparse_dense_map && !last_stable_dense_vertices_.empty()) {
+            pc_data.vertices = last_stable_dense_vertices_;
+        }
         return;
     }
 
@@ -5549,7 +6111,7 @@ void PipelineCoordinator::generate_overlay_vertices(
     // Rate limiter: token bucket prevents burst creation of too many Gaussians
     // when scanning reveals a large area at once. Smooth 20K/s steady flow,
     // 50K burst capacity. Prevents training engine from being overwhelmed.
-    {
+    if (!capture_sparse_dense_map) {
         // ── Token bucket refill ──
         if (!gaussian_bucket_initialized_) {
             gaussian_bucket_tokens_ = kGaussianBucketCapacity;
@@ -5762,7 +6324,7 @@ void PipelineCoordinator::generate_overlay_vertices(
                     }
                 }
                 const bool strict_preview_color =
-                    config_.local_preview_mode && frame_input.imported_video;
+                    is_local_subject_first_mode() && frame_input.imported_video;
                 if (color_ok) {
                     g.color[0] = sampled_rgb[0];
                     g.color[1] = sampled_rgb[1];
@@ -5868,7 +6430,7 @@ void PipelineCoordinator::generate_overlay_vertices(
 
                     float sampled_rgb[3] = {0.0f, 0.0f, 0.0f};
                     const bool strict_preview_color =
-                        config_.local_preview_mode && frame_input.imported_video;
+                        is_local_subject_first_mode() && frame_input.imported_video;
                     if (sample_frame_color_linear(frame_input, g.position[0], g.position[1], g.position[2], sampled_rgb)) {
                         g.color[0] = sampled_rgb[0];
                         g.color[1] = sampled_rgb[1];
@@ -5967,8 +6529,8 @@ void PipelineCoordinator::generate_overlay_vertices(
     const float min_sdf_smoothness = warmup_overlay ? 0.001f : 0.008f;
     const float min_geom_evidence = warmup_overlay ? 0.002f : 0.015f;
     const float min_phantom_score = warmup_overlay ? 0.08f : 0.5f;
-    const float min_quality_score = warmup_overlay ? 0.002f : 0.03f;
-    const float min_avg_weight = warmup_overlay ? 0.35f : 1.5f;
+    const float min_quality_score = warmup_overlay ? 0.001f : 0.008f;
+    const float min_avg_weight = warmup_overlay ? 0.30f : 0.75f;
     const int min_face_neighbors = warmup_overlay ? 0 : 2;
 
     // ═══════════════════════════════════════════════════════════════════
@@ -5985,16 +6547,17 @@ void PipelineCoordinator::generate_overlay_vertices(
     // occupied cell with consistent size and smoothed orientation.
     // ═══════════════════════════════════════════════════════════════════
 
-    // Grid cell = 5cm: large enough to merge multi-resolution TSDF blocks
-    // (near 4cm, mid 8cm) and allow 6-neighbor normal smoothing.
-    constexpr float kGridCell = 0.05f;
+    // Grid cell = 2cm: denser evidence that stays visually closer to the
+    // observed surface while still remaining mobile-friendly.
+    constexpr float kGridCell = 0.02f;
     constexpr float kGridInv  = 1.0f / kGridCell;
-    constexpr float kTileHalf = kGridCell * 0.47f;  // 4.7cm full width, 3mm gap
+    constexpr float kTileHalf = kGridCell * 0.10f;  // point-sprite world radius
 
     struct MergedCell {
         double pos[3]{};       // Weighted-average surface position
         double norm[3]{};      // Weighted-average surface normal
         float  quality_wsum{0};// Σ(quality × occupied_count) for weighted avg
+        float  avg_weight_wsum{0}; // Σ(avg_weight × occupied_count) for support avg
         int    occ_sum{0};     // Σ(occupied_count) — denominator for quality avg
         float  total_weight{0};// Σ(quality × occupied_count) — for position avg
         int    gx{0}, gy{0}, gz{0};  // Grid indices (for neighbor lookup)
@@ -6071,9 +6634,6 @@ void PipelineCoordinator::generate_overlay_vertices(
         // CONFIDENCE FILTER: very low quality → likely noise artifacts
         if (s.composite_quality < min_quality_score) { ++skipped_low_q; continue; }
 
-        // Already scanned well enough — overlay not needed
-        if (s.composite_quality >= 0.95f) continue;
-
         // WEIGHT FILTER: require at least 2 independent observations.
         // avg_weight < 2 means the block's surface was seen only once → noisy.
         if (s.avg_weight < min_avg_weight) { ++skipped_low_q; continue; }
@@ -6093,6 +6653,7 @@ void PipelineCoordinator::generate_overlay_vertices(
         cell.norm[1] += static_cast<double>(s.normal[1]) * w;
         cell.norm[2] += static_cast<double>(s.normal[2]) * w;
         cell.quality_wsum += s.composite_quality * static_cast<float>(s.occupied_count);
+        cell.avg_weight_wsum += s.avg_weight * static_cast<float>(s.occupied_count);
         cell.occ_sum += s.occupied_count;
         cell.total_weight += w;
         cell.gx = gx; cell.gy = gy; cell.gz = gz;
@@ -6157,6 +6718,7 @@ void PipelineCoordinator::generate_overlay_vertices(
         std::int64_t grid_key_val;  // For confirmed_overlay_cells_ lookup
         int gx, gy, gz;            // For grid-center snapping after filter
         float nnx, nny, nnz;       // Smoothed normal
+        float avg_weight{0.0f};
         float support_views{0.0f};
     };
     std::vector<OverlayCandidate> candidates;
@@ -6164,6 +6726,182 @@ void PipelineCoordinator::generate_overlay_vertices(
 
     // Track which grid cells are present this frame (for confirmed tile output)
     std::unordered_set<std::int64_t> current_frame_cells;
+    std::unordered_set<std::int64_t> current_dense_frame_cells;
+    std::size_t dense_rejected = 0;
+
+    auto update_confirmed_dense_cell =
+        [&](std::int64_t key,
+            int gx, int gy, int gz,
+            float px, float py, float pz,
+            float nnx, float nny, float nnz,
+            float avg_quality,
+            float avg_weight,
+            float support_views,
+            std::uint32_t pointmap_keyframe_id) {
+        // MASt3R-SLAM weighted_pointmap port:
+        //   X_canon = ((C * X_canon) + (c * X)) / (C + c)
+        // We use a scalar confidence proxy derived from the current TSDF evidence
+        // so the live capture trunk keeps one stable pointmap anchor per cell.
+        const float observation_confidence = std::max(
+            1e-3f,
+            std::max(avg_quality, 0.05f) * std::max(avg_weight, 1.0f));
+        const float observation_display_quality = std::clamp(
+            std::log1pf(std::max(0.0f, observation_confidence)) / std::log1pf(4.0f),
+            0.0f,
+            1.0f);
+
+        auto conf_it = confirmed_dense_cells_.find(key);
+        if (conf_it == confirmed_dense_cells_.end()) {
+            ConfirmedDenseCell cell;
+            cell.position[0] = px;
+            cell.position[1] = py;
+            cell.position[2] = pz;
+            cell.normal[0] = nnx;
+            cell.normal[1] = nny;
+            cell.normal[2] = nnz;
+            cell.best_position[0] = px;
+            cell.best_position[1] = py;
+            cell.best_position[2] = pz;
+            cell.best_normal[0] = nnx;
+            cell.best_normal[1] = nny;
+            cell.best_normal[2] = nnz;
+            cell.quality = avg_quality;
+            cell.avg_weight = avg_weight;
+            cell.confidence_accum = observation_confidence;
+            cell.display_quality_peak = observation_display_quality;
+            cell.best_confidence = observation_confidence;
+            cell.support_count = std::max(1.0f, support_views);
+            cell.stability = std::min(1.0f, 0.2f + 0.1f * cell.support_count);
+            if (pointmap_keyframe_id != 0) {
+                cell.unique_keyframes_seen = 1;
+                cell.last_keyframe_id = pointmap_keyframe_id;
+            }
+            cell.update_count = 1;
+            cell.last_update_ts = frame_input.timestamp;
+            confirmed_dense_cells_[key] = cell;
+            current_dense_frame_cells.insert(key);
+            return;
+        }
+
+        // Native pointmap adaptation:
+        // Keep weighted canonical fusion, but gate updates using a best-score
+        // anchor so outlier observations do not drag the live point layer away
+        // from the actual surface. A weaker-but-consistent observation can refine
+        // the canonical pointmap; a much stronger observation may re-anchor it.
+        float candidate_nx = nnx;
+        float candidate_ny = nny;
+        float candidate_nz = nnz;
+        const float best_normal_dot_raw =
+            conf_it->second.best_normal[0] * candidate_nx +
+            conf_it->second.best_normal[1] * candidate_ny +
+            conf_it->second.best_normal[2] * candidate_nz;
+        float best_normal_dot = best_normal_dot_raw;
+        if (best_normal_dot < 0.0f) {
+            candidate_nx = -candidate_nx;
+            candidate_ny = -candidate_ny;
+            candidate_nz = -candidate_nz;
+            best_normal_dot = -best_normal_dot;
+        }
+
+        const float anchor_dx = px - conf_it->second.best_position[0];
+        const float anchor_dy = py - conf_it->second.best_position[1];
+        const float anchor_dz = pz - conf_it->second.best_position[2];
+        const float anchor_dist =
+            std::sqrt(anchor_dx * anchor_dx + anchor_dy * anchor_dy + anchor_dz * anchor_dz);
+        const float consistent_radius = kGridCell * 0.55f;
+        const float reanchor_radius = kGridCell * 0.95f;
+        const bool is_consistent_observation =
+            best_normal_dot >= 0.72f && anchor_dist <= consistent_radius;
+        const bool is_high_confidence_reanchor =
+            best_normal_dot >= 0.55f &&
+            anchor_dist <= reanchor_radius &&
+            observation_confidence > conf_it->second.best_confidence * 1.25f;
+
+        if (!is_consistent_observation && !is_high_confidence_reanchor) {
+            ++dense_rejected;
+            return;
+        }
+
+        if (avg_quality > conf_it->second.quality) {
+            conf_it->second.quality = avg_quality;
+        }
+        if (avg_weight > conf_it->second.avg_weight) {
+            conf_it->second.avg_weight = avg_weight;
+        }
+
+        float blend_nx = candidate_nx;
+        float blend_ny = candidate_ny;
+        float blend_nz = candidate_nz;
+        const float normal_dot =
+            conf_it->second.normal[0] * candidate_nx +
+            conf_it->second.normal[1] * candidate_ny +
+            conf_it->second.normal[2] * candidate_nz;
+        if (normal_dot < 0.0f) {
+            blend_nx = -blend_nx;
+            blend_ny = -blend_ny;
+            blend_nz = -blend_nz;
+        }
+
+        const float old_conf = std::max(conf_it->second.confidence_accum, 1e-3f);
+        const float new_conf = observation_confidence;
+        const float total_conf = old_conf + new_conf;
+        const float inv_total_conf = 1.0f / total_conf;
+
+        conf_it->second.position[0] =
+            ((old_conf * conf_it->second.position[0]) + (new_conf * px)) * inv_total_conf;
+        conf_it->second.position[1] =
+            ((old_conf * conf_it->second.position[1]) + (new_conf * py)) * inv_total_conf;
+        conf_it->second.position[2] =
+            ((old_conf * conf_it->second.position[2]) + (new_conf * pz)) * inv_total_conf;
+
+        float fused_nx =
+            ((old_conf * conf_it->second.normal[0]) + (new_conf * blend_nx)) * inv_total_conf;
+        float fused_ny =
+            ((old_conf * conf_it->second.normal[1]) + (new_conf * blend_ny)) * inv_total_conf;
+        float fused_nz =
+            ((old_conf * conf_it->second.normal[2]) + (new_conf * blend_nz)) * inv_total_conf;
+        normalize3(fused_nx, fused_ny, fused_nz);
+        conf_it->second.normal[0] = fused_nx;
+        conf_it->second.normal[1] = fused_ny;
+        conf_it->second.normal[2] = fused_nz;
+        conf_it->second.confidence_accum = total_conf;
+        if (observation_display_quality > conf_it->second.display_quality_peak) {
+            conf_it->second.display_quality_peak = observation_display_quality;
+        }
+        if (is_high_confidence_reanchor ||
+            observation_confidence >= conf_it->second.best_confidence) {
+            conf_it->second.best_confidence = observation_confidence;
+            conf_it->second.best_position[0] = px;
+            conf_it->second.best_position[1] = py;
+            conf_it->second.best_position[2] = pz;
+            conf_it->second.best_normal[0] = candidate_nx;
+            conf_it->second.best_normal[1] = candidate_ny;
+            conf_it->second.best_normal[2] = candidate_nz;
+        }
+
+        const bool new_keyframe_support =
+            pointmap_keyframe_id != 0 &&
+            pointmap_keyframe_id != conf_it->second.last_keyframe_id;
+        if (new_keyframe_support) {
+            conf_it->second.unique_keyframes_seen += 1;
+            conf_it->second.last_keyframe_id = pointmap_keyframe_id;
+        }
+
+        if (new_keyframe_support) {
+            conf_it->second.support_count += std::max(1.0f, support_views);
+        } else {
+            conf_it->second.support_count =
+                std::max(conf_it->second.support_count, std::max(1.0f, support_views));
+        }
+        const float unique_kf_support =
+            std::max(1.0f, static_cast<float>(conf_it->second.unique_keyframes_seen));
+        conf_it->second.stability =
+            std::min(1.0f, 0.18f + 0.09f * unique_kf_support +
+                                0.08f * std::log1pf(static_cast<float>(conf_it->second.update_count + 1)));
+        conf_it->second.update_count += 1;
+        conf_it->second.last_update_ts = frame_input.timestamp;
+        current_dense_frame_cells.insert(key);
+    };
 
     for (const auto& [key, cell] : grid) {
         if (cell.total_weight < 1e-6f) continue;
@@ -6196,6 +6934,9 @@ void PipelineCoordinator::generate_overlay_vertices(
         // Honest representation of all contributing blocks, not just the best one.
         float avg_quality = (cell.occ_sum > 0)
             ? cell.quality_wsum / static_cast<float>(cell.occ_sum)
+            : 0.0f;
+        float avg_weight = (cell.occ_sum > 0)
+            ? cell.avg_weight_wsum / static_cast<float>(cell.occ_sum)
             : 0.0f;
 
         // ── Frustum culling ──
@@ -6243,13 +6984,13 @@ void PipelineCoordinator::generate_overlay_vertices(
                 conf_it->second.normal[1] = blended_ny;
                 conf_it->second.normal[2] = blended_nz;
 
-                const float max_anchor_step = 0.0015f;  // 1.5mm conservative refinement
+                const float max_anchor_step = 0.0040f;  // 4mm bounded refinement
                 float dx2 = px - conf_it->second.position[0];
                 float dy2 = py - conf_it->second.position[1];
                 float dz2 = pz - conf_it->second.position[2];
                 const float delta_len = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
                 if (delta_len > 1e-6f && delta_len < kGridCell * 0.45f) {
-                    const float step = std::min(max_anchor_step, delta_len * 0.20f);
+                    const float step = std::min(max_anchor_step, delta_len * 0.35f);
                     const float inv_len = step / delta_len;
                     conf_it->second.position[0] += dx2 * inv_len;
                     conf_it->second.position[1] += dy2 * inv_len;
@@ -6261,6 +7002,18 @@ void PipelineCoordinator::generate_overlay_vertices(
             conf_it->second.stability =
                 std::min(1.0f, 0.25f + 0.08f * conf_it->second.support_count);
             conf_it->second.last_update_ts = frame_input.timestamp;
+            // Keep dense pointmap state fresh even after the overlay cell is
+            // already confirmed. Otherwise the dense cache ages out while the
+            // overlay cache keeps updating, which looks like point-layer rollback.
+            update_confirmed_dense_cell(
+                key,
+                cell.gx, cell.gy, cell.gz,
+                px, py, pz,
+                nnx, nny, nnz,
+                avg_quality,
+                avg_weight,
+                1.0f,
+                active_pointmap_keyframe_id_);
             continue;  // Skip depth filter — will be emitted from confirmed set
         }
 
@@ -6281,6 +7034,7 @@ void PipelineCoordinator::generate_overlay_vertices(
         c.gy = cell.gy;
         c.gz = cell.gz;
         c.nnx = nnx; c.nny = nny; c.nnz = nnz;
+        c.avg_weight = avg_weight;
         candidates.push_back(c);
     }
 
@@ -6304,7 +7058,12 @@ void PipelineCoordinator::generate_overlay_vertices(
     // shows the real surface behind/in front of the phantom.
     // ═══════════════════════════════════════════════════════════════════
     std::size_t depth_rejected = 0;
-    const bool strict_depth_filter = (depth_keyframes_.size() >= 5) && !warmup_overlay;
+    const bool strict_depth_filter =
+        !capture_sparse_dense_map &&
+        (depth_keyframes_.size() >= 5) &&
+        !warmup_overlay;
+    const std::size_t max_depth_filter_keyframes =
+        capture_sparse_dense_map ? 3u : depth_keyframes_.size();
     if (depth_keyframes_.size() >= 3) {
         std::vector<OverlayCandidate> depth_passed;
         depth_passed.reserve(candidates.size());
@@ -6356,7 +7115,12 @@ void PipelineCoordinator::generate_overlay_vertices(
             int edge_range_violations = 0;     // Novel: 5×5 depth range
             int edge_range_checked = 0;
 
-            for (const auto& kf : depth_keyframes_) {
+            std::size_t depth_filter_frames_checked = 0;
+            for (auto it = depth_keyframes_.rbegin();
+                 it != depth_keyframes_.rend() &&
+                 depth_filter_frames_checked < max_depth_filter_keyframes;
+                 ++it, ++depth_filter_frames_checked) {
+                const auto& kf = *it;
                 // World → camera (same convention as tsdf_volume.cpp world_to_camera)
                 const float ddx = tx - kf.pose[12];
                 const float ddy = ty - kf.pose[13];
@@ -6485,12 +7249,16 @@ void PipelineCoordinator::generate_overlay_vertices(
 
             if (!strict_depth_filter) {
                 if (checked == 0) {
-                    depth_passed.push_back(cand);
+                    OverlayCandidate passed = cand;
+                    passed.support_views = 1.0f;
+                    depth_passed.push_back(std::move(passed));
                 } else {
                     const float cr = static_cast<float>(consistent)
                                    / static_cast<float>(checked);
                     if (cr >= 0.20f || consistent >= 1) {
-                        depth_passed.push_back(cand);
+                        OverlayCandidate passed = cand;
+                        passed.support_views = static_cast<float>(std::max(consistent, 1));
+                        depth_passed.push_back(std::move(passed));
                     } else {
                         ++depth_rejected;
                     }
@@ -6592,9 +7360,9 @@ void PipelineCoordinator::generate_overlay_vertices(
                 // From a fixed camera pose, legitimate tiles should be visible in
                 // most keyframes. If < 60% of keyframes see the tile, it's at an
                 // extreme position (likely a phantom at the edge of the FOV).
-                if (!novel_reject && depth_keyframes_.size() >= 10) {
+                if (!novel_reject && max_depth_filter_keyframes >= 10) {
                     const float visibility = static_cast<float>(checked)
-                                           / static_cast<float>(depth_keyframes_.size());
+                                           / static_cast<float>(max_depth_filter_keyframes);
                     if (visibility < 0.60f) novel_reject = true;
                 }
 
@@ -6630,9 +7398,10 @@ void PipelineCoordinator::generate_overlay_vertices(
 
             if (novel_reject) {
                 ++depth_rejected;
-            } else if (checked < 3) {
+            } else if (checked < static_cast<int>(capture_sparse_dense_map ? 1 : 3)) {
                 ++depth_rejected;
-            } else if (static_cast<float>(consistent) / static_cast<float>(checked) >= 0.35f) {
+            } else if (static_cast<float>(consistent) / static_cast<float>(checked) >=
+                       (capture_sparse_dense_map ? 0.20f : 0.35f)) {
                 OverlayCandidate passed = cand;
                 passed.support_views = static_cast<float>(consistent);
                 depth_passed.push_back(std::move(passed));
@@ -6642,6 +7411,45 @@ void PipelineCoordinator::generate_overlay_vertices(
         }
 
         candidates = std::move(depth_passed);
+    }
+
+    // Dense pointmap follows the same validated candidate set as the overlay.
+    // This prevents pre-filter phantoms from entering the canonical pointmap
+    // trunk and makes the live point layer behave more like the tracker-backed
+    // MASt3R-SLAM pointmap update path.
+    for (const auto& c : candidates) {
+        update_confirmed_dense_cell(
+            c.grid_key_val,
+            c.gx, c.gy, c.gz,
+            c.vertex.position[0],
+            c.vertex.position[1],
+            c.vertex.position[2],
+            c.nnx, c.nny, c.nnz,
+            c.vertex.quality,
+            c.avg_weight,
+            std::max(1.0f, c.support_views),
+            active_pointmap_keyframe_id_);
+    }
+
+    if (active_pointmap_keyframe_id_ != 0 && !pointmap_keyframes_.empty()) {
+        auto& pointmap_kf = pointmap_keyframes_.back();
+        if (pointmap_kf.id == active_pointmap_keyframe_id_) {
+            pointmap_kf.observed_cell_count =
+                static_cast<std::uint32_t>(current_dense_frame_cells.size());
+            float conf_sum = 0.0f;
+            std::uint32_t conf_count = 0;
+            for (const auto key : current_dense_frame_cells) {
+                const auto dense_it = confirmed_dense_cells_.find(key);
+                if (dense_it == confirmed_dense_cells_.end()) continue;
+                const float avg_conf =
+                    dense_it->second.confidence_accum /
+                    std::max(1.0f, static_cast<float>(dense_it->second.update_count));
+                conf_sum += avg_conf;
+                conf_count += 1;
+            }
+            pointmap_kf.average_confidence =
+                conf_count > 0 ? (conf_sum / static_cast<float>(conf_count)) : 0.0f;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -6657,25 +7465,12 @@ void PipelineCoordinator::generate_overlay_vertices(
     for (const auto& c : candidates) {
         auto conf_it = confirmed_overlay_cells_.find(c.grid_key_val);
         if (conf_it == confirmed_overlay_cells_.end()) {
-            // New confirmation: keep grid regularity but clamp toward observed surface.
+            // New confirmation: keep the observed surface anchor directly so the
+            // UI evidence sticks to the actual geometry instead of a snapped cell center.
             ConfirmedTile ct;
-            const float center_x = (static_cast<float>(c.gx) + 0.5f) * kGridCell;
-            const float center_y = (static_cast<float>(c.gy) + 0.5f) * kGridCell;
-            const float center_z = (static_cast<float>(c.gz) + 0.5f) * kGridCell;
-            float ox = c.vertex.position[0] - center_x;
-            float oy = c.vertex.position[1] - center_y;
-            float oz = c.vertex.position[2] - center_z;
-            const float offset_len = std::sqrt(ox * ox + oy * oy + oz * oz);
-            const float max_offset = kGridCell * 0.18f;
-            if (offset_len > max_offset && offset_len > 1e-6f) {
-                const float inv = max_offset / offset_len;
-                ox *= inv;
-                oy *= inv;
-                oz *= inv;
-            }
-            ct.position[0] = center_x + ox;
-            ct.position[1] = center_y + oy;
-            ct.position[2] = center_z + oz;
+            ct.position[0] = c.vertex.position[0];
+            ct.position[1] = c.vertex.position[1];
+            ct.position[2] = c.vertex.position[2];
             ct.normal[0] = c.nnx;
             ct.normal[1] = c.nny;
             ct.normal[2] = c.nnz;
@@ -6735,7 +7530,14 @@ void PipelineCoordinator::generate_overlay_vertices(
         sv.vertex.normal[1] = ct.normal[1];
         sv.vertex.normal[2] = ct.normal[2];
         sv.vertex.size = kTileHalf;
-        sv.vertex.quality = ct.quality;
+        const float support_norm = std::clamp(ct.support_count / 6.0f, 0.0f, 1.0f);
+        const float stability_norm = std::clamp(ct.stability, 0.0f, 1.0f);
+        const float display_quality = std::clamp(
+            0.30f * ct.quality +
+            0.40f * support_norm +
+            0.30f * stability_norm,
+            0.0f, 1.0f);
+        sv.vertex.quality = display_quality;
         sv.dist_sq = dsq;
         output.push_back(sv);
     }
@@ -6744,7 +7546,9 @@ void PipelineCoordinator::generate_overlay_vertices(
     // emit a conservative subset directly from TSDF samples so HUD does not stall at 0.
     if (output.empty() && !samples.empty()) {
         std::vector<SortableVertex> fallback;
-        fallback.reserve(std::min<std::size_t>(samples.size(), 2000));
+        const std::size_t fallback_limit =
+            capture_sparse_dense_map ? 512u : 2000u;
+        fallback.reserve(std::min<std::size_t>(samples.size(), fallback_limit));
         for (const auto& s : samples) {
             if (s.occupied_count < 2) continue;
             if (!s.has_surface && s.avg_weight < 0.35f) continue;
@@ -6790,7 +7594,7 @@ void PipelineCoordinator::generate_overlay_vertices(
             sv.vertex.quality = std::clamp(s.composite_quality, 0.0f, 0.95f);
             sv.dist_sq = dsq;
             fallback.push_back(sv);
-            if (fallback.size() >= 2000) break;
+            if (fallback.size() >= fallback_limit) break;
         }
         if (!fallback.empty()) {
             output.swap(fallback);
@@ -6805,70 +7609,372 @@ void PipelineCoordinator::generate_overlay_vertices(
                 return a.dist_sq < b.dist_sq;
             });
     }
+    if (capture_sparse_dense_map && output.size() > 1200u) {
+        output.resize(1200u);
+    }
 
     pc_data.overlay.reserve(output.size());
     for (const auto& sv : output) {
         pc_data.overlay.push_back(sv.vertex);
     }
 
-    // Diagnostic: log grid merge stats periodically
-    {
-        static std::uint32_t ovl_diag = 0;
-        ovl_diag++;
-        if (ovl_diag <= 5 || ovl_diag % 30 == 0) {
-            std::fprintf(stderr,
-                "[Aether3D][Overlay] #%u: samples=%zu merged=%zu cand=%zu emit=%zu "
-                "confirmed=%zu warmup=%d strictDepth=%d "
-                "(sparse=%zu no_surf=%zu low_q=%zu isolated=%zu depth_rej=%zu "
-                "fallback=%zu kf=%zu) "
-                "throttle=%dms\n",
-                ovl_diag, samples.size(), merged_count, candidates.size(), output.size(),
-                confirmed_overlay_cells_.size(),
-                warmup_overlay ? 1 : 0, strict_depth_filter ? 1 : 0,
-                skipped_sparse, skipped_no_surface, skipped_low_q, skipped_isolated,
-                depth_rejected, fallback_emitted, depth_keyframes_.size(), throttle_ms);
+    static std::uint32_t ovl_diag = 0;
+    ovl_diag++;
+    const bool should_log_overlay_diag = (ovl_diag <= 5 || ovl_diag % 30 == 0);
+
+    // ── Coverage Point Cloud: monotonic sparse dense-map cells ──
+    // The live dense-map must not rebuild from raw samples every frame or it will
+    // regress/flicker as visibility changes. Instead, emit from confirmed cells,
+    // with bounded anchor refinement and evidence that only grows.
+    overlay_dense_started = std::chrono::steady_clock::now();
+    pc_data.vertices.clear();
+    pc_data.vertices.reserve(std::min<std::size_t>(
+        confirmed_dense_cells_.size(),
+        capture_sparse_dense_map ? kCaptureDenseReserveCap : 1600u));
+    struct SortablePoint {
+        PointCloudVertex vertex;
+        float dist_sq;
+        float display_quality{0.0f};
+        bool fresh{false};
+        bool held{false};
+    };
+    std::vector<SortablePoint> dense_output;
+    dense_output.reserve(std::min<std::size_t>(
+        confirmed_dense_cells_.size(),
+        capture_sparse_dense_map ? kCaptureDenseReserveCap : 1600u));
+    std::size_t dense_fresh_candidates = 0;
+    std::size_t dense_held_candidates = 0;
+    std::size_t dense_low_quality_suppressed = 0;
+    std::size_t dense_far_suppressed = 0;
+    for (const auto& [key, dc] : confirmed_dense_cells_) {
+        const bool seen_this_frame =
+            current_dense_frame_cells.find(key) != current_dense_frame_cells.end();
+        const double staleness = frame_input.timestamp - dc.last_update_ts;
+        const std::uint32_t keyframe_age =
+            (active_pointmap_keyframe_id_ > 0 && dc.last_keyframe_id > 0 &&
+             active_pointmap_keyframe_id_ >= dc.last_keyframe_id)
+                ? (active_pointmap_keyframe_id_ - dc.last_keyframe_id)
+                : 0u;
+        const double hold_seconds = capture_sparse_dense_map
+            ? (7.50 + 3.00 * static_cast<double>(std::clamp(dc.stability, 0.0f, 1.0f)) +
+               0.60 * static_cast<double>(std::min<std::uint32_t>(dc.unique_keyframes_seen, 8u)))
+            : (1.20 + 1.20 * static_cast<double>(std::clamp(dc.stability, 0.0f, 1.0f)) +
+               0.25 * static_cast<double>(std::min<std::uint32_t>(dc.unique_keyframes_seen, 4u)));
+        const std::uint32_t capture_max_keyframe_age =
+            18u + 3u * std::min<std::uint32_t>(dc.unique_keyframes_seen, 8u);
+        if (!bootstrap_overlay_mode && !seen_this_frame) {
+            if (capture_sparse_dense_map) {
+                const bool has_keyframe_retention =
+                    active_pointmap_keyframe_id_ > 0 && dc.last_keyframe_id > 0;
+                const bool stale_in_time = staleness > hold_seconds;
+                const bool stale_in_keyframes =
+                    has_keyframe_retention ? (keyframe_age > capture_max_keyframe_age) : true;
+                if (stale_in_time && stale_in_keyframes) continue;
+            } else {
+                if (staleness > hold_seconds) continue;
+                if (keyframe_age > 4u) continue;
+            }
         }
+
+        float render_px = dc.position[0];
+        float render_py = dc.position[1];
+        float render_pz = dc.position[2];
+        float render_nx = dc.normal[0];
+        float render_ny = dc.normal[1];
+        float render_nz = dc.normal[2];
+        if (capture_sparse_dense_map && seen_this_frame) {
+            const float anchor_bias = std::clamp(0.12f + 0.18f * dc.stability, 0.0f, 0.30f);
+            const float keep_canonical = 1.0f - anchor_bias;
+            render_px = keep_canonical * render_px + anchor_bias * dc.best_position[0];
+            render_py = keep_canonical * render_py + anchor_bias * dc.best_position[1];
+            render_pz = keep_canonical * render_pz + anchor_bias * dc.best_position[2];
+            render_nx = keep_canonical * render_nx + anchor_bias * dc.best_normal[0];
+            render_ny = keep_canonical * render_ny + anchor_bias * dc.best_normal[1];
+            render_nz = keep_canonical * render_nz + anchor_bias * dc.best_normal[2];
+            normalize3(render_nx, render_ny, render_nz);
+        }
+
+        float dx = render_px - cx;
+        float dy = render_py - cy;
+        float dz = render_pz - cz;
+        float dsq = dx * dx + dy * dy + dz * dz;
+        if ((!bootstrap_overlay_mode && dsq > 36.0f) ||
+            (bootstrap_overlay_mode && dsq > 144.0f)) continue;
+        float d = std::sqrt(dsq);
+        if (!bootstrap_overlay_mode && d > 1e-6f) {
+            float cos_a = (dx * fwd_x + dy * fwd_y + dz * fwd_z) / d;
+            if (cos_a < kFrustumCosCutoff) continue;
+        }
+
+        // Use a pure pointmap-confidence score for display, matching the
+        // weighted_pointmap spirit: one canonical point plus accumulated confidence.
+        const float average_confidence =
+            dc.confidence_accum / std::max(1.0f, static_cast<float>(dc.update_count));
+        const float average_display_quality = std::clamp(
+            std::log1pf(std::max(0.0f, average_confidence)) / std::log1pf(4.0f),
+            0.0f,
+            1.0f);
+        const float keyframe_support_norm = std::clamp(
+            static_cast<float>(dc.unique_keyframes_seen) / 3.0f,
+            0.0f,
+            1.0f);
+        const float display_quality = std::clamp(
+            0.85f * std::max(average_display_quality, dc.display_quality_peak) +
+            0.15f * keyframe_support_norm,
+            0.0f,
+            1.0f);
+        const bool monocular_capture_depth =
+            capture_sparse_dense_map && !frame_input.ne_depth_is_metric;
+        if (monocular_capture_depth) {
+            const bool far_soft_unstable =
+                d > kCaptureDenseFarSoftDistanceM && display_quality < 0.66f;
+            const bool far_mid_unstable =
+                d > kCaptureDenseFarMidDistanceM && display_quality < 0.74f;
+            const bool far_hard_unstable =
+                d > kCaptureDenseFarHardDistanceM && display_quality < 0.84f;
+            if (far_soft_unstable || far_mid_unstable || far_hard_unstable) {
+                ++dense_far_suppressed;
+                continue;
+            }
+        }
+        if (capture_sparse_dense_map && display_quality < kCaptureDenseQualifiedQuality) {
+            ++dense_low_quality_suppressed;
+            continue;
+        }
+
+        const float r = 0.18f;
+        const float g = 1.0f;
+        const float b = 0.26f;
+        const float quality_alpha = 0.82f + 0.12f * display_quality;
+
+        SortablePoint sp;
+        sp.vertex.position[0] = render_px;
+        sp.vertex.position[1] = render_py;
+        sp.vertex.position[2] = render_pz;
+        sp.vertex.color[0] = r;
+        sp.vertex.color[1] = g;
+        sp.vertex.color[2] = b;
+        sp.vertex.size = capture_sparse_dense_map ? 8.0f : 9.0f;
+        sp.vertex.alpha = quality_alpha;
+        sp.dist_sq = dsq;
+        sp.display_quality = display_quality;
+        sp.held = !seen_this_frame;
+        sp.fresh = seen_this_frame || staleness <= 1.25 || keyframe_age <= 1u;
+        if (sp.fresh) {
+            ++dense_fresh_candidates;
+        }
+        if (sp.held) {
+            ++dense_held_candidates;
+        }
+        dense_output.push_back(sp);
+    }
+    const std::size_t dense_visible_raw = dense_output.size();
+    if (capture_sparse_dense_map &&
+        capture_dense_bucketing_enabled &&
+        dense_output.size() > 1u) {
+        auto dense_visible_bucket_key = [&](const SortablePoint& sp) -> std::int64_t {
+            int tier = 0;
+            float bucket_size = kCaptureDenseVisibleBucketNear;
+            if (sp.dist_sq > 9.0f) {
+                tier = 3;
+                bucket_size = kCaptureDenseVisibleBucketVeryFar;
+            } else if (sp.dist_sq > 4.0f) {
+                tier = 2;
+                bucket_size = kCaptureDenseVisibleBucketFar;
+            } else if (sp.dist_sq > 1.44f) {
+                tier = 1;
+                bucket_size = kCaptureDenseVisibleBucketMid;
+            }
+            const float dense_visible_bucket_inv = 1.0f / bucket_size;
+            const int gx = static_cast<int>(std::floor(
+                static_cast<double>(sp.vertex.position[0]) *
+                static_cast<double>(dense_visible_bucket_inv)));
+            const int gy = static_cast<int>(std::floor(
+                static_cast<double>(sp.vertex.position[1]) *
+                static_cast<double>(dense_visible_bucket_inv)));
+            const int gz = static_cast<int>(std::floor(
+                static_cast<double>(sp.vertex.position[2]) *
+                static_cast<double>(dense_visible_bucket_inv)));
+            auto u = [](int v) -> std::uint64_t {
+                return static_cast<std::uint64_t>(static_cast<std::uint32_t>(v)) & 0xFFFFFu;
+            };
+            return static_cast<std::int64_t>(
+                (static_cast<std::int64_t>(tier & 0x3) << 60) |
+                static_cast<std::int64_t>((u(gx) << 40) | (u(gy) << 20) | u(gz)));
+        };
+        auto should_replace_dense_bucket = [](const SortablePoint& candidate,
+                                              const SortablePoint& incumbent) {
+            if (candidate.fresh != incumbent.fresh) {
+                return candidate.fresh && !incumbent.fresh;
+            }
+            if (std::fabs(candidate.display_quality - incumbent.display_quality) > 1e-4f) {
+                return candidate.display_quality > incumbent.display_quality;
+            }
+            if (candidate.held != incumbent.held) {
+                return !candidate.held && incumbent.held;
+            }
+            return candidate.dist_sq < incumbent.dist_sq;
+        };
+
+        std::vector<SortablePoint> fresh_dense_output;
+        std::vector<SortablePoint> stable_dense_output;
+        fresh_dense_output.reserve(dense_output.size());
+        stable_dense_output.reserve(dense_output.size());
+        for (const auto& sp : dense_output) {
+            if (sp.fresh) {
+                fresh_dense_output.push_back(sp);
+            } else {
+                stable_dense_output.push_back(sp);
+            }
+        }
+
+        std::unordered_map<std::int64_t, std::size_t> dense_bucket_indices;
+        dense_bucket_indices.reserve(stable_dense_output.size());
+        std::vector<SortablePoint> bucketed_dense_output;
+        bucketed_dense_output.reserve(fresh_dense_output.size() + stable_dense_output.size());
+        for (const auto& sp : fresh_dense_output) {
+            bucketed_dense_output.push_back(sp);
+        }
+        for (const auto& sp : stable_dense_output) {
+            const std::int64_t bucket_key = dense_visible_bucket_key(sp);
+            const auto bucket_it = dense_bucket_indices.find(bucket_key);
+            if (bucket_it == dense_bucket_indices.end()) {
+                dense_bucket_indices.emplace(bucket_key, bucketed_dense_output.size());
+                bucketed_dense_output.push_back(sp);
+                continue;
+            }
+            auto& incumbent = bucketed_dense_output[bucket_it->second];
+            if (should_replace_dense_bucket(sp, incumbent)) {
+                incumbent = sp;
+            }
+        }
+        dense_output.swap(bucketed_dense_output);
+    }
+    const std::size_t dense_visible_bucketed = dense_output.size();
+    const std::size_t dense_visible_before_cap = dense_output.size();
+    std::size_t dense_fresh_kept = 0;
+    std::size_t dense_held_kept = 0;
+    if (capture_sparse_dense_map && dense_output.size() > kCaptureDenseVisibleCap) {
+        auto dist_sort = [](const SortablePoint& a, const SortablePoint& b) {
+            return a.dist_sq < b.dist_sq;
+        };
+        std::vector<SortablePoint> fresh_points;
+        std::vector<SortablePoint> stable_points;
+        fresh_points.reserve(dense_output.size());
+        stable_points.reserve(dense_output.size());
+        for (auto& sp : dense_output) {
+            if (sp.fresh) {
+                fresh_points.push_back(sp);
+            } else {
+                stable_points.push_back(sp);
+            }
+        }
+        std::sort(fresh_points.begin(), fresh_points.end(), dist_sort);
+        std::sort(stable_points.begin(), stable_points.end(), dist_sort);
+
+        std::vector<SortablePoint> clipped;
+        clipped.reserve(kCaptureDenseVisibleCap);
+        const std::size_t limit = kCaptureDenseVisibleCap;
+        const std::size_t target_fresh_quota = std::min<std::size_t>(
+            fresh_points.size(),
+            std::max<std::size_t>(limit / 4, 6000u));
+
+        for (std::size_t i = 0; i < target_fresh_quota && clipped.size() < limit; ++i) {
+            clipped.push_back(fresh_points[i]);
+        }
+        for (std::size_t i = 0; i < stable_points.size() && clipped.size() < limit; ++i) {
+            clipped.push_back(stable_points[i]);
+        }
+        for (std::size_t i = target_fresh_quota; i < fresh_points.size() && clipped.size() < limit; ++i) {
+            clipped.push_back(fresh_points[i]);
+        }
+        dense_output.swap(clipped);
+    } else if (dense_output.size() < 15000u) {
+        std::sort(dense_output.begin(), dense_output.end(),
+            [](const SortablePoint& a, const SortablePoint& b) {
+                return a.dist_sq < b.dist_sq;
+            });
+    }
+    if (!dense_output.empty()) {
+        for (const auto& sp : dense_output) {
+            pc_data.vertices.push_back(sp.vertex);
+            if (sp.fresh) {
+                ++dense_fresh_kept;
+            }
+            if (sp.held) {
+                ++dense_held_kept;
+            }
+        }
+        last_stable_dense_vertices_ = pc_data.vertices;
+    } else if (capture_sparse_dense_map && !last_stable_dense_vertices_.empty()) {
+        pc_data.vertices = last_stable_dense_vertices_;
     }
 
-    // ── Coverage Point Cloud: surface-snapped dots colored by TSDF weight ──
-    // Shows user WHERE to scan more (red=unseen → green=well-covered → invisible=done).
-    // Uses surface_center (SDF zero-crossing) for precise surface snapping.
-    // Non-reversible: TSDF avg_weight only ever increases.
-    pc_data.vertices.clear();
-    pc_data.vertices.reserve(std::min(samples.size(), std::size_t(100000)));
-    for (const auto& s : samples) {
-        if (s.occupied_count < 2) continue;
-        const float w = s.avg_weight;
-        // Fade out completely once well-covered (weight >= 20)
-        float pt_alpha = 1.0f - std::clamp(w / 20.0f, 0.0f, 1.0f);
-        if (pt_alpha < 0.05f) continue;
-        // Color ramp: red → orange → yellow → green
-        float r, g, b;
-        if (w < 2.0f) {
-            r = 1.0f; g = 0.2f; b = 0.1f;
-        } else if (w < 5.0f) {
-            const float t = (w - 2.0f) / 3.0f;
-            r = 1.0f; g = 0.2f + 0.5f * t; b = 0.1f;
-        } else if (w < 10.0f) {
-            const float t = (w - 5.0f) / 5.0f;
-            r = 1.0f - 0.5f * t; g = 0.7f + 0.3f * t; b = 0.1f;
-        } else {
-            const float t = std::clamp((w - 10.0f) / 10.0f, 0.0f, 1.0f);
-            r = 0.5f - 0.4f * t; g = 1.0f; b = 0.1f + 0.3f * t;
-        }
-        PointCloudVertex v;
-        v.position[0] = s.has_surface ? s.surface_center[0] : s.center[0];
-        v.position[1] = s.has_surface ? s.surface_center[1] : s.center[1];
-        v.position[2] = s.has_surface ? s.surface_center[2] : s.center[2];
-        v.color[0] = r; v.color[1] = g; v.color[2] = b;
-        v.size = 10.0f;
-        v.alpha = pt_alpha;
-        pc_data.vertices.push_back(v);
+    const auto overlay_build_finished = std::chrono::steady_clock::now();
+    const double overlay_total_ms = duration_ms(
+        overlay_build_started,
+        overlay_build_finished);
+    const double overlay_sample_ms = duration_ms(
+        overlay_sample_started,
+        overlay_sample_finished);
+    const double overlay_build_ms = duration_ms(
+        overlay_sample_finished,
+        overlay_dense_started);
+    const double overlay_dense_ms = duration_ms(
+        overlay_dense_started,
+        overlay_build_finished);
+    if (capture_sparse_dense_map) {
+        capture_prev_overlay_total_ms = overlay_total_ms;
+    }
+
+    // Diagnostic: log grid merge stats periodically after dense output is built
+    // so denseEmit reports the actual visible point count instead of always 0.
+    if (should_log_overlay_diag) {
+        const std::size_t active_blocks = tsdf_volume_->active_block_count();
+        const auto memory_usage = query_process_memory_usage_bytes();
+        const double sample_coverage_pct =
+            active_blocks > 0
+                ? (100.0 * static_cast<double>(samples.size()) /
+                   static_cast<double>(active_blocks))
+                : 0.0;
+        std::fprintf(stderr,
+            "[Aether3D][OverlayPerf] total=%.1fms sample=%.1fms filter=%.1fms dense=%.1fms "
+            "activeBlocks=%zu sampleCoverage=%.1f%% perfTier=%s rss=%.0fMiB footprint=%.0fMiB\n",
+            overlay_total_ms,
+            overlay_sample_ms,
+            overlay_build_ms,
+            overlay_dense_ms,
+            active_blocks,
+            sample_coverage_pct,
+            capture_perf_tier,
+            memory_usage.valid ? bytes_to_mib(memory_usage.resident) : -1.0,
+            memory_usage.valid ? bytes_to_mib(memory_usage.footprint) : -1.0);
+        std::fprintf(stderr,
+            "[Aether3D][Overlay] #%u: samples=%zu merged=%zu cand=%zu emit=%zu "
+            "confirmed=%zu denseConfirmed=%zu denseEmit=%zu denseRaw=%zu denseBucket=%zu densePreCap=%zu denseFresh=%zu/%zu denseHeld=%zu/%zu denseLowQ=%zu denseFar=%zu "
+            "warmup=%d strictDepth=%d "
+            "(sparse=%zu no_surf=%zu low_q=%zu isolated=%zu depth_rej=%zu dense_rej=%zu "
+            "fallback=%zu kf=%zu captureLite=%d) "
+            "throttle=%dms sampleBlocks=%zu visCell=%s\n",
+            ovl_diag, samples.size(), merged_count, candidates.size(), output.size(),
+            confirmed_overlay_cells_.size(), confirmed_dense_cells_.size(), pc_data.vertices.size(),
+            dense_visible_raw, dense_visible_bucketed, dense_visible_before_cap,
+            dense_fresh_kept, dense_fresh_candidates,
+            dense_held_kept, dense_held_candidates,
+            dense_low_quality_suppressed, dense_far_suppressed,
+            warmup_overlay ? 1 : 0, strict_depth_filter ? 1 : 0,
+            skipped_sparse, skipped_no_surface, skipped_low_q, skipped_isolated,
+            depth_rejected, dense_rejected, fallback_emitted, depth_keyframes_.size(),
+            capture_sparse_dense_map ? 1 : 0, throttle_ms,
+            capture_sparse_dense_map ? capture_dense_sample_blocks : 50000u,
+            capture_sparse_dense_map
+                ? (capture_dense_bucketing_enabled ? "adaptive" : "off")
+                : "off");
     }
 
     // Update timestamp AFTER expensive work so next call measures elapsed from COMPLETION.
     // If updated before, elapsed = rebuild_time (3-5s) >> throttle_ms → always rebuilds.
-    overlay_last_gen_time_ = std::chrono::steady_clock::now();
+    overlay_last_gen_time_ = overlay_build_finished;
 
     // Cache for subsequent frames within throttle window
     overlay_cache_ = pc_data.overlay;
@@ -6892,7 +7998,7 @@ void PipelineCoordinator::start_threads() noexcept {
     running_.store(true, std::memory_order_release);
     scanning_active_.store(true, std::memory_order_release);
     foreground_active_.store(true, std::memory_order_release);
-    if (config_.local_preview_mode) {
+    if (config_.is_local_subject_first_mode()) {
         preview_started_at_ = std::chrono::steady_clock::now();
     }
 
@@ -6926,7 +8032,7 @@ void PipelineCoordinator::seed_gaussians_per_frame_gsf(
 {
     if (!bgra || !depth || img_w <= 0 || img_h <= 0 || depth_w <= 0 || depth_h <= 0) return;
 
-    if (config_.local_preview_mode && imported_video) {
+    if (config_.is_local_subject_first_mode() && imported_video) {
         return;
     }
 
@@ -6946,12 +8052,12 @@ void PipelineCoordinator::seed_gaussians_per_frame_gsf(
     const float c2x = cam2world[8], c2y = cam2world[9], c2z = cam2world[10]; // -fwd
     const float  tx = cam2world[12], ty = cam2world[13], tz = cam2world[14];  // pos
 
-    if (config_.local_preview_mode) {
+    if (config_.is_local_subject_first_mode()) {
         const bool init_pass =
             preview_seed_accepted_.load(std::memory_order_relaxed) == 0;
         std::vector<splat::GaussianParams> new_gaussians;
         new_gaussians.reserve(1536u);
-        const PreviewSeedStats stats = build_preview_sampled_seeds_from_depth(
+        const SubjectFirstSeedStats stats = build_subject_first_sampled_seeds_from_depth(
             bgra,
             img_w,
             img_h,

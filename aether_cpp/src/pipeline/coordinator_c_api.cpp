@@ -81,6 +81,7 @@ int aether_coordinator_default_config(aether_coordinator_config_t* config) {
     // Depth inference (DAv2 dual-model cross-validation)
     config->depth_model_path = nullptr;
     config->depth_model_path_large = nullptr;
+    config->depth_model_path_video = nullptr;
     config->large_model_interval = 5;
 
     return 0;
@@ -127,8 +128,12 @@ aether_pipeline_coordinator_t* aether_pipeline_coordinator_create(
     // TSDF→Gaussian gate is geometry-based (has_surface + avg_weight), no configurable threshold
     cpp_config.blend_start_splat_count = config->blend_start_splat_count;
     cpp_config.blend_end_splat_count = config->blend_end_splat_count;
-    cpp_config.depth_model_path = config->depth_model_path;            // DAv2 Small
-    cpp_config.depth_model_path_large = config->depth_model_path_large;  // DAv2 Large
+    cpp_config.depth_model_path =
+        config->depth_model_path ? config->depth_model_path : "";          // DAv2 Small
+    cpp_config.depth_model_path_large =
+        config->depth_model_path_large ? config->depth_model_path_large : "";  // DAv2 Large
+    cpp_config.depth_model_path_video =
+        config->depth_model_path_video ? config->depth_model_path_video : "";  // Video Depth
     cpp_config.large_model_interval = config->large_model_interval;
 
     auto* wrapper = new (std::nothrow) aether_pipeline_coordinator_s;
@@ -241,6 +246,16 @@ int aether_pipeline_coordinator_get_snapshot(
     out->preview_prefilter_blur_rejects = snapshot.preview_prefilter_blur_rejects;
     out->preview_keyframe_gate_accepts = snapshot.preview_keyframe_gate_accepts;
     out->preview_keyframe_gate_rejects = snapshot.preview_keyframe_gate_rejects;
+    out->preview_imported_frames_evaluated = snapshot.preview_imported_frames_evaluated;
+    out->preview_imported_low_parallax_rejects = snapshot.preview_imported_low_parallax_rejects;
+    out->preview_imported_near_duplicate_rejects = snapshot.preview_imported_near_duplicate_rejects;
+    out->preview_imported_selected_keyframes = snapshot.preview_imported_selected_keyframes;
+    out->preview_imported_selected_translation_mean_mm =
+        snapshot.preview_imported_selected_translation_mean_mm;
+    out->preview_imported_selected_rotation_mean_deg =
+        snapshot.preview_imported_selected_rotation_mean_deg;
+    out->preview_imported_selected_overlap_mean =
+        snapshot.preview_imported_selected_overlap_mean;
     out->preview_seed_candidates = snapshot.preview_seed_candidates;
     out->preview_seed_accepted = snapshot.preview_seed_accepted;
     out->preview_seed_rejected = snapshot.preview_seed_rejected;
@@ -295,10 +310,15 @@ int aether_pipeline_coordinator_is_training(
     return coordinator->coordinator->is_training_active() ? 1 : 0;
 }
 
-int aether_pipeline_coordinator_service_local_preview_bootstrap(
+int aether_pipeline_coordinator_service_local_subject_first_bootstrap(
     aether_pipeline_coordinator_t* coordinator) {
     if (!coordinator || !coordinator->coordinator) return -1;
-    return coordinator->coordinator->service_local_preview_bootstrap() ? 1 : 0;
+    return coordinator->coordinator->service_local_subject_first_bootstrap() ? 1 : 0;
+}
+
+int aether_pipeline_coordinator_service_local_preview_bootstrap(
+    aether_pipeline_coordinator_t* coordinator) {
+    return aether_pipeline_coordinator_service_local_subject_first_bootstrap(coordinator);
 }
 
 int aether_pipeline_coordinator_is_gpu_training(

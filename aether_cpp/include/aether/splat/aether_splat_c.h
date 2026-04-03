@@ -63,6 +63,17 @@ typedef struct aether_splat_stats {
     float  render_time_ms;
 } aether_splat_stats_t;
 
+/// Boundary-aware mask/cutout cleanup statistics for a PLY -> PLY pass.
+typedef struct aether_subject_cleanup_stats {
+    size_t input_splats;
+    size_t mask_seed_kept_splats;
+    size_t boundary_refined_splats;
+    size_t boundary_split_splats;
+    size_t cutout_kept_splats;
+    size_t cleanup_kept_splats;
+    size_t cleanup_removed_splats;
+} aether_subject_cleanup_stats_t;
+
 // ═══════════════════════════════════════════════════════════════════════
 // Engine Lifecycle
 // ═══════════════════════════════════════════════════════════════════════
@@ -208,6 +219,14 @@ size_t aether_splat_get_sh_float_count(const aether_splat_engine_t* engine);
 /// Load a PLY file and return the Gaussian count (without creating an engine).
 /// Useful for inspection/validation.
 int aether_splat_ply_vertex_count(const char* path, size_t* out_count);
+
+/// Run a conservative subject-first cleanup pass on an exported PLY.
+/// The algorithm keeps the dominant connected component plus a small support
+/// band, then removes only very isolated low-confidence outliers.
+/// Returns 0 on success.
+int aether_splat_subject_cleanup_ply(const char* input_path,
+                                      const char* output_path,
+                                      aether_subject_cleanup_stats_t* out_stats);
 
 /// Pack a single GaussianParams into 16-byte PackedSplat.
 /// out_packed must point to 16 bytes.

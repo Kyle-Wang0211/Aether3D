@@ -951,6 +951,55 @@ bool should_accept_preview_keyframe(
     return sel_result.overlap_ratio <= kPreviewMaxOverlap;
 }
 
+ImportedPreviewKeyframeDecision decide_imported_preview_keyframe(
+    bool has_depth_prior,
+    const capture::FrameSelectionResult& sel_result,
+    bool has_last_selected,
+    const float current_pos[3],
+    const float current_fwd[3],
+    const float last_pos[3],
+    const float last_fwd[3]) noexcept {
+    ImportedPreviewKeyframeDecision decision{};
+    if (!has_depth_prior) {
+        decision.low_parallax = true;
+        return decision;
+    }
+    if (!has_last_selected) {
+        decision.accept = true;
+        return decision;
+    }
+
+    constexpr float kImportedOrbitMotionM = 0.010f;
+    constexpr float kImportedOrbitMotionRad = 0.045f;
+    constexpr float kImportedStrongMotionM = 0.016f;
+    constexpr float kImportedStrongMotionRad = 0.070f;
+    constexpr float kImportedGoodOverlap = 0.84f;
+    constexpr float kImportedDuplicateOverlap = 0.93f;
+
+    const float translation_m = translation_distance_m(current_pos, last_pos);
+    const float rotation_rad = angular_distance_rad(current_fwd, last_fwd);
+
+    decision.low_parallax =
+        translation_m < kImportedOrbitMotionM &&
+        rotation_rad < kImportedOrbitMotionRad;
+    decision.near_duplicate =
+        decision.low_parallax &&
+        sel_result.overlap_ratio >= kImportedDuplicateOverlap;
+
+    if (translation_m >= kImportedStrongMotionM ||
+        rotation_rad >= kImportedStrongMotionRad) {
+        decision.accept = true;
+        return decision;
+    }
+
+    if ((translation_m >= kImportedOrbitMotionM ||
+         rotation_rad >= kImportedOrbitMotionRad) &&
+        sel_result.overlap_ratio <= kImportedGoodOverlap) {
+        decision.accept = true;
+    }
+    return decision;
+}
+
 PreviewPrefilterDecision evaluate_preview_import_prefilter(
     float brightness,
     float blur,

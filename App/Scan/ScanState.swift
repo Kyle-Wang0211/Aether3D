@@ -205,7 +205,19 @@ public enum ScanState: String, Sendable {
 
     /// Core-owned render presentation policy for this scan state.
     public var renderPresentationPolicy: ScanRenderPresentationPolicy {
-        actionPlan(for: .presentation).renderPresentationPolicy
+        let policy = actionPlan(for: .presentation).renderPresentationPolicy
+        switch self {
+        case .initializing, .ready, .capturing, .paused, .finishing:
+            // Keep the live camera visible during all scan-stage states.
+            return ScanRenderPresentationPolicy(
+                forceBlackBackground: false,
+                overlayOpaque: false,
+                overlayClearAlpha: 0.0,
+                borderDepthMode: policy.borderDepthMode
+            )
+        case .completed, .failed:
+            return policy
+        }
     }
 
     /// Core-owned action plan (what to do); system layer executes bits (how to do).

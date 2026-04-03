@@ -2,8 +2,8 @@
 // LocalPreviewProductProfile.swift
 // Aether3D
 //
-// Product-facing local preview configuration extracted out of individual
-// runners so preview budget policy can evolve independently from shared UI
+// Product-facing local subject-first configuration extracted out of individual
+// runners so on-device budget policy can evolve independently from shared UI
 // orchestration and cloud routing.
 //
 
@@ -14,6 +14,8 @@ enum LocalPreviewWorkflowPhase: String, CaseIterable, Sendable {
     case depth
     case seed
     case refine
+    case cutout
+    case cleanup
     case export
 
     var title: String {
@@ -24,12 +26,20 @@ enum LocalPreviewWorkflowPhase: String, CaseIterable, Sendable {
             return "初始化高斯"
         case .refine:
             return "本地 refine"
+        case .cutout:
+            return "主体裁切"
+        case .cleanup:
+            return "边角清理"
         case .export:
-            return "导出预览"
+            return "导出结果"
         }
     }
 
     var progressBasis: String {
+        "local_subject_first_\(rawValue)"
+    }
+
+    var legacyProgressBasis: String {
         "local_preview_\(rawValue)"
     }
 
@@ -42,11 +52,15 @@ enum LocalPreviewWorkflowPhase: String, CaseIterable, Sendable {
         case .depth:
             return 0.08
         case .seed:
-            return 0.34
+            return 0.30
         case .refine:
-            return 0.58
+            return 0.52
+        case .cutout:
+            return 0.74
+        case .cleanup:
+            return 0.84
         case .export:
-            return 0.88
+            return 0.92
         }
     }
 
@@ -55,24 +69,32 @@ enum LocalPreviewWorkflowPhase: String, CaseIterable, Sendable {
         case .depth:
             return 0.18
         case .seed:
-            return 0.42
+            return 0.38
         case .refine:
-            return 0.72
+            return 0.64
+        case .cutout:
+            return 0.79
+        case .cleanup:
+            return 0.88
         case .export:
-            return 0.94
+            return 0.96
         }
     }
 
     var detailMessage: String {
         switch self {
         case .depth:
-            return "正在做多帧单目深度先验，先把可用于 preview 的几何线索补齐。"
+            return "正在做多帧单目深度先验，先把可用于本地结果生成的几何线索补齐。"
         case .seed:
             return "正在根据深度先验初始化高斯种子，筛掉不稳定和低质量 seed。"
         case .refine:
-            return "正在做有上限的本地 refine，只追求尽快得到一个能看的 preview。"
+            return "正在做有上限的本地 refine，只追求尽快得到一个能看的本地结果。"
+        case .cutout:
+            return "正在沿着主体主簇做显式 cutout，先把能看的主体边界站住。"
+        case .cleanup:
+            return "正在保守清理低覆盖碎边和浮空小块，同时尽量保住主体和接触面。"
         case .export:
-            return "本地训练已经收口，正在导出可交互预览结果。"
+            return "本地训练已经收口，正在导出可交互结果。"
         }
     }
 
@@ -120,31 +142,45 @@ struct DirectCaptureLocalPreviewBudget: Sendable {
 }
 
 enum LocalPreviewProductProfile {
-    static let previewMode = "monocular_ref_depth"
+    static let defaultPreviewMode = "monocular_ref_depth"
+    static let defaultSubjectFirstMode = "monocular_subject_first_result"
     static let depthPriorSource = "depthanything_v2_coreml"
     static let depthPriorTransport = "ref_depth"
     static let depthPriorProfile = "small_only_fast_preview"
 
+    static let subjectFirstCurrentDepthPrior = "video_depth_runtime_optional + dav2_temporal_consistency_fallback"
+    static let subjectFirstTargetDepthPrior = "video_depth_anything_v2"
+    static let subjectFirstCurrentBootstrap = "native_icp_repo_mvs_seed"
+    static let subjectFirstTargetBootstrap = "vggt_lite"
+
     static let importedVideoPoseBootstrap = "native_online_depth_bootstrap"
-    static let importedVideoKeyframeGate = "native_depth_backed_overlap_gate"
+    static let importedVideoKeyframeGate = "subject_first_strong_motion_gate"
     static let importedVideoSeedInitialization = "repo_mvs_initialize_primary + repo_dav2_fallback_prior"
     static let importedVideoPhotometricGate = "pr5_exposure_white_balance_consistency"
 
-    static let workflowPhases: [LocalPreviewWorkflowPhase] = LocalPreviewWorkflowPhase.allCases
+    private static func normalizedBackend(
+        _ processingBackend: ProcessingBackendChoice
+    ) -> ProcessingBackendChoice {
+        processingBackend == .localPreview ? .localSubjectFirst : processingBackend
+    }
 
     static func phase(
         for progressBasis: String?,
-        phaseName: String?
+        phaseName: String?,
+        processingBackend: ProcessingBackendChoice = .localSubjectFirst
     ) -> LocalPreviewWorkflowPhase? {
         if let phaseName {
             let normalized = phaseName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if let phase = LocalPreviewWorkflowPhase(rawValue: normalized) {
+            if let phase = LocalPreviewWorkflowPhase(rawValue: normalized),
+               workflowPhases(for: processingBackend).contains(phase) {
                 return phase
             }
         }
         if let progressBasis {
             let normalized = progressBasis.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return workflowPhases.first(where: { $0.progressBasis == normalized })
+            return workflowPhases(for: processingBackend).first(where: {
+                $0.progressBasis == normalized || $0.legacyProgressBasis == normalized
+            })
         }
         return nil
     }
@@ -152,16 +188,83 @@ enum LocalPreviewProductProfile {
     static func makePhaseUpdate(
         phase: LocalPreviewWorkflowPhase,
         runtimeMetrics: [String: String],
+        processingBackend: ProcessingBackendChoice = .localSubjectFirst,
         progressFraction: Double? = nil,
         detailOverride: String? = nil
     ) -> LocalPreviewPhaseUpdate {
         LocalPreviewPhaseUpdate(
             phase: phase,
-            progressFraction: progressFraction ?? phase.defaultActiveFraction,
+            progressFraction: progressFraction ?? defaultActiveFraction(for: phase, processingBackend: processingBackend),
             title: phase.title,
             detail: detailOverride ?? phase.detailMessage,
             runtimeMetrics: runtimeMetrics
         )
+    }
+
+    static func workflowPhases(
+        for processingBackend: ProcessingBackendChoice
+    ) -> [LocalPreviewWorkflowPhase] {
+        switch normalizedBackend(processingBackend) {
+        case .cloud:
+            return [.depth, .seed, .refine, .export]
+        case .localSubjectFirst:
+            return [.depth, .seed, .refine, .cutout, .cleanup, .export]
+        case .localPreview:
+            return [.depth, .seed, .refine, .cutout, .cleanup, .export]
+        }
+    }
+
+    static func previewMode(
+        for processingBackend: ProcessingBackendChoice
+    ) -> String {
+        switch normalizedBackend(processingBackend) {
+        case .cloud:
+            return defaultPreviewMode
+        case .localSubjectFirst:
+            return defaultSubjectFirstMode
+        case .localPreview:
+            return defaultSubjectFirstMode
+        }
+    }
+
+    static func defaultActiveFraction(
+        for phase: LocalPreviewWorkflowPhase,
+        processingBackend: ProcessingBackendChoice
+    ) -> Double {
+        switch normalizedBackend(processingBackend) {
+        case .localSubjectFirst:
+            return phase.defaultActiveFraction
+        case .cloud:
+            switch phase {
+            case .depth:
+                return 0.18
+            case .seed:
+                return 0.42
+            case .refine:
+                return 0.72
+            case .export:
+                return 0.94
+            case .cutout, .cleanup:
+                return 0.94
+            }
+        case .localPreview:
+            return phase.defaultActiveFraction
+        }
+    }
+
+    static func nextPhaseStartFraction(
+        after phase: LocalPreviewWorkflowPhase,
+        processingBackend: ProcessingBackendChoice
+    ) -> Double {
+        let phases = workflowPhases(for: processingBackend)
+        guard let index = phases.firstIndex(of: phase) else {
+            return 0.99
+        }
+        let nextIndex = phases.index(after: index)
+        guard nextIndex < phases.endIndex else {
+            return 0.99
+        }
+        return phases[nextIndex].startFraction
     }
 
     static func directCaptureSourceKind(sourceVideoRelativePath: String?) -> String {

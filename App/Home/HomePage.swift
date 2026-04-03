@@ -29,15 +29,19 @@ import CoreTransferable
 
 #if canImport(SwiftUI)
 struct HomePage: View {
+    private enum HomeLanguage: String {
+        case zh
+        case en
+    }
+
     @StateObject private var viewModel = HomeViewModel()
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(FrameSamplingProfile.userDefaultsKey) private var selectedFrameSamplingProfileRaw = FrameSamplingProfile.full.rawValue
     @AppStorage(ProcessingBackendChoice.userDefaultsKey) private var selectedProcessingBackendRaw = ProcessingBackendChoice.cloud.rawValue
+    @AppStorage("aether.homeLanguage") private var homeLanguageRaw = HomeLanguage.zh.rawValue
     @State private var navigateToScan = false
-    @State private var scanDestinationFactory: (() -> AnyView)?
     @State private var selectedRecord: ScanRecord?
     @State private var showViewer = false
-    @State private var hasResetLaunchPresentationState = false
 
     #if canImport(PhotosUI)
     @State private var selectedVideoItem: PhotosPickerItem?
@@ -53,7 +57,30 @@ struct HomePage: View {
     }
 
     private var selectedProcessingBackend: ProcessingBackendChoice {
-        ProcessingBackendChoice(rawValue: selectedProcessingBackendRaw) ?? .cloud
+        switch ProcessingBackendChoice(rawValue: selectedProcessingBackendRaw) {
+        case .localPreview:
+            return .localSubjectFirst
+        case let backend?:
+            return backend
+        case nil:
+            return .cloud
+        }
+    }
+
+    private var effectiveSelectedProcessingBackend: ProcessingBackendChoice {
+        selectedProcessingBackend
+    }
+
+    private var displayedProcessingBackends: [ProcessingBackendChoice] {
+        [.cloud, .localSubjectFirst]
+    }
+
+    private var homeLanguage: HomeLanguage {
+        HomeLanguage(rawValue: homeLanguageRaw) ?? .zh
+    }
+
+    private var useEnglish: Bool {
+        homeLanguage == .en
     }
 
     var body: some View {
@@ -62,25 +89,23 @@ struct HomePage: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    heroSection
-
                     if let errorMessage = viewModel.errorMessage, !errorMessage.isEmpty {
                         infoBanner(
-                            title: "刚才没有成功",
+                            title: t("刚才没有成功", "That Just Failed"),
                             detail: errorMessage,
                             tint: .red
                         )
                     }
 
                     if !viewModel.processingRecords.isEmpty {
-                        sectionTitle("处理中")
+                        sectionTitle(t("处理中", "In Progress"))
                         recordGrid(viewModel.processingRecords)
                     }
 
                     if !viewModel.cancelledRecords.isEmpty {
                         sectionHeader(
-                            title: "已取消，可重发",
-                            detail: "这些任务已经停下来了，原始视频仍保留在手机里，随时可以按原处理方案重新发起。",
+                            title: t("已取消，可重发", "Cancelled, Ready to Resend"),
+                            detail: t("这些任务已经停下来了，原始视频仍保留在手机里，随时可以按原处理方案重新发起。", "These jobs have stopped. The original videos are still on your phone, so you can resend them with the same processing setup at any time."),
                             tint: .orange
                         )
                         recordGrid(viewModel.cancelledRecords)
@@ -88,15 +113,15 @@ struct HomePage: View {
 
                     if !viewModel.failedRecords.isEmpty {
                         sectionHeader(
-                            title: "需要你处理",
-                            detail: "这些任务没有拿到可用结果。你可以点开查看原因，再决定重试还是删除。",
+                            title: t("需要你处理", "Needs Attention"),
+                            detail: t("这些任务没有拿到可用结果。你可以点开查看原因，再决定重试还是删除。", "These jobs did not produce a usable result. Open them to review the reason, then decide whether to retry or delete."),
                             tint: .red
                         )
                         recordGrid(viewModel.failedRecords)
                     }
 
                     if !viewModel.completedRecords.isEmpty {
-                        sectionTitle("已完成作品")
+                        sectionTitle(t("已完成作品", "Completed Results"))
                         recordGrid(viewModel.completedRecords)
                     }
 
@@ -110,11 +135,11 @@ struct HomePage: View {
             }
 
             if viewModel.isLoading {
-                loadingOverlay(title: "正在加载作品", detail: "请稍候...")
+                loadingOverlay(title: t("正在加载作品", "Loading Results"), detail: t("请稍候...", "Please wait..."))
             }
 
             if viewModel.isImportingVideo, let busyMessage = viewModel.busyMessage {
-                loadingOverlay(title: busyMessage, detail: "这一步完成后会自动进入等待页。")
+                loadingOverlay(title: busyMessage, detail: t("这一步完成后会自动进入等待页。", "You will enter the waiting screen automatically after this step finishes."))
             }
 
             VStack {
@@ -126,13 +151,14 @@ struct HomePage: View {
         .navigationTitle("Aether3D")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                languageToggleButton
+            }
+        }
         .onAppear {
-            if !hasResetLaunchPresentationState {
-                hasResetLaunchPresentationState = true
-                navigateToScan = false
-                scanDestinationFactory = nil
-                selectedRecord = nil
-                showViewer = false
+            if selectedProcessingBackendRaw == ProcessingBackendChoice.localPreview.rawValue {
+                selectedProcessingBackendRaw = ProcessingBackendChoice.localSubjectFirst.rawValue
             }
             viewModel.loadRecords()
         }
@@ -144,19 +170,20 @@ struct HomePage: View {
         .fullScreenCover(
             isPresented: $navigateToScan,
             onDismiss: {
-                scanDestinationFactory = nil
                 viewModel.loadRecords()
             }
         ) {
-            if let scanDestinationFactory {
-                scanDestinationFactory()
-            } else {
-                EmptyView()
-            }
+            ScanView(processingBackend: effectiveSelectedProcessingBackend)
         }
         #endif
         #if canImport(UIKit) && canImport(Metal)
-        .navigationDestination(isPresented: $showViewer) {
+        .fullScreenCover(
+            isPresented: $showViewer,
+            onDismiss: {
+                viewModel.loadRecords()
+                selectedRecord = nil
+            }
+        ) {
             if let record = selectedRecord {
                 SplatViewerView(
                     record: record,
@@ -167,6 +194,8 @@ struct HomePage: View {
                         showViewer = false
                     }
                 )
+            } else {
+                EmptyView()
             }
         }
         #endif
@@ -176,7 +205,7 @@ struct HomePage: View {
             Task {
                 await MainActor.run {
                     viewModel.errorMessage = nil
-                    viewModel.busyMessage = "正在读取相册视频（大视频可能需要几分钟）..."
+                    viewModel.busyMessage = t("正在读取相册视频（大视频可能需要几分钟）...", "Reading the video from Photos (large files may take a few minutes)...")
                     viewModel.isImportingVideo = true
                     selectedRecord = nil
                     showViewer = false
@@ -196,11 +225,11 @@ struct HomePage: View {
                     }
                     guard let record = await viewModel.importVideo(
                         at: movieURL,
-                        processingBackend: selectedProcessingBackend
+                        processingBackend: effectiveSelectedProcessingBackend
                     ) else {
                         await MainActor.run {
                             if viewModel.errorMessage?.isEmpty != false {
-                                viewModel.errorMessage = "相册视频已经选中，但没有成功进入上传流程，请再试一次。"
+                                viewModel.errorMessage = t("相册视频已经选中，但没有成功进入上传流程，请再试一次。", "The video was selected, but it did not enter the upload flow successfully. Please try again.")
                             }
                         }
                         return
@@ -216,7 +245,7 @@ struct HomePage: View {
                     }
                 } catch {
                     await MainActor.run {
-                        viewModel.errorMessage = "相册视频读取失败：\(Self.importErrorDescription(error))"
+                        viewModel.errorMessage = "\(t("相册视频读取失败", "Failed to read the selected video")): \(Self.importErrorDescription(error))"
                         viewModel.busyMessage = nil
                         viewModel.isImportingVideo = false
                     }
@@ -224,37 +253,6 @@ struct HomePage: View {
             }
         }
         #endif
-    }
-
-    private var heroSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("极简白盒闭环")
-                .font(.system(size: 28, weight: .bold))
-                .foregroundColor(.white)
-
-            Text("从手机拍摄与审核开始，把视频送到丹麦 5090 训练，再把 3DGS 自动回传到本地查看。")
-                .font(.system(size: 14))
-                .foregroundColor(.white.opacity(0.72))
-
-            HStack(spacing: 10) {
-                tag("手机拍摄")
-                tag("实时审核")
-                tag("丹麦 5090")
-                tag("3DGS 查看")
-            }
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 24)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.08), Color.white.opacity(0.03)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        )
     }
 
     private func sectionTitle(_ title: String) -> some View {
@@ -288,7 +286,8 @@ struct HomePage: View {
             ForEach(records) { record in
                 ScanRecordCell(
                     record: record,
-                    relativeTime: viewModel.relativeTimeString(for: record.updatedAt)
+                    relativeTime: localizedRelativeTimeString(for: record.updatedAt),
+                    useEnglish: useEnglish
                 )
                 .onTapGesture {
                     if record.canOpenStatusView {
@@ -301,7 +300,7 @@ struct HomePage: View {
                         Button(role: .destructive) {
                             viewModel.cancelRemoteRecord(record)
                         } label: {
-                            Label("取消远端任务", systemImage: "xmark.circle")
+                            Label(t("取消远端任务", "Cancel Remote Job"), systemImage: "xmark.circle")
                         }
                     }
 
@@ -310,9 +309,9 @@ struct HomePage: View {
                             viewModel.retryRecord(record)
                         } label: {
                             Label(
-                                record.resolvedProcessingBackend == .localPreview
-                                    ? "重新运行本地快速预览"
-                                    : "重试远端",
+                                record.resolvedProcessingBackend.usesLocalPreviewPipeline
+                                    ? t("重新运行本地处理", "Run Local Processing Again")
+                                    : t("重试远端", "Retry Remote"),
                                 systemImage: "arrow.clockwise"
                             )
                         }
@@ -323,9 +322,9 @@ struct HomePage: View {
                             viewModel.retryRecord(record)
                         } label: {
                             Label(
-                                record.resolvedProcessingBackend == .localPreview
-                                    ? "重新运行本地快速预览"
-                                    : "重新发送到丹麦 5090",
+                                record.resolvedProcessingBackend.usesLocalPreviewPipeline
+                                    ? t("重新运行本地处理", "Run Local Processing Again")
+                                    : t("重新发送到丹麦 5090", "Resend to Denmark 5090"),
                                 systemImage: "arrow.clockwise"
                             )
                         }
@@ -334,7 +333,7 @@ struct HomePage: View {
                     Button(role: .destructive) {
                         viewModel.deleteRecord(record)
                     } label: {
-                        Label("删除", systemImage: "trash")
+                        Label(t("删除", "Delete"), systemImage: "trash")
                     }
                 }
             }
@@ -347,11 +346,11 @@ struct HomePage: View {
                 .font(.system(size: 64))
                 .foregroundColor(.gray)
 
-            Text("尚无扫描作品")
+            Text(t("尚无扫描作品", "No Scans Yet"))
                 .font(.system(size: 17))
                 .foregroundColor(.gray)
 
-            Text("你可以直接拍摄，也可以先选一个已有视频，按云端高质量或本地快速预览两条方案处理。")
+            Text(t("你可以直接拍摄，也可以先选一个已有视频，按远端高质量或本地处理两条方案处理。", "You can start recording right away, or choose an existing video and process it with either remote high quality or local processing."))
                 .font(.system(size: 13))
                 .multilineTextAlignment(.center)
                 .foregroundColor(.white.opacity(0.52))
@@ -365,15 +364,19 @@ struct HomePage: View {
         VStack(spacing: 12) {
             if !viewModel.processingRecords.isEmpty {
                 infoBanner(
-                    title: "远端任务正在进行",
-                    detail: "处理中的作品可以随时点开查看等待页，也可以稍后回来继续。",
+                    title: t("远端任务正在进行", "Remote Jobs Are Running"),
+                    detail: t("处理中的作品可以随时点开查看等待页，也可以稍后回来继续。", "You can open any in-progress result to view its waiting screen, or come back later and continue."),
                     tint: .cyan
                 )
             }
 
             processingBackendCard
 
-            frameSamplingProfileCard
+            if effectiveSelectedProcessingBackend == .cloud {
+                frameSamplingProfileCard
+            } else {
+                localProcessingProfileCard
+            }
 
             HStack(spacing: 12) {
                 secondaryActionButton
@@ -397,12 +400,9 @@ struct HomePage: View {
             #if canImport(UIKit)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             #endif
-            #if canImport(ARKit)
-            scanDestinationFactory = { AnyView(ScanView()) }
-            #endif
             navigateToScan = true
         }) {
-            Text("开始拍摄")
+            Text(t("开始拍摄", "Start Capture"))
                 .font(.system(size: 17, weight: .bold))
                 .foregroundColor(.black)
                 .frame(maxWidth: .infinity)
@@ -415,10 +415,10 @@ struct HomePage: View {
 
     private var frameSamplingProfileCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("训练速度方案")
+            Text(t("训练速度方案", "Training Speed"))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(.white)
-            Text("全量保质量，半量和三分之一用更少的输入帧换更短的总耗时。拍摄和相册导入都会走这里的选择。")
+            Text(t("全量保质量，半量和三分之一用更少的输入帧换更短的总耗时。拍摄和相册导入都会走这里的选择。", "Full keeps the highest quality. Half and one-third trade fewer input frames for shorter total runtime. Both capture and photo import use the selection here."))
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.60))
 
@@ -441,17 +441,57 @@ struct HomePage: View {
         .padding(.horizontal, 16)
     }
 
-    private var processingBackendCard: some View {
+    private var localProcessingProfileCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("处理方案")
+            Text(t("本地处理节奏", "Local Processing Profile"))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(.white)
-            Text("云端高质量会继续走当前成功链。本地快速预览现在支持直接拍摄和相册导入，优先给出单目 preview；复杂场景仍建议优先选云端。")
+            Text(t("本地方案固定走手机本地链路：拍摄时保留轻量点图反馈，拍完后再做深度先验、高斯初始化、本地 refine、cutout 和保守 cleanup。这里不再提供远端那组三档速度。", "The local route always uses the on-device pipeline: lightweight pointmap feedback during capture, then depth prior, Gaussian initialization, local refine, cutout, and conservative cleanup after capture. The cloud speed presets do not apply here."))
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.60))
 
             HStack(spacing: 10) {
-                ForEach(ProcessingBackendChoice.allCases, id: \.rawValue) { backend in
+                fixedLocalInfoChip(
+                    title: t("关键帧预算", "Keyframe Budget"),
+                    value: t("60-120 张", "60-120 frames"),
+                    tint: .green
+                )
+                fixedLocalInfoChip(
+                    title: t("处理方式", "Pipeline"),
+                    value: t("本地链路", "On-Device"),
+                    tint: .cyan
+                )
+                fixedLocalInfoChip(
+                    title: t("速度档位", "Speed Preset"),
+                    value: t("固定一档", "Single Fixed Tier"),
+                    tint: .white
+                )
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 16)
+    }
+
+    private var processingBackendCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(t("处理方案", "Processing Mode"))
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+            Text(t("这里只有两条主路线：远端高质量和本地处理。本地方案就是手机本地链路。", "There are only two main routes here: remote high quality and local processing. The local route is simply the on-device pipeline."))
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.60))
+
+            HStack(spacing: 10) {
+                ForEach(displayedProcessingBackends, id: \.rawValue) { backend in
                     processingBackendButton(backend)
                 }
             }
@@ -470,14 +510,14 @@ struct HomePage: View {
     }
 
     private func processingBackendButton(_ backend: ProcessingBackendChoice) -> some View {
-        let isSelected = selectedProcessingBackend == backend
+        let isSelected = effectiveSelectedProcessingBackend == backend
         return Button {
             selectedProcessingBackendRaw = backend.rawValue
         } label: {
             VStack(spacing: 4) {
-                Text(backend.title)
+                Text(processingBackendTitle(backend))
                     .font(.system(size: 15, weight: .bold))
-                Text(backend.detail)
+                Text(processingBackendDetail(backend))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(isSelected ? Color.black.opacity(0.70) : Color.white.opacity(0.58))
             }
@@ -494,15 +534,39 @@ struct HomePage: View {
         .buttonStyle(ScaleButtonStyle())
     }
 
+    private func fixedLocalInfoChip(title: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white.opacity(0.55))
+            Text(value)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(tint.opacity(0.14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(tint.opacity(0.22), lineWidth: 1)
+                )
+        )
+    }
+
     private func frameSamplingProfileButton(_ profile: FrameSamplingProfile) -> some View {
         let isSelected = selectedFrameSamplingProfile == profile
         return Button {
             selectedFrameSamplingProfileRaw = profile.rawValue
         } label: {
             VStack(spacing: 4) {
-                Text(profile.title)
+                Text(frameSamplingProfileTitle(profile))
                     .font(.system(size: 15, weight: .bold))
-                Text(profile.detail)
+                Text(frameSamplingProfileDetail(profile))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(isSelected ? Color.black.opacity(0.70) : Color.white.opacity(0.58))
             }
@@ -529,7 +593,7 @@ struct HomePage: View {
             ) {
                 HStack(spacing: 8) {
                     Image(systemName: "film")
-                    Text("选择视频")
+                    Text(t("选择视频", "Choose Video"))
                 }
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white)
@@ -546,7 +610,7 @@ struct HomePage: View {
             Button(action: {}) {
                 HStack(spacing: 8) {
                     Image(systemName: "film")
-                    Text("选择视频")
+                    Text(t("选择视频", "Choose Video"))
                 }
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white.opacity(0.45))
@@ -612,18 +676,104 @@ struct HomePage: View {
         }
     }
 
-    private func tag(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(.white.opacity(0.78))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.white.opacity(0.06))
-            .cornerRadius(999)
-    }
 }
 
 private extension HomePage {
+    var languageToggleButton: some View {
+        Button {
+            homeLanguageRaw = useEnglish ? HomeLanguage.zh.rawValue : HomeLanguage.en.rawValue
+        } label: {
+            Text("中/A")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(
+                    Capsule()
+                        .fill(Color.white.opacity(0.10))
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(t("切换中英文", "Switch Language"))
+    }
+
+    func t(_ zh: String, _ en: String) -> String {
+        useEnglish ? en : zh
+    }
+
+    func localizedRelativeTimeString(for date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: useEnglish ? "en_US" : "zh_CN")
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    func frameSamplingProfileTitle(_ profile: FrameSamplingProfile) -> String {
+        if !useEnglish {
+            return profile.title
+        }
+        switch profile {
+        case .full:
+            return "Full"
+        case .half:
+            return "1/2"
+        case .third:
+            return "1/3"
+        }
+    }
+
+    func frameSamplingProfileDetail(_ profile: FrameSamplingProfile) -> String {
+        if !useEnglish {
+            return profile.detail
+        }
+        switch profile {
+        case .full:
+            return "200 frames"
+        case .half:
+            return "100 frames"
+        case .third:
+            return "67 frames"
+        }
+    }
+
+    func processingBackendTitle(_ backend: ProcessingBackendChoice) -> String {
+        if !useEnglish {
+            switch backend {
+            case .cloud:
+                return "远端"
+            case .localPreview, .localSubjectFirst:
+                return "本地"
+            }
+        }
+        switch backend {
+        case .cloud:
+            return "Remote"
+        case .localPreview, .localSubjectFirst:
+            return "Local"
+        }
+    }
+
+    func processingBackendDetail(_ backend: ProcessingBackendChoice) -> String {
+        if !useEnglish {
+            switch backend {
+            case .cloud:
+                return "高质量"
+            case .localPreview, .localSubjectFirst:
+                return "本地处理"
+            }
+        }
+        switch backend {
+        case .cloud:
+            return "High Quality"
+        case .localPreview, .localSubjectFirst:
+            return "Local Processing"
+        }
+    }
+
     static func importErrorDescription(_ error: Error) -> String {
         let nsError = error as NSError
         let message = nsError.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)

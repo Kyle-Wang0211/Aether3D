@@ -26,6 +26,7 @@ public final class ScanRecordStore {
 
     private let baseDirectory: URL
     private let jsonFileURL: URL
+    private let backupFileURL: URL
     private let thumbnailsDirectory: URL
     private let exportsDirectory: URL
     private let importsDirectory: URL
@@ -37,6 +38,7 @@ public final class ScanRecordStore {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         self.baseDirectory = documents.appendingPathComponent("Aether3D")
         self.jsonFileURL = baseDirectory.appendingPathComponent("scans.json")
+        self.backupFileURL = baseDirectory.appendingPathComponent("scans.json.bak")
         self.thumbnailsDirectory = baseDirectory.appendingPathComponent("thumbnails")
         self.exportsDirectory = baseDirectory.appendingPathComponent("exports")
         self.importsDirectory = baseDirectory.appendingPathComponent("imports")
@@ -57,22 +59,14 @@ public final class ScanRecordStore {
                 return cachedRecords
             }
 
-            guard FileManager.default.fileExists(atPath: jsonFileURL.path) else {
-                let recoveredRecords = normalizedLoadedRecords(recoverRecordsFromFilesystem())
-                cachedRecords = recoveredRecords
-                return recoveredRecords
-            }
-
-            do {
-                let data = try Data(contentsOf: jsonFileURL)
-                let records = normalizedLoadedRecords(try decodeRecords(from: data))
+            if let records = loadRecordsFromPrimaryOrBackup() {
                 cachedRecords = records
                 return records
-            } catch {
-                let recoveredRecords = normalizedLoadedRecords(recoverRecordsFromFilesystem())
-                cachedRecords = recoveredRecords
-                return recoveredRecords
             }
+
+            let recoveredRecords = normalizedLoadedRecords(recoverRecordsFromFilesystem())
+            cachedRecords = recoveredRecords
+            return recoveredRecords
         }
     }
 
@@ -281,7 +275,9 @@ public final class ScanRecordStore {
                 let normalizedIncomingStageKey = remoteStageKey?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .lowercased()
-                let isIncomingLocalPreview = normalizedIncomingStageKey == "local_preview"
+                let isIncomingLocalPreview =
+                    normalizedIncomingStageKey == "local_preview" ||
+                    normalizedIncomingStageKey == "local_subject_first"
                 let incomingIsAuthoritativeRemoteRuntime = Self.shouldTrustIncomingRemoteRuntime(
                     incomingStatus: status,
                     progressBasis: progressBasis,
@@ -714,12 +710,38 @@ public final class ScanRecordStore {
     }
 
     private func loadRecordsUnsafe() -> [ScanRecord] {
-        guard FileManager.default.fileExists(atPath: jsonFileURL.path) else { return normalizedLoadedRecords(recoverRecordsFromFilesystem()) }
+        if let records = loadRecordsFromPrimaryOrBackup() {
+            return records
+        }
+        return normalizedLoadedRecords(recoverRecordsFromFilesystem())
+    }
+
+    private func loadRecordsFromPrimaryOrBackup() -> [ScanRecord]? {
+        if let primary = loadRecords(from: jsonFileURL) {
+            return primary
+        }
+
+        guard let backup = loadRecords(from: backupFileURL) else {
+            return nil
+        }
+
+        // Restore the primary index from the last known-good backup before we
+        // fall back to filesystem salvage, so an interrupted local write does
+        // not silently downgrade active local work into a cancelled record.
+        writeRecordsToDisk(backup)
+        return backup
+    }
+
+    private func loadRecords(from fileURL: URL) -> [ScanRecord]? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return nil
+        }
+
         do {
-            let data = try Data(contentsOf: jsonFileURL)
+            let data = try Data(contentsOf: fileURL)
             return normalizedLoadedRecords(try decodeRecords(from: data))
         } catch {
-            return normalizedLoadedRecords(recoverRecordsFromFilesystem())
+            return nil
         }
     }
 
@@ -762,13 +784,8 @@ public final class ScanRecordStore {
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(records)
-            let tempURL = jsonFileURL.appendingPathExtension("tmp")
-            try data.write(to: tempURL, options: [.atomic])
-
-            if FileManager.default.fileExists(atPath: jsonFileURL.path) {
-                try FileManager.default.removeItem(at: jsonFileURL)
-            }
-            try FileManager.default.moveItem(at: tempURL, to: jsonFileURL)
+            try data.write(to: jsonFileURL, options: [.atomic])
+            try data.write(to: backupFileURL, options: [.atomic])
         } catch {
             // Ignore write failures to avoid blocking the capture loop.
         }

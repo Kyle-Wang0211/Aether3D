@@ -84,6 +84,11 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
     }
     
     private func configureInternal(orientation: AVCaptureVideoOrientation) throws {
+        try ensureAuthorizedVideoAccess()
+        try configureGraph(orientation: orientation)
+    }
+
+    private func ensureAuthorizedVideoAccess() throws {
         // CI-HARDENED: No dispatchPrecondition() - use log for debugging if needed
         // Queue validation is handled by sessionQueue.sync/async boundaries
         
@@ -99,6 +104,9 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         @unknown default:
             throw RecordingError.configurationFailed(.permissionNotDetermined)
         }
+    }
+
+    private func configureGraph(orientation: AVCaptureVideoOrientation) throws {
         
         // Find camera device
         let discoverySession = AVCaptureDevice.DiscoverySession(
@@ -113,48 +121,14 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         
         videoDevice = device
         
-        // Select format using two-phase algorithm
-        let selectedFormat = try selectFormat(device: device)
-        
-        // Lock device for configuration
-        try device.lockForConfiguration()
-        defer { device.unlockForConfiguration() }
-        
-        device.activeFormat = selectedFormat.format
-        device.activeVideoMinFrameDuration = selectedFormat.frameDuration
-        
-        // Determine codec
-        let codec: VideoCodec
-        if selectedFormat.format.isVideoCodecSupported(.hevc) {
-            codec = .hevc
-        } else {
-            codec = .h264
-        }
-        
-        // Determine tier
-        let tier = determineTier(width: Int(selectedFormat.format.formatDescription.dimensions.width),
-                                  height: Int(selectedFormat.format.formatDescription.dimensions.height))
-        
-        // Create selected config
-        selectedConfig = SelectedCaptureConfig(
-            dimensions: VideoDimensions(
-                width: Int(selectedFormat.format.formatDescription.dimensions.width),
-                height: Int(selectedFormat.format.formatDescription.dimensions.height)
-            ),
-            tier: tier,
-            frameRate: selectedFormat.targetFps,
-            hdrCapable: selectedFormat.format.isVideoHDRSupported,
-            isVirtualDevice: device.isVirtualDevice,
-            formatScore: selectedFormat.score,
-            codec: codec
-        )
-        
         captureSession.beginConfiguration()
         defer { captureSession.commitConfiguration() }
 
         if !isSessionGraphReusable(for: device) {
             try rebuildSessionGraph(for: device)
         }
+
+        try applyFullQualityFormatSelection(to: device)
 
         // Verify no audio input
         for input in captureSession.inputs {
@@ -174,7 +148,37 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
             connection.videoOrientation = orientation
         }
         
-        // Setup focus and exposure
+        try applyFocusAndExposureConfiguration(to: device)
+    }
+
+    private func applyFullQualityFormatSelection(to device: AVCaptureDevice) throws {
+        let selectedFormat = try selectFormat(device: device)
+
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+
+        device.activeFormat = selectedFormat.format
+        device.activeVideoMinFrameDuration = selectedFormat.frameDuration
+
+        let codec: VideoCodec = selectedFormat.format.isVideoCodecSupported(.hevc) ? .hevc : .h264
+        let dimensions = selectedFormat.format.formatDescription.dimensions
+        let tier = determineTier(width: Int(dimensions.width), height: Int(dimensions.height))
+
+        selectedConfig = SelectedCaptureConfig(
+            dimensions: VideoDimensions(width: Int(dimensions.width), height: Int(dimensions.height)),
+            tier: tier,
+            frameRate: selectedFormat.targetFps,
+            hdrCapable: selectedFormat.format.isVideoHDRSupported,
+            isVirtualDevice: device.isVirtualDevice,
+            formatScore: selectedFormat.score,
+            codec: codec
+        )
+    }
+
+    private func applyFocusAndExposureConfiguration(to device: AVCaptureDevice) throws {
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+
         if device.isFocusModeSupported(.continuousAutoFocus) {
             device.focusMode = .continuousAutoFocus
         }
@@ -184,7 +188,18 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
     }
 
     private func isSessionGraphReusable(for device: AVCaptureDevice) -> Bool {
-        guard let videoInput, let movieOutput else {
+        guard let videoInput else {
+            return false
+        }
+
+        guard let movieOutput else {
+            return false
+        }
+
+        let hasInstalledOutput = captureSession.outputs.contains { output in
+            output === movieOutput
+        }
+        guard hasInstalledOutput else {
             return false
         }
 
@@ -195,10 +210,7 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         let hasInstalledInput = captureSession.inputs.contains { input in
             (input as? AVCaptureDeviceInput)?.device.uniqueID == device.uniqueID
         }
-        let hasInstalledOutput = captureSession.outputs.contains { output in
-            output === movieOutput
-        }
-        return hasInstalledInput && hasInstalledOutput
+        return hasInstalledInput
     }
 
     private func rebuildSessionGraph(for device: AVCaptureDevice) throws {
@@ -208,6 +220,7 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         for output in captureSession.outputs {
             captureSession.removeOutput(output)
         }
+        movieOutput = nil
 
         let input = try AVCaptureDeviceInput(device: device)
         guard captureSession.canAddInput(input) else {

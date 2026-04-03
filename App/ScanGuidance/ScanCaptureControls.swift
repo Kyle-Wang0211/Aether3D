@@ -15,17 +15,23 @@ import SwiftUI
 #if canImport(SwiftUI)
 public struct ScanCaptureControls: View {
     let isCapturing: Bool
+    let modeTitle: String?
+    let helperText: String?
     let onStart: () -> Void
     let onStop: () -> Void
     let onPause: () -> Void
 
     public init(
         isCapturing: Bool = false,
+        modeTitle: String? = nil,
+        helperText: String? = nil,
         onStart: @escaping () -> Void,
         onStop: @escaping () -> Void,
         onPause: @escaping () -> Void
     ) {
         self.isCapturing = isCapturing
+        self.modeTitle = modeTitle
+        self.helperText = helperText
         self.onStart = onStart
         self.onStop = onStop
         self.onPause = onPause
@@ -33,6 +39,23 @@ public struct ScanCaptureControls: View {
 
     public var body: some View {
         VStack(spacing: 14) {
+            if modeTitle != nil || helperText != nil {
+                VStack(spacing: 4) {
+                    if let modeTitle, !modeTitle.isEmpty {
+                        Text(modeTitle)
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+                    if let helperText, !helperText.isEmpty {
+                        Text(helperText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white.opacity(0.60))
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding(.horizontal, 14)
+            }
+
             if isCapturing {
                 HStack(spacing: 14) {
                     secondaryButton(
