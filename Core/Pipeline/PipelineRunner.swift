@@ -782,7 +782,7 @@ public final class PipelineRunner: @unchecked Sendable {
                 : (backend == .brokeredBackgroundUpload ? "正在上传到后台对象存储" : "正在上传到丹麦 5090")
             eta = remoteProgress.etaMinutes
         case .localFallback:
-            title = preferredRemoteTitle?.isEmpty == false ? preferredRemoteTitle! : "远端不可用，正在本地兜底"
+            title = preferredRemoteTitle?.isEmpty == false ? preferredRemoteTitle! : "远端不可用，正在切到本地处理"
             eta = remoteProgress.etaMinutes
         case .failed:
             title = preferredRemoteTitle?.isEmpty == false ? preferredRemoteTitle! : "远端生成失败"

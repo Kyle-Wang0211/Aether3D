@@ -377,14 +377,6 @@ int aether_pipeline_coordinator_export_ply(
     return static_cast<int>(status);
 }
 
-int aether_pipeline_coordinator_export_point_cloud_ply(
-    aether_pipeline_coordinator_t* coordinator,
-    const char* path) {
-    if (!coordinator || !coordinator->coordinator || !path) return -1;
-    auto status = coordinator->coordinator->export_point_cloud_ply(path);
-    return static_cast<int>(status);
-}
-
 size_t aether_pipeline_coordinator_copy_surface_points_xyz(
     aether_pipeline_coordinator_t* coordinator,
     float* out_xyz,
@@ -393,16 +385,6 @@ size_t aether_pipeline_coordinator_copy_surface_points_xyz(
         return 0;
     }
     return coordinator->coordinator->copy_surface_points_xyz(out_xyz, max_points);
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Viewer Entry Signal
-// ═══════════════════════════════════════════════════════════════════════
-
-void aether_pipeline_coordinator_signal_viewer_entered(
-    aether_pipeline_coordinator_t* coordinator) {
-    if (!coordinator || !coordinator->coordinator) return;
-    coordinator->coordinator->signal_viewer_entered();
 }
 
 }  // extern "C"

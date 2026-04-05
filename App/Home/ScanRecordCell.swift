@@ -21,15 +21,34 @@ import UIKit
 #endif
 
 #if canImport(UIKit) && canImport(AVFoundation)
-private func makeSourceVideoThumbnailJPEGData(for url: URL) -> Data? {
+private func makeSourceVideoThumbnailJPEGData(for url: URL) async -> Data? {
     let asset = AVURLAsset(url: url)
     let generator = AVAssetImageGenerator(asset: asset)
     generator.appliesPreferredTrackTransform = true
     generator.maximumSize = CGSize(width: 960, height: 960)
-    guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+    do {
+        let cgImage = try await generateThumbnailImage(generator: generator, time: .zero)
+        return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.82)
+    } catch {
         return nil
     }
-    return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.82)
+}
+#endif
+
+#if canImport(UIKit) && canImport(AVFoundation)
+private func generateThumbnailImage(
+    generator: AVAssetImageGenerator,
+    time: CMTime
+) async throws -> CGImage {
+    try await withCheckedThrowingContinuation { continuation in
+        generator.generateCGImageAsynchronously(for: time) { image, _, error in
+            if let image {
+                continuation.resume(returning: image)
+            } else {
+                continuation.resume(throwing: error ?? NSError(domain: "Aether3D.Thumbnail", code: -1))
+            }
+        }
+    }
 }
 #endif
 
@@ -41,14 +60,19 @@ struct ScanRecordCell: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ZStack(alignment: .topLeading) {
+            ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(Color.black)
                     .aspectRatio(16.0 / 9.0, contentMode: .fit)
 
                 thumbnailContent
-
+            }
+            .overlay(alignment: .topLeading) {
                 statusBadge
+                    .padding(10)
+            }
+            .overlay(alignment: .topTrailing) {
+                processingBackendBadge
                     .padding(10)
             }
 
@@ -88,13 +112,6 @@ struct ScanRecordCell: View {
 
             if let samplingProfileLabelText = record.gallerySamplingProfileLabelText {
                 Text(samplingProfileLabelText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white.opacity(0.50))
-                    .lineLimit(1)
-            }
-
-            if let processingBackendLabelText = record.galleryProcessingBackendLabelText {
-                Text(processingBackendLabelText)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white.opacity(0.50))
                     .lineLimit(1)
@@ -225,6 +242,16 @@ struct ScanRecordCell: View {
         .cornerRadius(999)
     }
 
+    private var processingBackendBadge: some View {
+        Text(processingBackendBadgeTitle)
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(processingBackendBadgeColor)
+            .cornerRadius(999)
+    }
+
     private var statusTitle: String {
         if useEnglish {
             switch record.status {
@@ -235,7 +262,7 @@ struct ScanRecordCell: View {
             case .failed:
                 return "Failed"
             case .localFallback:
-                return "Local"
+                return "On Device"
             case .uploading:
                 return "Uploading"
             case .queued:
@@ -260,7 +287,7 @@ struct ScanRecordCell: View {
         case .failed:
             return "失败"
         case .localFallback:
-            return "本地兜底"
+            return "本地处理"
         case .uploading:
             return "上传中"
         case .queued:
@@ -305,7 +332,7 @@ struct ScanRecordCell: View {
         case .downloading:
             return "Returning the 3DGS to your phone"
         case .localFallback:
-            return "Remote unavailable, switching to local fallback"
+            return "Remote unavailable, continuing with on-device processing"
         case .completed:
             return "Result is ready to open"
         case .cancelled:
@@ -359,6 +386,17 @@ struct ScanRecordCell: View {
 
     private var metaLineText: String? {
         record.galleryStatusMetaText
+    }
+
+    private var processingBackendBadgeTitle: String {
+        if useEnglish {
+            return record.resolvedProcessingBackend == .cloud ? "Remote" : "Local"
+        }
+        return record.resolvedProcessingBackend == .cloud ? "远端方案" : "本地方案"
+    }
+
+    private var processingBackendBadgeColor: Color {
+        record.resolvedProcessingBackend == .cloud ? Color.cyan.opacity(0.92) : Color.green.opacity(0.85)
     }
 
     private var cardBackgroundColor: Color {
@@ -452,7 +490,7 @@ private struct SourceVideoThumbnailView<Placeholder: View>: View {
         let recordId = self.recordId
 
         Task.detached(priority: .utility) {
-            let thumbnailData = makeSourceVideoThumbnailJPEGData(for: sourceURL)
+            let thumbnailData = await makeSourceVideoThumbnailJPEGData(for: sourceURL)
             let persistedPath = thumbnailData.flatMap { data in
                 ScanRecordStore().saveThumbnail(data, for: recordId)
             }

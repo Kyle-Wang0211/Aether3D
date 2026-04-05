@@ -13,6 +13,8 @@ enum class Status : int {
     kOutOfRange = -2,
     kResourceExhausted = -3,
     kCancelled = -4,
+    kFailedPrecondition = -5,
+    kIoError = -6,
 };
 
 inline bool is_ok(Status s) { return static_cast<int>(s) == 0; }

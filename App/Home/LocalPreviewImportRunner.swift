@@ -48,6 +48,10 @@ enum LocalPreviewImportRunner {
         let bridge: PipelineCoordinatorBridge?
     }
 
+    private struct SendableHandle: @unchecked Sendable {
+        let pointer: OpaquePointer
+    }
+
     private final class CoordinatorTeardownBox: @unchecked Sendable {
         var bridge: PipelineCoordinatorBridge?
 
@@ -460,6 +464,25 @@ enum LocalPreviewImportRunner {
         return nil
     }
 
+    private static func loadedDurationSeconds(for asset: AVAsset) -> TimeInterval {
+        let key = "duration"
+        let semaphore = DispatchSemaphore(value: 0)
+        asset.loadValuesAsynchronously(forKeys: [key]) {
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 0.6)
+        var error: NSError?
+        let status = asset.statusOfValue(forKey: key, error: &error)
+        if status == .loaded,
+           let duration = asset.value(forKey: key) as? CMTime {
+            let seconds = duration.seconds
+            if seconds.isFinite, seconds > 0 {
+                return seconds
+            }
+        }
+        return 0
+    }
+
     static func execute(
         sourceVideoURL: URL,
         artifactURL: URL,
@@ -468,8 +491,7 @@ enum LocalPreviewImportRunner {
         processingBackend: ProcessingBackendChoice = .localSubjectFirst,
         onPhaseUpdate: (@Sendable (LocalPreviewPhaseUpdate) -> Void)? = nil
     ) -> LocalPreviewImportResult {
-        let processingBackend: ProcessingBackendChoice =
-            processingBackend == .localPreview ? .localSubjectFirst : processingBackend
+        let processingBackend = processingBackend.normalizedForActiveUse
         let budget = LocalPreviewProductProfile.importedVideoBudget(for: frameSamplingProfile)
         let thermalAtFinish = ProcessInfo.processInfo.thermalState
         let runnerStartWallClock = CFAbsoluteTimeGetCurrent()
@@ -495,7 +517,45 @@ enum LocalPreviewImportRunner {
         var lastEmittedSelectedFrames = -1
         var lastSnapshotPollAt: CFAbsoluteTime = 0.0
         var lastObservedGaussianCount = 0
+        var lastObservedPendingGaussianCount = 0
+        var lastObservedWorkingSetCount = 0
         var traceLines: [String] = []
+
+        func observeSnapshotPeaks(_ snapshot: aether_evidence_snapshot_t?) {
+            guard let snapshot else { return }
+            let currentGaussians = max(Int(snapshot.num_gaussians), 0)
+            let pendingGaussians = max(Int(snapshot.pending_gaussian_count), 0)
+            lastObservedGaussianCount = max(lastObservedGaussianCount, currentGaussians)
+            lastObservedPendingGaussianCount = max(
+                lastObservedPendingGaussianCount,
+                pendingGaussians
+            )
+            lastObservedWorkingSetCount = max(
+                lastObservedWorkingSetCount,
+                currentGaussians + pendingGaussians
+            )
+        }
+
+        func gaussianLifecycleSummary(currentGaussians: Int) -> String {
+            let peakGaussians = max(lastObservedGaussianCount, currentGaussians)
+            let peakWorkingSet = max(lastObservedWorkingSetCount, currentGaussians)
+            var components = ["当前 \(currentGaussians) 个训练高斯"]
+            if peakGaussians > currentGaussians {
+                components.append("训练峰值 \(peakGaussians) 个")
+            }
+            if peakWorkingSet > peakGaussians {
+                components.append("含 pending 的工作集峰值 \(peakWorkingSet) 个")
+            }
+            return components.joined(separator: "，")
+        }
+
+        func likelyCollapsedAfterInitialization(currentGaussians: Int) -> Bool {
+            let peakEvidenceCount = max(lastObservedWorkingSetCount, 0)
+            guard peakEvidenceCount > 0 else { return false }
+            let peakGaussians = max(lastObservedGaussianCount, currentGaussians)
+            return peakEvidenceCount >= max(2048, currentGaussians * 8) &&
+                peakGaussians <= peakEvidenceCount / 2
+        }
 
 #if canImport(PR5Capture)
         let photometricProfile = ExtremeProfile(profile: .standard)
@@ -518,22 +578,31 @@ enum LocalPreviewImportRunner {
                 thermalState: thermalAtFinish,
                 exportElapsedMs: exportElapsedMs
             )
-            metrics["preview_active_phase"] = phase.phaseName
-            metrics["preview_phase_model"] = processingBackend == .localSubjectFirst
-                ? "depth_seed_refine_cutout_cleanup_export"
-                : "depth_seed_refine_export"
+            metrics["native_active_phase"] = phase.phaseName
+            metrics["native_phase_model"] = LocalPreviewProductProfile.phaseModelDescriptor(
+                for: processingBackend
+            )
             if !traceLines.isEmpty {
-                metrics["preview_trace_last_event"] = traceLines.last
-                metrics["preview_trace_log"] = traceLines.joined(separator: "\n")
+                metrics["native_trace_last_event"] = traceLines.last
+                metrics["native_trace_log"] = traceLines.joined(separator: "\n")
             }
             if let snapshot {
-                lastObservedGaussianCount = max(
-                    lastObservedGaussianCount,
-                    Int(snapshot.num_gaussians)
+                observeSnapshotPeaks(snapshot)
+                metrics["native_current_gaussians"] = String(snapshot.num_gaussians)
+                metrics["native_current_pending_gaussians"] = String(snapshot.pending_gaussian_count)
+                metrics["native_current_working_set"] = String(
+                    max(Int(snapshot.num_gaussians) + Int(snapshot.pending_gaussian_count), 0)
                 )
             }
             if lastObservedGaussianCount > 0 {
-                metrics["preview_gaussians"] = String(lastObservedGaussianCount)
+                metrics["native_gaussians"] = String(lastObservedGaussianCount)
+                metrics["native_peak_gaussians"] = String(lastObservedGaussianCount)
+            }
+            if lastObservedPendingGaussianCount > 0 {
+                metrics["native_peak_pending_gaussians"] = String(lastObservedPendingGaussianCount)
+            }
+            if lastObservedWorkingSetCount > 0 {
+                metrics["native_peak_working_set"] = String(lastObservedWorkingSetCount)
             }
             return metrics
         }
@@ -546,9 +615,9 @@ enum LocalPreviewImportRunner {
             detail: String? = nil
         ) {
             let elapsedMs = Int(max(0, (CFAbsoluteTimeGetCurrent() - runnerStartWallClock) * 1000.0))
-            let ingested = Int(snapshot?.preview_frames_ingested ?? 0)
+            let ingested = Int(snapshot?.onDeviceFramesIngested ?? 0)
             let selected = Int(snapshot?.selected_frames ?? 0)
-            let depthReady = Int(snapshot?.preview_depth_results_ready ?? 0)
+            let depthReady = Int(snapshot?.onDeviceDepthResultsReady ?? 0)
             var line = "[\(elapsedMs)ms] \(label) phase=\(phase.phaseName) submitted=\(submittedFrames) ingested=\(ingested) selected=\(selected) depth_ready=\(depthReady)"
             if let detail, !detail.isEmpty {
                 line += " detail=\(detail)"
@@ -565,13 +634,13 @@ enum LocalPreviewImportRunner {
         ) -> String {
             let enqueuedFrames = max(
                 submittedFrames,
-                Int(snapshot?.preview_frames_enqueued ?? 0)
+                Int(snapshot?.onDeviceFramesEnqueued ?? 0)
             )
-            let ingestedFrames = Int(snapshot?.preview_frames_ingested ?? 0)
-            let backlogFrames = Int(snapshot?.preview_frame_backlog ?? 0)
+            let ingestedFrames = Int(snapshot?.onDeviceFramesIngested ?? 0)
+            let backlogFrames = Int(snapshot?.onDeviceFrameBacklog ?? 0)
             if enqueuedFrames > 0 {
-                let batches = Int(snapshot?.preview_depth_batches_submitted ?? 0)
-                let ready = Int(snapshot?.preview_depth_results_ready ?? 0)
+                let batches = Int(snapshot?.onDeviceDepthBatchesSubmitted ?? 0)
+                let ready = Int(snapshot?.onDeviceDepthResultsReady ?? 0)
                 if batches > 0 {
                     if backlogFrames > 0 {
                         return "\(ingestedFrames) / \(enqueuedFrames) 帧 · depth \(ready)/\(batches) · 排队 \(backlogFrames)"
@@ -588,40 +657,66 @@ enum LocalPreviewImportRunner {
 
         func seedMetricText(
             snapshot: aether_evidence_snapshot_t?,
-            minimumSelectedFrames: Int
+            minimumSelectedFrames: Int,
+            submittedFrames: Int
         ) -> String {
             let selectedFrames = Int(snapshot?.selected_frames ?? 0)
-            let acceptedSeeds = Int(snapshot?.preview_seed_accepted ?? 0)
-            let candidateSeeds = Int(snapshot?.preview_seed_candidates ?? 0)
+            let acceptedSeeds = Int(snapshot?.onDeviceSeedAccepted ?? 0)
+            let candidateSeeds = Int(snapshot?.onDeviceSeedCandidates ?? 0)
+            let processedFrames = Int(snapshot?.onDeviceFramesIngested ?? 0)
+            let replayOngoing =
+                submittedFrames > 0 &&
+                processedFrames > 0 &&
+                processedFrames < submittedFrames
             if minimumSelectedFrames > 0 {
                 if selectedFrames < minimumSelectedFrames {
+                    if replayOngoing {
+                        return "回放 \(processedFrames) / \(submittedFrames) · 关键帧 \(selectedFrames) / \(minimumSelectedFrames)"
+                    }
                     return "关键帧 \(selectedFrames) / \(minimumSelectedFrames)"
                 }
                 if acceptedSeeds > 0 {
+                    if replayOngoing {
+                        return "回放 \(processedFrames) / \(submittedFrames) · seed \(acceptedSeeds)"
+                    }
                     return "seed \(acceptedSeeds) · 帧 \(selectedFrames)"
+                }
+                if replayOngoing {
+                    return "回放 \(processedFrames) / \(submittedFrames) · 关键帧 \(selectedFrames)"
                 }
                 return "关键帧 \(selectedFrames) · 已达标"
             }
             if acceptedSeeds > 0 || candidateSeeds > 0 {
+                if replayOngoing {
+                    return "回放 \(processedFrames) / \(submittedFrames) · seed \(acceptedSeeds)"
+                }
                 return "seed \(acceptedSeeds) · 候选 \(candidateSeeds)"
             }
             return "等待开始"
         }
 
         func refineMetricText(snapshot: aether_evidence_snapshot_t?) -> String {
-            if Int(snapshot?.preview_phase_refine_ms ?? 0) <= 0 {
-                return "等待起步"
-            }
+            let refinePhaseMs = Int(snapshot?.onDeviceRefinePhaseMs ?? 0)
             let trainingProgress = Double(snapshot?.training_progress ?? 0)
-            if trainingProgress > 0 {
+            let trainingStep = Int(snapshot?.training_step ?? 0)
+            if refinePhaseMs > 0 && trainingProgress > 0 {
                 return String(format: "%.1f%%", trainingProgress * 100.0)
             }
             let gaussianCount = max(
                 Int(snapshot?.num_gaussians ?? 0),
                 lastObservedGaussianCount
             )
+            if trainingStep > 0 {
+                if gaussianCount > 0 {
+                    return "\(trainingStep) 步 · \(gaussianCount) 个高斯"
+                }
+                return "\(trainingStep) 步"
+            }
             if gaussianCount > 0 {
-                return "\(gaussianCount) 个高斯"
+                return "\(gaussianCount) 个高斯 · 启动中"
+            }
+            if snapshot?.training_active != 0 {
+                return "训练启动中"
             }
             return "等待开始"
         }
@@ -644,37 +739,39 @@ enum LocalPreviewImportRunner {
                 exportElapsedMs: exportElapsedMs
             )
             if let liveSubmittedFrames {
-                metrics["preview_live_submitted_frames"] = String(liveSubmittedFrames)
-                metrics["preview_import_submitted_frames"] = String(liveSubmittedFrames)
+                metrics["native_live_submitted_frames"] = String(liveSubmittedFrames)
+                metrics["native_import_submitted_frames"] = String(liveSubmittedFrames)
             }
             if let liveMinimumSelectedFrames {
-                metrics["preview_live_min_selected_frames"] = String(liveMinimumSelectedFrames)
+                metrics["native_live_min_selected_frames"] = String(liveMinimumSelectedFrames)
             }
             if let liveTargetFrames {
-                metrics["preview_live_target_frames"] = String(liveTargetFrames)
+                metrics["native_live_target_frames"] = String(liveTargetFrames)
             }
             let minimumSelected = liveMinimumSelectedFrames
                 ?? max(Int(snapshot?.min_frames_needed ?? 0), minimumSelectedFramesToStartTraining)
             switch phase {
             case .depth:
-                metrics["preview_depth_phase_metric_text"] = depthMetricText(
+                metrics["native_depth_phase_metric_text"] = depthMetricText(
                     snapshot: snapshot,
                     submittedFrames: liveSubmittedFrames ?? 0
                 )
             case .seed:
-                metrics["preview_seed_phase_metric_text"] = seedMetricText(
+                metrics["native_seed_phase_metric_text"] = seedMetricText(
                     snapshot: snapshot,
-                    minimumSelectedFrames: minimumSelected
+                    minimumSelectedFrames: minimumSelected,
+                    submittedFrames: liveSubmittedFrames ?? 0
                 )
             case .refine:
-                metrics["preview_refine_phase_metric_text"] = refineMetricText(snapshot: snapshot)
+                metrics["native_refine_phase_metric_text"] = refineMetricText(snapshot: snapshot)
             case .cutout:
-                metrics["preview_cutout_phase_metric_text"] = metrics["preview_cutout_phase_metric_text"] ?? "处理中"
+                metrics["native_cutout_phase_metric_text"] = metrics["native_cutout_phase_metric_text"] ?? "处理中"
             case .cleanup:
-                metrics["preview_cleanup_phase_metric_text"] = metrics["preview_cleanup_phase_metric_text"] ?? "处理中"
+                metrics["native_cleanup_phase_metric_text"] = metrics["native_cleanup_phase_metric_text"] ?? "处理中"
             case .export:
-                metrics["preview_export_phase_metric_text"] = exported == true ? "已完成" : "导出中"
+                metrics["native_export_phase_metric_text"] = exported == true ? "已完成" : "导出中"
             }
+            metrics = LocalPreviewProductProfile.canonicalRuntimeMetrics(metrics)
             appendTrace(
                 "phase_update",
                 phase: phase,
@@ -729,13 +826,13 @@ enum LocalPreviewImportRunner {
                     let submittedRatio = targetSubmittedFrames > 0
                         ? min(1.0, Double(submittedFrames) / Double(max(targetSubmittedFrames, 1)))
                         : 0.0
-                    let ingestedFrames = Int(snapshot.preview_frames_ingested)
+                    let ingestedFrames = Int(snapshot.onDeviceFramesIngested)
                     let processedRatio = submittedFrames > 0
                         ? min(1.0, Double(ingestedFrames) / Double(max(submittedFrames, 1)))
                         : 0.0
                     let depthRatio = min(
                         1.0,
-                        Double(snapshot.preview_depth_results_ready) /
+                        Double(snapshot.onDeviceDepthResultsReady) /
                             Double(max(budget.minDepthResultsBeforeFinalize, 1))
                     )
                     return max(
@@ -745,15 +842,53 @@ enum LocalPreviewImportRunner {
                         0.02
                     )
                 case .seed:
+                    let requiredSelectedFrames = max(
+                        minSelectedFrames,
+                        minimumSelectedFramesToStartTraining
+                    )
+                    let selectedTarget = max(
+                        max(minSelectedFrames, 1),
+                        max(budget.targetSelectedFrames, 1) * 2
+                    )
                     let selectedRatio = min(
                         1.0,
-                        Double(snapshot.selected_frames) / Double(max(minSelectedFrames, 1))
+                        Double(snapshot.selected_frames) / Double(selectedTarget)
                     )
-                    let seedRatio = min(
+                    let candidateRatio = min(
                         1.0,
-                        Double(snapshot.preview_seed_accepted) / 512.0
+                        Double(snapshot.onDeviceSeedCandidates) / 256.0
                     )
-                    return max(selectedRatio * 0.6 + seedRatio * 0.4, 0.02)
+                    let pendingGaussianRatio = min(
+                        1.0,
+                        Double(snapshot.pending_gaussian_count) / 12000.0
+                    )
+                    let acceptedSeedRatio = min(
+                        1.0,
+                        Double(snapshot.onDeviceSeedAccepted) / 512.0
+                    )
+                    let replayRatio = submittedFrames > 0
+                        ? min(
+                            1.0,
+                            Double(snapshot.onDeviceFramesIngested) /
+                                Double(max(submittedFrames, 1))
+                        )
+                        : 0.0
+                    let replayBridgeRatio: Double = {
+                        guard Int(snapshot.selected_frames) >= requiredSelectedFrames else {
+                            return 0.0
+                        }
+                        guard snapshot.onDeviceSeedCandidates == 0,
+                              snapshot.onDeviceSeedAccepted == 0,
+                              snapshot.pending_gaussian_count == 0 else {
+                            return 0.0
+                        }
+                        return replayRatio
+                    }()
+                    let seedBootstrapRatio = max(
+                        acceptedSeedRatio,
+                        max(candidateRatio * 0.65, max(pendingGaussianRatio, replayBridgeRatio))
+                    )
+                    return max(selectedRatio * 0.30 + seedBootstrapRatio * 0.70, 0.02)
                 case .refine:
                     return max(min(1.0, Double(snapshot.training_progress)), 0.02)
                 case .cutout:
@@ -781,47 +916,61 @@ enum LocalPreviewImportRunner {
             case .depth:
                 let enqueuedFrames = max(
                     submittedFrames,
-                    Int(snapshot.preview_frames_enqueued)
+                    Int(snapshot.onDeviceFramesEnqueued)
                 )
-                let processedFrames = Int(snapshot.preview_frames_ingested)
-                let nativeBacklog = Int(snapshot.preview_frame_backlog)
-                let depthReady = Int(snapshot.preview_depth_results_ready)
-                let depthSubmitted = Int(snapshot.preview_depth_batches_submitted)
+                let processedFrames = Int(snapshot.onDeviceFramesIngested)
+                let nativeBacklog = Int(snapshot.onDeviceFrameBacklog)
+                let depthReady = Int(snapshot.onDeviceDepthResultsReady)
+                let depthSubmitted = Int(snapshot.onDeviceDepthBatchesSubmitted)
                 if depthSubmitted > 0 {
-                    return "已送入队列 \(enqueuedFrames)/\(max(targetSubmittedFrames, 1)) 帧，native 已接收 \(processedFrames) 帧，排队中 \(nativeBacklog) 帧，depth 已回流 \(depthReady)/\(max(depthSubmitted, 1)) 批，正在建立可用于 preview 的几何先验。"
+                    return "已送入队列 \(enqueuedFrames)/\(max(targetSubmittedFrames, 1)) 帧，native 已接收 \(processedFrames) 帧，排队中 \(nativeBacklog) 帧，depth 已回流 \(depthReady)/\(max(depthSubmitted, 1)) 批，正在建立可用于本地结果的几何先验。"
                 }
-                return "已送入队列 \(enqueuedFrames)/\(max(targetSubmittedFrames, 1)) 帧，native 已接收 \(processedFrames) 帧，排队中 \(nativeBacklog) 帧，正在建立可用于 preview 的几何先验。"
+                return "已送入队列 \(enqueuedFrames)/\(max(targetSubmittedFrames, 1)) 帧，native 已接收 \(processedFrames) 帧，排队中 \(nativeBacklog) 帧，正在建立可用于本地结果的几何先验。"
             case .seed:
                 let selectedFrames = Int(snapshot.selected_frames)
-                let seedCandidates = Int(snapshot.preview_seed_candidates)
-                let acceptedSeeds = Int(snapshot.preview_seed_accepted)
+                let seedCandidates = Int(snapshot.onDeviceSeedCandidates)
+                let acceptedSeeds = Int(snapshot.onDeviceSeedAccepted)
                 let pendingGaussians = Int(snapshot.pending_gaussian_count)
+                let processedFrames = Int(snapshot.onDeviceFramesIngested)
                 let requiredSelectedFrames = max(
                     minSelectedFrames,
                     minimumSelectedFramesToStartTraining
                 )
+                let replaySuffix: String = {
+                    guard submittedFrames > 0 else { return "" }
+                    let processedClamped = min(processedFrames, submittedFrames)
+                    guard processedClamped > 0 && processedClamped < submittedFrames else { return "" }
+                    return "当前已回放 \(processedClamped)/\(submittedFrames) 帧。"
+                }()
+                let replayDetail = replaySuffix.isEmpty ? "" : "\n\(replaySuffix)"
                 if selectedFrames == 0 &&
                     seedCandidates == 0 &&
                     acceptedSeeds == 0 &&
                     pendingGaussians == 0 {
-                    return "深度先验已经回流，正在重放录制视频并补关键帧。当前有效关键帧 \(selectedFrames)/\(max(requiredSelectedFrames, 1))，达到后才开始初始化高斯种子。"
+                    return "深度先验已经回流，正在重放录制视频并补关键帧。当前有效关键帧 \(selectedFrames)/\(max(requiredSelectedFrames, 1))，达到后才开始初始化高斯种子。\(replayDetail)"
                 }
                 if selectedFrames < requiredSelectedFrames {
                     if acceptedSeeds == 0 && pendingGaussians == 0 {
-                        return "正在重放录制视频并补关键帧；当前有效关键帧 \(selectedFrames)/\(max(requiredSelectedFrames, 1))，候选 seed \(seedCandidates) 个，尚未满足本地初始化门槛。"
+                        return "正在重放录制视频并补关键帧；当前有效关键帧 \(selectedFrames)/\(max(requiredSelectedFrames, 1))，候选 seed \(seedCandidates) 个，尚未满足本地初始化门槛。\(replayDetail)"
                     }
-                    return "正在重放录制视频并补关键帧；当前有效关键帧 \(selectedFrames)/\(max(requiredSelectedFrames, 1))，候选 seed \(seedCandidates) 个，已接受 \(acceptedSeeds) 个。"
+                    return "正在重放录制视频并补关键帧；当前有效关键帧 \(selectedFrames)/\(max(requiredSelectedFrames, 1))，候选 seed \(seedCandidates) 个，已接受 \(acceptedSeeds) 个。\(replayDetail)"
                 }
                 if acceptedSeeds == 0 && pendingGaussians == 0 {
+                    if !replaySuffix.isEmpty {
+                        return "关键帧门槛已满足，正在继续重放录制视频并汇总 MVS 几何；候选 seed \(seedCandidates) 个，正在确认第一批稳定 seed。\(replayDetail)"
+                    }
                     return "关键帧门槛已满足，候选 seed \(seedCandidates) 个，正在确认第一批稳定 seed。"
                 }
-                return "关键帧门槛已满足，候选 seed \(snapshot.preview_seed_candidates) 个，已接受 \(snapshot.preview_seed_accepted) 个。"
+                if !replaySuffix.isEmpty {
+                    return "关键帧门槛已满足，候选 seed \(snapshot.onDeviceSeedCandidates) 个，已接受 \(snapshot.onDeviceSeedAccepted) 个；native 仍在继续回放录制视频补几何证据。\(replayDetail)"
+                }
+                return "关键帧门槛已满足，候选 seed \(snapshot.onDeviceSeedCandidates) 个，已接受 \(snapshot.onDeviceSeedAccepted) 个。"
             case .refine:
                 let gaussianCount = max(
                     Int(snapshot.num_gaussians),
                     lastObservedGaussianCount
                 )
-                return "本地 refine 已跑到 \(snapshot.training_step) 步，当前高斯 \(gaussianCount) 个，继续收口 preview 几何。"
+                return "本地 refine 已跑到 \(snapshot.training_step) 步，当前高斯 \(gaussianCount) 个，继续收口本地结果几何。"
             case .cutout:
                 return "正在做 mask / boundary cutout，先把边界薄带和接触面保住。"
             case .cleanup:
@@ -836,16 +985,16 @@ enum LocalPreviewImportRunner {
             submittedFrames: Int,
             minSelectedFrames: Int
         ) -> LocalPreviewWorkflowPhase {
-            let processedFrames = Int(snapshot.preview_frames_ingested)
+            let processedFrames = Int(snapshot.onDeviceFramesIngested)
             let processedFloor = min(
                 max(submittedFrames, 1),
                 max(budget.minimumProcessedFramesBeforeFinalize, 1)
             )
-            let depthReady = Int(snapshot.preview_depth_results_ready)
+            let depthReady = Int(snapshot.onDeviceDepthResultsReady)
             let selectedFrames = Int(snapshot.selected_frames)
-            let acceptedSeeds = Int(snapshot.preview_seed_accepted)
+            let acceptedSeeds = Int(snapshot.onDeviceSeedAccepted)
             let pendingGaussians = Int(snapshot.pending_gaussian_count)
-            let seedCandidates = Int(snapshot.preview_seed_candidates)
+            let seedCandidates = Int(snapshot.onDeviceSeedCandidates)
             let requiredSelectedFrames = max(
                 minSelectedFrames,
                 minimumSelectedFramesToStartTraining
@@ -863,6 +1012,14 @@ enum LocalPreviewImportRunner {
             return .depth
         }
 
+        func hasRefinePhaseEvidence(_ snapshot: aether_evidence_snapshot_t?) -> Bool {
+            guard let snapshot else { return false }
+            return Int(snapshot.onDeviceRefinePhaseMs) > 0 ||
+                snapshot.training_active != 0 ||
+                Int(snapshot.training_step) > 0 ||
+                Int(snapshot.num_gaussians) > 0
+        }
+
         func resolvedLivePhase(
             requestedPhase: LocalPreviewWorkflowPhase,
             snapshot: aether_evidence_snapshot_t?,
@@ -872,7 +1029,7 @@ enum LocalPreviewImportRunner {
             guard let snapshot else { return requestedPhase }
             switch requestedPhase {
             case .depth, .seed:
-                if Int(snapshot.preview_phase_refine_ms) > 0 {
+                if hasRefinePhaseEvidence(snapshot) {
                     return .refine
                 }
                 return resolvePreRefinePhase(
@@ -881,7 +1038,7 @@ enum LocalPreviewImportRunner {
                     minSelectedFrames: minSelectedFrames
                 )
             case .refine:
-                if Int(snapshot.preview_phase_refine_ms) > 0 {
+                if hasRefinePhaseEvidence(snapshot) {
                     return .refine
                 }
                 return resolvePreRefinePhase(
@@ -904,14 +1061,14 @@ enum LocalPreviewImportRunner {
                 return nil
             }
 
-            let evaluatedFrames = Int(snapshot.preview_imported_frames_evaluated)
-            let ingestedFrames = Int(snapshot.preview_frames_ingested)
+            let evaluatedFrames = Int(snapshot.onDeviceImportedFramesEvaluated)
+            let ingestedFrames = Int(snapshot.onDeviceFramesIngested)
             let selectedFrames = Int(snapshot.selected_frames)
-            let lowParallaxRejects = Int(snapshot.preview_imported_low_parallax_rejects)
-            let nearDuplicateRejects = Int(snapshot.preview_imported_near_duplicate_rejects)
-            let meanTranslationMm = Double(snapshot.preview_imported_selected_translation_mean_mm)
-            let meanRotationDeg = Double(snapshot.preview_imported_selected_rotation_mean_deg)
-            let meanOverlap = Double(snapshot.preview_imported_selected_overlap_mean)
+            let lowParallaxRejects = Int(snapshot.onDeviceImportedLowParallaxRejects)
+            let nearDuplicateRejects = Int(snapshot.onDeviceImportedNearDuplicateRejects)
+            let meanTranslationMm = Double(snapshot.onDeviceImportedSelectedTranslationMeanMm)
+            let meanRotationDeg = Double(snapshot.onDeviceImportedSelectedRotationMeanDeg)
+            let meanOverlap = Double(snapshot.onDeviceImportedSelectedOverlapMean)
 
             let enoughEvidenceFrames = max(16, min(targetSubmittedFrames, 24))
             guard max(evaluatedFrames, ingestedFrames, submittedFrames) >= enoughEvidenceFrames else {
@@ -979,23 +1136,23 @@ enum LocalPreviewImportRunner {
             snapshot: aether_evidence_snapshot_t?
         ) -> [String: String] {
             var metrics = baseMetrics
-            metrics["preview_failure_reason"] = diagnosis.reason
-            metrics["preview_import_suitability_verdict"] = "fallback_remote"
-            metrics["preview_import_suitability_terminal_phase"] = diagnosis.terminalPhase.phaseName
+            metrics["native_failure_reason"] = diagnosis.reason
+            metrics["native_import_suitability_verdict"] = "remote_recommended"
+            metrics["native_import_suitability_terminal_phase"] = diagnosis.terminalPhase.phaseName
             if let snapshot {
-                let evaluatedFrames = max(Int(snapshot.preview_imported_frames_evaluated), 1)
-                let lowParallaxRejects = Int(snapshot.preview_imported_low_parallax_rejects)
-                let nearDuplicateRejects = Int(snapshot.preview_imported_near_duplicate_rejects)
+                let evaluatedFrames = max(Int(snapshot.onDeviceImportedFramesEvaluated), 1)
+                let lowParallaxRejects = Int(snapshot.onDeviceImportedLowParallaxRejects)
+                let nearDuplicateRejects = Int(snapshot.onDeviceImportedNearDuplicateRejects)
                 let lowParallaxRatio = Double(lowParallaxRejects) / Double(evaluatedFrames)
                 let nearDuplicateRatio = Double(nearDuplicateRejects) / Double(evaluatedFrames)
-                metrics["preview_import_low_parallax_ratio"] = String(format: "%.3f", lowParallaxRatio)
-                metrics["preview_import_near_duplicate_ratio"] = String(format: "%.3f", nearDuplicateRatio)
-                metrics["preview_import_selected_translation_mean_mm"] =
-                    String(format: "%.1f", Double(snapshot.preview_imported_selected_translation_mean_mm))
-                metrics["preview_import_selected_rotation_mean_deg"] =
-                    String(format: "%.2f", Double(snapshot.preview_imported_selected_rotation_mean_deg))
-                metrics["preview_import_selected_overlap_mean"] =
-                    String(format: "%.3f", Double(snapshot.preview_imported_selected_overlap_mean))
+                metrics["native_import_low_parallax_ratio"] = String(format: "%.3f", lowParallaxRatio)
+                metrics["native_import_near_duplicate_ratio"] = String(format: "%.3f", nearDuplicateRatio)
+                metrics["native_import_selected_translation_mean_mm"] =
+                    String(format: "%.1f", Double(snapshot.onDeviceImportedSelectedTranslationMeanMm))
+                metrics["native_import_selected_rotation_mean_deg"] =
+                    String(format: "%.2f", Double(snapshot.onDeviceImportedSelectedRotationMeanDeg))
+                metrics["native_import_selected_overlap_mean"] =
+                    String(format: "%.3f", Double(snapshot.onDeviceImportedSelectedOverlapMean))
             }
             return metrics
         }
@@ -1014,8 +1171,8 @@ enum LocalPreviewImportRunner {
                 minSelectedFrames: minSelectedFrames
             )
             let now = CFAbsoluteTimeGetCurrent()
-            let processedFrames = Int(snapshot?.preview_frames_ingested ?? 0)
-            let depthReady = Int(snapshot?.preview_depth_results_ready ?? 0)
+            let processedFrames = Int(snapshot?.onDeviceFramesIngested ?? 0)
+            let depthReady = Int(snapshot?.onDeviceDepthResultsReady ?? 0)
             let selectedFrames = Int(snapshot?.selected_frames ?? 0)
             let phaseChanged = lastEmittedPhase != effectivePhase
             let shouldEmit =
@@ -1133,37 +1290,38 @@ enum LocalPreviewImportRunner {
             liveTargetFrames: Int? = nil
         ) -> LocalPreviewImportResult {
             var metrics = runtimeMetrics
-            metrics["preview_active_phase"] = terminalPhase.phaseName
+            metrics["native_active_phase"] = terminalPhase.phaseName
             if let liveSubmittedFrames {
-                metrics["preview_live_submitted_frames"] = String(liveSubmittedFrames)
-                metrics["preview_import_submitted_frames"] = String(liveSubmittedFrames)
+                metrics["native_live_submitted_frames"] = String(liveSubmittedFrames)
+                metrics["native_import_submitted_frames"] = String(liveSubmittedFrames)
             }
             if let liveMinimumSelectedFrames {
-                metrics["preview_live_min_selected_frames"] = String(liveMinimumSelectedFrames)
+                metrics["native_live_min_selected_frames"] = String(liveMinimumSelectedFrames)
             }
             if let liveTargetFrames {
-                metrics["preview_live_target_frames"] = String(max(liveTargetFrames, 1))
+                metrics["native_live_target_frames"] = String(max(liveTargetFrames, 1))
             }
             let minimumSelected = liveMinimumSelectedFrames ?? minimumSelectedFramesToStartTraining
             switch terminalPhase {
             case .depth:
-                metrics["preview_depth_phase_metric_text"] = depthMetricText(
+                metrics["native_depth_phase_metric_text"] = depthMetricText(
                     snapshot: snapshot,
                     submittedFrames: liveSubmittedFrames ?? 0
                 )
             case .seed:
-                metrics["preview_seed_phase_metric_text"] = seedMetricText(
+                metrics["native_seed_phase_metric_text"] = seedMetricText(
                     snapshot: snapshot,
-                    minimumSelectedFrames: minimumSelected
+                    minimumSelectedFrames: minimumSelected,
+                    submittedFrames: liveSubmittedFrames ?? 0
                 )
             case .refine:
-                metrics["preview_refine_phase_metric_text"] = refineMetricText(snapshot: snapshot)
+                metrics["native_refine_phase_metric_text"] = refineMetricText(snapshot: snapshot)
             case .cutout:
-                metrics["preview_cutout_phase_metric_text"] = "mask / boundary"
+                metrics["native_cutout_phase_metric_text"] = "mask / boundary"
             case .cleanup:
-                metrics["preview_cleanup_phase_metric_text"] = "边界 cleanup"
+                metrics["native_cleanup_phase_metric_text"] = "边界 cleanup"
             case .export:
-                metrics["preview_export_phase_metric_text"] = exported ? "已完成" : "导出失败"
+                metrics["native_export_phase_metric_text"] = exported ? "已完成" : "导出失败"
             }
             appendTrace(
                 exported ? "terminal_success" : "terminal_failure",
@@ -1173,9 +1331,10 @@ enum LocalPreviewImportRunner {
                 detail: detailMessage
             )
             if !traceLines.isEmpty {
-                metrics["preview_trace_last_event"] = traceLines.last
-                metrics["preview_trace_log"] = traceLines.joined(separator: "\n")
+                metrics["native_trace_last_event"] = traceLines.last
+                metrics["native_trace_log"] = traceLines.joined(separator: "\n")
             }
+            metrics = LocalPreviewProductProfile.canonicalRuntimeMetrics(metrics)
             return LocalPreviewImportResult(
                 exported: exported,
                 runtimeMetrics: metrics,
@@ -1185,13 +1344,13 @@ enum LocalPreviewImportRunner {
             )
         }
 
-        func hasAnyPreviewBootstrapSignal(_ snapshot: aether_evidence_snapshot_t?) -> Bool {
+        func hasAnyNativeBootstrapSignal(_ snapshot: aether_evidence_snapshot_t?) -> Bool {
             guard let snapshot else { return false }
-            return Int(snapshot.preview_depth_results_ready) > 0 ||
+            return Int(snapshot.onDeviceDepthResultsReady) > 0 ||
                 Int(snapshot.selected_frames) > 0 ||
                 Int(snapshot.pending_gaussian_count) > 0 ||
-                Int(snapshot.preview_seed_candidates) > 0 ||
-                Int(snapshot.preview_seed_accepted) > 0 ||
+                Int(snapshot.onDeviceSeedCandidates) > 0 ||
+                Int(snapshot.onDeviceSeedAccepted) > 0 ||
                 snapshot.training_active != 0 ||
                 Int(snapshot.training_step) > 0
         }
@@ -1201,8 +1360,8 @@ enum LocalPreviewImportRunner {
             minimumSelectedFrames: Int
         ) -> Bool {
             guard let snapshot else { return false }
-            let processedFrames = Int(snapshot.preview_frames_ingested)
-            let depthReady = Int(snapshot.preview_depth_results_ready)
+            let processedFrames = Int(snapshot.onDeviceFramesIngested)
+            let depthReady = Int(snapshot.onDeviceDepthResultsReady)
             let processedFloor = max(
                 1,
                 min(targetSubmittedFrames, max(budget.minimumProcessedFramesBeforeFinalize, 1))
@@ -1217,7 +1376,7 @@ enum LocalPreviewImportRunner {
         ) -> Bool {
             guard let snapshot else { return false }
             let selectedFrames = Int(snapshot.selected_frames)
-            let acceptedSeeds = Int(snapshot.preview_seed_accepted)
+            let acceptedSeeds = Int(snapshot.onDeviceSeedAccepted)
             let pendingGaussians = Int(snapshot.pending_gaussian_count)
             return selectedFrames >= minimumSelectedFrames ||
                 acceptedSeeds > 0 ||
@@ -1270,10 +1429,12 @@ enum LocalPreviewImportRunner {
         func destroyCoordinatorHandles(_ handles: CoordinatorHandles) {
             #if canImport(CAetherNativeBridge) && canImport(Metal)
             let teardown = CoordinatorTeardownBox(handles.bridge)
+            let engine = SendableHandle(pointer: handles.splatEngine)
+            let device = SendableHandle(pointer: handles.gpuDevice)
             DispatchQueue.global(qos: .userInitiated).async {
                 teardown.bridge = nil
-                aether_splat_engine_destroy(handles.splatEngine)
-                aether_gpu_device_destroy(handles.gpuDevice)
+                aether_splat_engine_destroy(engine.pointer)
+                aether_gpu_device_destroy(device.pointer)
             }
             #else
             _ = handles
@@ -1317,18 +1478,18 @@ enum LocalPreviewImportRunner {
                 }
             }
             let cleanupElapsedMs = UInt64(max(0, (CFAbsoluteTimeGetCurrent() - cleanupStart) * 1000.0))
-            baseMetrics["preview_phase_cutout_ms"] = String(cleanupElapsedMs)
-            baseMetrics["preview_phase_cleanup_ms"] = String(cleanupElapsedMs)
-            baseMetrics["preview_subject_input_splats"] = String(cleanupStats.input_splats)
-            baseMetrics["preview_subject_mask_seed_kept"] = String(cleanupStats.mask_seed_kept_splats)
-            baseMetrics["preview_subject_boundary_refined"] = String(cleanupStats.boundary_refined_splats)
-            baseMetrics["preview_subject_boundary_split"] = String(cleanupStats.boundary_split_splats)
-            baseMetrics["preview_subject_cutout_kept"] = String(cleanupStats.cutout_kept_splats)
-            baseMetrics["preview_subject_cleanup_kept"] = String(cleanupStats.cleanup_kept_splats)
-            baseMetrics["preview_subject_cleanup_removed"] = String(cleanupStats.cleanup_removed_splats)
-            baseMetrics["preview_cutout_phase_metric_text"] =
+            baseMetrics["native_phase_cutout_ms"] = String(cleanupElapsedMs)
+            baseMetrics["native_phase_cleanup_ms"] = String(cleanupElapsedMs)
+            baseMetrics["native_subject_input_splats"] = String(cleanupStats.input_splats)
+            baseMetrics["native_subject_mask_seed_kept"] = String(cleanupStats.mask_seed_kept_splats)
+            baseMetrics["native_subject_boundary_refined"] = String(cleanupStats.boundary_refined_splats)
+            baseMetrics["native_subject_boundary_split"] = String(cleanupStats.boundary_split_splats)
+            baseMetrics["native_subject_cutout_kept"] = String(cleanupStats.cutout_kept_splats)
+            baseMetrics["native_subject_cleanup_kept"] = String(cleanupStats.cleanup_kept_splats)
+            baseMetrics["native_subject_cleanup_removed"] = String(cleanupStats.cleanup_removed_splats)
+            baseMetrics["native_cutout_phase_metric_text"] =
                 "\(cleanupStats.mask_seed_kept_splats) -> \(cleanupStats.cutout_kept_splats)"
-            baseMetrics["preview_cleanup_phase_metric_text"] =
+            baseMetrics["native_cleanup_phase_metric_text"] =
                 cleanupStats.cleanup_removed_splats > 0
                     ? "split+\(cleanupStats.boundary_split_splats) / 移除 \(cleanupStats.cleanup_removed_splats)"
                     : "split+\(cleanupStats.boundary_split_splats)"
@@ -1349,8 +1510,8 @@ enum LocalPreviewImportRunner {
             }
 #endif
 
-            baseMetrics["preview_subject_cleanup_fallback"] = "disabled_raw_fallback"
-            baseMetrics["preview_subject_cleanup_failed"] = "1"
+            baseMetrics["native_subject_cleanup_strategy"] = "disabled_raw_retention"
+            baseMetrics["native_subject_cleanup_failed"] = "1"
             return (
                 false,
                 "本地结果在 cutout / cleanup 阶段失败了。raw artifact 已保留为 sidecar，但不会再回退成旧结果。"
@@ -1402,7 +1563,7 @@ enum LocalPreviewImportRunner {
                 bootstrapDepthReady = bridge.serviceLocalSubjectFirstBootstrap() || bootstrapDepthReady
                 if let snapshot = bridge.getSnapshot() {
                     latestSnapshot = snapshot
-                    let processedFrames = Int(snapshot.preview_frames_ingested)
+                    let processedFrames = Int(snapshot.onDeviceFramesIngested)
                     let inFlightFrames = max(0, submittedFrames - processedFrames)
                     let selectedFrames = Int(snapshot.selected_frames)
                     let requiredSelectedFrames = max(
@@ -1486,7 +1647,7 @@ enum LocalPreviewImportRunner {
                 _ = bridge.serviceLocalSubjectFirstBootstrap()
                 if let snapshot = bridge.getSnapshot() {
                     latestSnapshot = snapshot
-                    let processedFrames = Int(snapshot.preview_frames_ingested)
+                    let processedFrames = Int(snapshot.onDeviceFramesIngested)
                     let inFlightFrames = max(0, submittedFrames - processedFrames)
                     emitLivePhase(
                         .depth,
@@ -1525,8 +1686,8 @@ enum LocalPreviewImportRunner {
                 sourceKind: "imported_video",
                 thermalState: thermalAtFinish
             )
-            metrics["preview_import_error"] = "foreground_required_for_gpu_depth"
-            metrics["preview_import_foreground_wait_expired"] = "1"
+            metrics["native_import_error"] = "foreground_required_for_gpu_depth"
+            metrics["native_import_foreground_wait_expired"] = "1"
             return buildResult(
                 snapshot: nil,
                 exported: false,
@@ -1553,12 +1714,12 @@ enum LocalPreviewImportRunner {
                 sourceKind: "imported_video",
                 thermalState: thermalAtFinish
             )
-            metrics["preview_import_error"] = "artifact_directory_prepare_failed"
+            metrics["native_import_error"] = "artifact_directory_prepare_failed"
             return buildResult(
                 snapshot: nil,
                 exported: false,
                 runtimeMetrics: metrics,
-                detailMessage: "本地导出目录准备失败了，这次没有拿到可写的 preview 输出位置。",
+                detailMessage: "本地导出目录准备失败了，这次没有拿到可写的本地结果输出位置。",
                 terminalPhase: .export,
                 terminalProgressFraction: LocalPreviewWorkflowPhase.export.startFraction
             )
@@ -1573,12 +1734,12 @@ enum LocalPreviewImportRunner {
                 sourceKind: "imported_video",
                 thermalState: thermalAtFinish
             )
-            metrics["preview_import_error"] = "video_track_missing"
+            metrics["native_import_error"] = "video_track_missing"
             return buildResult(
                 snapshot: nil,
                 exported: false,
                 runtimeMetrics: metrics,
-                detailMessage: "这个相册视频没有可用的视频轨道，本地 preview 这次无法启动。",
+                detailMessage: "这个相册视频没有可用的视频轨道，本地 native 视频链这次无法启动。",
                 terminalPhase: .depth,
                 terminalProgressFraction: LocalPreviewWorkflowPhase.depth.startFraction
             )
@@ -1592,7 +1753,7 @@ enum LocalPreviewImportRunner {
                 sourceKind: "imported_video",
                 thermalState: thermalAtFinish
             )
-            metrics["preview_import_error"] = "asset_reader_create_failed"
+            metrics["native_import_error"] = "asset_reader_create_failed"
             return buildResult(
                 snapshot: nil,
                 exported: false,
@@ -1616,12 +1777,12 @@ enum LocalPreviewImportRunner {
                 sourceKind: "imported_video",
                 thermalState: thermalAtFinish
             )
-            metrics["preview_import_error"] = "asset_reader_output_failed"
+            metrics["native_import_error"] = "asset_reader_output_failed"
             return buildResult(
                 snapshot: nil,
                 exported: false,
                 runtimeMetrics: metrics,
-                detailMessage: "视频读取输出没有准备成功，这次本地 preview 无法继续。",
+                detailMessage: "视频读取输出没有准备成功，这次本地 native 视频链无法继续。",
                 terminalPhase: .depth,
                 terminalProgressFraction: LocalPreviewWorkflowPhase.depth.startFraction
             )
@@ -1635,12 +1796,12 @@ enum LocalPreviewImportRunner {
                 sourceKind: "imported_video",
                 thermalState: thermalAtFinish
             )
-            metrics["preview_import_error"] = "asset_reader_start_failed"
+            metrics["native_import_error"] = "asset_reader_start_failed"
             return buildResult(
                 snapshot: nil,
                 exported: false,
                 runtimeMetrics: metrics,
-                detailMessage: "视频帧读取启动失败了，这次本地 preview 还没法开始。",
+                detailMessage: "视频帧读取启动失败了，这次本地 native 视频链还没法开始。",
                 terminalPhase: .depth,
                 terminalProgressFraction: LocalPreviewWorkflowPhase.depth.startFraction
             )
@@ -1649,7 +1810,7 @@ enum LocalPreviewImportRunner {
         let trackSize = videoTrack.naturalSize.applying(videoTrack.preferredTransform)
         let width = max(1, Int(abs(trackSize.width.rounded())))
         let height = max(1, Int(abs(trackSize.height.rounded())))
-        let durationSeconds = max(0.1, CMTimeGetSeconds(asset.duration))
+        let durationSeconds = max(0.1, Self.loadedDurationSeconds(for: asset))
         let estimatedSubmittedFrames = max(
             1,
             min(
@@ -1700,8 +1861,8 @@ enum LocalPreviewImportRunner {
                     sourceKind: "imported_video",
                     thermalState: thermalAtFinish
                 )
-                metrics["preview_import_error"] = "foreground_required_for_gpu_depth"
-                metrics["preview_import_foreground_wait_expired"] = "1"
+                metrics["native_import_error"] = "foreground_required_for_gpu_depth"
+                metrics["native_import_foreground_wait_expired"] = "1"
                 return buildResult(
                     snapshot: latestSnapshot,
                     exported: false,
@@ -1853,11 +2014,11 @@ enum LocalPreviewImportRunner {
                 lastSubmittedPTS = frameTimestamp
                 let bootstrapFrameBudget = max(budget.bootstrapFrameBudget, 1)
                 let latestDepthReady =
-                    Int(latestSnapshot?.preview_depth_results_ready ?? 0)
+                    Int(latestSnapshot?.onDeviceDepthResultsReady ?? 0)
                 let latestSelectedFrames =
                     Int(latestSnapshot?.selected_frames ?? 0)
                 let latestSeedCandidates =
-                    Int(latestSnapshot?.preview_seed_candidates ?? 0)
+                    Int(latestSnapshot?.onDeviceSeedCandidates ?? 0)
                 let eagerBootstrap =
                     latestDepthReady < max(budget.minDepthResultsBeforeFinalize, 1) ||
                     latestSelectedFrames < minimumSelectedFramesToStartTraining ||
@@ -1893,9 +2054,9 @@ enum LocalPreviewImportRunner {
             }
             if let snapshot = latestSnapshot ?? bridge.getSnapshot(),
                Int(snapshot.selected_frames) >= budget.targetSelectedFrames {
-                let seedAccepted = Int(snapshot.preview_seed_accepted)
+                let seedAccepted = Int(snapshot.onDeviceSeedAccepted)
                 let pendingGaussians = Int(snapshot.pending_gaussian_count)
-                let depthReady = Int(snapshot.preview_depth_results_ready)
+                let depthReady = Int(snapshot.onDeviceDepthResultsReady)
                 let trainingStarted =
                     snapshot.training_active != 0 || Int(snapshot.training_step) > 0
                 let readyToStopIngesting =
@@ -1909,7 +2070,7 @@ enum LocalPreviewImportRunner {
 
         let outstandingFrames = max(
             0,
-            submittedFrames - Int(latestSnapshot?.preview_frames_ingested ?? 0)
+            submittedFrames - Int(latestSnapshot?.onDeviceFramesIngested ?? 0)
         )
         let dynamicDrainSeconds = max(
             budget.preFinishDrainSeconds,
@@ -2060,11 +2221,11 @@ enum LocalPreviewImportRunner {
         }
 
         let seedDetail: String = {
-            let depthReady = Int(latestSnapshot?.preview_depth_results_ready ?? 0)
+            let depthReady = Int(latestSnapshot?.onDeviceDepthResultsReady ?? 0)
             if depthReady > 0 {
-                return "深度先验已经回流，正在根据有效深度和局部一致性初始化 preview 高斯。"
+                return "深度先验已经回流，正在根据有效深度和局部一致性初始化本地高斯。"
             }
-            return "正在等待最后一批单目 depth prior 回流，再启动 preview 高斯初始化。"
+            return "正在等待最后一批单目 depth prior 回流，再启动本地高斯初始化。"
         }()
 
         emitPhase(
@@ -2282,10 +2443,7 @@ enum LocalPreviewImportRunner {
                 }
                 if let snapshot = bridge.getSnapshot() {
                     latestSnapshot = snapshot
-                    lastObservedGaussianCount = max(
-                        lastObservedGaussianCount,
-                        Int(snapshot.num_gaussians)
-                    )
+                    observeSnapshotPeaks(snapshot)
                     reached = max(reached, Int(snapshot.training_step))
                     emitLivePhase(
                         .refine,
@@ -2335,10 +2493,7 @@ enum LocalPreviewImportRunner {
             exportMinSteps = resolveExportMinSteps(currentFloor: max(exportMinSteps, reachedSteps))
             if let snapshot = bridge.getSnapshot() {
                 latestSnapshot = snapshot
-                lastObservedGaussianCount = max(
-                    lastObservedGaussianCount,
-                    Int(snapshot.num_gaussians)
-                )
+                observeSnapshotPeaks(snapshot)
                 reachedSteps = max(reachedSteps, Int(snapshot.training_step))
                 emitLivePhase(
                     LocalPreviewWorkflowPhase.refine,
@@ -2370,10 +2525,7 @@ enum LocalPreviewImportRunner {
         )
         latestSnapshot = bridge.getSnapshot() ?? latestSnapshot
         if let latestSnapshot {
-            lastObservedGaussianCount = max(
-                lastObservedGaussianCount,
-                Int(latestSnapshot.num_gaussians)
-            )
+            observeSnapshotPeaks(latestSnapshot)
         }
         emitLivePhase(
             LocalPreviewWorkflowPhase.refine,
@@ -2406,10 +2558,7 @@ enum LocalPreviewImportRunner {
                 exportMinSteps = resolveExportMinSteps(currentFloor: max(exportMinSteps, reachedSteps))
                 if let snapshot = bridge.getSnapshot() {
                     latestSnapshot = snapshot
-                    lastObservedGaussianCount = max(
-                        lastObservedGaussianCount,
-                        Int(snapshot.num_gaussians)
-                    )
+                    observeSnapshotPeaks(snapshot)
                     reachedSteps = max(reachedSteps, Int(snapshot.training_step))
                     emitLivePhase(
                         LocalPreviewWorkflowPhase.refine,
@@ -2446,7 +2595,22 @@ enum LocalPreviewImportRunner {
                 fromByteCount: Int64(exportFileSizeBytes),
                 countStyle: .file
             )
-            return "导出诊断：尝试 \(exportAttempts) 次；状态 \(lastExportStatusCode)（\(lastExportStatusReason)）；文件 \(fileSizeText)；等待步数 \(reachedSteps)。"
+            let reasonHint: String = {
+                switch lastExportStatusReason {
+                case "native_failed_precondition":
+                    return "导出时 native 没拿到健康的可写快照，常见于训练引擎已结束且 retained snapshot 不可用，或当前高斯已经明显收缩到不可导出。"
+                case "native_io_error":
+                    return "导出文件创建或写入失败。"
+                case "swift_parent_dir_create_failed":
+                    return "Swift 侧在导出前创建输出目录失败。"
+                case "native_ok_but_empty_or_missing_file":
+                    return "native 返回成功，但输出文件仍然为空或不存在。"
+                default:
+                    return ""
+                }
+            }()
+            let hintSuffix = reasonHint.isEmpty ? "" : " 提示：\(reasonHint)"
+            return "导出诊断：尝试 \(exportAttempts) 次；状态 \(lastExportStatusCode)（\(lastExportStatusReason)）；文件 \(fileSizeText)；等待步数 \(reachedSteps)。\(hintSuffix)"
         }
         while exportAttempts < exportAttemptLimit {
             exportAttempts += 1
@@ -2466,6 +2630,7 @@ enum LocalPreviewImportRunner {
 
             latestSnapshot = bridge.getSnapshot() ?? latestSnapshot
             reachedSteps = max(reachedSteps, Int(latestSnapshot?.training_step ?? 0))
+            observeSnapshotPeaks(latestSnapshot)
             if exportAttempts < exportAttemptLimit &&
                 ((latestSnapshot?.training_active ?? 0) != 0 || reachedSteps > 0) {
                 Thread.sleep(forTimeInterval: 0.20)
@@ -2473,6 +2638,7 @@ enum LocalPreviewImportRunner {
         }
 
         let snapshot = bridge.getSnapshot() ?? latestSnapshot
+        observeSnapshotPeaks(snapshot)
         let totalElapsedMs = UInt64(max(0, (CFAbsoluteTimeGetCurrent() - startWallClock) * 1000.0))
 
         let baseMetrics = LocalPreviewMetricsArchive.runtimeMetrics(
@@ -2506,12 +2672,21 @@ enum LocalPreviewImportRunner {
             reachedSteps: reachedSteps,
             totalElapsedMs: totalElapsedMs
         )
-        metrics["preview_export_attempts"] = "\(exportAttempts)"
-        metrics["preview_export_file_size_bytes"] = "\(exportFileSizeBytes)"
-        metrics["preview_export_wait_steps"] = "\(reachedSteps)"
-        metrics["preview_export_status_code"] = "\(lastExportStatusCode)"
-        metrics["preview_export_failure_reason"] = lastExportStatusReason
-        metrics["preview_export_output_path"] = rawArtifactURL.path
+        metrics["native_export_attempts"] = "\(exportAttempts)"
+        metrics["native_export_file_size_bytes"] = "\(exportFileSizeBytes)"
+        metrics["native_export_wait_steps"] = "\(reachedSteps)"
+        metrics["native_export_status_code"] = "\(lastExportStatusCode)"
+        metrics["native_export_failure_reason"] = lastExportStatusReason
+        metrics["native_export_output_path"] = rawArtifactURL.path
+        metrics["native_peak_gaussians"] = "\(lastObservedGaussianCount)"
+        metrics["native_peak_pending_gaussians"] = "\(lastObservedPendingGaussianCount)"
+        metrics["native_peak_working_set"] = "\(lastObservedWorkingSetCount)"
+        let currentGaussians = Int(snapshot?.num_gaussians ?? 0)
+        let currentPendingGaussians = Int(snapshot?.pending_gaussian_count ?? 0)
+        let currentWorkingSet = max(currentGaussians + currentPendingGaussians, 0)
+        metrics["native_current_gaussians"] = "\(currentGaussians)"
+        metrics["native_current_pending_gaussians"] = "\(currentPendingGaussians)"
+        metrics["native_current_working_set"] = "\(currentWorkingSet)"
 
         let exportDetailMessage: String = {
             if exported {
@@ -2521,18 +2696,22 @@ enum LocalPreviewImportRunner {
                 if let snapshot {
                     let step = Int(snapshot.training_step)
                     let gaussians = Int(snapshot.num_gaussians)
+                    let gaussianSummary = gaussianLifecycleSummary(currentGaussians: gaussians)
+                    let collapseNote = likelyCollapsedAfterInitialization(currentGaussians: gaussians)
+                        ? "\n\n初始化阶段看到的工作集并不等于最终可导出的训练高斯。现在只剩 \(gaussians) 个训练高斯，说明后面的 refine / cleanup 已经把大量不稳定候选明显收缩掉了。"
+                        : ""
                     if step > 0 {
-                        return "这次本地结果没能导出成功。本地 refine 已经真正启动并跑到 \(step) 步（当前 \(gaussians) 个高斯），但最终 Gaussian 结果文件还没有成功写出来。\n\n\(exportDiagnosticsDetail())"
+                        return "这次本地结果没能导出成功。本地 refine 已经真正启动并跑到 \(step) 步（\(gaussianSummary)），但最终 Gaussian 结果文件还没有成功写出来。\(collapseNote)\n\n\(exportDiagnosticsDetail())"
                     }
-                    return "这次本地结果没能导出成功。初始化和本地 refine 已经启动（当前 \(gaussians) 个高斯），但最终 Gaussian 结果文件还没有成功写出来。\n\n\(exportDiagnosticsDetail())"
+                    return "这次本地结果没能导出成功。初始化和本地 refine 已经启动（\(gaussianSummary)），但最终 Gaussian 结果文件还没有成功写出来。\(collapseNote)\n\n\(exportDiagnosticsDetail())"
                 }
                 return "这次本地结果没能导出成功。本地 refine 已经启动，但最终 Gaussian 结果文件还没有成功写出来。\n\n\(exportDiagnosticsDetail())"
             }
             if let snapshot {
-                if snapshot.selected_frames > 0 || snapshot.preview_seed_candidates > 0 || snapshot.preview_seed_accepted > 0 {
+                if snapshot.selected_frames > 0 || snapshot.onDeviceSeedCandidates > 0 || snapshot.onDeviceSeedAccepted > 0 {
                     return "这次本地结果没能导出成功。单目 depth prior 已经回流，但关键帧 gate / seed 初始化没有拿到足够的稳定几何，本地结果链没有真正启动。\n\n\(exportDiagnosticsDetail())"
                 }
-                if snapshot.preview_depth_results_ready == 0 {
+                if snapshot.onDeviceDepthResultsReady == 0 {
                     return "这次本地结果没能导出成功。相册视频已经读完，但单目 depth prior 还没在预算内真正回流，所以本地结果链没能启动。\n\n\(exportDiagnosticsDetail())"
                 }
                 if snapshot.selected_frames == 0 {
@@ -2568,13 +2747,13 @@ enum LocalPreviewImportRunner {
                 return .refine
             }
             if let snapshot {
-                if snapshot.preview_seed_accepted > 0 ||
-                    snapshot.preview_seed_candidates > 0 ||
+                if snapshot.onDeviceSeedAccepted > 0 ||
+                    snapshot.onDeviceSeedCandidates > 0 ||
                     snapshot.pending_gaussian_count > 0 ||
                     snapshot.selected_frames > 0 {
                     return .seed
                 }
-                if snapshot.preview_depth_results_ready > 0 {
+                if snapshot.onDeviceDepthResultsReady > 0 {
                     return .depth
                 }
             }

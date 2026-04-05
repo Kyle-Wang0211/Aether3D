@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import Aether3DCore
 
 #if canImport(AVFoundation)
 import AVFoundation
@@ -55,18 +56,9 @@ public final class ScanRecordStore {
 
     public func loadRecords() -> [ScanRecord] {
         queue.sync {
-            if let cachedRecords {
-                return cachedRecords
-            }
-
-            if let records = loadRecordsFromPrimaryOrBackup() {
-                cachedRecords = records
-                return records
-            }
-
-            let recoveredRecords = normalizedLoadedRecords(recoverRecordsFromFilesystem())
-            cachedRecords = recoveredRecords
-            return recoveredRecords
+            let records = loadRecordsUnsafe()
+            cachedRecords = records
+            return records
         }
     }
 
@@ -77,7 +69,7 @@ public final class ScanRecordStore {
         remotePendingGraceSeconds: TimeInterval = 6 * 60 * 60
     ) -> Bool {
         queue.sync {
-            var records = cachedRecords ?? loadRecordsUnsafe()
+            var records = loadRecordsUnsafe()
             var didMutate = false
 
             for index in records.indices {
@@ -135,7 +127,7 @@ public final class ScanRecordStore {
         maxAgeSeconds: TimeInterval = 24 * 60 * 60
     ) -> Int {
         queue.sync {
-            var records = cachedRecords ?? loadRecordsUnsafe()
+            var records = loadRecordsUnsafe()
             let originalCount = records.count
             let removableIDs = Set(
                 records.compactMap { record -> UUID? in
@@ -171,16 +163,61 @@ public final class ScanRecordStore {
         }
     }
 
+    @discardableResult
+    public func failOrphanedLocalProcessingRecordsOnColdLaunch(
+        now: Date = Date()
+    ) -> Int {
+        queue.sync {
+            var records = loadRecordsUnsafe()
+            var mutatedCount = 0
+
+            for index in records.indices {
+                let trimmedRemoteJobID = records[index].remoteJobId?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard records[index].artifactPath == nil,
+                      records[index].isProcessing,
+                      records[index].resolvedProcessingBackend == .localSubjectFirst,
+                      trimmedRemoteJobID.isEmpty else {
+                    continue
+                }
+
+                let startedAt = records[index].processingStartedAt ?? records[index].createdAt
+                records[index].status = .failed
+                records[index].statusMessage = "本地处理已中断"
+                records[index].detailMessage = "这次本地处理依赖上一次 app 进程里的 live bridge。重新启动 app 后，这条本地任务已经无法继续，所以系统把它标成中断；请回主页重新发起。"
+                records[index].progressFraction = nil
+                records[index].uploadedBytes = nil
+                records[index].totalBytes = nil
+                records[index].uploadBytesPerSecond = nil
+                records[index].estimatedRemainingMinutes = nil
+                records[index].remoteJobId = nil
+                records[index].failureReason = "local_processing_interrupted_after_relaunch"
+                records[index].processingCompletedAt = now
+                records[index].processingElapsedSeconds = max(0, now.timeIntervalSince(startedAt))
+                records[index].updatedAt = now
+                mutatedCount += 1
+            }
+
+            if mutatedCount > 0 {
+                cachedRecords = records
+                writeRecordsToDisk(records)
+            }
+
+            return mutatedCount
+        }
+    }
+
     public func record(id: UUID) -> ScanRecord? {
         queue.sync {
-            let records = cachedRecords ?? loadRecordsUnsafe()
+            let records = loadRecordsUnsafe()
+            cachedRecords = records
             return records.first(where: { $0.id == id })
         }
     }
 
     public func saveRecord(_ record: ScanRecord) {
         queue.sync {
-            var records = cachedRecords ?? loadRecordsUnsafe()
+            var records = loadRecordsUnsafe()
             records.removeAll { $0.id == record.id }
             records.append(record)
             if records.count > maxRecords {
@@ -226,7 +263,7 @@ public final class ScanRecordStore {
 
     public func updateViewerInitialPose(recordId: UUID, viewerInitialPose: ViewerInitialPose) {
         queue.sync {
-            var records = cachedRecords ?? loadRecordsUnsafe()
+            var records = loadRecordsUnsafe()
             guard let index = records.firstIndex(where: { $0.id == recordId }) else {
                 return
             }
@@ -272,16 +309,18 @@ public final class ScanRecordStore {
         queue.sync {
             mutateRecord(id: recordId) { record in
                 let now = Date()
-                let normalizedIncomingStageKey = remoteStageKey?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased()
-                let isIncomingLocalPreview =
-                    normalizedIncomingStageKey == "local_preview" ||
-                    normalizedIncomingStageKey == "local_subject_first"
+                let normalizedIncomingProgressBasis =
+                    OnDeviceProcessingCompatibility.normalizedProgressBasis(progressBasis)
+                let normalizedIncomingStageKey =
+                    OnDeviceProcessingCompatibility.normalizedWorkflowStageKey(remoteStageKey)
+                let normalizedIncomingFailureReason =
+                    OnDeviceProcessingCompatibility.normalizedFailureReason(failureReason)
+                let isIncomingOnDevice =
+                    OnDeviceProcessingCompatibility.isOnDeviceWorkflowStageKey(remoteStageKey)
                 let incomingIsAuthoritativeRemoteRuntime = Self.shouldTrustIncomingRemoteRuntime(
                     incomingStatus: status,
-                    progressBasis: progressBasis,
-                    remoteStageKey: remoteStageKey,
+                    progressBasis: normalizedIncomingProgressBasis,
+                    remoteStageKey: normalizedIncomingStageKey,
                     remotePhaseName: remotePhaseName,
                     runtimeMetrics: runtimeMetrics,
                     detailMessage: detailMessage
@@ -289,8 +328,8 @@ public final class ScanRecordStore {
                 let resolvedStatus = Self.mergedStatus(
                     existing: record,
                     incomingStatus: status,
-                    progressBasis: progressBasis,
-                    remoteStageKey: remoteStageKey,
+                    progressBasis: normalizedIncomingProgressBasis,
+                    remoteStageKey: normalizedIncomingStageKey,
                     remotePhaseName: remotePhaseName,
                     runtimeMetrics: runtimeMetrics,
                     detailMessage: detailMessage,
@@ -303,22 +342,19 @@ public final class ScanRecordStore {
                     incomingIsAuthoritativeRemoteRuntime: incomingIsAuthoritativeRemoteRuntime,
                     clearRemoteJobId: clearRemoteJobId
                 )
-                let normalizedIncomingProgressBasis = progressBasis?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased()
                 let isUploadFinalizing = resolvedStatus == .uploading &&
                     normalizedIncomingProgressBasis == "upload_finalizing"
                 let shouldResetProcessingClock = clearRemoteJobId && Self.isInFlightStatus(resolvedStatus)
                 let shouldFinalizeProcessingClock = Self.shouldFinalizeProcessingClock(
                     for: resolvedStatus,
-                    failureReason: failureReason
+                    failureReason: normalizedIncomingFailureReason
                 )
 
                 if shouldResetProcessingClock {
                     record.processingStartedAt = now
                     record.processingCompletedAt = nil
                     record.processingElapsedSeconds = nil
-                    if isIncomingLocalPreview {
+                    if isIncomingOnDevice {
                         record.progressBasis = nil
                         record.remoteStageKey = nil
                         record.remotePhaseName = nil
@@ -343,20 +379,23 @@ public final class ScanRecordStore {
                     existing: record,
                     incomingStatus: resolvedStatus,
                     incomingProgress: progressFraction,
+                    incomingProgressBasis: normalizedIncomingProgressBasis,
+                    incomingStageKey: normalizedIncomingStageKey,
+                    runtimeMetrics: runtimeMetrics,
                     clearRemoteJobId: clearRemoteJobId,
                     regressedStage: regressedStage,
                     authoritativeIncomingRegression: authoritativeIncomingRegression
                 )
                 if !regressedStage {
                     if incomingIsAuthoritativeRemoteRuntime {
-                        record.progressBasis = progressBasis
-                        record.remoteStageKey = remoteStageKey
+                        record.progressBasis = normalizedIncomingProgressBasis
+                        record.remoteStageKey = normalizedIncomingStageKey
                         record.remotePhaseName = remotePhaseName
                         record.currentTier = currentTier
                         record.runtimeMetrics = runtimeMetrics
                     } else {
-                        record.progressBasis = progressBasis ?? record.progressBasis
-                        record.remoteStageKey = remoteStageKey ?? record.remoteStageKey
+                        record.progressBasis = normalizedIncomingProgressBasis ?? record.progressBasis
+                        record.remoteStageKey = normalizedIncomingStageKey ?? record.remoteStageKey
                         record.remotePhaseName = remotePhaseName ?? record.remotePhaseName
                         record.currentTier = currentTier ?? record.currentTier
                         record.runtimeMetrics = runtimeMetrics ?? record.runtimeMetrics
@@ -394,7 +433,7 @@ public final class ScanRecordStore {
                 }
                 if clearRemoteJobId {
                     record.remoteJobId = nil
-                    if !isIncomingLocalPreview {
+                    if !isIncomingOnDevice {
                         record.progressBasis = nil
                         record.remoteStageKey = nil
                         record.remotePhaseName = nil
@@ -406,12 +445,12 @@ public final class ScanRecordStore {
                     record.remoteStageKey = nil
                     record.remotePhaseName = nil
                     record.currentTier = nil
-                    record.progressBasis = progressBasis
+                    record.progressBasis = normalizedIncomingProgressBasis
                     record.runtimeMetrics = runtimeMetrics
                 } else if let remoteJobId {
                     record.remoteJobId = remoteJobId
                 }
-                record.failureReason = failureReason
+                record.failureReason = normalizedIncomingFailureReason
                 if resolvedStatus == .failed {
                     record.artifactPath = nil
                     record.viewerInitialPose = nil
@@ -436,6 +475,9 @@ public final class ScanRecordStore {
         existing: ScanRecord,
         incomingStatus: ScanRecordStatus,
         incomingProgress: Double?,
+        incomingProgressBasis: String?,
+        incomingStageKey: String?,
+        runtimeMetrics: [String: String]?,
         clearRemoteJobId: Bool,
         regressedStage: Bool,
         authoritativeIncomingRegression: Bool
@@ -457,6 +499,22 @@ public final class ScanRecordStore {
 
         if authoritativeIncomingRegression {
             return normalizedIncoming
+        }
+
+        if shouldTrustIncomingOnDeviceRuntimeProgress(
+            incomingStatus: incomingStatus,
+            progressBasis: incomingProgressBasis,
+            remoteStageKey: incomingStageKey,
+            runtimeMetrics: runtimeMetrics
+        ) {
+            switch (normalizedIncoming, existing.progressFraction) {
+            case let (incoming?, _):
+                return incoming
+            case (nil, let existing?):
+                return existing
+            case (nil, nil):
+                return nil
+            }
         }
 
         if regressedStage {
@@ -538,6 +596,35 @@ public final class ScanRecordStore {
         return incomingRank < existingRank
     }
 
+    private static func shouldTrustIncomingOnDeviceRuntimeProgress(
+        incomingStatus: ScanRecordStatus,
+        progressBasis: String?,
+        remoteStageKey: String?,
+        runtimeMetrics: [String: String]?
+    ) -> Bool {
+        switch incomingStatus {
+        case .preparing, .uploading, .queued, .reconstructing, .training, .packaging, .downloading, .localFallback:
+            break
+        case .completed, .cancelled, .failed:
+            return false
+        }
+
+        let normalizedBasis =
+            OnDeviceProcessingCompatibility.normalizedProgressBasis(progressBasis)
+        let normalizedStageKey =
+            OnDeviceProcessingCompatibility.normalizedWorkflowStageKey(remoteStageKey)
+        let hasRuntimeMetrics = !(runtimeMetrics?.isEmpty ?? true)
+        let isOnDeviceStage =
+            normalizedStageKey == OnDeviceProcessingCompatibility.canonicalWorkflowStageKey
+        let isOnDevicePhaseBasis =
+            normalizedBasis == OnDeviceProcessingCompatibility.canonicalWorkflowStageKey ||
+            (normalizedBasis?.hasPrefix(
+                OnDeviceProcessingCompatibility.canonicalWorkflowStageKey + "_"
+            ) ?? false)
+
+        return hasRuntimeMetrics && isOnDeviceStage && isOnDevicePhaseBasis
+    }
+
     private static func shouldTrustIncomingRemoteRuntime(
         incomingStatus: ScanRecordStatus,
         progressBasis: String?,
@@ -553,12 +640,10 @@ public final class ScanRecordStore {
             return false
         }
 
-        let normalizedBasis = progressBasis?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let normalizedStageKey = remoteStageKey?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        let normalizedBasis =
+            OnDeviceProcessingCompatibility.normalizedProgressBasis(progressBasis)
+        let normalizedStageKey =
+            OnDeviceProcessingCompatibility.normalizedWorkflowStageKey(remoteStageKey)
         let normalizedPhaseName = remotePhaseName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -649,9 +734,8 @@ public final class ScanRecordStore {
         case .completed, .failed:
             return true
         case .cancelled:
-            let normalizedFailureReason = failureReason?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
+            let normalizedFailureReason =
+                OnDeviceProcessingCompatibility.normalizedFailureReason(failureReason)
             return normalizedFailureReason != "cancel_requested_unconfirmed"
                 && normalizedFailureReason != "cancel_requested"
         default:
@@ -668,7 +752,7 @@ public final class ScanRecordStore {
 
     public func deleteRecord(id: UUID) {
         queue.sync {
-            var records = cachedRecords ?? loadRecordsUnsafe()
+            var records = loadRecordsUnsafe()
             let artifactRelPath = records.first(where: { $0.id == id })?.artifactPath
             let sourceVideoPath = records.first(where: { $0.id == id })?.sourceVideoPath
             records.removeAll { $0.id == id }
@@ -700,7 +784,7 @@ public final class ScanRecordStore {
     }
 
     private func mutateRecord(id: UUID, mutate: (inout ScanRecord) -> Void) {
-        var records = cachedRecords ?? loadRecordsUnsafe()
+        var records = loadRecordsUnsafe()
         guard let index = records.firstIndex(where: { $0.id == id }) else {
             return
         }
@@ -963,9 +1047,20 @@ public final class ScanRecordStore {
     private static func sourceVideoDuration(at url: URL) -> TimeInterval {
         #if canImport(AVFoundation)
         let asset = AVURLAsset(url: url)
-        let seconds = CMTimeGetSeconds(asset.duration)
-        if seconds.isFinite, seconds > 0 {
-            return seconds
+        let key = "duration"
+        let semaphore = DispatchSemaphore(value: 0)
+        asset.loadValuesAsynchronously(forKeys: [key]) {
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 0.6)
+        var error: NSError?
+        let status = asset.statusOfValue(forKey: key, error: &error)
+        if status == .loaded,
+           let duration = asset.value(forKey: key) as? CMTime {
+            let seconds = duration.seconds
+            if seconds.isFinite, seconds > 0 {
+                return seconds
+            }
         }
         #endif
         return 0

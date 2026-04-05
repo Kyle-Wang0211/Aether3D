@@ -907,12 +907,7 @@ private func runProbe() throws {
     try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
 
     let plyURL = exportDir.appendingPathComponent("\(recordID.uuidString).ply")
-    var artifactExported = false
-    if bridge.exportPLY(path: plyURL.path) {
-        artifactExported = true
-    } else if bridge.exportPointCloudPLY(path: plyURL.path) {
-        artifactExported = true
-    }
+    let artifactExported = bridge.exportPLY(path: plyURL.path)
 
     let worldStateURL = exportDir.appendingPathComponent("\(recordID.uuidString).world_state.json")
     let exportPayload = makeWorldStateExport(

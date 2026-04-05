@@ -40,7 +40,7 @@ typedef struct {
     size_t max_iterations;                     // Default: 3000 (global engine: TSDF init + MCMC converges fast)
     uint32_t render_width;                     // Default: 800
     uint32_t render_height;                    // Default: 600
-    uint32_t local_preview_mode;              // ABI-compat flag: 0 (cloud/default), 1 = bounded local subject-first monocular mode
+    uint32_t local_preview_mode;              // ABI-compat flag: 0 (cloud/default), 1 = bounded on-device subject-first monocular mode
 
     // Thermal — predictive management
     float thermal_recovery_delay_s;            // Default: 3.0
@@ -272,24 +272,12 @@ int aether_pipeline_coordinator_export_ply(
     aether_pipeline_coordinator_t* coordinator,
     const char* path);
 
-/// Export accumulated point cloud as Gaussian-format PLY for 3D viewing.
-int aether_pipeline_coordinator_export_point_cloud_ply(
-    aether_pipeline_coordinator_t* coordinator,
-    const char* path);
-
 /// Copy TSDF surface sample positions as tightly packed xyz triplets.
 /// Returns the number of points written to out_xyz.
 size_t aether_pipeline_coordinator_copy_surface_points_xyz(
     aether_pipeline_coordinator_t* coordinator,
     float* out_xyz,
     size_t max_points);
-
-// ═══════════════════════════════════════════════════════════════════════
-// Viewer Entry Signal
-// ═══════════════════════════════════════════════════════════════════════
-
-void aether_pipeline_coordinator_signal_viewer_entered(
-    aether_pipeline_coordinator_t* coordinator);
 
 #ifdef __cplusplus
 }

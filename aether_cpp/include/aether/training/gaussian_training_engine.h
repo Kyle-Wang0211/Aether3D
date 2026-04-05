@@ -177,6 +177,10 @@ public:
     /// Higher levels reduce training frequency.
     void set_thermal_state(int level) noexcept;
 
+    /// Tell the engine whether the app is foreground-active.
+    /// Background GPU denials are treated as a resumable pause.
+    void set_foreground_active(bool active) noexcept;
+
     // ─── Export ───
 
     /// Export all Gaussians.
@@ -274,6 +278,8 @@ private:
     std::atomic<float> current_loss_{0.0f};
     std::atomic<int> thermal_state_{0};
     std::atomic<bool> stop_requested_{false};  // Set by request_stop() for early exit
+    std::atomic<bool> foreground_active_{true};
+    std::atomic<bool> gpu_background_suspended_{false};
 
     // GPU params round-trip optimization: skip upload/download when GPU already has latest.
     // Set true after CPU modifies params_ (init, densification, NaN rollback).

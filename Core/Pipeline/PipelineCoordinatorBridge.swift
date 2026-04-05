@@ -20,20 +20,60 @@ import CoreVideo
 
 import simd
 
+private enum OnDeviceRecordedVideoProfileCompatibility {
+    static let legacyProfileRawValue = "local_preview_monocular"
+}
+
 public enum PipelineCoordinatorProfile: String, Sendable {
     case cloudDefault = "cloud_default"
+    @available(*, deprecated, message: "Use localSubjectFirstMonocular for on-device recorded-video processing.")
     case localPreviewMonocular = "local_preview_monocular"
     case localSubjectFirstMonocular = "local_subject_first_monocular"
 
     public var normalizedForActiveUse: PipelineCoordinatorProfile {
-        switch self {
-        case .localPreviewMonocular:
+        if rawValue == OnDeviceRecordedVideoProfileCompatibility.legacyProfileRawValue {
             return .localSubjectFirstMonocular
-        case .cloudDefault, .localSubjectFirstMonocular:
-            return self
         }
+        return self
     }
 }
+
+#if canImport(CAetherNativeBridge)
+public extension aether_evidence_snapshot_t {
+    var onDeviceElapsedMs: UInt64 { preview_elapsed_ms }
+    var onDeviceDepthPhaseMs: UInt64 { preview_phase_depth_ms }
+    var onDeviceSeedPhaseMs: UInt64 { preview_phase_seed_ms }
+    var onDeviceRefinePhaseMs: UInt64 { preview_phase_refine_ms }
+    var onDeviceDepthBatchesSubmitted: UInt32 { preview_depth_batches_submitted }
+    var onDeviceDepthResultsReady: UInt32 { preview_depth_results_ready }
+    var onDeviceDepthReuseFrames: UInt32 { preview_depth_reuse_frames }
+    var onDevicePrefilterAccepts: UInt32 { preview_prefilter_accepts }
+    var onDevicePrefilterBrightnessRejects: UInt32 { preview_prefilter_brightness_rejects }
+    var onDevicePrefilterBlurRejects: UInt32 { preview_prefilter_blur_rejects }
+    var onDeviceKeyframeGateAccepts: UInt32 { preview_keyframe_gate_accepts }
+    var onDeviceKeyframeGateRejects: UInt32 { preview_keyframe_gate_rejects }
+    var onDeviceImportedFramesEvaluated: UInt32 { preview_imported_frames_evaluated }
+    var onDeviceImportedLowParallaxRejects: UInt32 { preview_imported_low_parallax_rejects }
+    var onDeviceImportedNearDuplicateRejects: UInt32 { preview_imported_near_duplicate_rejects }
+    var onDeviceImportedSelectedKeyframes: UInt32 { preview_imported_selected_keyframes }
+    var onDeviceImportedSelectedTranslationMeanMm: Float { preview_imported_selected_translation_mean_mm }
+    var onDeviceImportedSelectedRotationMeanDeg: Float { preview_imported_selected_rotation_mean_deg }
+    var onDeviceImportedSelectedOverlapMean: Float { preview_imported_selected_overlap_mean }
+    var onDeviceSeedCandidates: UInt32 { preview_seed_candidates }
+    var onDeviceSeedAccepted: UInt32 { preview_seed_accepted }
+    var onDeviceSeedRejected: UInt32 { preview_seed_rejected }
+    var onDeviceSeedQualityMean: Float { preview_seed_quality_mean }
+    var onDeviceFramesEnqueued: UInt32 { preview_frames_enqueued }
+    var onDeviceFramesIngested: UInt32 { preview_frames_ingested }
+    var onDeviceFrameBacklog: UInt32 { preview_frame_backlog }
+}
+
+private extension aether_coordinator_config_t {
+    mutating func setSubjectFirstOnDeviceMode(_ enabled: Bool) {
+        local_preview_mode = enabled ? 1 : 0
+    }
+}
+#endif
 
 public struct PipelinePLYExportResult: Sendable {
     public let statusCode: Int32
@@ -103,14 +143,12 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
             return nil
         }
 
-        switch profile.normalizedForActiveUse {
-        case .cloudDefault:
-            config.local_preview_mode = 0
-            break
-        case .localPreviewMonocular, .localSubjectFirstMonocular:
+        if profile.normalizedForActiveUse == .cloudDefault {
+            config.setSubjectFirstOnDeviceMode(false)
+        } else {
             // Subject-first local path: bias toward faster on-device convergence
             // while keeping the existing cloud path untouched.
-            config.local_preview_mode = 1
+            config.setSubjectFirstOnDeviceMode(true)
             config.max_iterations = 1400
             config.min_frames_to_start_training = 3
             config.render_width = 640
@@ -221,7 +259,7 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         config.depth_model_path_large = nil
         config.depth_model_path_video = nil
         NSLog(
-            "[Aether3D] WARNING: no bundled monocular depth model, profile=%@ → MVS-only fallback",
+            "[Aether3D] WARNING: no bundled monocular depth model, profile=%@ → MVS-only backup path",
             normalizedProfile.rawValue
         )
         return withUnsafeMutablePointer(to: &config) { configPtr in
@@ -362,7 +400,8 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
-    /// Tell the native local-preview pipeline whether the host app is currently
+    /// Tell the native on-device subject-first pipeline whether the host app is
+    /// currently
     /// foreground-active. Training uses this to pause GPU refine instead of
     /// tripping iOS background GPU execution denial and degrading to CPU.
     public func setForegroundActive(_ active: Bool) {
@@ -403,12 +442,13 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
-    /// Compatibility wrapper for older local-preview naming.
+    /// Legacy wrapper retained for older bootstrap call sites.
+    @available(*, deprecated, message: "Use serviceLocalSubjectFirstBootstrap() instead.")
     public func serviceLocalPreviewBootstrap() -> Bool {
         serviceLocalSubjectFirstBootstrap()
     }
 
-    /// Whether training is running on GPU (true) or CPU fallback (false).
+    /// Whether training is running on GPU (true) or CPU recovery mode (false).
     /// Returns false before training starts or if GPU shaders failed to load.
     /// UI should surface a warning when isTraining && !isGPUTraining.
     public var isGPUTraining: Bool {
@@ -461,6 +501,21 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
                 outputPath: path
             )
         }
+        let outputURL = URL(fileURLWithPath: path)
+        let outputDirectoryURL = outputURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: outputDirectoryURL,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            return PipelinePLYExportResult(
+                statusCode: -998,
+                statusReason: "swift_parent_dir_create_failed",
+                fileSizeBytes: 0,
+                outputPath: path
+            )
+        }
         let statusCode: Int32 = path.withCString { cStr in
             aether_pipeline_coordinator_export_ply(coordinator, cStr)
         }
@@ -487,18 +542,6 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #endif
     }
 
-    /// Export accumulated point cloud as Gaussian-format PLY for 3D viewing.
-    public func exportPointCloudPLY(path: String) -> Bool {
-        #if canImport(CAetherNativeBridge)
-        guard let coordinator = coordinator else { return false }
-        return path.withCString { cStr in
-            aether_pipeline_coordinator_export_point_cloud_ply(coordinator, cStr) == 0
-        }
-        #else
-        return false
-        #endif
-    }
-
     private static func exportPLYStatusReason(statusCode: Int32, fileSizeBytes: UInt64) -> String {
         switch statusCode {
         case 0:
@@ -509,6 +552,14 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
             return "native_out_of_range"
         case -3:
             return "native_resource_exhausted"
+        case -4:
+            return "native_cancelled"
+        case -5:
+            return "native_failed_precondition"
+        case -6:
+            return "native_io_error"
+        case -998:
+            return "swift_parent_dir_create_failed"
         default:
             return "native_status_\(statusCode)"
         }
@@ -538,14 +589,6 @@ public final class PipelineCoordinatorBridge: @unchecked Sendable {
         #else
         _ = maxPoints
         return []
-        #endif
-    }
-
-    /// Signal that the user has entered the 3D viewer space.
-    public func signalViewerEntered() {
-        #if canImport(CAetherNativeBridge)
-        guard let coordinator = coordinator else { return }
-        aether_pipeline_coordinator_signal_viewer_entered(coordinator)
         #endif
     }
 

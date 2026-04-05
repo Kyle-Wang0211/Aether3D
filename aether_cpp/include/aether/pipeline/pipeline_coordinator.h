@@ -146,7 +146,7 @@ struct EvidenceSnapshot {
     std::size_t assigned_blocks{0};               // Surface blocks → Gaussians (geometry gate, separate from S6+)
     std::size_t pending_gaussian_count{0};        // Gaussians waiting in queue for engine
 
-    // ── Local preview diagnostics (internal archival, cloud leaves zero) ──
+    // ── On-device diagnostics (internal archival, cloud leaves zero) ──
     std::uint64_t preview_elapsed_ms{0};
     std::uint64_t preview_phase_depth_ms{0};
     std::uint64_t preview_phase_seed_ms{0};
@@ -211,7 +211,7 @@ struct CoordinatorConfig {
     std::size_t min_frames_to_start_training{4};  // 4 frames — start ASAP (heatmap coverage = rendering readiness)
     std::size_t training_batch_size{4};
     float low_quality_loss_weight{0.3f};
-    bool local_preview_mode{false};               // ABI-compat flag for subject-first on-device path (bounded/faster)
+    bool local_preview_mode{false};               // ABI-compat flag for bounded on-device subject-first mode
     capture::FrameSelectionConfig frame_selection;
     training::TrainingConfig training;
 
@@ -332,11 +332,6 @@ public:
     /// Export final PLY (trained Gaussians).
     core::Status export_ply(const char* path) noexcept;
 
-    /// Export accumulated point cloud as Gaussian-format PLY.
-    /// Each feature point → tiny Gaussian (3mm radius, identity rotation).
-    /// Reuses GaussianSplatViewController for orbit-camera 3D viewing.
-    core::Status export_point_cloud_ply(const char* path) noexcept;
-
     /// Copy TSDF surface sample positions for export-time world-state metrics.
     /// Blocks briefly if Thread A is still accessing the TSDF volume.
     std::size_t copy_surface_points_xyz(float* out_xyz,
@@ -371,9 +366,6 @@ public:
 
     /// Get training progress (lock-free).
     training::TrainingProgress training_progress() const noexcept;
-
-    /// Signal that user has entered the 3D viewer space.
-    void signal_viewer_entered() noexcept;
 
 private:
     render::GPUDevice& device_;
@@ -461,6 +453,7 @@ private:
     // Prevents data race: training thread writes params_ while
     // export_ply() reads them on the main thread.
     mutable std::mutex training_export_mutex_;
+    std::vector<splat::GaussianParams> retained_export_splats_;
     mutable std::mutex depth_cache_mutex_;
 
     // ─── DAv2 Depth Inference — Dual-Model Cross-Validation ───

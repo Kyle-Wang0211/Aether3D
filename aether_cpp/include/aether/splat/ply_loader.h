@@ -472,7 +472,7 @@ inline core::Status write_ply(const char* path,
             path ? path : "(null)",
             errno,
             std::strerror(errno));
-        return core::Status::kInvalidArgument;
+        return core::Status::kIoError;
     }
 
     // Write header
@@ -498,6 +498,15 @@ inline core::Status write_ply(const char* path,
         std::fprintf(file, "property float f_rest_%d\n", sh);
     }
     std::fprintf(file, "end_header\n");
+    if (std::ferror(file)) {
+        std::fprintf(stderr,
+            "[Aether3D][Export] write_ply header FAILED path=%s errno=%d (%s)\n",
+            path ? path : "(null)",
+            errno,
+            std::strerror(errno));
+        std::fclose(file);
+        return core::Status::kIoError;
+    }
 
     // Write binary data
     constexpr float kInvSH_C0 = 1.0f / 0.28209479177387814f;
@@ -546,7 +555,7 @@ inline core::Status write_ply(const char* path,
                 errno,
                 std::strerror(errno));
             std::fclose(file);
-            return core::Status::kInvalidArgument;
+            return core::Status::kIoError;
         }
     }
 

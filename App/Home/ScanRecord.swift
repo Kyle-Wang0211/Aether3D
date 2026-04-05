@@ -190,6 +190,11 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     public var estimatedRemainingMinutes: Int?
     public var failureReason: String?
     public var viewerInitialPose: ViewerInitialPose?
+    public var captureGravityUpX: Float?
+    public var captureGravityUpY: Float?
+    public var captureGravityUpZ: Float?
+    public var captureGravitySource: String?
+    public var captureGravityConfidence: Float?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -224,6 +229,11 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         case estimatedRemainingMinutes
         case failureReason
         case viewerInitialPose
+        case captureGravityUpX
+        case captureGravityUpY
+        case captureGravityUpZ
+        case captureGravitySource
+        case captureGravityConfidence
     }
 
     public init(
@@ -258,7 +268,12 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         uploadBytesPerSecond: Double? = nil,
         estimatedRemainingMinutes: Int? = nil,
         failureReason: String? = nil,
-        viewerInitialPose: ViewerInitialPose? = nil
+        viewerInitialPose: ViewerInitialPose? = nil,
+        captureGravityUpX: Float? = nil,
+        captureGravityUpY: Float? = nil,
+        captureGravityUpZ: Float? = nil,
+        captureGravitySource: String? = nil,
+        captureGravityConfidence: Float? = nil
     ) {
         let resolvedStatus = status ?? (artifactPath != nil ? .completed : .preparing)
         self.id = id
@@ -300,6 +315,11 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         self.estimatedRemainingMinutes = estimatedRemainingMinutes
         self.failureReason = failureReason
         self.viewerInitialPose = viewerInitialPose
+        self.captureGravityUpX = captureGravityUpX
+        self.captureGravityUpY = captureGravityUpY
+        self.captureGravityUpZ = captureGravityUpZ
+        self.captureGravitySource = captureGravitySource
+        self.captureGravityConfidence = captureGravityConfidence
     }
 
     public init(from decoder: Decoder) throws {
@@ -357,6 +377,11 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         self.estimatedRemainingMinutes = Self.decodeLossyInt(from: container, forKey: .estimatedRemainingMinutes)
         self.failureReason = Self.decodeLossyString(from: container, forKey: .failureReason)
         self.viewerInitialPose = try? container.decodeIfPresent(ViewerInitialPose.self, forKey: .viewerInitialPose)
+        self.captureGravityUpX = Self.decodeLossyFloat(from: container, forKey: .captureGravityUpX)
+        self.captureGravityUpY = Self.decodeLossyFloat(from: container, forKey: .captureGravityUpY)
+        self.captureGravityUpZ = Self.decodeLossyFloat(from: container, forKey: .captureGravityUpZ)
+        self.captureGravitySource = Self.decodeLossyString(from: container, forKey: .captureGravitySource)
+        self.captureGravityConfidence = Self.decodeLossyFloat(from: container, forKey: .captureGravityConfidence)
     }
 
     private static func decodeLossyString(from container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) -> String? {
@@ -390,6 +415,16 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         }
         if let stringValue = decodeLossyString(from: container, forKey: key) {
             return Double(stringValue)
+        }
+        return nil
+    }
+
+    private static func decodeLossyFloat(from container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) -> Float? {
+        if let floatValue = try? container.decodeIfPresent(Float.self, forKey: key) {
+            return floatValue
+        }
+        if let doubleValue = decodeLossyDouble(from: container, forKey: key) {
+            return Float(doubleValue)
         }
         return nil
     }
@@ -477,14 +512,8 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     private static func normalizedProcessingBackend(_ rawValue: String?) -> String? {
         guard let rawValue else { return nil }
         let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        switch normalized {
-        case ProcessingBackendChoice.cloud.rawValue,
-             ProcessingBackendChoice.localPreview.rawValue,
-             ProcessingBackendChoice.localSubjectFirst.rawValue:
-            return normalized
-        default:
-            return nil
-        }
+        guard let backend = ProcessingBackendChoice(rawValue: normalized) else { return nil }
+        return backend.normalizedForActiveUse.rawValue
     }
 
     public var resolvedCaptureIntent: ScanCaptureIntent? {
@@ -493,16 +522,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     public var resolvedProcessingBackend: ProcessingBackendChoice {
-        guard let processingBackend,
-              let backend = ProcessingBackendChoice(rawValue: processingBackend) else {
-            return .cloud
-        }
-        switch backend {
-        case .localPreview:
-            return .localSubjectFirst
-        case .cloud, .localSubjectFirst:
-            return backend
-        }
+        ProcessingBackendChoice.resolvedStoredSelection(rawValue: processingBackend)
     }
 
     public var isProcessing: Bool {
@@ -754,9 +774,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private var normalizedRemoteStageKey: String? {
-        remoteStageKey?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        OnDeviceProcessingCompatibility.normalizedWorkflowStageKey(remoteStageKey)
     }
 
     private var normalizedRemotePhaseName: String? {
@@ -770,12 +788,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private func runtimeMetricString(_ key: String) -> String? {
-        let value = normalizedRuntimeMetrics[key]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let value, !value.isEmpty {
-            return value
-        }
-        return nil
+        LocalPreviewProductProfile.runtimeMetricString(key, from: normalizedRuntimeMetrics)
     }
 
     private func runtimeMetricInt(_ key: String) -> Int? {
@@ -814,111 +827,111 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     private func localPreviewPhaseElapsedMs(_ phase: LocalPreviewWorkflowPhase) -> Int? {
         switch phase {
         case .depth:
-            return runtimeMetricInt("preview_phase_depth_ms")
+            return runtimeMetricInt("native_phase_depth_ms")
         case .seed:
-            return runtimeMetricInt("preview_phase_seed_ms")
+            return runtimeMetricInt("native_phase_seed_ms")
         case .refine:
-            return runtimeMetricInt("preview_phase_refine_ms")
+            return runtimeMetricInt("native_phase_refine_ms")
         case .cutout:
-            return runtimeMetricInt("preview_phase_cutout_ms")
+            return runtimeMetricInt("native_phase_cutout_ms")
         case .cleanup:
-            return runtimeMetricInt("preview_phase_cleanup_ms")
+            return runtimeMetricInt("native_phase_cleanup_ms")
         case .export:
-            return runtimeMetricInt("preview_export_ms")
+            return runtimeMetricInt("native_export_ms")
         }
     }
 
     private func localPreviewPhaseMetricText(for phase: LocalPreviewWorkflowPhase) -> String? {
         switch phase {
         case .depth:
-            let liveSubmitted = runtimeMetricInt("preview_live_submitted_frames") ?? 0
-            let importSubmitted = runtimeMetricInt("preview_import_submitted_frames") ?? 0
-            let nativeEnqueued = runtimeMetricInt("preview_native_frames_enqueued") ?? 0
-            let nativeIngested = runtimeMetricInt("preview_native_frames_ingested") ?? 0
+            let liveSubmitted = runtimeMetricInt("native_live_submitted_frames") ?? 0
+            let importSubmitted = runtimeMetricInt("native_import_submitted_frames") ?? 0
+            let nativeEnqueued = runtimeMetricInt("native_frames_enqueued") ?? 0
+            let nativeIngested = runtimeMetricInt("native_frames_ingested") ?? 0
             let submitted = Swift.max(liveSubmitted, importSubmitted, nativeEnqueued)
             if submitted > 0 {
                 return "\(nativeIngested) / \(submitted) 帧"
             }
-            if let liveText = runtimeMetrics?["preview_depth_phase_metric_text"],
+            if let liveText = runtimeMetricString("native_depth_phase_metric_text"),
                !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return liveText
             }
-            if let ready = runtimeMetricInt("preview_depth_results_ready"),
-               let submitted = runtimeMetricInt("preview_depth_batches_submitted"),
+            if let ready = runtimeMetricInt("native_depth_results_ready"),
+               let submitted = runtimeMetricInt("native_depth_batches_submitted"),
                submitted > 0 {
                 return "\(ready) / \(submitted) 批 depth"
             }
-            if let processed = runtimeMetricInt("preview_processed_frames"),
-               let target = runtimeMetricInt("preview_live_target_frames"),
+            if let processed = runtimeMetricInt("native_processed_frames"),
+               let target = runtimeMetricInt("native_live_target_frames"),
                target > 0 {
                 return "\(processed) / \(target) 帧"
             }
-            if let processed = runtimeMetricInt("preview_processed_frames"),
+            if let processed = runtimeMetricInt("native_processed_frames"),
                processed > 0 {
                 return "\(processed) 帧"
             }
         case .seed:
-            if let liveText = runtimeMetrics?["preview_seed_phase_metric_text"],
+            if let liveText = runtimeMetricString("native_seed_phase_metric_text"),
                !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return liveText
             }
-            if let accepted = runtimeMetricInt("preview_seed_accepted"),
+            if let accepted = runtimeMetricInt("native_seed_accepted"),
                accepted > 0 {
-                let selected = runtimeMetricInt("preview_selected_frames") ?? 0
+                let selected = runtimeMetricInt("native_selected_frames") ?? 0
                 if selected > 0 {
                     return "seed \(accepted) · 帧 \(selected)"
                 }
-                let candidates = runtimeMetricInt("preview_seed_candidates") ?? 0
+                let candidates = runtimeMetricInt("native_seed_candidates") ?? 0
                 if candidates > 0 {
                     return "seed \(accepted) · 候选 \(candidates)"
                 }
                 return "seed \(accepted)"
             }
-            if let selected = runtimeMetricInt("preview_selected_frames"),
-               let minimum = runtimeMetricInt("preview_live_min_selected_frames"),
+            if let selected = runtimeMetricInt("native_selected_frames"),
+               let minimum = runtimeMetricInt("native_live_min_selected_frames"),
                minimum > 0 {
                 if selected < minimum {
                     return "关键帧 \(selected) / \(minimum)"
                 }
                 return "关键帧 \(selected) · 已达标"
             }
-            if let accepted = runtimeMetricInt("preview_seed_accepted"),
-               let candidates = runtimeMetricInt("preview_seed_candidates"),
+            if let accepted = runtimeMetricInt("native_seed_accepted"),
+               let candidates = runtimeMetricInt("native_seed_candidates"),
                candidates > 0 {
                 return "seed \(accepted) · 候选 \(candidates)"
             }
         case .refine:
-            if let liveText = runtimeMetrics?["preview_refine_phase_metric_text"],
+            if let liveText = runtimeMetricString("native_refine_phase_metric_text"),
                !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return liveText
             }
             if let percent = trainingProgressPercentTextValue {
                 return percent
             }
-            if let gaussians = runtimeMetricInt("preview_gaussians"), gaussians > 0 {
+            if let gaussians = runtimeMetricInt("native_gaussians"), gaussians > 0 {
                 return "\(gaussians) 个高斯"
             }
         case .cutout:
-            if let liveText = runtimeMetrics?["preview_cutout_phase_metric_text"],
+            if let liveText = runtimeMetricString("native_cutout_phase_metric_text"),
                !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return liveText
             }
-            if let kept = runtimeMetricInt("preview_subject_cutout_kept"),
-               let input = runtimeMetricInt("preview_subject_input_splats"),
+            if let kept = runtimeMetricInt("native_subject_cutout_kept"),
+               let input = runtimeMetricInt("native_subject_input_splats"),
                input > 0 {
                 return "\(kept) / \(input)"
             }
         case .cleanup:
-            if let liveText = runtimeMetrics?["preview_cleanup_phase_metric_text"],
+            if let liveText = runtimeMetricString("native_cleanup_phase_metric_text"),
                !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return liveText
             }
-            if let kept = runtimeMetricInt("preview_subject_cleanup_kept"),
-               let removed = runtimeMetricInt("preview_subject_cleanup_removed") {
+            if let kept = runtimeMetricInt("native_subject_cleanup_kept"),
+               let removed = runtimeMetricInt("native_subject_cleanup_removed") {
                 return "保留 \(kept) · 删除 \(removed)"
             }
         case .export:
-            if let liveText = runtimeMetrics?["preview_export_phase_metric_text"],
+            if let liveText = runtimeMetricString("native_export_phase_metric_text"),
                !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return liveText
             }
@@ -954,28 +967,28 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         }
         switch phase {
         case .depth:
-            if let batches = runtimeMetricInt("preview_depth_batches_submitted"), batches > 0 {
+            if let batches = runtimeMetricInt("native_depth_batches_submitted"), batches > 0 {
                 return .completed
             }
         case .seed:
-            if let accepted = runtimeMetricInt("preview_seed_accepted"), accepted > 0 {
+            if let accepted = runtimeMetricInt("native_seed_accepted"), accepted > 0 {
                 return .completed
             }
         case .refine:
-            if let trainingProgress = runtimeMetricString("preview_training_progress"),
+            if let trainingProgress = runtimeMetricString("native_training_progress"),
                !trainingProgress.isEmpty {
                 return .completed
             }
         case .cutout:
-            if let kept = runtimeMetricInt("preview_subject_cutout_kept"), kept > 0 {
+            if let kept = runtimeMetricInt("native_subject_cutout_kept"), kept > 0 {
                 return .completed
             }
         case .cleanup:
-            if let kept = runtimeMetricInt("preview_subject_cleanup_kept"), kept > 0 {
+            if let kept = runtimeMetricInt("native_subject_cleanup_kept"), kept > 0 {
                 return .completed
             }
         case .export:
-            if let exported = runtimeMetricString("preview_export_succeeded"), exported == "1" {
+            if let exported = runtimeMetricString("native_export_succeeded"), exported == "1" {
                 return .completed
             }
         }
@@ -1592,12 +1605,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     public var galleryProcessingBackendLabelText: String? {
-        switch resolvedProcessingBackend {
-        case .cloud:
-            return "处理 云端高质量"
-        case .localPreview, .localSubjectFirst:
-            return "处理 本地方案"
-        }
+        resolvedProcessingBackend == .cloud ? "远端方案" : "本地方案"
     }
 
     public var galleryProcessingDurationLabelText: String? {
@@ -1664,74 +1672,74 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                let metricText = localPreviewPhaseMetricText(for: currentPhase) {
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "local_preview_phase_metric",
+                        id: "local_native_phase_metric",
                         title: metricText,
                         subtitle: currentPhase.title
                     )
                 )
             }
-            if let gaussians = runtimeMetricInt("preview_gaussians"), gaussians > 0 {
+            if let gaussians = runtimeMetricInt("native_gaussians"), gaussians > 0 {
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "preview_gaussians",
+                        id: "native_gaussians",
                         title: "\(gaussians)",
                         subtitle: "当前高斯数"
                     )
                 )
             }
-            if status == .failed, let attempts = runtimeMetricInt("preview_export_attempts"), attempts > 0 {
+            if status == .failed, let attempts = runtimeMetricInt("native_export_attempts"), attempts > 0 {
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "preview_export_attempts",
+                        id: "native_export_attempts",
                         title: "\(attempts)",
                         subtitle: "导出尝试次数"
                     )
                 )
             }
-            if status == .failed, let fileSize = runtimeMetricInt("preview_export_file_size_bytes"), fileSize >= 0 {
+            if status == .failed, let fileSize = runtimeMetricInt("native_export_file_size_bytes"), fileSize >= 0 {
                 let fileSizeText = ByteCountFormatter.string(
                     fromByteCount: Int64(fileSize),
                     countStyle: .file
                 )
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "preview_export_file_size_bytes",
+                        id: "native_export_file_size_bytes",
                         title: fileSizeText,
                         subtitle: "导出文件大小"
                     )
                 )
             }
-            if status == .failed, let waitSteps = runtimeMetricInt("preview_export_wait_steps"), waitSteps > 0 {
+            if status == .failed, let waitSteps = runtimeMetricInt("native_export_wait_steps"), waitSteps > 0 {
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "preview_export_wait_steps",
+                        id: "native_export_wait_steps",
                         title: "\(waitSteps)",
                         subtitle: "导出等待步数"
                     )
                 )
             }
-            if status == .failed, let statusCode = runtimeMetricInt("preview_export_status_code") {
+            if status == .failed, let statusCode = runtimeMetricInt("native_export_status_code") {
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "preview_export_status_code",
+                        id: "native_export_status_code",
                         title: "\(statusCode)",
-                        subtitle: runtimeMetricString("preview_export_failure_reason") ?? "导出状态码"
+                        subtitle: runtimeMetricString("native_export_failure_reason") ?? "导出状态码"
                     )
                 )
             }
-            if let quality = runtimeMetricString("preview_overall_quality") {
+            if let quality = runtimeMetricString("native_overall_quality") {
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "preview_quality",
+                        id: "native_quality",
                         title: quality,
                         subtitle: "当前质量估计"
                     )
                 )
             }
-            if let elapsed = runtimeMetricInt("preview_elapsed_ms"), elapsed > 0 {
+            if let elapsed = runtimeMetricInt("native_elapsed_ms"), elapsed > 0 {
                 metrics.append(
                     WorkflowActivityMetric(
-                        id: "preview_elapsed_ms",
+                        id: "native_elapsed_ms",
                         title: Self.durationMetricText(seconds: max(1, Int((Double(elapsed) / 1000.0).rounded()))),
                         subtitle: "本地已运行"
                     )
@@ -1845,7 +1853,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                 WorkflowActivityMetric(
                     id: "phase_elapsed_seconds",
                     title: Self.durationMetricText(seconds: phaseElapsedSeconds),
-                    subtitle: runtimeMetricInt("phase_elapsed_seconds") != nil ? "本阶段已运行" : "远端已运行"
+                    subtitle: runtimeMetricInt("phase_elapsed_seconds") != nil
+                        ? "本阶段已运行"
+                        : (resolvedProcessingBackend.usesLocalPreviewPipeline ? "本地已运行" : "远端已运行")
                 )
             )
         }
@@ -2567,7 +2577,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         case .downloading:
             return "正在回传 3DGS 到手机"
         case .localFallback:
-            return "远端不可用，正在本地兜底"
+            return "远端不可用，正在切到本地处理"
         case .completed:
             return "作品已生成，可交互查看"
         case .cancelled:
@@ -2616,13 +2626,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private var normalizedProgressBasis: String? {
-        let trimmed = progressBasis?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return nil }
-        let normalized = trimmed.lowercased()
-        if normalized.hasPrefix("local_preview_") {
-            return normalized.replacingOccurrences(of: "local_preview_", with: "local_subject_first_", options: [.anchored])
-        }
-        return normalized
+        OnDeviceProcessingCompatibility.normalizedProgressBasis(progressBasis)
     }
 
     private var effectiveWorkflowStatus: ScanRecordStatus {
@@ -2797,16 +2801,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private var normalizedFailureReason: String? {
-        let trimmed = failureReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return nil }
-        switch trimmed.lowercased() {
-        case "local_preview_import_failed":
-            return "local_subject_first_import_failed"
-        case "local_preview_bridge_missing":
-            return "local_subject_first_bridge_missing"
-        default:
-            return trimmed
-        }
+        OnDeviceProcessingCompatibility.normalizedFailureReason(failureReason)
     }
 
     private var currentStepActualRatio: (current: Double, total: Double)? {
@@ -3648,6 +3643,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private static func progressBasisDisplayTitle(for basis: String) -> String {
+        if let onDeviceTitle = OnDeviceProcessingCompatibility.progressBasisDisplayTitle(basis) {
+            return onDeviceTitle
+        }
         switch basis {
         case "prepare_inspecting_source":
             return "检查原视频"
@@ -3715,6 +3713,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private static func failureReasonDisplayTitle(for reason: String) -> String {
+        if let onDeviceTitle = OnDeviceProcessingCompatibility.failureReasonDisplayTitle(reason) {
+            return onDeviceTitle
+        }
         switch reason.lowercased() {
         case "timeout":
             return "远端超时"
@@ -3740,14 +3741,6 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             return "处理卡住"
         case "unknown_error":
             return "未分类异常"
-        case "local_subject_first_bridge_missing":
-            return "本地引擎未启动"
-        case "local_subject_first_import_failed":
-            return "本地处理失败"
-        case "local_subject_first_insufficient_parallax":
-            return "本地视差不足"
-        case "local_subject_first_duplicate_views":
-            return "近重复视角过多"
         case "copy_failed":
             return "本地落盘失败"
         case "cancel_requested":

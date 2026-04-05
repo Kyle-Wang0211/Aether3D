@@ -2,9 +2,9 @@
 // LocalPreviewProductProfile.swift
 // Aether3D
 //
-// Product-facing local subject-first configuration extracted out of individual
-// runners so on-device budget policy can evolve independently from shared UI
-// orchestration and cloud routing.
+// Product-facing on-device subject-first configuration extracted out of
+// individual runners so the native recorded-video path can evolve
+// independently from shared UI orchestration and cloud routing.
 //
 
 import Foundation
@@ -142,26 +142,26 @@ struct DirectCaptureLocalPreviewBudget: Sendable {
 }
 
 enum LocalPreviewProductProfile {
-    static let defaultPreviewMode = "monocular_ref_depth"
-    static let defaultSubjectFirstMode = "monocular_subject_first_result"
+    static let defaultCloudPipelineMode = "monocular_ref_depth"
+    static let defaultSubjectFirstPipelineMode = "monocular_subject_first_result"
     static let depthPriorSource = "depthanything_v2_coreml"
     static let depthPriorTransport = "ref_depth"
-    static let depthPriorProfile = "small_only_fast_preview"
+    static let depthPriorProfile = "small_only_fast_native"
 
-    static let subjectFirstCurrentDepthPrior = "video_depth_runtime_optional + dav2_temporal_consistency_fallback"
+    static let subjectFirstCurrentDepthPrior = "video_depth_runtime_optional + dav2_temporal_consistency_assist"
     static let subjectFirstTargetDepthPrior = "video_depth_anything_v2"
     static let subjectFirstCurrentBootstrap = "native_icp_repo_mvs_seed"
     static let subjectFirstTargetBootstrap = "vggt_lite"
 
     static let importedVideoPoseBootstrap = "native_online_depth_bootstrap"
     static let importedVideoKeyframeGate = "subject_first_strong_motion_gate"
-    static let importedVideoSeedInitialization = "repo_mvs_initialize_primary + repo_dav2_fallback_prior"
+    static let importedVideoSeedInitialization = "repo_mvs_initialize_primary + repo_dav2_assist_prior"
     static let importedVideoPhotometricGate = "pr5_exposure_white_balance_consistency"
 
     private static func normalizedBackend(
         _ processingBackend: ProcessingBackendChoice
     ) -> ProcessingBackendChoice {
-        processingBackend == .localPreview ? .localSubjectFirst : processingBackend
+        processingBackend.normalizedForActiveUse
     }
 
     static func phase(
@@ -204,51 +204,46 @@ enum LocalPreviewProductProfile {
     static func workflowPhases(
         for processingBackend: ProcessingBackendChoice
     ) -> [LocalPreviewWorkflowPhase] {
-        switch normalizedBackend(processingBackend) {
-        case .cloud:
+        if normalizedBackend(processingBackend) == .cloud {
             return [.depth, .seed, .refine, .export]
-        case .localSubjectFirst:
-            return [.depth, .seed, .refine, .cutout, .cleanup, .export]
-        case .localPreview:
-            return [.depth, .seed, .refine, .cutout, .cleanup, .export]
         }
+        return [.depth, .seed, .refine, .cutout, .cleanup, .export]
     }
 
-    static func previewMode(
+    static func nativePipelineMode(
         for processingBackend: ProcessingBackendChoice
     ) -> String {
-        switch normalizedBackend(processingBackend) {
-        case .cloud:
-            return defaultPreviewMode
-        case .localSubjectFirst:
-            return defaultSubjectFirstMode
-        case .localPreview:
-            return defaultSubjectFirstMode
-        }
+        normalizedBackend(processingBackend) == .cloud
+            ? defaultCloudPipelineMode
+            : defaultSubjectFirstPipelineMode
+    }
+
+    static func phaseModelDescriptor(
+        for processingBackend: ProcessingBackendChoice
+    ) -> String {
+        normalizedBackend(processingBackend) == .localSubjectFirst
+            ? "recorded_video_depth_seed_refine_cutout_cleanup_export"
+            : "recorded_video_depth_seed_refine_export"
     }
 
     static func defaultActiveFraction(
         for phase: LocalPreviewWorkflowPhase,
         processingBackend: ProcessingBackendChoice
     ) -> Double {
-        switch normalizedBackend(processingBackend) {
-        case .localSubjectFirst:
+        if normalizedBackend(processingBackend) != .cloud {
             return phase.defaultActiveFraction
-        case .cloud:
-            switch phase {
-            case .depth:
-                return 0.18
-            case .seed:
-                return 0.42
-            case .refine:
-                return 0.72
-            case .export:
-                return 0.94
-            case .cutout, .cleanup:
-                return 0.94
-            }
-        case .localPreview:
-            return phase.defaultActiveFraction
+        }
+        switch phase {
+        case .depth:
+            return 0.18
+        case .seed:
+            return 0.42
+        case .refine:
+            return 0.72
+        case .export:
+            return 0.94
+        case .cutout, .cleanup:
+            return 0.94
         }
     }
 
@@ -268,9 +263,6 @@ enum LocalPreviewProductProfile {
     }
 
     static func directCaptureSourceKind(sourceVideoRelativePath: String?) -> String {
-        if sourceVideoRelativePath == "memory_only" {
-            return "direct_capture_memory_only"
-        }
         return "direct_capture_video"
     }
 
@@ -353,5 +345,149 @@ enum LocalPreviewProductProfile {
             exportWaitFloorSeconds: 45.0,
             extraRefineTailSeconds: 45.0
         )
+    }
+
+    static func canonicalRuntimeMetrics(_ runtimeMetrics: [String: String]) -> [String: String] {
+        var canonical: [String: String] = [:]
+        for (key, value) in runtimeMetrics {
+            let canonicalKey = canonicalMetricKey(for: key)
+            canonical[canonicalKey] = canonicalMetricValue(
+                for: canonicalKey,
+                originalKey: key,
+                value: value
+            )
+        }
+        return canonical
+    }
+
+    static func runtimeMetricString(
+        _ key: String,
+        from runtimeMetrics: [String: String]?
+    ) -> String? {
+        guard let runtimeMetrics else { return nil }
+        for candidate in runtimeMetricLookupKeys(for: key) {
+            if let value = runtimeMetrics[candidate]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    static func setRuntimeMetric(
+        _ key: String,
+        value: String?,
+        in metrics: inout [String: String]
+    ) {
+        guard let value else { return }
+        let canonicalKey = canonicalMetricKey(for: key)
+        metrics[canonicalKey] = canonicalMetricValue(
+            for: canonicalKey,
+            originalKey: key,
+            value: value
+        )
+    }
+
+    private static let canonicalMetricKeyOverrides: [String: String] = [
+        "preview_mode": "native_pipeline_mode",
+        "preview_source_kind": "native_input_kind",
+        "preview_capture_source_kind": "native_capture_input_kind",
+        "preview_active_phase": "native_active_phase",
+        "preview_phase_model": "native_phase_model",
+        "preview_trace_last_event": "native_trace_last_event",
+        "preview_trace_log": "native_trace_log",
+        "preview_gaussians_current": "native_current_gaussians",
+        "preview_peak_gaussians": "native_peak_gaussians",
+        "preview_fallback_from": "native_handoff_from",
+        "preview_failure_reason": "native_failure_reason",
+        "preview_export_failure_reason": "native_export_failure_reason",
+        "preview_native_frames_enqueued": "native_frames_enqueued",
+        "preview_native_frames_ingested": "native_frames_ingested",
+        "preview_native_frame_backlog": "native_frame_backlog",
+        "preview_import_frames_using_fallback_intrinsics": "native_import_frames_using_estimated_intrinsics",
+        "preview_subject_cleanup_fallback": "native_subject_cleanup_strategy",
+    ]
+
+    private static func runtimeMetricLookupKeys(for key: String) -> [String] {
+        var candidates: [String] = []
+        let canonical = canonicalMetricKey(for: key)
+        let legacy = legacyMetricKey(for: key)
+
+        func appendUnique(_ candidate: String) {
+            guard !candidate.isEmpty, !candidates.contains(candidate) else { return }
+            candidates.append(candidate)
+        }
+
+        appendUnique(canonical)
+        appendUnique(key)
+        appendUnique(legacy)
+        return candidates
+    }
+
+    private static func canonicalMetricKey(for key: String) -> String {
+        if let override = canonicalMetricKeyOverrides[key] {
+            return override
+        }
+        if key.hasPrefix("preview_") {
+            return "native_" + key.dropFirst("preview_".count)
+        }
+        return key
+    }
+
+    private static func legacyMetricKey(for key: String) -> String {
+        if let legacy = canonicalMetricKeyOverrides.first(where: { $0.value == key })?.key {
+            return legacy
+        }
+        if key.hasPrefix("native_") {
+            return "preview_" + key.dropFirst("native_".count)
+        }
+        return key
+    }
+
+    private static func canonicalMetricValue(
+        for canonicalKey: String,
+        originalKey: String,
+        value: String
+    ) -> String {
+        switch canonicalKey {
+        case "native_input_kind", "native_capture_input_kind":
+            switch value {
+            case "imported_video":
+                return "recorded_video"
+            case "captured_video", "direct_capture_video":
+                return "recorded_video_from_capture"
+            case "captured_video_missing":
+                return "recorded_video_missing"
+            case "direct_capture":
+                return "live_capture"
+            default:
+                return value
+            }
+        case "native_phase_model":
+            switch value {
+            case "captured_video_depth_seed_refine_cutout_cleanup_export":
+                return "recorded_video_from_capture_depth_seed_refine_cutout_cleanup_export"
+            case "captured_video_depth_seed_refine_export":
+                return "recorded_video_from_capture_depth_seed_refine_export"
+            case "depth_seed_refine_cutout_cleanup_export":
+                return "recorded_video_depth_seed_refine_cutout_cleanup_export"
+            case "depth_seed_refine_export":
+                return "recorded_video_depth_seed_refine_export"
+            default:
+                return value
+            }
+        case "native_import_intrinsics_source":
+            return value == "mixed_fallback" ? "mixed_estimated" : value
+        case "native_import_suitability_verdict":
+            return value == "fallback_remote" ? "remote_recommended" : value
+        case "native_subject_cleanup_strategy":
+            return value == "disabled_raw_fallback" ? "disabled_raw_retention" : value
+        default:
+            if originalKey == "preview_subject_cleanup_fallback",
+               value == "disabled_raw_fallback" {
+                return "disabled_raw_retention"
+            }
+            return value
+        }
     }
 }

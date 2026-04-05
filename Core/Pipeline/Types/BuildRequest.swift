@@ -117,87 +117,182 @@ public enum FrameSamplingProfile: String, Codable, CaseIterable, Sendable {
 
 public enum ProcessingBackendChoice: String, Codable, CaseIterable, Sendable {
     case cloud
+    @available(*, deprecated, message: "Use localSubjectFirst for on-device recorded-video processing.")
     case localPreview = "local_preview"
     case localSubjectFirst = "local_subject_first"
 
     public static let userDefaultsKey = "aether.processingBackendChoice"
+    public static let allCases: [ProcessingBackendChoice] = [
+        .cloud,
+        .localSubjectFirst,
+    ]
 
-    public static func currentSelection(userDefaults: UserDefaults = .standard) -> ProcessingBackendChoice {
-        let rawValue = userDefaults.string(forKey: userDefaultsKey)
-        guard let rawValue else { return .cloud }
-        switch ProcessingBackendChoice(rawValue: rawValue) {
-        case .localPreview:
-            return .localSubjectFirst
-        case let backend?:
-            return backend
-        case nil:
+    public static func resolvedStoredSelection(rawValue: String?) -> ProcessingBackendChoice {
+        guard let normalized = OnDeviceProcessingCompatibility.normalizedStoredBackendRawValue(rawValue) else {
             return .cloud
         }
+        guard let backend = ProcessingBackendChoice(rawValue: normalized) else { return .cloud }
+        return backend.normalizedForActiveUse
+    }
+
+    public static func canonicalStoredSelectionRawValue(_ rawValue: String?) -> String {
+        resolvedStoredSelection(rawValue: rawValue).rawValue
+    }
+
+    public static func currentSelection(userDefaults: UserDefaults = .standard) -> ProcessingBackendChoice {
+        resolvedStoredSelection(rawValue: userDefaults.string(forKey: userDefaultsKey))
     }
 
     public var normalizedForActiveUse: ProcessingBackendChoice {
-        switch self {
-        case .localPreview:
+        if OnDeviceProcessingCompatibility.isLegacyStoredBackendRawValue(rawValue) {
             return .localSubjectFirst
-        case .cloud, .localSubjectFirst:
-            return self
         }
+        return self
     }
 
     public var title: String {
-        switch self {
-        case .cloud:
-            return "云端"
-        case .localPreview, .localSubjectFirst:
-            return "本地"
-        }
+        normalizedForActiveUse == .cloud ? "云端" : "本地"
     }
 
     public var detail: String {
-        switch self {
-        case .cloud:
-            return "高质量"
-        case .localPreview, .localSubjectFirst:
-            return "本地处理"
-        }
+        normalizedForActiveUse == .cloud ? "高质量" : "本地处理"
     }
 
     public var displayLabel: String {
-        switch self {
-        case .cloud:
-            return "云端高质量"
-        case .localPreview, .localSubjectFirst:
-            return "本地处理"
-        }
+        normalizedForActiveUse == .cloud ? "云端高质量" : "本地处理"
     }
 
     public var supportsImportedVideoPreview: Bool {
-        switch self {
-        case .cloud:
-            return true
-        case .localPreview:
-            return true
-        case .localSubjectFirst:
-            return true
-        }
+        true
     }
 
     public var localWorkflowStageKey: String? {
-        switch self {
-        case .cloud:
-            return nil
-        case .localPreview, .localSubjectFirst:
-            return "local_subject_first"
+        normalizedForActiveUse == .cloud ? nil : OnDeviceProcessingCompatibility.canonicalWorkflowStageKey
+    }
+
+    public var usesSubjectFirstCaptureContract: Bool {
+        switch normalizedForActiveUse {
+        case .cloud, .localPreview, .localSubjectFirst:
+            return true
         }
     }
 
     public var usesLocalPreviewPipeline: Bool {
-        switch self {
-        case .cloud:
-            return false
-        case .localPreview, .localSubjectFirst:
-            return true
+        normalizedForActiveUse != .cloud
+    }
+}
+
+public enum OnDeviceProcessingCompatibility {
+    public static let legacyStoredBackendRawValue = "local_preview"
+    public static let canonicalStoredBackendRawValue = ProcessingBackendChoice.localSubjectFirst.rawValue
+    public static let legacyWorkflowStageKey = "local_preview"
+    public static let canonicalWorkflowStageKey = "local_subject_first"
+    public static let canonicalDepthProgressBasis = canonicalWorkflowStageKey + "_depth"
+    public static let canonicalSeedProgressBasis = canonicalWorkflowStageKey + "_seed"
+    public static let canonicalRefineProgressBasis = canonicalWorkflowStageKey + "_refine"
+    public static let canonicalCutoutProgressBasis = canonicalWorkflowStageKey + "_cutout"
+    public static let canonicalCleanupProgressBasis = canonicalWorkflowStageKey + "_cleanup"
+    public static let canonicalExportProgressBasis = canonicalWorkflowStageKey + "_export"
+
+    public static let legacyImportFailureReason = "local_preview_import_failed"
+    public static let canonicalImportFailureReason = "local_subject_first_import_failed"
+    public static let legacyBridgeMissingFailureReason = "local_preview_bridge_missing"
+    public static let canonicalBridgeMissingFailureReason = "local_subject_first_bridge_missing"
+    public static let canonicalInsufficientParallaxFailureReason = "local_subject_first_insufficient_parallax"
+    public static let canonicalDuplicateViewsFailureReason = "local_subject_first_duplicate_views"
+
+    public static func normalizedStoredBackendRawValue(_ rawValue: String?) -> String? {
+        let normalized = normalizedToken(rawValue)
+        switch normalized {
+        case legacyStoredBackendRawValue:
+            return canonicalStoredBackendRawValue
+        default:
+            return normalized
         }
+    }
+
+    public static func isLegacyStoredBackendRawValue(_ rawValue: String?) -> Bool {
+        normalizedToken(rawValue) == legacyStoredBackendRawValue
+    }
+
+    public static func normalizedWorkflowStageKey(_ stageKey: String?) -> String? {
+        let normalized = normalizedToken(stageKey)
+        switch normalized {
+        case legacyWorkflowStageKey:
+            return canonicalWorkflowStageKey
+        default:
+            return normalized
+        }
+    }
+
+    public static func normalizedProgressBasis(_ progressBasis: String?) -> String? {
+        guard let normalized = normalizedToken(progressBasis) else { return nil }
+        if normalized == legacyWorkflowStageKey {
+            return canonicalWorkflowStageKey
+        }
+        if normalized.hasPrefix(legacyWorkflowStageKey + "_") {
+            return canonicalWorkflowStageKey +
+                normalized.dropFirst(legacyWorkflowStageKey.count)
+        }
+        return normalized
+    }
+
+    public static func isOnDeviceWorkflowStageKey(_ stageKey: String?) -> Bool {
+        normalizedWorkflowStageKey(stageKey) == canonicalWorkflowStageKey
+    }
+
+    public static func normalizedFailureReason(_ failureReason: String?) -> String? {
+        let normalized = normalizedToken(failureReason)
+        switch normalized {
+        case legacyImportFailureReason:
+            return canonicalImportFailureReason
+        case legacyBridgeMissingFailureReason:
+            return canonicalBridgeMissingFailureReason
+        default:
+            return normalized
+        }
+    }
+
+    public static func progressBasisDisplayTitle(_ progressBasis: String?) -> String? {
+        switch normalizedProgressBasis(progressBasis) {
+        case canonicalDepthProgressBasis:
+            return "深度先验"
+        case canonicalSeedProgressBasis:
+            return "初始化高斯"
+        case canonicalRefineProgressBasis:
+            return "本地 refine"
+        case canonicalCutoutProgressBasis:
+            return "主体裁切"
+        case canonicalCleanupProgressBasis:
+            return "边角清理"
+        case canonicalExportProgressBasis:
+            return "导出结果"
+        case canonicalWorkflowStageKey:
+            return "本地处理"
+        default:
+            return nil
+        }
+    }
+
+    public static func failureReasonDisplayTitle(_ failureReason: String?) -> String? {
+        switch normalizedFailureReason(failureReason) {
+        case canonicalBridgeMissingFailureReason:
+            return "本地引擎未启动"
+        case canonicalImportFailureReason:
+            return "本地处理失败"
+        case canonicalInsufficientParallaxFailureReason:
+            return "本地视差不足"
+        case canonicalDuplicateViewsFailureReason:
+            return "近重复视角过多"
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizedToken(_ rawValue: String?) -> String? {
+        let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.lowercased()
     }
 }
 

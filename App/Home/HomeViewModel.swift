@@ -136,8 +136,7 @@ final class HomeViewModel: ObservableObject {
         do {
             let recordId = UUID()
             let selectedFrameSamplingProfile = FrameSamplingProfile.currentSelection()
-            let effectiveProcessingBackend: ProcessingBackendChoice =
-                processingBackend.supportsImportedVideoPreview ? processingBackend : .cloud
+            let effectiveProcessingBackend = processingBackend.normalizedForActiveUse
             let baseDirectory = store.baseDirectoryURL()
             let importsDirectory = baseDirectory.appendingPathComponent("imports", isDirectory: true)
             let exportsDirectory = baseDirectory.appendingPathComponent("exports", isDirectory: true)
@@ -153,7 +152,8 @@ final class HomeViewModel: ObservableObject {
 
             let asset = AVURLAsset(url: targetURL)
             let thumbnailPath = try await makeThumbnail(for: asset, recordId: recordId)
-            let durationSeconds = CMTimeGetSeconds(asset.duration).isFinite ? CMTimeGetSeconds(asset.duration) : 0
+            let duration = (try? await asset.load(.duration)) ?? .zero
+            let durationSeconds = duration.seconds.isFinite ? duration.seconds : 0
 
             let relativeSource = "imports/\(targetURL.lastPathComponent)"
             let record = ScanRecord(
@@ -168,22 +168,12 @@ final class HomeViewModel: ObservableObject {
                 triangleCount: 0,
                 durationSeconds: durationSeconds,
                 status: .preparing,
-                statusMessage: {
-                    switch effectiveProcessingBackend {
-                    case .cloud:
-                        return "正在准备后台上传任务"
-                    case .localPreview, .localSubjectFirst:
-                        return "正在准备本地处理"
-                    }
-                }(),
-                detailMessage: {
-                    switch effectiveProcessingBackend {
-                    case .cloud:
-                        return "只有这次你手动选择的视频会进入后台上传与训练队列；过去的旧素材不会自动重发。"
-                    case .localPreview, .localSubjectFirst:
-                        return "这次会先在手机上走本地处理链路：单目点图、cutout，再做保守 cleanup。"
-                    }
-                }(),
+                statusMessage: effectiveProcessingBackend == .cloud
+                    ? "正在准备后台上传任务"
+                    : "正在准备本地处理",
+                detailMessage: effectiveProcessingBackend == .cloud
+                    ? "只有这次你手动选择的视频会进入后台上传与训练队列；过去的旧素材不会自动重发。"
+                    : "这次会先在手机上走本地处理链路：单目点图、cutout，再做保守 cleanup。",
                 progressFraction: 0.01,
                 estimatedRemainingMinutes: nil
             )
@@ -203,14 +193,9 @@ final class HomeViewModel: ObservableObject {
                 }
             }
 
-            busyMessage = {
-                switch effectiveProcessingBackend {
-                case .cloud:
-                    return nil
-                case .localPreview, .localSubjectFirst:
-                    return "正在启动本地处理..."
-                }
-            }()
+            busyMessage = effectiveProcessingBackend == .cloud
+                ? nil
+                : "正在启动本地处理..."
             isImportingVideo = false
             return record
         } catch {
@@ -275,12 +260,13 @@ final class HomeViewModel: ObservableObject {
         let artifactURL = store.baseDirectoryURL().appendingPathComponent(artifactRelativePath)
         let sourceRelativePath = store.record(id: recordId)?.sourceVideoPath ?? "imports/\(sourceVideoURL.lastPathComponent)"
         let stageKey = processingBackend.localWorkflowStageKey ?? ProcessingBackendChoice.localSubjectFirst.localWorkflowStageKey!
-        let initialPhaseModel = "depth_seed_refine_cutout_cleanup_export"
+        let initialPhaseModel = "recorded_video_depth_seed_refine_cutout_cleanup_export"
         final class LocalPreviewUiRefreshThrottle {
             var lastRefreshAt: CFAbsoluteTime = 0.0
             var lastPhaseName = ""
             var lastSubmittedFrames = -1
             var lastProcessedFrames = -1
+            var lastSelectedFrames = -1
         }
         let uiRefreshThrottle = LocalPreviewUiRefreshThrottle()
 
@@ -307,16 +293,35 @@ final class HomeViewModel: ObservableObject {
                 frameSamplingProfile: frameSamplingProfile.rawValue,
                 clearRemoteJobId: true
             )
+            _ = self.refreshRecord(id: recordId)
             let submittedFrames = Int(
-                update.runtimeMetrics["preview_live_submitted_frames"]
-                ?? update.runtimeMetrics["preview_import_submitted_frames"]
+                LocalPreviewProductProfile.runtimeMetricString(
+                    "native_live_submitted_frames",
+                    from: update.runtimeMetrics
+                )
+                ?? LocalPreviewProductProfile.runtimeMetricString(
+                    "native_import_submitted_frames",
+                    from: update.runtimeMetrics
+                )
                 ?? "-1"
             ) ?? -1
             let processedFrames = Int(
-                update.runtimeMetrics["preview_processed_frames"] ?? "-1"
+                LocalPreviewProductProfile.runtimeMetricString(
+                    "native_processed_frames",
+                    from: update.runtimeMetrics
+                ) ?? "-1"
             ) ?? -1
             let queueIngestedFrames = Int(
-                update.runtimeMetrics["preview_native_frames_ingested"] ?? "-1"
+                LocalPreviewProductProfile.runtimeMetricString(
+                    "native_frames_ingested",
+                    from: update.runtimeMetrics
+                ) ?? "-1"
+            ) ?? -1
+            let selectedFrames = Int(
+                LocalPreviewProductProfile.runtimeMetricString(
+                    "native_selected_frames",
+                    from: update.runtimeMetrics
+                ) ?? "-1"
             ) ?? -1
             let now = CFAbsoluteTimeGetCurrent()
             let isDepthPhase = update.phase == .depth
@@ -326,13 +331,15 @@ final class HomeViewModel: ObservableObject {
                     ? submittedFrames != uiRefreshThrottle.lastSubmittedFrames
                     : submittedFrames - uiRefreshThrottle.lastSubmittedFrames >= 4) ||
                 processedFrames - uiRefreshThrottle.lastProcessedFrames >= 1 ||
+                selectedFrames != uiRefreshThrottle.lastSelectedFrames ||
                 (isDepthPhase && queueIngestedFrames >= 0 && queueIngestedFrames != processedFrames) ||
-                now - uiRefreshThrottle.lastRefreshAt >= (isDepthPhase ? 0.10 : 0.25)
+                now - uiRefreshThrottle.lastRefreshAt >= (isDepthPhase ? 0.25 : 0.75)
             if shouldReload {
                 uiRefreshThrottle.lastRefreshAt = now
                 uiRefreshThrottle.lastPhaseName = update.phase.phaseName
                 uiRefreshThrottle.lastSubmittedFrames = submittedFrames
                 uiRefreshThrottle.lastProcessedFrames = processedFrames
+                uiRefreshThrottle.lastSelectedFrames = selectedFrames
                 self.loadRecords(scheduleRemoteResume: false)
             }
         }
@@ -346,12 +353,12 @@ final class HomeViewModel: ObservableObject {
             progressBasis: LocalPreviewWorkflowPhase.depth.progressBasis,
             remoteStageKey: stageKey,
             remotePhaseName: LocalPreviewWorkflowPhase.depth.phaseName,
-            runtimeMetrics: [
+            runtimeMetrics: LocalPreviewProductProfile.canonicalRuntimeMetrics([
                 "processing_backend": processingBackend.rawValue,
-                "preview_source_kind": "imported_video",
-                "preview_active_phase": LocalPreviewWorkflowPhase.depth.phaseName,
-                "preview_phase_model": initialPhaseModel,
-            ],
+                "native_input_kind": "recorded_video",
+                "native_active_phase": LocalPreviewWorkflowPhase.depth.phaseName,
+                "native_phase_model": initialPhaseModel,
+            ]),
             estimatedRemainingMinutes: nil,
             clearRemoteJobId: true
         )
@@ -403,7 +410,10 @@ final class HomeViewModel: ObservableObject {
                 estimatedRemainingMinutes: nil,
                 sourceVideoPath: sourceRelativePath,
                 frameSamplingProfile: frameSamplingProfile.rawValue,
-                failureReason: result.runtimeMetrics["preview_failure_reason"] ?? "local_subject_first_import_failed"
+                failureReason: LocalPreviewProductProfile.runtimeMetricString(
+                    "native_failure_reason",
+                    from: result.runtimeMetrics
+                ) ?? OnDeviceProcessingCompatibility.canonicalImportFailureReason
             )
         }
         loadRecords(scheduleRemoteResume: false)
@@ -687,7 +697,7 @@ final class HomeViewModel: ObservableObject {
                 store.updateProcessingState(
                     recordId: recordId,
                     status: .localFallback,
-                    statusMessage: "远端不可用，正在本地兜底",
+                    statusMessage: "远端不可用，正在切到本地处理",
                     detailMessage: "这次会退回到手机本地导出。",
                     progressFraction: 0.82,
                     estimatedRemainingMinutes: nil,
@@ -791,7 +801,7 @@ final class HomeViewModel: ObservableObject {
     private func makeThumbnail(for asset: AVAsset, recordId: UUID) async throws -> String? {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        let image = try generator.copyCGImage(at: .zero, actualTime: nil)
+        let image = try await generateThumbnailImage(generator: generator, time: .zero)
         #if canImport(UIKit)
         let uiImage = UIImage(cgImage: image)
         guard let data = uiImage.jpegData(compressionQuality: 0.82) else {
@@ -801,6 +811,21 @@ final class HomeViewModel: ObservableObject {
         #else
         return nil
         #endif
+    }
+    
+    private func generateThumbnailImage(
+        generator: AVAssetImageGenerator,
+        time: CMTime
+    ) async throws -> CGImage {
+        try await withCheckedThrowingContinuation { continuation in
+            generator.generateCGImageAsynchronously(for: time) { image, _, error in
+                if let image {
+                    continuation.resume(returning: image)
+                } else {
+                    continuation.resume(throwing: error ?? NSError(domain: "Aether3D.Thumbnail", code: -1))
+                }
+            }
+        }
     }
     #endif
 }

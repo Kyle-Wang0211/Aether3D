@@ -190,6 +190,69 @@ inline float gaussian_scale_ratio(const splat::GaussianParams& g) noexcept {
     return max_scale / min_scale;
 }
 
+inline std::size_t exportable_gaussian_count(
+    const std::vector<splat::GaussianParams>& gaussians) noexcept
+{
+    std::size_t usable = 0;
+    for (const auto& g : gaussians) {
+        if (!is_finite_gaussian(g)) {
+            continue;
+        }
+        if (g.opacity < 0.02f) {
+            continue;
+        }
+        if (gaussian_mean_scale(g) <= 1e-5f) {
+            continue;
+        }
+        usable++;
+    }
+    return usable;
+}
+
+inline bool should_replace_retained_export_snapshot(
+    const std::vector<splat::GaussianParams>& candidate,
+    std::size_t retained_size) noexcept
+{
+    const std::size_t usable = exportable_gaussian_count(candidate);
+    if (usable == 0) {
+        return false;
+    }
+    if (retained_size == 0) {
+        return true;
+    }
+    if (usable < 64 && retained_size >= 512) {
+        return false;
+    }
+    if (usable * 8 < retained_size && usable < 512) {
+        return false;
+    }
+    return true;
+}
+
+inline bool should_use_retained_snapshot_for_export(
+    const std::vector<splat::GaussianParams>& current,
+    const std::vector<splat::GaussianParams>& retained) noexcept
+{
+    if (retained.empty()) {
+        return false;
+    }
+    const std::size_t current_usable = exportable_gaussian_count(current);
+    if (current_usable == 0) {
+        return true;
+    }
+    const std::size_t retained_usable = exportable_gaussian_count(retained);
+    if (retained_usable == 0) {
+        return false;
+    }
+    if (current_usable < 64 && retained_usable >= 512) {
+        return true;
+    }
+    if (current_usable * 8 < retained_usable && current_usable < 512) {
+        return true;
+    }
+    return false;
+}
+
 inline ExportSceneBounds compute_gaussian_bounds(
     const std::vector<splat::GaussianParams>& gaussians) noexcept
 {
@@ -2020,8 +2083,22 @@ core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
     // delete training_engine_. Must re-check training_engine_ after lock
     // to avoid TOCTOU race (training thread may delete between check and lock).
     std::lock_guard<std::mutex> lock(training_export_mutex_);
-    if (!training_engine_)
-        return core::Status::kInvalidArgument;
+    if (!training_engine_) {
+        if (is_local_subject_first_mode() && !retained_export_splats_.empty()) {
+            std::fprintf(stderr,
+                "[Aether3D][Export] local_subject_first export using retained snapshot: gaussians=%zu path=%s\n",
+                retained_export_splats_.size(),
+                path ? path : "(null)");
+            return splat::write_ply(
+                path,
+                retained_export_splats_.data(),
+                retained_export_splats_.size());
+        }
+        std::fprintf(stderr,
+            "[Aether3D][Export] export FAILED: no active training engine and no retained snapshot path=%s\n",
+            path ? path : "(null)");
+        return core::Status::kFailedPrecondition;
+    }
 
     const bool training_started =
         training_started_.load(std::memory_order_acquire);
@@ -2038,17 +2115,50 @@ core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
     if (is_local_subject_first_mode()) {
         std::vector<splat::GaussianParams> raw_splats;
         training_engine_->export_gaussians(raw_splats);
+        const std::size_t raw_exportable = exportable_gaussian_count(raw_splats);
+        const std::size_t retained_exportable = exportable_gaussian_count(retained_export_splats_);
+        if (should_use_retained_snapshot_for_export(raw_splats, retained_export_splats_)) {
+            if (!retained_export_splats_.empty()) {
+                std::fprintf(stderr,
+                    "[Aether3D][Export] local_subject_first raw export unhealthy — falling back to retained snapshot: raw=%zu (exportable=%zu) retained=%zu (exportable=%zu) path=%s\n",
+                    raw_splats.size(),
+                    raw_exportable,
+                    retained_export_splats_.size(),
+                    retained_exportable,
+                    path ? path : "(null)");
+                return splat::write_ply(
+                    path,
+                    retained_export_splats_.data(),
+                    retained_export_splats_.size());
+            }
+        }
         if (raw_splats.empty()) {
             std::fprintf(stderr,
-                "[Aether3D][Export] local_subject_first raw export FAILED: no gaussians path=%s\n",
+                "[Aether3D][Export] local_subject_first raw export FAILED: no gaussians retained=%zu path=%s\n",
+                retained_export_splats_.size(),
                 path ? path : "(null)");
-            return core::Status::kInvalidArgument;
+            return core::Status::kFailedPrecondition;
         }
         std::fprintf(stderr,
-            "[Aether3D][Export] local_subject_first raw export: gaussians=%zu path=%s\n",
+            "[Aether3D][Export] local_subject_first raw export: gaussians=%zu exportable=%zu retained=%zu retained_exportable=%zu path=%s\n",
             raw_splats.size(),
+            raw_exportable,
+            retained_export_splats_.size(),
+            retained_exportable,
             path ? path : "(null)");
-        return splat::write_ply(path, raw_splats.data(), raw_splats.size());
+        const auto raw_status = splat::write_ply(path, raw_splats.data(), raw_splats.size());
+        if (raw_status != core::Status::kOk && !retained_export_splats_.empty()) {
+            std::fprintf(stderr,
+                "[Aether3D][Export] local_subject_first raw write failed (%d) — retrying retained snapshot: retained=%zu path=%s\n",
+                static_cast<int>(raw_status),
+                retained_export_splats_.size(),
+                path ? path : "(null)");
+            return splat::write_ply(
+                path,
+                retained_export_splats_.data(),
+                retained_export_splats_.size());
+        }
+        return raw_status;
     }
 
     // Diagnostic: log color statistics before export
@@ -2177,17 +2287,19 @@ core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
 std::size_t PipelineCoordinator::wait_for_training(
     std::size_t min_steps, double timeout_seconds) noexcept
 {
-    if (!training_engine_) {
-        // Training hasn't started — wait briefly for it to initialize.
-        // Check training_started_ (acquire) BEFORE training_engine_ to establish
-        // happens-before with Thread C's release after creating the engine.
+    if (!training_started_.load(std::memory_order_acquire) || !training_engine_) {
+        // Training hasn't started yet — wait until Thread C has both published
+        // the engine pointer and released training_started_. Waiting on the raw
+        // pointer alone is not sufficient because Thread C assigns
+        // training_engine_ before the engine is fully seeded and before
+        // training_started_ is released.
         auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(static_cast<int>(timeout_seconds * 1000));
-        while (!training_engine_ &&
+        while ((!training_started_.load(std::memory_order_acquire) || !training_engine_) &&
                std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        if (!training_engine_) {
+        if (!training_started_.load(std::memory_order_acquire) || !training_engine_) {
             std::fprintf(stderr,
                 "[Aether3D][Coordinator] wait_for_training: training never started\n");
             return 0;
@@ -2232,118 +2344,6 @@ std::size_t PipelineCoordinator::wait_for_training(
         "[Aether3D][Coordinator] wait_for_training: timeout after %.1fs at %zu/%zu steps\n",
         elapsed, current_step, min_steps);
     return current_step;
-}
-
-core::Status PipelineCoordinator::export_point_cloud_ply(const char* path) noexcept {
-    if (!tsdf_volume_) return core::Status::kInvalidArgument;
-
-    // Prefer exporting the trained gaussians when available.
-    // This keeps final output colorful and avoids grayscale TSDF fallback.
-    if (training_started_.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(training_export_mutex_);
-        if (training_engine_) {
-            std::vector<splat::GaussianParams> trained;
-            training_engine_->export_gaussians(trained);
-            if (!trained.empty()) {
-                std::fprintf(stderr,
-                    "[Aether3D][Export] point-cloud export redirected to trained gaussians: %zu\n",
-                    trained.size());
-                return splat::write_ply(path, trained.data(), trained.size());
-            }
-        }
-    }
-
-    // Safety: ensure Thread A has stopped TSDF access.
-    // finish_scanning() sets features_frozen_=true (release). Thread A checks it
-    // (acquire) at the top of each iteration and skips all TSDF operations.
-    if (!features_frozen_.load(std::memory_order_acquire)) {
-        // Caller forgot to call finish_scanning() — force-freeze now.
-        features_frozen_.store(true, std::memory_order_release);
-    }
-    // Wait for Thread A to finish any in-progress TSDF work.
-    // Thread A sets tsdf_idle_=false before TSDF ops, true after.
-    // Typical wait: <1ms (Thread A's TSDF work is <100ms per frame).
-    // Timeout: 500ms (safety bound — should never be hit).
-    for (int i = 0; i < 500 && !tsdf_idle_.load(std::memory_order_acquire); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    // Extract surface points from TSDF volume (now safe — Thread A is not accessing)
-    std::vector<tsdf::SurfacePoint> surface_points;
-    tsdf_volume_->extract_surface_points(surface_points, 10000000);  // 10M max
-
-    if (surface_points.empty()) return core::Status::kInvalidArgument;
-
-    const std::size_t N = surface_points.size();
-
-    // ─── Compute scene bounding sphere for adaptive scale ───
-    double cx = 0, cy = 0, cz = 0;
-    for (const auto& sp : surface_points) {
-        cx += sp.position[0];
-        cy += sp.position[1];
-        cz += sp.position[2];
-    }
-    double inv_n = 1.0 / static_cast<double>(N);
-    float center_x = static_cast<float>(cx * inv_n);
-    float center_y = static_cast<float>(cy * inv_n);
-    float center_z = static_cast<float>(cz * inv_n);
-
-    float max_dist2 = 0.0f;
-    for (const auto& sp : surface_points) {
-        float dx = sp.position[0] - center_x;
-        float dy = sp.position[1] - center_y;
-        float dz = sp.position[2] - center_z;
-        float d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > max_dist2) max_dist2 = d2;
-    }
-    float scene_radius = std::sqrt(max_dist2);
-
-    float cbrt_n = std::cbrt(static_cast<float>(N));
-    float adaptive_scale = std::max(scene_radius / (cbrt_n * 3.0f), 0.002f);
-    adaptive_scale = std::min(adaptive_scale, std::max(scene_radius * 0.05f, 0.005f));
-    if (scene_radius < 1e-4f) adaptive_scale = 0.02f;
-
-    std::fprintf(stderr, "[Aether3D][Export] TSDF surface: N=%zu radius=%.3f "
-                 "adaptive_scale=%.4f\n",
-                 N, scene_radius, adaptive_scale);
-
-    // Convert SurfacePoint → GaussianParams
-    std::vector<splat::GaussianParams> gaussians;
-    gaussians.reserve(N);
-
-    for (const auto& sp : surface_points) {
-        splat::GaussianParams g{};
-        g.position[0] = sp.position[0];
-        g.position[1] = sp.position[1];
-        g.position[2] = sp.position[2];
-        // Fallback chroma (TSDF only, no true texture source here).
-        // Use normal + normalized radial position to avoid black/white-only appearance.
-        const float nx = std::fabs(sp.normal[0]);
-        const float ny = std::fabs(sp.normal[1]);
-        const float nz = std::fabs(sp.normal[2]);
-        const float radial = std::sqrt(
-            (sp.position[0] - center_x) * (sp.position[0] - center_x) +
-            (sp.position[1] - center_y) * (sp.position[1] - center_y) +
-            (sp.position[2] - center_z) * (sp.position[2] - center_z));
-        const float radial_norm = scene_radius > 1e-5f
-            ? std::clamp(radial / scene_radius, 0.0f, 1.0f)
-            : 0.0f;
-        const float base = std::clamp(0.20f + 0.55f * (1.0f - radial_norm), 0.15f, 0.85f);
-        g.color[0] = std::clamp(base * (0.70f + 0.50f * nx), 0.0f, 1.0f);
-        g.color[1] = std::clamp(base * (0.68f + 0.50f * ny), 0.0f, 1.0f);
-        g.color[2] = std::clamp(base * (0.72f + 0.45f * nz), 0.0f, 1.0f);
-        g.opacity = std::clamp(static_cast<float>(sp.weight) / 32.0f, 0.1f, 1.0f);
-        g.scale[0] = adaptive_scale;
-        g.scale[1] = adaptive_scale;
-        g.scale[2] = adaptive_scale;
-        g.rotation[0] = 1.0f;
-        g.rotation[1] = 0.0f;
-        g.rotation[2] = 0.0f;
-        g.rotation[3] = 0.0f;
-        gaussians.push_back(g);
-    }
-
-    return splat::write_ply(path, gaussians.data(), gaussians.size());
 }
 
 std::size_t PipelineCoordinator::copy_surface_points_xyz(
@@ -3364,7 +3364,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
               (input.source_frame_index % 6u) != 0u));
 
         // Signal that Thread A is entering TSDF-access critical section.
-        // export_point_cloud_ply() waits for tsdf_idle_ before reading.
+        // Export-time surface sampling waits for tsdf_idle_ before reading.
         tsdf_idle_.store(false, std::memory_order_release);
 
         // Keep overlay camera state in sync even when DAv2/LiDAR depth is missing.
@@ -3901,7 +3901,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
             }
         }
 
-        // TSDF access complete — signal idle so export_point_cloud_ply() can proceed.
+        // TSDF access complete — signal idle so export-time surface sampling can proceed.
         tsdf_idle_.store(true, std::memory_order_release);
 
         // ─── ARKit feature points (legacy non-preview visualization only) ───
@@ -4713,6 +4713,23 @@ void PipelineCoordinator::training_thread_func() noexcept {
             return out.size() - before;
         };
 
+    auto retain_export_snapshot =
+        [this](std::vector<splat::GaussianParams>& splats) {
+            if (splats.empty()) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(training_export_mutex_);
+            if (!should_replace_retained_export_snapshot(
+                    splats, retained_export_splats_.size())) {
+                std::fprintf(stderr,
+                    "[Aether3D][Export] retaining previous snapshot: candidate=%zu retained=%zu\n",
+                    splats.size(),
+                    retained_export_splats_.size());
+                return;
+            }
+            retained_export_splats_.swap(splats);
+        };
+
     while (running_.load(std::memory_order_relaxed)) {
         // ── Step 1: Collect frames + pending Gaussians from Thread A ──
         while (selected_queue_.try_pop(sf)) {
@@ -5226,19 +5243,28 @@ void PipelineCoordinator::training_thread_func() noexcept {
                     training_target_steps_.load(std::memory_order_relaxed),
                     is_local_subject_first_mode() ? "local_subject_first" : "cloud_default");
 
-                if (renderer_alive_.load(std::memory_order_acquire)) {
-                    std::vector<splat::GaussianParams> initial_splats;
+                std::vector<splat::GaussianParams> initial_splats;
+                {
+                    std::lock_guard<std::mutex> lock(training_export_mutex_);
                     training_engine_->export_gaussians(initial_splats);
-                    if (!initial_splats.empty()) {
+                }
+                if (!initial_splats.empty()) {
+                    const std::size_t initial_splat_count = initial_splats.size();
+                    const bool renderer_alive =
+                        renderer_alive_.load(std::memory_order_acquire);
+                    if (renderer_alive) {
                         renderer_.clear_splats();
                         renderer_.push_splats(initial_splats.data(), initial_splats.size());
-                        published_initial_splats = true;
-                        last_published_splat_count = initial_splats.size();
-                        last_published_step = 0;
-                        std::fprintf(stderr,
-                            "[Aether3D][TrainThread] Initial splats published: %zu\n",
-                            initial_splats.size());
                     }
+                    published_initial_splats = true;
+                    last_published_splat_count = initial_splat_count;
+                    last_published_step = 0;
+                    retain_export_snapshot(initial_splats);
+                    std::fprintf(stderr,
+                        renderer_alive
+                            ? "[Aether3D][TrainThread] Initial splats published: %zu\n"
+                            : "[Aether3D][TrainThread] Initial export snapshot retained: %zu\n",
+                        initial_splat_count);
                 }
             } catch (const std::exception& e) {
                 std::fprintf(stderr,
@@ -5330,19 +5356,17 @@ void PipelineCoordinator::training_thread_func() noexcept {
         constexpr std::size_t kTrainBatchSize = 8;    // Max steps per batch
         constexpr int kBatchTimeBudgetMs = 200;       // Max time per batch
         if (engine_created && training_engine_ && !scan_done_refinement) {
-            if (is_local_subject_first_mode() &&
-                !foreground_active_.load(std::memory_order_acquire)) {
+            const bool foreground_active =
+                foreground_active_.load(std::memory_order_acquire);
+            if (is_local_subject_first_mode() && !foreground_active) {
                 if (!foreground_pause_logged) {
                     std::fprintf(stderr,
-                        "[Aether3D][TrainThread] local_subject_first paused: app inactive, holding GPU refine until foreground resumes\n");
+                        "[Aether3D][TrainThread] local_subject_first app inactive: using background-safe refine path while host execution remains available\n");
                     foreground_pause_logged = true;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
-            }
-            if (foreground_pause_logged) {
+            } else if (foreground_pause_logged) {
                 std::fprintf(stderr,
-                    "[Aether3D][TrainThread] local_subject_first resumed: foreground active, continuing refine\n");
+                    "[Aether3D][TrainThread] local_subject_first resumed: foreground active, continuing GPU refine\n");
                 foreground_pause_logged = false;
             }
             try {
@@ -5407,23 +5431,31 @@ void PipelineCoordinator::training_thread_func() noexcept {
                         should_publish_splats = true;  // Avoid stale viewer snapshots
                     }
 
-                    if (should_publish_splats &&
-                        renderer_alive_.load(std::memory_order_acquire)) {
+                    if (should_publish_splats) {
                         std::vector<splat::GaussianParams> splats;
                         {
                             std::lock_guard<std::mutex> lock(training_export_mutex_);
                             training_engine_->export_gaussians(splats);
                         }
                         if (!splats.empty()) {
-                            renderer_.clear_splats();
-                            renderer_.push_splats(splats.data(), splats.size());
+                            const std::size_t published_splat_count = splats.size();
+                            const bool renderer_alive =
+                                renderer_alive_.load(std::memory_order_acquire);
+                            if (renderer_alive) {
+                                renderer_.clear_splats();
+                                renderer_.push_splats(splats.data(), splats.size());
+                            }
                             published_initial_splats = true;
-                            last_published_splat_count = splats.size();
+                            last_published_splat_count = published_splat_count;
                             last_published_step = progress.step;
+                            retain_export_snapshot(splats);
                             if (progress.step <= 20 || (progress.step % 50) == 0) {
                                 std::fprintf(stderr,
-                                    "[Aether3D][TrainThread] Published splats: step=%zu count=%zu\n",
-                                    progress.step, splats.size());
+                                    renderer_alive
+                                        ? "[Aether3D][TrainThread] Published splats: step=%zu count=%zu\n"
+                                        : "[Aether3D][TrainThread] Retained export snapshot: step=%zu count=%zu\n",
+                                    progress.step,
+                                    published_splat_count);
                             }
                         }
                     }
@@ -5461,19 +5493,25 @@ void PipelineCoordinator::training_thread_func() noexcept {
                                 converge_count, post_scan_steps);
 
                             // Final push of fully trained splats
-                            if (renderer_alive_.load(std::memory_order_acquire)) {
-                                std::vector<splat::GaussianParams> final_splats;
-                                {
-                                    std::lock_guard<std::mutex> lock(training_export_mutex_);
-                                    training_engine_->export_gaussians(final_splats);
-                                }
-                                if (!final_splats.empty()) {
+                            std::vector<splat::GaussianParams> final_splats;
+                            {
+                                std::lock_guard<std::mutex> lock(training_export_mutex_);
+                                training_engine_->export_gaussians(final_splats);
+                            }
+                            if (!final_splats.empty()) {
+                                const std::size_t final_splat_count = final_splats.size();
+                                const bool renderer_alive =
+                                    renderer_alive_.load(std::memory_order_acquire);
+                                if (renderer_alive) {
                                     renderer_.clear_splats();
                                     renderer_.push_splats(final_splats.data(), final_splats.size());
-                                    std::fprintf(stderr,
-                                        "[Aether3D][TrainThread] Final splats pushed: %zu\n",
-                                        final_splats.size());
                                 }
+                                retain_export_snapshot(final_splats);
+                                std::fprintf(stderr,
+                                    renderer_alive
+                                        ? "[Aether3D][TrainThread] Final splats pushed: %zu\n"
+                                        : "[Aether3D][TrainThread] Final export snapshot retained: %zu\n",
+                                    final_splat_count);
                             }
                         }
                     }
@@ -7683,7 +7721,11 @@ void PipelineCoordinator::generate_overlay_vertices(
         float render_ny = dc.normal[1];
         float render_nz = dc.normal[2];
         if (capture_sparse_dense_map && seen_this_frame) {
-            const float anchor_bias = std::clamp(0.12f + 0.18f * dc.stability, 0.0f, 0.30f);
+            // During live capture, keep the pointmap visually closer to the
+            // highest-confidence surface anchor, but preserve more of the
+            // canonical point so the overlay stays locked instead of jittering
+            // with short-lived best-position updates.
+            const float anchor_bias = std::clamp(0.18f + 0.12f * dc.stability, 0.18f, 0.30f);
             const float keep_canonical = 1.0f - anchor_bias;
             render_px = keep_canonical * render_px + anchor_bias * dc.best_position[0];
             render_py = keep_canonical * render_py + anchor_bias * dc.best_position[1];
@@ -7754,7 +7796,7 @@ void PipelineCoordinator::generate_overlay_vertices(
         sp.vertex.color[0] = r;
         sp.vertex.color[1] = g;
         sp.vertex.color[2] = b;
-        sp.vertex.size = capture_sparse_dense_map ? 8.0f : 9.0f;
+        sp.vertex.size = capture_sparse_dense_map ? 7.5f : 8.5f;
         sp.vertex.alpha = quality_alpha;
         sp.dist_sq = dsq;
         sp.display_quality = display_quality;
@@ -7980,14 +8022,12 @@ void PipelineCoordinator::generate_overlay_vertices(
     overlay_cache_ = pc_data.overlay;
 }
 
-void PipelineCoordinator::signal_viewer_entered() noexcept {
-    // Global training: no per-region animations.
-    // Splats are progressively visible via push_splats() in training_thread_func.
-    std::fprintf(stderr, "[Aether3D] Viewer entered (global training mode)\n");
-}
-
 void PipelineCoordinator::set_foreground_active(bool active) noexcept {
     foreground_active_.store(active, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(training_export_mutex_);
+    if (training_engine_) {
+        training_engine_->set_foreground_active(active);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

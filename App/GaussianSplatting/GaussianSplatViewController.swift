@@ -118,6 +118,9 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
     /// URL of the file to load (.ply or .spz).
     var fileURL: URL?
     var viewerInitialPose: ViewerInitialPose?
+    var preferredSceneUp: SIMD3<Float>?
+    var preferredSceneUpSource: String?
+    var preferredSceneUpConfidence: Float?
     var onModelLoaded: (() -> Void)?
     var onViewerInitialPoseResolved: ((ViewerInitialPose) -> Void)?
     var onNavigationModeResolved: ((ViewerNavigationMode) -> Void)?
@@ -671,12 +674,19 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         if let bounds = bridge.getBounds() {
             sceneCenter = bounds.center
             sceneRadius = max(bounds.radius, 0.001)
-            activeArtifactCacheKey = nil
-            initialPoseCacheStatus = "disabled"
+            activeArtifactCacheKey = Self.artifactCacheKey(for: url)
+            initialPoseCacheStatus = "miss"
             initialPoseSource = "legacy_default"
             sceneOrientationEstimate = nil
             sceneUpAxis = Self.canonicalWorldUp
-            resetCameraToDefault()
+            if let artifactCacheKey = activeArtifactCacheKey,
+               let cachedPose = cachedViewerInitialPose(for: artifactCacheKey) {
+                initialPoseCacheStatus = "hit"
+                initialPoseSource = cachedPose.source
+                resetCameraToDefault(cachedPose: cachedPose)
+            } else {
+                resetCameraToDefault()
+            }
             logLoadObservation(fileURL: url, bridge: bridge)
             reportModelLoadedIfNeeded()
             beginViewerWarmup()
@@ -758,6 +768,20 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
         if let cachedPose {
             sceneUpAxis = Self.leveledVerticalAxis(matching: Self.sceneUpVector(from: cachedPose))
             defaultCameraOrientation = Self.orientationQuaternion(from: cachedPose)
+        } else if let preferredSceneUp {
+            sceneUpAxis = Self.leveledVerticalAxis(matching: preferredSceneUp)
+            defaultCameraOrientation = sceneAwareDefaultCameraOrientation()
+            initialPoseSource = preferredSceneUpSource ?? "capture_gravity_metadata"
+            if let confidence = preferredSceneUpConfidence {
+                sceneOrientationEstimate = SceneOrientationEstimate(
+                    up: sceneUpAxis,
+                    sampleCount: 0,
+                    verticalSpan: 0,
+                    horizontalSpan: 0,
+                    supportBias: 0,
+                    confidence: confidence
+                )
+            }
         } else {
             sceneUpAxis = Self.canonicalWorldUp
             defaultCameraOrientation = Self.legacyDefaultCameraOrientation()

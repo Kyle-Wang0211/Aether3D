@@ -76,12 +76,12 @@ vertex OverlayOut overlayVertex(
     float3 normal = float3(v.normal);
     float nLen = length(normal);
     float3 faceNormal = nLen > 0.01 ? normal / nLen : -float3(uniforms.cameraBack);
-    float3 worldPos = center + faceNormal * 0.002;
+    float3 worldPos = center + faceNormal * 0.0013;
 
     out.position = uniforms.viewProjection * float4(worldPos, 1.0);
     float depth = max(0.001, out.position.w);
-    float projectedSize = (v.size * uniforms.pointSizeScale * 420.0) / depth;
-    out.pointSize = clamp(projectedSize, 4.0, 9.0);
+    float projectedSize = (v.size * uniforms.pointSizeScale * 380.0) / depth;
+    out.pointSize = clamp(projectedSize, 4.0, 8.0);
     out.quality = v.quality;
 
     return out;

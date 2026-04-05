@@ -528,8 +528,18 @@ core::Status GaussianTrainingEngine::train_step() noexcept {
         return core::Status::kInvalidArgument;
     }
 
-    // ─── GPU path: dispatch to full GPU pipeline when ready ───
-    if (gpu_training_ready_) {
+    const bool foreground_active =
+        foreground_active_.load(std::memory_order_acquire);
+    if (!foreground_active) {
+        gpu_background_suspended_.store(true, std::memory_order_release);
+    }
+
+    // ─── GPU path: foreground only ───
+    // When the app is backgrounded, UIKit may grant a short continuation
+    // window. Keep the training loop alive in that window, but stay off the
+    // GPU and let the CPU fallback make forward progress until foreground
+    // resumes or iOS suspends the app.
+    if (gpu_training_ready_ && foreground_active) {
         return train_step_gpu();
     }
 
@@ -537,7 +547,9 @@ core::Status GaussianTrainingEngine::train_step() noexcept {
     // After a GPU error, wait (2s × 2^fail_count) before retrying.
     // Shorter cooldown (2s base vs old 5s) — overlay tile count is now much
     // lower after quality + edge filters, so GPU should recover faster.
-    if (gpu_fail_count_ > 0 && gpu_fail_count_ <= kMaxGPURetries) {
+    if (foreground_active &&
+        gpu_fail_count_ > 0 &&
+        gpu_fail_count_ <= kMaxGPURetries) {
         const auto now = std::chrono::steady_clock::now();
         const auto cooldown_ms = 2000 * (1 << (gpu_fail_count_ - 1));  // 2s, 4s, 8s
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -552,6 +564,7 @@ core::Status GaussianTrainingEngine::train_step() noexcept {
                 probe->wait_until_completed();
                 if (!probe->had_error()) {
                     gpu_training_ready_ = true;
+                    gpu_background_suspended_.store(false, std::memory_order_release);
                     std::fprintf(stderr, "[Aether3D] GPU RECOVERED — resuming GPU training\n");
                     return train_step_gpu();
                 }
@@ -564,6 +577,11 @@ core::Status GaussianTrainingEngine::train_step() noexcept {
                              kMaxGPURetries);
             }
         }
+    }
+
+    if (gpu_background_suspended_.load(std::memory_order_acquire) &&
+        foreground_active) {
+        return core::Status::kCancelled;
     }
 
     // ─── CPU fallback path below ───
@@ -930,6 +948,13 @@ TrainingProgress GaussianTrainingEngine::progress() const noexcept {
 
 void GaussianTrainingEngine::set_thermal_state(int level) noexcept {
     thermal_state_.store(level, std::memory_order_relaxed);
+}
+
+void GaussianTrainingEngine::set_foreground_active(bool active) noexcept {
+    foreground_active_.store(active, std::memory_order_release);
+    if (active && gpu_training_ready_) {
+        gpu_background_suspended_.store(false, std::memory_order_release);
+    }
 }
 
 // ─── Export ──────────────────────────────────────────────────────────
@@ -2591,9 +2616,20 @@ core::Status GaussianTrainingEngine::train_step_gpu() noexcept {
     // After cooldown, train_step() will attempt to re-enable GPU training.
     // Max kMaxGPURetries recovery attempts before permanent disable.
     auto gpu_fail = [&]() -> core::Status {
+        const bool foreground_active =
+            foreground_active_.load(std::memory_order_acquire);
         gpu_training_ready_ = false;
         gpu_fail_count_++;
         gpu_fail_time_ = std::chrono::steady_clock::now();
+        gpu_background_suspended_.store(!foreground_active, std::memory_order_release);
+        if (!foreground_active) {
+            std::fprintf(stderr,
+                "[Aether3D] GPU denied while app inactive — pausing GPU refine until foreground resumes "
+                "(retry %d/%d)\n",
+                gpu_fail_count_,
+                kMaxGPURetries);
+            return core::Status::kCancelled;
+        }
         std::fprintf(stderr, "[Aether3D] GPU failure #%d — disabling GPU training, "
                              "will retry after %dms cooldown (max %d retries)\n",
                      gpu_fail_count_,

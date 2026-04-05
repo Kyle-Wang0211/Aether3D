@@ -209,11 +209,11 @@ int main() {
     }
 
     // =====================================================================
-    // Test 8: PLY export after scan session — can we enter 3D viewer?
+    // Test 8: TSDF surface export after scan session.
     //
-    // After 210 frames, export surface points as Gaussian PLY.
+    // After 210 frames, export surface points as Gaussian PLY via the
+    // test-only TSDF helper below.
     // Verify: file exists, non-empty, valid PLY header.
-    // This is exactly what stopCapture() → exportPointCloudPLY() does.
     // =====================================================================
     {
         std::fprintf(stderr, "\n[Test 8] PLY export after 7s scan session\n");
@@ -258,7 +258,7 @@ int main() {
             std::fprintf(stderr, "  FAIL: no surface points to export — 3D viewer would be empty!\n");
             failed++;
         } else {
-            // Convert to GaussianParams (same logic as PipelineCoordinator::export_point_cloud_ply)
+            // Convert to GaussianParams (same logic as the local test-only TSDF export helper)
             std::vector<aether::splat::GaussianParams> gaussians;
             gaussians.reserve(surface.size());
 

@@ -24,6 +24,8 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
@@ -36,9 +38,8 @@
 	<array>
 		<string>com.aether3d.remote-resume.refresh</string>
 		<string>com.aether3d.remote-resume.processing</string>
+		<string>com.kyle.Aether3D.local-processing</string>
 	</array>
-	<key>LSMinimumSystemVersion</key>
-	<string>18.0</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

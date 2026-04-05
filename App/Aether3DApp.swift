@@ -33,6 +33,204 @@ private final class BackgroundTaskCompletionBox: @unchecked Sendable {
     }
 }
 
+@available(iOS 26.0, *)
+final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
+    static let shared = LocalProcessingContinuedTaskCoordinator()
+
+    private static let totalProgressUnits: Int64 = 1000
+    private static var taskIdentifier: String {
+        "\(Bundle.main.bundleIdentifier ?? "com.aether3d.app").local-processing"
+    }
+
+    private let lock = NSLock()
+    private var registered = false
+    private var activeRecordID: UUID?
+    private var activeTask: BGContinuedProcessingTask?
+    private var taskExpired = false
+    private var latestTitle = "Aether3D 正在本地处理"
+    private var latestSubtitle = "本地训练继续进行中"
+    private var latestCompletedUnits: Int64 = 0
+
+    private init() {}
+
+    func register() {
+        guard !registered else { return }
+        let didRegister = BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: Self.taskIdentifier,
+            using: nil
+        ) { task in
+            guard let continuedTask = task as? BGContinuedProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            self.attach(continuedTask)
+        }
+        registered = didRegister
+        if didRegister {
+            NSLog("[Aether3D][LocalBG] registered continued processing id=%@", Self.taskIdentifier)
+        } else {
+            NSLog("[Aether3D][LocalBG] failed to register continued processing id=%@", Self.taskIdentifier)
+        }
+    }
+
+    func submit(recordId: UUID, scanName: String?) {
+        let title = "Aether3D 正在本地处理"
+        let subtitle = Self.normalizedSubtitle(scanName ?? "本地训练继续进行中")
+        lock.withLock {
+            activeRecordID = recordId
+            taskExpired = false
+            latestCompletedUnits = 0
+            latestTitle = title
+            latestSubtitle = subtitle
+        }
+
+        let request = BGContinuedProcessingTaskRequest(
+            identifier: Self.taskIdentifier,
+            title: title,
+            subtitle: subtitle
+        )
+        request.strategy = .queue
+
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            NSLog(
+                "[Aether3D][LocalBG] submitted continued processing record=%@",
+                recordId.uuidString
+            )
+        } catch {
+            NSLog(
+                "[Aether3D][LocalBG] submit failed record=%@ error=%@",
+                recordId.uuidString,
+                String(describing: error)
+            )
+        }
+    }
+
+    func update(
+        recordId: UUID,
+        progressFraction: Double?,
+        title: String,
+        subtitle: String
+    ) {
+        let normalizedSubtitle = Self.normalizedSubtitle(subtitle)
+        let completedUnits = Self.completedUnits(for: progressFraction)
+        let snapshot = lock.withLock { () -> (BGContinuedProcessingTask?, Int64, String, String)? in
+            if activeRecordID == nil {
+                activeRecordID = recordId
+            }
+            guard activeRecordID == recordId else {
+                return nil
+            }
+            latestTitle = title
+            latestSubtitle = normalizedSubtitle
+            latestCompletedUnits = max(latestCompletedUnits, completedUnits)
+            return (activeTask, latestCompletedUnits, latestTitle, latestSubtitle)
+        }
+
+        guard let snapshot, let task = snapshot.0 else { return }
+        task.progress.totalUnitCount = Self.totalProgressUnits
+        task.progress.completedUnitCount = snapshot.1
+        task.updateTitle(snapshot.2, subtitle: snapshot.3)
+    }
+
+    func finish(
+        recordId: UUID,
+        success: Bool,
+        title: String,
+        subtitle: String
+    ) {
+        let normalizedSubtitle = Self.normalizedSubtitle(subtitle)
+        let task: BGContinuedProcessingTask? = lock.withLock {
+            guard activeRecordID == recordId else {
+                return nil
+            }
+            latestTitle = title
+            latestSubtitle = normalizedSubtitle
+            latestCompletedUnits = success ? Self.totalProgressUnits : latestCompletedUnits
+            let capturedTask = activeTask
+            activeTask = nil
+            activeRecordID = nil
+            taskExpired = false
+            return capturedTask
+        }
+
+        if let task {
+            task.progress.totalUnitCount = Self.totalProgressUnits
+            task.progress.completedUnitCount = success
+                ? Self.totalProgressUnits
+                : min(task.progress.completedUnitCount, Self.totalProgressUnits)
+            task.updateTitle(title, subtitle: normalizedSubtitle)
+            task.setTaskCompleted(success: success)
+        }
+    }
+
+    func isBackgroundExecutionActive(for recordId: UUID? = nil) -> Bool {
+        lock.withLock {
+            guard activeTask != nil, !taskExpired else {
+                return false
+            }
+            guard let recordId else {
+                return true
+            }
+            return activeRecordID == recordId
+        }
+    }
+
+    private func attach(_ task: BGContinuedProcessingTask) {
+        let snapshot = lock.withLock {
+            activeTask = task
+            taskExpired = false
+            return (latestTitle, latestSubtitle, latestCompletedUnits, activeRecordID)
+        }
+
+        task.expirationHandler = { [weak self] in
+            self?.markExpired()
+        }
+        task.progress.totalUnitCount = Self.totalProgressUnits
+        task.progress.completedUnitCount = snapshot.2
+        task.updateTitle(snapshot.0, subtitle: snapshot.1)
+        NSLog(
+            "[Aether3D][LocalBG] attached continued processing record=%@",
+            snapshot.3?.uuidString ?? "none"
+        )
+    }
+
+    private func markExpired() {
+        let recordID = lock.withLock { () -> UUID? in
+            taskExpired = true
+            activeTask = nil
+            return activeRecordID
+        }
+        NSLog(
+            "[Aether3D][LocalBG] continued processing expired record=%@",
+            recordID?.uuidString ?? "none"
+        )
+    }
+
+    private static func completedUnits(for progressFraction: Double?) -> Int64 {
+        guard let progressFraction else { return 0 }
+        let clamped = min(max(progressFraction, 0.0), 1.0)
+        return Int64((clamped * Double(totalProgressUnits)).rounded(.down))
+    }
+
+    private static func normalizedSubtitle(_ value: String) -> String {
+        let firstLine = value
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init) ?? value
+        let collapsedWhitespace = firstLine
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        let trimmed = collapsedWhitespace.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard trimmed.count > 72 else {
+            return trimmed.isEmpty ? "本地训练继续进行中" : trimmed
+        }
+        return String(trimmed.prefix(72))
+    }
+}
+
 private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
     static let shared = BackgroundRemoteResumeCoordinator()
 
@@ -363,7 +561,17 @@ final class Aether3DAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil
     ) -> Bool {
+        let interruptedLocalJobs = ScanRecordStore().failOrphanedLocalProcessingRecordsOnColdLaunch()
+        if interruptedLocalJobs > 0 {
+            NSLog(
+                "[Aether3D][LaunchRecovery] marked %ld orphaned local processing record(s) as interrupted",
+                interruptedLocalJobs
+            )
+        }
         #if canImport(BackgroundTasks)
+        if #available(iOS 26.0, *) {
+            LocalProcessingContinuedTaskCoordinator.shared.register()
+        }
         BackgroundRemoteResumeCoordinator.shared.register()
         BackgroundRemoteResumeCoordinator.shared.scheduleIfNeeded(reason: "launch")
         #endif

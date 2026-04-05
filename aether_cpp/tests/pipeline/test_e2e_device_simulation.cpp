@@ -109,9 +109,9 @@ static void make_camera_pose(float out[16], float tx, float ty, float tz) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// PLY export — exact copy from pipeline_coordinator.cpp L374
+// Test-only TSDF surface export helper.
 // ═══════════════════════════════════════════════════════════════════
-static aether::core::Status export_point_cloud_ply(
+static aether::core::Status export_surface_points_ply_for_test(
     TSDFVolume& volume, const char* path)
 {
     std::vector<SurfacePoint> surface_points;
@@ -354,9 +354,9 @@ int main() {
     // finish_scanning() freezes TSDF — mirrors coordinator->finish_scanning()
     std::fprintf(stderr, "  finish_scanning() called — TSDF frozen\n");
 
-    // Export PLY — mirrors coordinatorBridge.exportPointCloudPLY(path)
+    // Export a TSDF surface snapshot through the test-only helper.
     const char* ply_path = "/tmp/aether3d_e2e_test.ply";
-    auto export_status = export_point_cloud_ply(volume, ply_path);
+    auto export_status = export_surface_points_ply_for_test(volume, ply_path);
 
     if (export_status != aether::core::Status::kOk) {
         std::fprintf(stderr,

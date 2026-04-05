@@ -21,12 +21,14 @@ struct ScanView: View {
     private let processingBackend: ProcessingBackendChoice
     @StateObject private var viewModel: ScanViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var completedRecord: ScanRecord?
     @State private var showViewer = false
+    @State private var hasHandedOffToProcessing = false
 
     init(processingBackend: ProcessingBackendChoice = ProcessingBackendChoice.currentSelection()) {
-        let normalizedBackend = processingBackend == .localPreview ? .localSubjectFirst : processingBackend
+        let normalizedBackend = processingBackend.normalizedForActiveUse
         self.processingBackend = normalizedBackend
         _viewModel = StateObject(
             wrappedValue: ScanViewModel(initialProcessingBackend: normalizedBackend)
@@ -34,28 +36,32 @@ struct ScanView: View {
     }
 
     private var isSubjectFirstMode: Bool {
-        processingBackend == .localSubjectFirst
+        processingBackend.usesSubjectFirstCaptureContract
     }
 
     var body: some View {
         ZStack {
-            ARCameraPreview(
-                viewModel: viewModel,
-                prefersMinimalRuntime: viewModel.prefersMinimalARCaptureRuntime,
-                shouldAcquireHeavyFrameInputs: viewModel.shouldAcquireHeavyARFrameInputs,
-                shouldRequestSceneDepth: viewModel.shouldRequestSceneDepthDuringCapture,
-                shouldProcessLiveFrames: viewModel.shouldProcessLiveARFrames,
-                renderPresentationPolicy: viewModel.scanState.renderPresentationPolicy
-            )
-            .ignoresSafeArea()
+            if !hasHandedOffToProcessing {
+                ARCameraPreview(
+                    viewModel: viewModel,
+                    prefersMinimalRuntime: viewModel.prefersMinimalARCaptureRuntime,
+                    shouldAcquireHeavyFrameInputs: viewModel.shouldAcquireHeavyARFrameInputs,
+                    shouldRequestSceneDepth: viewModel.shouldRequestSceneDepthDuringCapture,
+                    shouldProcessLiveFrames: viewModel.shouldProcessLiveARFrames,
+                    renderPresentationPolicy: viewModel.scanState.renderPresentationPolicy
+                )
+                .ignoresSafeArea()
 
 #if canImport(UIKit) && canImport(MetalKit)
-            if isSubjectFirstMode && viewModel.scanState == .capturing {
-                LiveSparseDenseMapOverlayView(viewModel: viewModel)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-            }
+                if isSubjectFirstMode && viewModel.scanState == .capturing {
+                    LiveSparseDenseMapOverlayView(viewModel: viewModel)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
 #endif
+            } else {
+                Color.black.ignoresSafeArea()
+            }
 
             LinearGradient(
                 colors: [Color.black.opacity(0.34), Color.clear, Color.black.opacity(0.64)],
@@ -113,15 +119,18 @@ struct ScanView: View {
         .navigationBarHidden(true)
         .statusBarHidden(true)
         .onDisappear {
-            if !showViewer && viewModel.scanState != .completed {
+            if !showViewer && !hasHandedOffToProcessing && viewModel.scanState != .completed {
                 transitionToSafeTerminalState()
             }
         }
         .onAppear {
             viewModel.prepareCapture(processingBackend: processingBackend)
+            viewModel.setForegroundActive(true)
         }
-#if canImport(UIKit)
-#if canImport(Metal)
+        .onChange(of: scenePhase) { _, newPhase in
+            viewModel.setForegroundActive(newPhase == .active)
+        }
+#if canImport(UIKit) && canImport(Metal)
         .fullScreenCover(isPresented: $showViewer) {
             if let record = completedRecord {
                 SplatViewerView(
@@ -134,10 +143,13 @@ struct ScanView: View {
                     }
                 )
             } else {
-                EmptyView()
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    ProgressView()
+                        .tint(.white)
+                }
             }
         }
-#endif
 #endif
     }
 
@@ -159,18 +171,24 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
         metalView.framebufferOnly = false
         metalView.enableSetNeedsDisplay = false
         metalView.isPaused = false
-        metalView.preferredFramesPerSecond = 20
+        metalView.preferredFramesPerSecond = 30
         metalView.autoResizeDrawable = true
-        context.coordinator.attach(metalView)
+        Task { @MainActor in
+            context.coordinator.attach(metalView)
+        }
         return metalView
     }
 
     func updateUIView(_ uiView: MTKView, context: Context) {
-        context.coordinator.attach(uiView)
+        Task { @MainActor in
+            context.coordinator.attach(uiView)
+        }
     }
 
     static func dismantleUIView(_ uiView: MTKView, coordinator: Coordinator) {
-        coordinator.teardown()
+        Task { @MainActor in
+            coordinator.teardown()
+        }
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
@@ -182,6 +200,7 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
             self.viewModel = viewModel
         }
 
+        @MainActor
         func attach(_ view: MTKView) {
             guard metalView !== view else { return }
             metalView = view
@@ -191,6 +210,7 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
             view.delegate = self
         }
 
+        @MainActor
         func teardown() {
             metalView?.delegate = nil
         }
@@ -229,7 +249,7 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
 
             Spacer()
 
-            if viewModel.scanState.isActive || viewModel.scanState == .paused {
+            if showsElapsedTime {
                 Text(formatTime(viewModel.elapsedTime))
                     .font(.system(size: 16, weight: .medium, design: .monospaced))
                     .foregroundColor(.white)
@@ -239,6 +259,11 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
             }
         }
         .padding(.top, 8)
+    }
+
+    private var showsElapsedTime: Bool {
+        guard !isSubjectFirstMode else { return false }
+        return viewModel.scanState.isActive || viewModel.scanState == .paused
     }
 
     @ViewBuilder
@@ -356,79 +381,21 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
         let progressTint: Color =
             viewModel.captureKeyframeProgressFraction >= 1.0 ? .green :
             (viewModel.captureKeyframeProgressFraction >= 0.6 ? .orange : .cyan)
-        let acceptanceTint: Color =
-            viewModel.captureKeyframeAcceptanceRatio >= 0.45 ? .green :
-            (viewModel.captureKeyframeAcceptanceRatio >= 0.25 ? .orange : .red)
-        let seedTint: Color =
-            viewModel.captureSeedProgressFraction >= 1.0 ? .green :
-            (viewModel.captureSeedProgressFraction >= 0.55 ? .orange : .red)
 
-        return VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("有效关键帧")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundColor(.white)
-                Text(viewModel.captureKeyframeHint)
-                    .font(.system(size: 13))
-                    .foregroundColor(.white.opacity(0.72))
-            }
-
-            HStack(alignment: .bottom, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(viewModel.debugSelectedFrames)")
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                    Text("已收集")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.56))
-                }
 
                 Spacer()
 
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text("建议完成 \(viewModel.captureKeyframeRecommendedRangeText)")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.72))
-                }
+                Text("\(viewModel.debugSelectedFrames) / \(max(viewModel.captureKeyframeRecommendedTarget, 1))")
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.92))
             }
 
             keyframeProgressBar(tint: progressTint)
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Seed 保底估计")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(viewModel.captureSeedMetricText)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundColor(.white.opacity(0.88))
-                }
-
-                seedProgressBar(tint: seedTint)
-
-                Text(viewModel.captureSeedHint)
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.56))
-            }
-
-            HStack(spacing: 10) {
-                signalChip(
-                    title: viewModel.captureKeyframeStatusTitle,
-                    subtitle: viewModel.subjectCaptureBudgetAdvice,
-                    tint: progressTint
-                )
-                signalChip(
-                    title: viewModel.captureSeedStatusTitle,
-                    subtitle: viewModel.captureSeedMetricText,
-                    tint: seedTint
-                )
-                signalChip(
-                    title: "通过率",
-                    subtitle: viewModel.captureKeyframeAcceptanceRateText,
-                    tint: acceptanceTint
-                )
-            }
         }
         .padding(18)
         .background(
@@ -570,73 +537,21 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
     }
 
     private func keyframeProgressBar(tint: Color) -> some View {
-        let maxCount = max(viewModel.captureKeyframeRecommendedMax, 1)
-        let progressFraction = min(1.0, Double(viewModel.debugSelectedFrames) / Double(maxCount))
-        let minMarker = min(1.0, Double(viewModel.captureKeyframeRecommendedMin) / Double(maxCount))
-        let targetMarker = min(1.0, Double(viewModel.captureKeyframeRecommendedTarget) / Double(maxCount))
+        let targetCount = max(viewModel.captureKeyframeRecommendedTarget, 1)
+        let progressFraction = min(1.0, Double(viewModel.debugSelectedFrames) / Double(targetCount))
 
-        return VStack(spacing: 8) {
-            GeometryReader { proxy in
-                let width = max(proxy.size.width, 1)
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.white.opacity(0.14))
-                    Capsule()
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: width * CGFloat(targetMarker))
-                    Capsule()
-                        .fill(tint)
-                        .frame(width: width * CGFloat(progressFraction))
-                    Capsule()
-                        .fill(Color.white.opacity(0.45))
-                        .frame(width: 2, height: 14)
-                        .offset(x: max(0, width * CGFloat(minMarker) - 1))
-                    Capsule()
-                        .fill(Color.white.opacity(0.82))
-                        .frame(width: 2, height: 14)
-                        .offset(x: max(0, width * CGFloat(targetMarker) - 1))
-                }
+        return GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.14))
+                Capsule()
+                    .fill(tint)
+                    .frame(width: width * CGFloat(progressFraction))
             }
-            .frame(height: 14)
-
-            HStack {
-                Text("建议下限 \(viewModel.captureKeyframeRecommendedMin)")
-                Spacer()
-                Text("建议 \(viewModel.captureKeyframeRecommendedTarget)")
-                Spacer()
-                Text("建议上限 \(viewModel.captureKeyframeRecommendedMax)")
-            }
-            .font(.system(size: 11, weight: .medium))
-            .foregroundColor(.white.opacity(0.56))
         }
+        .frame(height: 12)
     }
-
-    private func seedProgressBar(tint: Color) -> some View {
-        let progressFraction = min(1.0, viewModel.captureSeedProgressFraction)
-
-        return VStack(spacing: 8) {
-            GeometryReader { proxy in
-                let width = max(proxy.size.width, 1)
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.white.opacity(0.14))
-                    Capsule()
-                        .fill(tint)
-                        .frame(width: width * CGFloat(progressFraction))
-                }
-            }
-            .frame(height: 12)
-
-            HStack {
-                Text("当前估计 \(viewModel.captureSeedEstimatedCount)")
-                Spacer()
-                Text("保底目标 \(viewModel.captureSeedTargetCount)")
-            }
-            .font(.system(size: 11, weight: .medium))
-            .foregroundColor(.white.opacity(0.56))
-        }
-    }
-
 
     private enum OverlayButtonStyle {
         case primary
@@ -678,10 +593,9 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
     private func handleStop() {
         NSLog("[Aether3D] handleStop: IMMEDIATE navigation to viewer")
 
-        viewModel.finishScanningOnly()
-
         let recordId = UUID()
         let frameSamplingProfile = FrameSamplingProfile.currentSelection()
+        let captureGravity = viewModel.captureGravityMetadata()
         let record = ScanRecord(
             id: recordId,
             name: nil,
@@ -699,18 +613,23 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
             statusMessage: stopStatusMessage,
             detailMessage: stopDetailMessage,
             progressFraction: 0.01,
-            estimatedRemainingMinutes: nil
+            estimatedRemainingMinutes: nil,
+            captureGravityUpX: captureGravity?.up.x,
+            captureGravityUpY: captureGravity?.up.y,
+            captureGravityUpZ: captureGravity?.up.z,
+            captureGravitySource: captureGravity?.source,
+            captureGravityConfidence: captureGravity?.confidence
         )
 
         ScanRecordStore().saveRecord(record)
         completedRecord = record
+        hasHandedOffToProcessing = true
 
         if viewModel.scanState.allowedTransitions.contains(.finishing) {
             viewModel.transition(to: .finishing)
         }
 
         showViewer = true
-        viewModel.signalViewerEntered()
         viewModel.startBackgroundExport(recordId: recordId, processingBackend: processingBackend)
     }
 
@@ -726,21 +645,13 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
     }
 
     private var stopStatusMessage: String {
-        switch processingBackend {
-        case .cloud:
-            return "正在整理拍摄素材"
-        case .localPreview, .localSubjectFirst:
-            return "正在整理本地素材"
-        }
+        processingBackend == .cloud ? "正在整理拍摄素材" : "正在整理本地素材"
     }
 
     private var stopDetailMessage: String {
-        switch processingBackend {
-        case .cloud:
-            return "现在会进入黑色等待页。你可以留在这里，也可以返回主页稍后继续。"
-        case .localPreview, .localSubjectFirst:
-            return "现在会进入等待页；手机会先读取这段录制视频，再按深度先验 → 初始化高斯 → 本地 refine → cutout → cleanup 这条链路继续处理。"
-        }
+        processingBackend == .cloud
+            ? "现在会进入黑色等待页。你可以留在这里，也可以返回主页稍后继续。"
+            : "现在会进入等待页；手机会先读取这段录制视频，再按深度先验 → 初始化高斯 → 本地 refine → cutout → cleanup 这条链路继续处理。"
     }
 }
 #endif

@@ -12,6 +12,9 @@ import Foundation
 
 #if canImport(SwiftUI) && canImport(UIKit) && canImport(Metal)
 import SwiftUI
+#if canImport(simd)
+import simd
+#endif
 
 /// Post-scan 3D viewer: renders Gaussian splats on a black background.
 ///
@@ -45,15 +48,22 @@ struct SplatViewerView: View {
     }
 
     var body: some View {
+        let artifactURL = resolvedArtifactURL()
+
         ZStack {
             // Pure black background
             Color.black.ignoresSafeArea()
 
             // Metal 3DGS rendering view (when trained model exists)
-            if let url = resolvedArtifactURL() {
+            if let url = artifactURL {
                 let _ = NSLog("[Aether3D] SplatViewerView: loading PLY from %@", url.path)
                 SplatViewerRepresentable(
                     artifactURL: url,
+                    captureGravityUpX: currentRecord.captureGravityUpX,
+                    captureGravityUpY: currentRecord.captureGravityUpY,
+                    captureGravityUpZ: currentRecord.captureGravityUpZ,
+                    captureGravitySource: currentRecord.captureGravitySource,
+                    captureGravityConfidence: currentRecord.captureGravityConfidence,
                     onLoaded: { isLoading = false }
                 )
                 .ignoresSafeArea()
@@ -77,7 +87,7 @@ struct SplatViewerView: View {
 
                     Spacer()
 
-                    if let url = resolvedArtifactURL() {
+                    if let url = artifactURL {
                         ShareLink(
                             item: url,
                             subject: Text(currentRecord.name),
@@ -96,7 +106,7 @@ struct SplatViewerView: View {
                 Spacer()
 
                 // Loading indicator (centered, only when loading 3DGS model)
-                if isLoading, resolvedArtifactURL() != nil {
+                if isLoading, artifactURL != nil {
                     VStack(spacing: 8) {
                         ProgressView()
                             .tint(.white)
@@ -135,20 +145,55 @@ struct SplatViewerView: View {
 
     @ViewBuilder
     private var waitingOrFallbackView: some View {
-        switch currentRecord.status {
-        case .failed:
+        if currentRecord.status == .completed && hasUnreadyArtifactReference {
             terminalStateView(
-                title: currentRecord.workflowModeTitle,
-                detail: currentRecord.detailMessage ?? "这次处理没有拿到可用结果，请返回主页后再试一次。"
+                title: "结果文件暂不可用",
+                detail: currentRecord.detailMessage ?? "结果路径已经生成，但文件还没真正落盘或仍是空文件。请稍等片刻自动刷新；如果一直这样，请回主页重试。"
             )
-        case .cancelled:
-            terminalStateView(
-                title: currentRecord.workflowModeTitle,
-                detail: currentRecord.detailMessage ?? "这次处理已经停止。原始视频仍保留在手机里，可稍后重新发起。"
-            )
-        default:
-            waitingStageView
+        } else {
+            switch currentRecord.status {
+            case .failed:
+                terminalStateView(
+                    title: currentRecord.workflowModeTitle,
+                    detail: currentRecord.detailMessage ?? "这次处理没有拿到可用结果，请返回主页后再试一次。"
+                )
+            case .cancelled:
+                terminalStateView(
+                    title: currentRecord.workflowModeTitle,
+                    detail: currentRecord.detailMessage ?? "这次处理已经停止。原始视频仍保留在手机里，可稍后重新发起。"
+                )
+            default:
+                waitingStageView
+            }
         }
+    }
+
+    private var hasUnreadyArtifactReference: Bool {
+        currentRecord.artifactPath != nil && resolvedArtifactURL() == nil
+    }
+
+    private static func validatedArtifactURL(for record: ScanRecord) -> URL? {
+        guard let relativePath = record.artifactPath else { return nil }
+        let documents = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0]
+        let url = documents
+            .appendingPathComponent("Aether3D")
+            .appendingPathComponent(relativePath)
+        let path = url.path
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            guard fileSize > 0 else { return nil }
+        } catch {
+            return nil
+        }
+        return url
+    }
+
+    private func resolvedArtifactURL() -> URL? {
+        Self.validatedArtifactURL(for: currentRecord)
     }
 
     private var waitingStageView: some View {
@@ -207,10 +252,54 @@ struct SplatViewerView: View {
         .padding(.horizontal, 20)
     }
 
+    private func startRefreshLoopIfNeeded() {
+        refreshTask?.cancel()
+        refreshTask = nil
+
+        let shouldPollForArtifact = currentRecord.artifactPath != nil && resolvedArtifactURL() == nil
+        guard shouldPollForArtifact || currentRecord.isProcessing else {
+            return
+        }
+
+        let recordID = currentRecord.id
+        refreshTask = Task {
+            let store = ScanRecordStore()
+            let invalidArtifactDeadline = Date().addingTimeInterval(20)
+            while !Task.isCancelled {
+                guard let refreshed = store.record(id: recordID) else { break }
+                await MainActor.run {
+                    currentRecord = refreshed
+                }
+                let artifactReady = Self.validatedArtifactURL(for: refreshed) != nil
+                let waitingOnArtifact = refreshed.artifactPath != nil
+                if artifactReady {
+                    break
+                }
+                if !refreshed.isProcessing && !waitingOnArtifact {
+                    break
+                }
+                if !refreshed.isProcessing &&
+                    waitingOnArtifact &&
+                    Date() >= invalidArtifactDeadline {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 900_000_000)
+            }
+        }
+    }
+
+    private func closeExperience() {
+        if let onReturnHome {
+            onReturnHome()
+        } else {
+            dismiss()
+        }
+    }
+
     private var workflowStepsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(currentRecord.resolvedProcessingBackend == .localSubjectFirst ? "本地处理流程" : "处理流程")
+                Text(currentRecord.resolvedProcessingBackend == .localSubjectFirst ? "本地处理流程" : "远端处理流程")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.white)
                 Spacer()
@@ -318,46 +407,6 @@ struct SplatViewerView: View {
 
     // MARK: - Helpers
 
-    private func resolvedArtifactURL() -> URL? {
-        guard let relativePath = currentRecord.artifactPath else { return nil }
-        let documents = FileManager.default.urls(
-            for: .documentDirectory, in: .userDomainMask)[0]
-        return documents
-            .appendingPathComponent("Aether3D")
-            .appendingPathComponent(relativePath)
-    }
-
-    private func startRefreshLoopIfNeeded() {
-        refreshTask?.cancel()
-        refreshTask = nil
-
-        guard currentRecord.artifactPath == nil || currentRecord.isProcessing else {
-            return
-        }
-
-        let recordID = currentRecord.id
-        refreshTask = Task {
-            let store = ScanRecordStore()
-            while !Task.isCancelled {
-                guard let refreshed = store.record(id: recordID) else { break }
-                await MainActor.run {
-                    currentRecord = refreshed
-                }
-                if refreshed.artifactPath != nil || !refreshed.isProcessing {
-                    break
-                }
-                try? await Task.sleep(nanoseconds: 900_000_000)
-            }
-        }
-    }
-
-    private func closeExperience() {
-        if let onReturnHome {
-            onReturnHome()
-        } else {
-            dismiss()
-        }
-    }
 }
 
 // MARK: - UIViewControllerRepresentable wrapper
@@ -366,11 +415,23 @@ struct SplatViewerView: View {
 /// Configures the file URL and handles lifecycle.
 struct SplatViewerRepresentable: UIViewControllerRepresentable {
     let artifactURL: URL
+    let captureGravityUpX: Float?
+    let captureGravityUpY: Float?
+    let captureGravityUpZ: Float?
+    let captureGravitySource: String?
+    let captureGravityConfidence: Float?
     var onLoaded: (() -> Void)?
 
     func makeUIViewController(context: Context) -> GaussianSplatViewController {
         let vc = GaussianSplatViewController()
         vc.fileURL = artifactURL
+        if let x = captureGravityUpX,
+           let y = captureGravityUpY,
+           let z = captureGravityUpZ {
+            vc.preferredSceneUp = SIMD3<Float>(x, y, z)
+            vc.preferredSceneUpSource = captureGravitySource
+            vc.preferredSceneUpConfidence = captureGravityConfidence
+        }
         return vc
     }
 

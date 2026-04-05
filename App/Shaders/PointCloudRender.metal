@@ -68,7 +68,7 @@ vertex PointCloudOut pointCloudVertex(
     // Depth-based size attenuation
     float depth = out.position.w;
     if (depth > 0.1) {
-        out.pointSize *= clamp(2.0 / depth, 0.5, 4.0);
+        out.pointSize *= clamp(1.75 / depth, 0.50, 3.0);
     }
 
     return out;

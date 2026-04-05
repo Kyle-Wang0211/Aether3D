@@ -15,6 +15,7 @@
 
 import Foundation
 @preconcurrency import AVFoundation
+import UIKit
 import os.log
 import Aether3DCore
 
@@ -28,11 +29,11 @@ protocol CameraSessionProtocol: AnyObject {
     var captureSession: AVCaptureSession { get }
     var selectedConfig: SelectedCaptureConfig? { get }
     
-    func configure(orientation: AVCaptureVideoOrientation) throws
+    func configure(orientation: UIInterfaceOrientation) throws
     func startRunning()
     func startRecording(to url: URL, delegate: AVCaptureFileOutputRecordingDelegate)
     func stopRecording()
-    func reconfigureAfterInterruption(orientation: AVCaptureVideoOrientation) throws
+    func reconfigureAfterInterruption(orientation: UIInterfaceOrientation) throws
 }
 
 struct SelectedCaptureConfig {
@@ -77,13 +78,13 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         #endif
     }
     
-    func configure(orientation: AVCaptureVideoOrientation) throws {
+    func configure(orientation: UIInterfaceOrientation) throws {
         try sessionQueue.sync {
             try configureInternal(orientation: orientation)
         }
     }
     
-    private func configureInternal(orientation: AVCaptureVideoOrientation) throws {
+    private func configureInternal(orientation: UIInterfaceOrientation) throws {
         try ensureAuthorizedVideoAccess()
         try configureGraph(orientation: orientation)
     }
@@ -106,7 +107,7 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         }
     }
 
-    private func configureGraph(orientation: AVCaptureVideoOrientation) throws {
+    private func configureGraph(orientation: UIInterfaceOrientation) throws {
         
         // Find camera device
         let discoverySession = AVCaptureDevice.DiscoverySession(
@@ -143,9 +144,8 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         }
 
         // Configure video connection orientation
-        if let connection = movieOutput?.connection(with: .video),
-           connection.isVideoOrientationSupported {
-            connection.videoOrientation = orientation
+        if let connection = movieOutput?.connection(with: .video) {
+            applyVideoOrientation(connection: connection, orientation: orientation)
         }
         
         try applyFocusAndExposureConfiguration(to: device)
@@ -489,13 +489,13 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         }
     }
     
-    func reconfigureAfterInterruption(orientation: AVCaptureVideoOrientation) throws {
+    func reconfigureAfterInterruption(orientation: UIInterfaceOrientation) throws {
         try sessionQueue.sync {
             try reconfigureAfterInterruptionInternal(orientation: orientation)
         }
     }
     
-    private func reconfigureAfterInterruptionInternal(orientation: AVCaptureVideoOrientation) throws {
+    private func reconfigureAfterInterruptionInternal(orientation: UIInterfaceOrientation) throws {
         // CI-HARDENED: No dispatchPrecondition() - use log for debugging if needed
         // Queue validation is handled by sessionQueue.sync/async boundaries
         
@@ -518,6 +518,50 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         // Start running if not already
         if !captureSession.isRunning {
             captureSession.startRunning()
+        }
+    }
+
+    private func applyVideoOrientation(connection: AVCaptureConnection, orientation: UIInterfaceOrientation) {
+        if #available(iOS 17.0, *) {
+            let angle = rotationAngle(for: orientation)
+            if connection.isVideoRotationAngleSupported(angle) {
+                connection.videoRotationAngle = angle
+            }
+        } else {
+            applyLegacyVideoOrientation(connection: connection, orientation: orientation)
+        }
+    }
+
+    @available(iOS, deprecated: 17.0)
+    private func applyLegacyVideoOrientation(connection: AVCaptureConnection, orientation: UIInterfaceOrientation) {
+        guard connection.isVideoOrientationSupported else { return }
+        connection.videoOrientation = legacyVideoOrientation(for: orientation)
+    }
+
+    @available(iOS, deprecated: 17.0)
+    private func legacyVideoOrientation(for orientation: UIInterfaceOrientation) -> AVCaptureVideoOrientation {
+        switch orientation {
+        case .landscapeLeft:
+            return .landscapeRight
+        case .landscapeRight:
+            return .landscapeLeft
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        default:
+            return .portrait
+        }
+    }
+
+    private func rotationAngle(for orientation: UIInterfaceOrientation) -> Double {
+        switch orientation {
+        case .landscapeLeft:
+            return 270
+        case .landscapeRight:
+            return 90
+        case .portraitUpsideDown:
+            return 180
+        default:
+            return 0
         }
     }
 }

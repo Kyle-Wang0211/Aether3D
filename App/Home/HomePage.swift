@@ -57,14 +57,7 @@ struct HomePage: View {
     }
 
     private var selectedProcessingBackend: ProcessingBackendChoice {
-        switch ProcessingBackendChoice(rawValue: selectedProcessingBackendRaw) {
-        case .localPreview:
-            return .localSubjectFirst
-        case let backend?:
-            return backend
-        case nil:
-            return .cloud
-        }
+        ProcessingBackendChoice.resolvedStoredSelection(rawValue: selectedProcessingBackendRaw)
     }
 
     private var effectiveSelectedProcessingBackend: ProcessingBackendChoice {
@@ -157,12 +150,12 @@ struct HomePage: View {
             }
         }
         .onAppear {
-            if selectedProcessingBackendRaw == ProcessingBackendChoice.localPreview.rawValue {
-                selectedProcessingBackendRaw = ProcessingBackendChoice.localSubjectFirst.rawValue
-            }
+            selectedProcessingBackendRaw = ProcessingBackendChoice.canonicalStoredSelectionRawValue(
+                selectedProcessingBackendRaw
+            )
             viewModel.loadRecords()
         }
-        .onChange(of: scenePhase) { newPhase in
+        .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }
             viewModel.loadRecords()
         }
@@ -195,12 +188,16 @@ struct HomePage: View {
                     }
                 )
             } else {
-                EmptyView()
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    ProgressView()
+                        .tint(.white)
+                }
             }
         }
         #endif
         #if canImport(PhotosUI)
-        .onChange(of: selectedVideoItem) { newValue in
+        .onChange(of: selectedVideoItem) { _, newValue in
             guard let newValue else { return }
             Task {
                 await MainActor.run {
@@ -296,7 +293,7 @@ struct HomePage: View {
                     }
                 }
                 .contextMenu {
-                    if record.isProcessing {
+                    if record.isProcessing && record.resolvedProcessingBackend == .cloud {
                         Button(role: .destructive) {
                             viewModel.cancelRemoteRecord(record)
                         } label: {
@@ -364,8 +361,8 @@ struct HomePage: View {
         VStack(spacing: 12) {
             if !viewModel.processingRecords.isEmpty {
                 infoBanner(
-                    title: t("远端任务正在进行", "Remote Jobs Are Running"),
-                    detail: t("处理中的作品可以随时点开查看等待页，也可以稍后回来继续。", "You can open any in-progress result to view its waiting screen, or come back later and continue."),
+                    title: processingBannerTitle,
+                    detail: processingBannerDetail,
                     tint: .cyan
                 )
             }
@@ -374,8 +371,6 @@ struct HomePage: View {
 
             if effectiveSelectedProcessingBackend == .cloud {
                 frameSamplingProfileCard
-            } else {
-                localProcessingProfileCard
             }
 
             HStack(spacing: 12) {
@@ -395,11 +390,41 @@ struct HomePage: View {
         )
     }
 
+    private var hasLocalProcessingRecords: Bool {
+        viewModel.processingRecords.contains { $0.resolvedProcessingBackend.usesLocalPreviewPipeline }
+    }
+
+    private var hasRemoteProcessingRecords: Bool {
+        viewModel.processingRecords.contains { !$0.resolvedProcessingBackend.usesLocalPreviewPipeline }
+    }
+
+    private var processingBannerTitle: String {
+        if hasLocalProcessingRecords && hasRemoteProcessingRecords {
+            return t("任务正在处理中", "Jobs Are Running")
+        }
+        if hasLocalProcessingRecords {
+            return t("本地任务正在处理", "Local Jobs Are Running")
+        }
+        return t("远端任务正在进行", "Remote Jobs Are Running")
+    }
+
+    private var processingBannerDetail: String {
+        if hasLocalProcessingRecords && hasRemoteProcessingRecords {
+            return t("有的作品在手机本地处理，有的作品在远端处理。你可以随时点开查看等待页，也可以先回主页稍后再看。", "Some results are processing on the phone and some are processing remotely. You can open any waiting screen at any time, or come back later.")
+        }
+        if hasLocalProcessingRecords {
+            return t("本地方案会继续在手机上处理。你可以点开查看等待页，也可以先回主页稍后再看。", "The local pipeline will keep running on your phone. You can open the waiting screen now, or come back later.")
+        }
+        return t("远端方案会继续在后台处理。你可以点开查看等待页，也可以稍后回来继续。", "The remote pipeline will keep running in the background. You can open the waiting screen now, or come back later.")
+    }
+
     private var primaryActionButton: some View {
         Button(action: {
             #if canImport(UIKit)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             #endif
+            selectedRecord = nil
+            showViewer = false
             navigateToScan = true
         }) {
             Text(t("开始拍摄", "Start Capture"))
@@ -426,46 +451,6 @@ struct HomePage: View {
                 ForEach(FrameSamplingProfile.allCases, id: \.rawValue) { profile in
                     frameSamplingProfileButton(profile)
                 }
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18)
-                .fill(Color.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 16)
-    }
-
-    private var localProcessingProfileCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(t("本地处理节奏", "Local Processing Profile"))
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.white)
-            Text(t("本地方案固定走手机本地链路：拍摄时保留轻量点图反馈，拍完后再做深度先验、高斯初始化、本地 refine、cutout 和保守 cleanup。这里不再提供远端那组三档速度。", "The local route always uses the on-device pipeline: lightweight pointmap feedback during capture, then depth prior, Gaussian initialization, local refine, cutout, and conservative cleanup after capture. The cloud speed presets do not apply here."))
-                .font(.system(size: 12))
-                .foregroundColor(.white.opacity(0.60))
-
-            HStack(spacing: 10) {
-                fixedLocalInfoChip(
-                    title: t("关键帧预算", "Keyframe Budget"),
-                    value: t("60-120 张", "60-120 frames"),
-                    tint: .green
-                )
-                fixedLocalInfoChip(
-                    title: t("处理方式", "Pipeline"),
-                    value: t("本地链路", "On-Device"),
-                    tint: .cyan
-                )
-                fixedLocalInfoChip(
-                    title: t("速度档位", "Speed Preset"),
-                    value: t("固定一档", "Single Fixed Tier"),
-                    tint: .white
-                )
             }
         }
         .padding(14)
@@ -534,30 +519,6 @@ struct HomePage: View {
         .buttonStyle(ScaleButtonStyle())
     }
 
-    private func fixedLocalInfoChip(title: String, value: String, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.white.opacity(0.55))
-            Text(value)
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(tint.opacity(0.14))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(tint.opacity(0.22), lineWidth: 1)
-                )
-        )
-    }
-
     private func frameSamplingProfileButton(_ profile: FrameSamplingProfile) -> some View {
         let isSelected = selectedFrameSamplingProfile == profile
         return Button {
@@ -584,7 +545,8 @@ struct HomePage: View {
     }
 
     private var secondaryActionButton: some View {
-        Group {
+        let selectVideoTitle = useEnglish ? "Choose Video" : "选择视频"
+        return Group {
             #if canImport(PhotosUI)
             PhotosPicker(
                 selection: $selectedVideoItem,
@@ -593,7 +555,7 @@ struct HomePage: View {
             ) {
                 HStack(spacing: 8) {
                     Image(systemName: "film")
-                    Text(t("选择视频", "Choose Video"))
+                    Text(selectVideoTitle)
                 }
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white)
@@ -610,7 +572,7 @@ struct HomePage: View {
             Button(action: {}) {
                 HStack(spacing: 8) {
                     Image(systemName: "film")
-                    Text(t("选择视频", "Choose Video"))
+                    Text(selectVideoTitle)
                 }
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white.opacity(0.45))
@@ -741,37 +703,19 @@ private extension HomePage {
     }
 
     func processingBackendTitle(_ backend: ProcessingBackendChoice) -> String {
+        let backend = backend.normalizedForActiveUse
         if !useEnglish {
-            switch backend {
-            case .cloud:
-                return "远端"
-            case .localPreview, .localSubjectFirst:
-                return "本地"
-            }
+            return backend == .cloud ? "远端" : "本地"
         }
-        switch backend {
-        case .cloud:
-            return "Remote"
-        case .localPreview, .localSubjectFirst:
-            return "Local"
-        }
+        return backend == .cloud ? "Remote" : "Local"
     }
 
     func processingBackendDetail(_ backend: ProcessingBackendChoice) -> String {
+        let backend = backend.normalizedForActiveUse
         if !useEnglish {
-            switch backend {
-            case .cloud:
-                return "高质量"
-            case .localPreview, .localSubjectFirst:
-                return "本地处理"
-            }
+            return backend == .cloud ? "高质量" : "本地处理"
         }
-        switch backend {
-        case .cloud:
-            return "High Quality"
-        case .localPreview, .localSubjectFirst:
-            return "Local Processing"
-        }
+        return backend == .cloud ? "High Quality" : "Local Processing"
     }
 
     static func importErrorDescription(_ error: Error) -> String {

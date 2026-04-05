@@ -124,7 +124,7 @@ final class RecordingController: NSObject, @unchecked Sendable {
     private var lockedStopTriggerSource: StopTriggerSource?
     private var metadata: CaptureMetadata
     private var currentTmpFileURL: URL?
-    private var currentOrientation: AVCaptureVideoOrientation = .portrait
+    private var currentOrientation: UIInterfaceOrientation = .portrait
     private var sizePollToken: Cancellable?
     private var processingFinishEpoch: Int?
     private let workerQueue = DispatchQueue(label: "app.capture.recordingcontroller.worker", qos: .userInitiated)
@@ -174,7 +174,7 @@ final class RecordingController: NSObject, @unchecked Sendable {
         )
     }
     
-    func startRecording(orientation: AVCaptureVideoOrientation = .portrait) -> RecordingError? {
+    func startRecording(orientation: UIInterfaceOrientation = .portrait) -> RecordingError? {
         guard case .idle = state else {
             return .alreadyRecording
         }
@@ -795,4 +795,3 @@ extension ProcessInfo.ThermalState {
         }
     }
 }
-

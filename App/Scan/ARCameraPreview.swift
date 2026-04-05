@@ -16,6 +16,9 @@ import SceneKit
 #if canImport(simd)
 import simd
 #endif
+#if canImport(CoreMotion)
+import CoreMotion
+#endif
 
 struct LightEstimateSnapshot: Sendable {
     let ambientIntensity: Float
@@ -147,6 +150,18 @@ struct ARCameraPreview: UIViewRepresentable {
         private var tearingDown = false
         private var hasStartedSession = false
         private var hasSignaledReady = false
+        private var lastInterfaceOrientation: UIInterfaceOrientation = .portrait
+        private var lastViewportSize: CGSize = .zero
+#if canImport(CoreMotion)
+        private let motionManager = CMMotionManager()
+        private let motionQueue: OperationQueue = {
+            let queue = OperationQueue()
+            queue.qualityOfService = .userInitiated
+            return queue
+        }()
+        private let motionLock = NSLock()
+        private var latestDeviceGravity: SIMD3<Double>?
+#endif
 
         init(viewModel: ScanViewModel) {
             self.viewModel = viewModel
@@ -161,6 +176,7 @@ struct ARCameraPreview: UIViewRepresentable {
                 }
             }
             guard view.window != nil else { return }
+            updateViewportSnapshot(from: view)
             startSessionIfNeeded(on: view)
         }
 
@@ -202,6 +218,9 @@ struct ARCameraPreview: UIViewRepresentable {
             frameLock.unlock()
             hasStartedSession = false
             hasSignaledReady = false
+#if canImport(CoreMotion)
+            stopMotionUpdates()
+#endif
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.captureBlackoutView = nil
@@ -232,6 +251,9 @@ struct ARCameraPreview: UIViewRepresentable {
             view.rendersContinuously = true
             view.isPlaying = true
             view.scene.isPaused = false
+#if canImport(CoreMotion)
+            startMotionUpdatesIfNeeded()
+#endif
             view.session.run(configuration, options: runOptions)
             hasStartedSession = true
             refreshPreviewDisplay(on: view)
@@ -246,6 +268,7 @@ struct ARCameraPreview: UIViewRepresentable {
 
         @MainActor
         private func refreshPreviewDisplay(on view: PreviewARView) {
+            updateViewportSnapshot(from: view)
             view.isHidden = false
             view.alpha = 1.0
             view.rendersContinuously = true
@@ -256,6 +279,14 @@ struct ARCameraPreview: UIViewRepresentable {
             view.layer.setNeedsDisplay()
             view.setNeedsDisplay()
             CATransaction.flush()
+        }
+
+        @MainActor
+        private func updateViewportSnapshot(from view: PreviewARView) {
+            let orientation = view.window?.windowScene?.interfaceOrientation ?? .portrait
+            let size = view.bounds.size
+            lastInterfaceOrientation = orientation
+            lastViewportSize = size == .zero ? UIScreen.main.bounds.size : size
         }
 
         private func markSessionReadyIfNeeded() {
@@ -336,6 +367,47 @@ struct ARCameraPreview: UIViewRepresentable {
             )
         }
 
+#if canImport(CoreMotion)
+        private func startMotionUpdatesIfNeeded() {
+            guard motionManager.isDeviceMotionAvailable else { return }
+            if motionManager.isDeviceMotionActive { return }
+            motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
+            motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, _ in
+                guard let self, let motion else { return }
+                let gravity = motion.gravity
+                self.motionLock.lock()
+                self.latestDeviceGravity = SIMD3<Double>(gravity.x, gravity.y, gravity.z)
+                self.motionLock.unlock()
+            }
+        }
+
+        private func stopMotionUpdates() {
+            if motionManager.isDeviceMotionActive {
+                motionManager.stopDeviceMotionUpdates()
+            }
+            motionLock.lock()
+            latestDeviceGravity = nil
+            motionLock.unlock()
+        }
+
+        private func captureWorldUp(from cameraTransform: simd_float4x4) -> SIMD3<Float>? {
+            motionLock.lock()
+            let gravityDevice = latestDeviceGravity
+            motionLock.unlock()
+            guard let gravityDevice else { return nil }
+            let gravityCam = SIMD3<Float>(
+                Float(gravityDevice.x),
+                Float(gravityDevice.y),
+                Float(-gravityDevice.z)
+            )
+            let worldGravity4 = cameraTransform * SIMD4<Float>(gravityCam.x, gravityCam.y, gravityCam.z, 0)
+            let worldGravity = SIMD3<Float>(worldGravity4.x, worldGravity4.y, worldGravity4.z)
+            let length = simd_length(worldGravity)
+            guard length > 1e-5 else { return nil }
+            return -worldGravity / length
+        }
+#endif
+
         @MainActor
         func configureOverlayAppearance(policy: ScanRenderPresentationPolicy) {
             captureBlackoutView?.isHidden = !policy.forceBlackBackground
@@ -358,73 +430,85 @@ struct ARCameraPreview: UIViewRepresentable {
 
         // ARSessionDelegate — called per frame (~60 FPS)
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            if shouldDropFrame() {
-                return
-            }
-            recordFirstARFrameIfNeeded()
-            markSessionReadyIfNeeded()
-            let inputPolicy = captureInputPolicy()
-            if !inputPolicy.shouldProcessLiveFrames {
-                releaseFrameProcessingLock()
-                return
-            }
-            let timestamp = frame.timestamp
-            let cameraTransform = frame.camera.transform
-            let lightEstimateSnapshot = makeLightEstimateSnapshot(frame.lightEstimate)
-            // Snapshot sparse feature points on delegate thread so we never
-            // retain ARFrame/ARPointCloud objects across actor hops.
-            let featurePointsSnapshot: [SIMD3<Float>] = {
-                guard inputPolicy.shouldAcquireHeavyFrameInputs else { return [] }
-                guard let cloud = frame.rawFeaturePoints else { return [] }
-                let maxPoints = min(cloud.points.count, 512)
-                return Array(cloud.points.prefix(maxPoints))
-            }()
-            let viewMatrix: simd_float4x4?
-            let projectionMatrix: simd_float4x4?
-            if inputPolicy.shouldAcquireHeavyFrameInputs {
-                #if os(iOS)
-                let orientation = UIInterfaceOrientation.portrait
-                let viewportSize = CGSize(width: 1080, height: 1920)
-                viewMatrix = frame.camera.viewMatrix(for: orientation)
-                projectionMatrix = frame.camera.projectionMatrix(
-                    for: orientation,
-                    viewportSize: viewportSize,
-                    zNear: 0.001,
-                    zFar: 1000.0
-                )
-                #else
-                viewMatrix = simd_inverse(frame.camera.transform)
-                projectionMatrix = matrix_identity_float4x4
-                #endif
-            } else {
-                viewMatrix = nil
-                projectionMatrix = nil
-            }
+            autoreleasepool {
+                if shouldDropFrame() {
+                    return
+                }
+                recordFirstARFrameIfNeeded()
+                markSessionReadyIfNeeded()
+                let inputPolicy = captureInputPolicy()
+                if !inputPolicy.shouldProcessLiveFrames {
+                    releaseFrameProcessingLock()
+                    return
+                }
+                let timestamp = frame.timestamp
+                let cameraTransform = frame.camera.transform
+#if canImport(CoreMotion)
+                if let worldUp = captureWorldUp(from: cameraTransform) {
+                    Task { @MainActor in
+                        self.viewModel.ingestCaptureGravity(worldUp: worldUp)
+                    }
+                }
+#endif
+                let lightEstimateSnapshot = makeLightEstimateSnapshot(frame.lightEstimate)
+                // Snapshot sparse feature points on delegate thread so we never
+                // retain ARFrame/ARPointCloud objects across actor hops.
+                let featurePointsSnapshot: [SIMD3<Float>] = {
+                    guard inputPolicy.shouldAcquireHeavyFrameInputs else { return [] }
+                    guard let cloud = frame.rawFeaturePoints else { return [] }
+                    let maxPoints = min(cloud.points.count, 512)
+                    return Array(cloud.points.prefix(maxPoints))
+                }()
+                let viewMatrix: simd_float4x4?
+                let projectionMatrix: simd_float4x4?
+                if inputPolicy.shouldAcquireHeavyFrameInputs {
+                    #if os(iOS)
+                    let orientation = lastInterfaceOrientation
+                    let viewportSize = lastViewportSize
+                    viewMatrix = frame.camera.viewMatrix(for: orientation)
+                    projectionMatrix = frame.camera.projectionMatrix(
+                        for: orientation,
+                        viewportSize: viewportSize,
+                        zNear: 0.001,
+                        zFar: 1000.0
+                    )
+                    #else
+                    viewMatrix = simd_inverse(frame.camera.transform)
+                    projectionMatrix = matrix_identity_float4x4
+                    #endif
+                } else {
+                    viewMatrix = nil
+                    projectionMatrix = nil
+                }
 
-            // Extract frame data on ARKit background thread BEFORE Task dispatch.
-            // CVPixelBuffers are retained by local variables until Task completes.
-            let pixelBuffer = frame.capturedImage
-            let cameraIntrinsics = frame.camera.intrinsics
-            // LiDAR depth: sceneDepth on LiDAR devices, nil on non-LiDAR (pure DAv2 path)
-            let lidarDepthBuffer: CVPixelBuffer? = inputPolicy.shouldRequestSceneDepth
-                ? (frame.sceneDepth?.depthMap ?? frame.smoothedSceneDepth?.depthMap)
-                : nil
+                // Detach ARKit-owned pixel buffers on the delegate thread so the
+                // original ARFrame can be released before crossing actor hops.
+                guard let pixelBuffer = Self.clonePixelBuffer(frame.capturedImage) else {
+                    releaseFrameProcessingLock()
+                    return
+                }
+                let cameraIntrinsics = frame.camera.intrinsics
+                // LiDAR depth: sceneDepth on LiDAR devices, nil on non-LiDAR (pure DAv2 path)
+                let lidarDepthBuffer: CVPixelBuffer? = inputPolicy.shouldRequestSceneDepth
+                    ? (frame.sceneDepth?.depthMap ?? frame.smoothedSceneDepth?.depthMap).flatMap(Self.clonePixelBuffer)
+                    : nil
 
-            Task { @MainActor in
-                self.configureOverlayAppearance(policy: self.viewModel.scanState.renderPresentationPolicy)
-                viewModel.processARFrame(
-                    timestamp: timestamp,
-                    cameraTransform: cameraTransform,
-                    lightEstimate: lightEstimateSnapshot,
-                    meshAnchors: [],
-                    viewMatrix: viewMatrix,
-                    projectionMatrix: projectionMatrix,
-                    pixelBuffer: pixelBuffer,
-                    cameraIntrinsics: cameraIntrinsics,
-                    lidarDepthBuffer: lidarDepthBuffer,
-                    featurePoints: featurePointsSnapshot
-                )
-                self.releaseFrameProcessingLock()
+                Task { @MainActor in
+                    self.configureOverlayAppearance(policy: self.viewModel.scanState.renderPresentationPolicy)
+                    viewModel.processARFrame(
+                        timestamp: timestamp,
+                        cameraTransform: cameraTransform,
+                        lightEstimate: lightEstimateSnapshot,
+                        meshAnchors: [],
+                        viewMatrix: viewMatrix,
+                        projectionMatrix: projectionMatrix,
+                        pixelBuffer: pixelBuffer,
+                        cameraIntrinsics: cameraIntrinsics,
+                        lidarDepthBuffer: lidarDepthBuffer,
+                        featurePoints: featurePointsSnapshot
+                    )
+                    self.releaseFrameProcessingLock()
+                }
             }
         }
 
@@ -449,6 +533,77 @@ struct ARCameraPreview: UIViewRepresentable {
         // Session interruption ended
         func sessionInterruptionEnded(_ session: ARSession) {
             // Session automatically resumes — user can tap to continue
+        }
+
+        private static func clonePixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+            let pixelFormat = CVPixelBufferGetPixelFormatType(source)
+            let width = CVPixelBufferGetWidth(source)
+            let height = CVPixelBufferGetHeight(source)
+            let attrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+            ]
+
+            var destination: CVPixelBuffer?
+            guard CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                width,
+                height,
+                pixelFormat,
+                attrs as CFDictionary,
+                &destination
+            ) == kCVReturnSuccess,
+            let destination else {
+                return nil
+            }
+
+            CVPixelBufferLockBaseAddress(source, .readOnly)
+            CVPixelBufferLockBaseAddress(destination, [])
+            defer {
+                CVPixelBufferUnlockBaseAddress(destination, [])
+                CVPixelBufferUnlockBaseAddress(source, .readOnly)
+            }
+
+            let planeCount = CVPixelBufferGetPlaneCount(source)
+            if planeCount > 0 {
+                for plane in 0..<planeCount {
+                    guard let srcBase = CVPixelBufferGetBaseAddressOfPlane(source, plane),
+                          let dstBase = CVPixelBufferGetBaseAddressOfPlane(destination, plane) else {
+                        return nil
+                    }
+                    let srcStride = CVPixelBufferGetBytesPerRowOfPlane(source, plane)
+                    let dstStride = CVPixelBufferGetBytesPerRowOfPlane(destination, plane)
+                    let rows = CVPixelBufferGetHeightOfPlane(source, plane)
+                    let bytesPerRow = min(srcStride, dstStride)
+                    for row in 0..<rows {
+                        memcpy(
+                            dstBase.advanced(by: row * dstStride),
+                            srcBase.advanced(by: row * srcStride),
+                            bytesPerRow
+                        )
+                    }
+                }
+                return destination
+            }
+
+            guard let srcBase = CVPixelBufferGetBaseAddress(source),
+                  let dstBase = CVPixelBufferGetBaseAddress(destination) else {
+                return nil
+            }
+            let srcStride = CVPixelBufferGetBytesPerRow(source)
+            let dstStride = CVPixelBufferGetBytesPerRow(destination)
+            let rows = CVPixelBufferGetHeight(source)
+            let bytesPerRow = min(srcStride, dstStride)
+            for row in 0..<rows {
+                memcpy(
+                    dstBase.advanced(by: row * dstStride),
+                    srcBase.advanced(by: row * srcStride),
+                    bytesPerRow
+                )
+            }
+            return destination
         }
 
         private func makeLightEstimateSnapshot(_ estimate: ARLightEstimate?) -> LightEstimateSnapshot? {
