@@ -844,6 +844,9 @@ final class HomeViewModel: ObservableObject {
         let broker = BackgroundUploadBrokerClient.shared
         var transientPollFailures = 0
         var defaultArtifactReady = store.record(id: recordId)?.artifactPath != nil
+        let requiredConfirmedRemoteFailurePolls = 3
+        var consecutiveRemoteFailedPolls = 0
+        var lastObservedRemoteFailureReason: String?
 
         while true {
             let status: JobStatus
@@ -897,6 +900,8 @@ final class HomeViewModel: ObservableObject {
 
             switch status {
             case .pending(let progress), .processing(let progress):
+                consecutiveRemoteFailedPolls = 0
+                lastObservedRemoteFailureReason = nil
                 persistObjectFastPublishProgress(
                     recordId: recordId,
                     remoteJobId: jobId,
@@ -904,6 +909,8 @@ final class HomeViewModel: ObservableObject {
                     defaultArtifactReady: defaultArtifactReady
                 )
             case .downloadReady(let progress):
+                consecutiveRemoteFailedPolls = 0
+                lastObservedRemoteFailureReason = nil
                 if !defaultArtifactReady {
                     do {
                         let bundle = try await broker.downloadObjectModeViewerBundle(jobId: jobId)
@@ -954,6 +961,8 @@ final class HomeViewModel: ObservableObject {
                     )
                 }
             case .completed(let progress):
+                consecutiveRemoteFailedPolls = 0
+                lastObservedRemoteFailureReason = nil
                 do {
                     let relativePath: String
                     let viewerManifestPath: String?
@@ -1005,11 +1014,50 @@ final class HomeViewModel: ObservableObject {
                 }
                 return
             case .failed(let reason, let progress):
+                let normalizedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                if lastObservedRemoteFailureReason == normalizedReason {
+                    consecutiveRemoteFailedPolls += 1
+                } else {
+                    lastObservedRemoteFailureReason = normalizedReason
+                    consecutiveRemoteFailedPolls = 1
+                }
+
+                if consecutiveRemoteFailedPolls < requiredConfirmedRemoteFailurePolls {
+                    if let progress {
+                        persistObjectFastPublishProgress(
+                            recordId: recordId,
+                            remoteJobId: jobId,
+                            progress: progress,
+                            defaultArtifactReady: defaultArtifactReady
+                        )
+                    } else {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .reconstructing,
+                            statusMessage: "正在确认远端状态",
+                            detailMessage: "远端短暂返回失败状态，系统正在再次确认任务是否仍在继续。",
+                            progressFraction: max(store.record(id: recordId)?.displayProgressFraction ?? 0.12, 0.12),
+                            progressBasis: "remote_failure_pending",
+                            remoteStageKey: "remote_failure_pending",
+                            runtimeMetrics: objectFastPublishRuntimeMetrics(
+                                stageKey: "remote_failure_pending",
+                                detail: normalizedReason,
+                                remoteJobId: jobId,
+                                defaultArtifactReady: defaultArtifactReady
+                            ),
+                            remoteJobId: jobId
+                        )
+                        loadRecords(scheduleRemoteResume: false)
+                    }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    continue
+                }
+
                 store.updateProcessingState(
                     recordId: recordId,
                     status: .failed,
                     statusMessage: "新远端生成失败",
-                    detailMessage: reason,
+                    detailMessage: normalizedReason,
                     progressFraction: progress?.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
                     progressBasis: progress?.progressBasis,
                     remoteStageKey: progress?.stageKey,
@@ -1017,7 +1065,7 @@ final class HomeViewModel: ObservableObject {
                     currentTier: progress?.currentTier,
                     runtimeMetrics: objectFastPublishRuntimeMetrics(
                         stageKey: progress?.stageKey,
-                        detail: reason,
+                        detail: normalizedReason,
                         remoteJobId: jobId,
                         defaultArtifactReady: defaultArtifactReady,
                         remoteMetrics: progress?.runtimeMetrics ?? [:]

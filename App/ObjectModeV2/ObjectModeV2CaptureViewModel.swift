@@ -460,6 +460,9 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             var defaultDownloaded = false
             var transientPollFailures = 0
             var lastLoggedStageSignature: String?
+            let requiredConfirmedRemoteFailurePolls = 3
+            var consecutiveRemoteFailedPolls = 0
+            var lastObservedRemoteFailureReason: String?
 
             while true {
                 let status: JobStatus
@@ -496,12 +499,18 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 }
                 switch status {
                 case .pending(let progress):
+                    consecutiveRemoteFailedPolls = 0
+                    lastObservedRemoteFailureReason = nil
                     applyRemoteProgress(progress, defaultReady: defaultReady)
                     persistRemoteProgress(progress, recordId: recordContext.recordId, remoteJobId: jobId, defaultReady: defaultReady)
                 case .processing(let progress):
+                    consecutiveRemoteFailedPolls = 0
+                    lastObservedRemoteFailureReason = nil
                     applyRemoteProgress(progress, defaultReady: defaultReady)
                     persistRemoteProgress(progress, recordId: recordContext.recordId, remoteJobId: jobId, defaultReady: defaultReady)
                 case .downloadReady(let progress):
+                    consecutiveRemoteFailedPolls = 0
+                    lastObservedRemoteFailureReason = nil
                     defaultReady = true
                     debugLog("default artifact ready jobId=\(jobId)")
                     updateStage(.defaultStage, state: .ready)
@@ -537,6 +546,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                         debugLog("default viewer bundle downloaded raw=\(persistedBundle.defaultArtifactURL.lastPathComponent) manifest=\(persistedBundle.localManifestURL.lastPathComponent)")
                     }
                 case .completed(let progress):
+                    consecutiveRemoteFailedPolls = 0
+                    lastObservedRemoteFailureReason = nil
                     let persistedBundle = try await downloadAndPersistViewerBundle(
                         broker: broker,
                         jobId: jobId,
@@ -576,9 +587,50 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     isRunning = false
                     debugLog("runPipeline completed jobId=\(jobId)")
                     return
-                case .failed(let reason, _):
-                    debugLog("remote job failed jobId=\(jobId) reason=\(reason)")
-                    throw RemoteB1ClientError.jobFailed(reason)
+                case .failed(let reason, let progress):
+                    let normalizedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if lastObservedRemoteFailureReason == normalizedReason {
+                        consecutiveRemoteFailedPolls += 1
+                    } else {
+                        lastObservedRemoteFailureReason = normalizedReason
+                        consecutiveRemoteFailedPolls = 1
+                    }
+
+                    if consecutiveRemoteFailedPolls < requiredConfirmedRemoteFailurePolls {
+                        statusText = "正在确认远端状态…"
+                        if let progress {
+                            applyRemoteProgress(progress, defaultReady: defaultReady)
+                            persistRemoteProgress(
+                                progress,
+                                recordId: recordContext.recordId,
+                                remoteJobId: jobId,
+                                defaultReady: defaultReady
+                            )
+                        } else {
+                            persistRecordState(
+                                recordId: recordContext.recordId,
+                                status: .reconstructing,
+                                statusMessage: "正在确认远端状态",
+                                detailMessage: "远端短暂返回失败状态，系统正在再次确认对象任务是否仍在继续。",
+                                progressFraction: max(currentProcessingProgress, 0.12),
+                                remoteJobId: jobId,
+                                runtimeMetrics: objectFastPublishRuntimeMetrics(
+                                    stageKey: "remote_failure_pending",
+                                    detail: normalizedReason,
+                                    remoteJobId: jobId
+                                )
+                            )
+                        }
+                        debugLog(
+                            "remote job failed pending jobId=\(jobId) reason=\(normalizedReason) attempt=\(consecutiveRemoteFailedPolls)/\(requiredConfirmedRemoteFailurePolls)"
+                        )
+                        break
+                    }
+
+                    debugLog(
+                        "remote job failed confirmed jobId=\(jobId) reason=\(normalizedReason) attempts=\(consecutiveRemoteFailedPolls)"
+                    )
+                    throw RemoteB1ClientError.jobFailed(normalizedReason)
                 }
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             }
