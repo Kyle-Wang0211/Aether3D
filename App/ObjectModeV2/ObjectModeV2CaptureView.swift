@@ -2145,14 +2145,26 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
     private func load(url: URL, in webView: WKWebView, coordinator: Coordinator) {
         let directoryURL = url.deletingLastPathComponent()
         let htmlURL = directoryURL.appendingPathComponent(".aether-mesh-viewer-\(UUID().uuidString).html")
+        let scriptFileName = "model-viewer.min.js"
+        guard let bundledScriptURL = Bundle.main.url(forResource: "model-viewer.min", withExtension: "js") else {
+            coordinator.loadedURL = url
+            coordinator.htmlURL = nil
+            webView.loadHTMLString(
+                """
+                <html><body style="margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font:600 15px -apple-system,sans-serif;">默认 mesh viewer 资源缺失。</body></html>
+                """,
+                baseURL: nil
+            )
+            return
+        }
+        let localScriptURL = directoryURL.appendingPathComponent(scriptFileName)
         let html = """
         <!doctype html>
         <html>
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-          <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
-          <script nomodule src="https://unpkg.com/@google/model-viewer/dist/model-viewer-legacy.js"></script>
+          <script type="module" src="\(scriptFileName)"></script>
           <style>
             html, body {
               margin: 0;
@@ -2197,6 +2209,21 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             reveal="auto">
           </model-viewer>
           <div class="fallback">正在打开默认 mesh 成品...</div>
+          <script>
+            const viewer = document.querySelector('model-viewer');
+            const fallback = document.querySelector('.fallback');
+            const show = (text) => { if (fallback) { fallback.style.display = 'flex'; fallback.textContent = text; } };
+            const hide = () => { if (fallback) { fallback.style.display = 'none'; } };
+            if (viewer) {
+              viewer.addEventListener('load', hide, { once: false });
+              viewer.addEventListener('error', () => show('默认 mesh 打开失败，请稍后重试。'));
+              window.setTimeout(() => {
+                if (fallback && fallback.style.display !== 'none') {
+                  show('默认 mesh 较大，正在继续加载...');
+                }
+              }, 1500);
+            }
+          </script>
         </body>
         </html>
         """
@@ -2205,6 +2232,9 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             if let previousHTMLURL = coordinator.htmlURL,
                FileManager.default.fileExists(atPath: previousHTMLURL.path) {
                 try? FileManager.default.removeItem(at: previousHTMLURL)
+            }
+            if FileManager.default.fileExists(atPath: localScriptURL.path) == false {
+                try FileManager.default.copyItem(at: bundledScriptURL, to: localScriptURL)
             }
             try html.write(to: htmlURL, atomically: true, encoding: .utf8)
             coordinator.loadedURL = url

@@ -1,0 +1,628 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 63;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		026E8D24563064BE2272F0DF /* TimerScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1B05A5AF31707735644266 /* TimerScheduler.swift */; };
+		02B842CF49DD12E69F26F6EE /* CaptureMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C627A72DFE978848D6B1035 /* CaptureMetadata.swift */; };
+		139D201128D0D4E8B92F50B1 /* GuidanceHints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21275A3DB358672305FE464C /* GuidanceHints.swift */; };
+		15237C4E294396D4584A9C9D /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84AA3673A45168FFCF2591D2 /* ScanView.swift */; };
+		199BD37CE3484BB8B8AC4A48 /* ARCameraPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C9B21602BAE5F242CFA2DF7 /* ARCameraPreview.swift */; };
+		1AF263B0045892B34535C7D0 /* ScanState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94321A1213424617C89B1099 /* ScanState.swift */; };
+		34D655AC21B84FC57DE6287B /* HomePage.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7E1E96BDC919A3DD22CC004 /* HomePage.swift */; };
+		371C8E6BDD412A9DC6235D17 /* ScanViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8D5AF12C09854B38C432DC3 /* ScanViewModel.swift */; };
+		3A11C0DE11AA11BB11CC11FF /* LocalPreviewImportRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A11C0DE11AA11BB11CC1200 /* LocalPreviewImportRunner.swift */; };
+		LPPR000100010001BFA00001 /* LocalPreviewProductProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = LPPR000100010001BFA00011 /* LocalPreviewProductProfile.swift */; };
+		LPMA000100010001BFA00001 /* LocalPreviewMetricsArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = LPMA000100010001BFA00011 /* LocalPreviewMetricsArchive.swift */; };
+		4129A151E0FF4756AFEE8FCE /* IMUDataCollector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CF29EFE4192A04186138DC6 /* IMUDataCollector.swift */; };
+		46535C5893C1EE6757EDBFBD /* LiDARDepthProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0B5C9A42D53D2FCEFC332D /* LiDARDepthProcessor.swift */; };
+
+		5C6D2E80F97B952C2B1AE92F /* RecordingConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DB27B69630B1D302D44FD88 /* RecordingConfig.swift */; };
+		5E9E5FFFE7946B7C4B3B1FEB /* HomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65FE3E81A75AD32AB11FAA00 /* HomeViewModel.swift */; };
+		5F80380816E28D09572A2775 /* ScanRecordCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B2806B154F05CE67AB99474 /* ScanRecordCell.swift */; };
+		65DD9B648B55B0B3BAE7A0B7 /* ScanRecordStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 254FAFF2F314487C28A8504F /* ScanRecordStore.swift */; };
+		6BDED97F3253456E4C457289 /* CameraSessionError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1281C0027AEA8E8061A27D52 /* CameraSessionError.swift */; };
+		6DD416C934E59209B54D47D1 /* CameraSessionDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9925189411403AF7F273853E /* CameraSessionDelegate.swift */; };
+		70E9A14AECD9BDBCBEF61D15 /* ARKitSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0918BCBB500AC66CFF4D6044 /* ARKitSessionManager.swift */; };
+		71A72F1821F2DA70ACE90897 /* CameraConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 187C43DC9422CE4956EA6E8D /* CameraConfig.swift */; };
+		74EC72F94CA47BD22391EF2F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 45CBCA499F89466593691E9F /* Assets.xcassets */; };
+		A0B200000000000000000031 /* model-viewer.min.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000032 /* model-viewer.min.js */; };
+		76B81AA6B24166965066AA15 /* ScanCompletionBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CABC53CFB1C86C083D5E792 /* ScanCompletionBridge.swift */; };
+		868738ED8472F4B93A6FBDE4 /* Aether3DApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46357E7EDB2D5D315F71F4E3 /* Aether3DApp.swift */; };
+		9EB4B45511FEB68A40C0F253 /* CameraCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84947607474B82E0F00D980F /* CameraCapabilities.swift */; };
+		B5E9E0998069AEB592EC8C28 /* ScanCaptureControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D17226BC03FE07B29725E54 /* ScanCaptureControls.swift */; };
+		C203245060F238D6D73928A1 /* ThermalMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34B9E1402832D942C60CAEEB /* ThermalMonitor.swift */; };
+		C40953C670C4F01AE5DC43F6 /* RecordingResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB29F99F07DDECB9A64AA783 /* RecordingResult.swift */; };
+		CAE5EFC418EC4FD4F4B9BCEA /* GuidanceToastPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF98C1485BD086E2C77AAC98 /* GuidanceToastPresenter.swift */; };
+		CD41308C708A89A541D0FF8D /* Aether3DCore in Frameworks */ = {isa = PBXBuildFile; productRef = 811F127AC8CD639C232BC3E2 /* Aether3DCore */; };
+		D220CD8C7AB28ED8FE54DE1E /* RecordingController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BB9C13F01689D7D61249C05 /* RecordingController.swift */; };
+		D80C8E3E25E0BF6FE6303FFF /* CameraSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 699F1D81056EC09D4E9042F4 /* CameraSession.swift */; };
+		DA58AC6A04518722D6A06CEA /* GuidanceHapticEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7A8FFF50BF56A9A367C205 /* GuidanceHapticEngine.swift */; };
+		DFD2FA37B03B7B58C52A32C6 /* ScanRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D0E6E588C34713A7374018 /* ScanRecord.swift */; };
+		EAEAF231A78E56AFCAC22692 /* InterruptionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5E78E0387A5797B36E10C08 /* InterruptionHandler.swift */; };
+		FC14359324F69F9A209E8544 /* ClockProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B5B2EFF11D53C99C548D1EA /* ClockProvider.swift */; };
+		PCOI000100010001BFA00001 /* PointCloudOIRPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCOI000100010001BFA00011 /* PointCloudOIRPipeline.swift */; };
+		SPLV000100010001BFA00001 /* SplatViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SPLV000100010001BFA00011 /* SplatViewerView.swift */; };
+		A0B200000000000000000001 /* ObjectModeV2CaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000011 /* ObjectModeV2CaptureView.swift */; };
+		A0B200000000000000000002 /* ObjectModeV2CaptureViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000012 /* ObjectModeV2CaptureViewModel.swift */; };
+		A0B200000000000000000003 /* ObjectModeV2CaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000013 /* ObjectModeV2CaptureRecorder.swift */; };
+		A0B200000000000000000004 /* ObjectModeV2GuidanceEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */; };
+		A0B200000000000000000005 /* ObjectModeV2CameraPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */; };
+		3DGS000100010001BFAA0001 /* GaussianSplatViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DGS000100010001BFAA0011 /* GaussianSplatViewController.swift */; };
+		3DGS000100010001BFAA0002 /* GaussianSplat.metal in Sources */ = {isa = PBXBuildFile; fileRef = 3DGS000100010001BFAA0012 /* GaussianSplat.metal */; };
+		3DGS000200010001BFAA0001 /* GaussianTraining.metal in Sources */ = {isa = PBXBuildFile; fileRef = 3DGS000200010001BFAA0011 /* GaussianTraining.metal */; };
+		MTLS000100010001BFA00001 /* PointCloudRender.metal in Sources */ = {isa = PBXBuildFile; fileRef = MTLS000100010001BFA00011 /* PointCloudRender.metal */; };
+		MTLS000100010001BFA00002 /* OIRSplatRender.metal in Sources */ = {isa = PBXBuildFile; fileRef = MTLS000100010001BFA00012 /* OIRSplatRender.metal */; };
+		MTLS000100010001BFA00003 /* QualityMetrics.metal in Sources */ = {isa = PBXBuildFile; fileRef = MTLS000100010001BFA00013 /* QualityMetrics.metal */; };
+		DAV2000100010001BFA00001 /* DepthAnythingV2Small.mlmodelc in Resources */ = {isa = PBXBuildFile; fileRef = DAV2000100010001BFA00011 /* DepthAnythingV2Small.mlmodelc */; };
+		DAV2000100010001BFA00002 /* DepthAnythingV2Large.mlmodelc in Resources */ = {isa = PBXBuildFile; fileRef = DAV2000100010001BFA00012 /* DepthAnythingV2Large.mlmodelc */; };
+		MTLS000100010001BFA00004 /* QualityOverlay.metal in Sources */ = {isa = PBXBuildFile; fileRef = MTLS000100010001BFA00014 /* QualityOverlay.metal */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0918BCBB500AC66CFF4D6044 /* ARKitSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARKitSessionManager.swift; sourceTree = "<group>"; };
+		0BB9C13F01689D7D61249C05 /* RecordingController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingController.swift; sourceTree = "<group>"; };
+		1281C0027AEA8E8061A27D52 /* CameraSessionError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraSessionError.swift; sourceTree = "<group>"; };
+		187C43DC9422CE4956EA6E8D /* CameraConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraConfig.swift; sourceTree = "<group>"; };
+		1B2806B154F05CE67AB99474 /* ScanRecordCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecordCell.swift; sourceTree = "<group>"; };
+		21275A3DB358672305FE464C /* GuidanceHints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuidanceHints.swift; sourceTree = "<group>"; };
+		254FAFF2F314487C28A8504F /* ScanRecordStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecordStore.swift; sourceTree = "<group>"; };
+		2A0B5C9A42D53D2FCEFC332D /* LiDARDepthProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARDepthProcessor.swift; sourceTree = "<group>"; };
+		34B9E1402832D942C60CAEEB /* ThermalMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThermalMonitor.swift; sourceTree = "<group>"; };
+		45CBCA499F89466593691E9F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		46357E7EDB2D5D315F71F4E3 /* Aether3DApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aether3DApp.swift; sourceTree = "<group>"; };
+		5C9B21602BAE5F242CFA2DF7 /* ARCameraPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARCameraPreview.swift; sourceTree = "<group>"; };
+		5CABC53CFB1C86C083D5E792 /* ScanCompletionBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanCompletionBridge.swift; sourceTree = "<group>"; };
+		5CF29EFE4192A04186138DC6 /* IMUDataCollector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMUDataCollector.swift; sourceTree = "<group>"; };
+		65FE3E81A75AD32AB11FAA00 /* HomeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewModel.swift; sourceTree = "<group>"; };
+		699F1D81056EC09D4E9042F4 /* CameraSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraSession.swift; sourceTree = "<group>"; };
+		6D17226BC03FE07B29725E54 /* ScanCaptureControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanCaptureControls.swift; sourceTree = "<group>"; };
+		3A11C0DE11AA11BB11CC1200 /* LocalPreviewImportRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPreviewImportRunner.swift; sourceTree = "<group>"; };
+		LPPR000100010001BFA00011 /* LocalPreviewProductProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPreviewProductProfile.swift; sourceTree = "<group>"; };
+		LPMA000100010001BFA00011 /* LocalPreviewMetricsArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPreviewMetricsArchive.swift; sourceTree = "<group>"; };
+		7B5B2EFF11D53C99C548D1EA /* ClockProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClockProvider.swift; sourceTree = "<group>"; };
+		7C627A72DFE978848D6B1035 /* CaptureMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureMetadata.swift; sourceTree = "<group>"; };
+		82D0E6E588C34713A7374018 /* ScanRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecord.swift; sourceTree = "<group>"; };
+		84947607474B82E0F00D980F /* CameraCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCapabilities.swift; sourceTree = "<group>"; };
+		84AA3673A45168FFCF2591D2 /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
+		8C1B05A5AF31707735644266 /* TimerScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimerScheduler.swift; sourceTree = "<group>"; };
+		8D7A8FFF50BF56A9A367C205 /* GuidanceHapticEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuidanceHapticEngine.swift; sourceTree = "<group>"; };
+		8DB27B69630B1D302D44FD88 /* RecordingConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingConfig.swift; sourceTree = "<group>"; };
+		94321A1213424617C89B1099 /* ScanState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanState.swift; sourceTree = "<group>"; };
+		9925189411403AF7F273853E /* CameraSessionDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraSessionDelegate.swift; sourceTree = "<group>"; };
+		AB29F99F07DDECB9A64AA783 /* RecordingResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingResult.swift; sourceTree = "<group>"; };
+		AB4B3856E304CFC23ED880D7 /* Aether3D.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aether3D.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B5E78E0387A5797B36E10C08 /* InterruptionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InterruptionHandler.swift; sourceTree = "<group>"; };
+		BF98C1485BD086E2C77AAC98 /* GuidanceToastPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuidanceToastPresenter.swift; sourceTree = "<group>"; };
+		C7E1E96BDC919A3DD22CC004 /* HomePage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomePage.swift; sourceTree = "<group>"; };
+		A0B200000000000000000011 /* ObjectModeV2CaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2CaptureView.swift; sourceTree = "<group>"; };
+		A0B200000000000000000012 /* ObjectModeV2CaptureViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2CaptureViewModel.swift; sourceTree = "<group>"; };
+		A0B200000000000000000013 /* ObjectModeV2CaptureRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2CaptureRecorder.swift; sourceTree = "<group>"; };
+		A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2GuidanceEngine.swift; sourceTree = "<group>"; };
+		A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2CameraPreview.swift; sourceTree = "<group>"; };
+		A0B200000000000000000032 /* model-viewer.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/model-viewer.min.js; sourceTree = "<group>"; };
+
+		E8D5AF12C09854B38C432DC3 /* ScanViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanViewModel.swift; sourceTree = "<group>"; };
+		PCOI000100010001BFA00011 /* PointCloudOIRPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudOIRPipeline.swift; sourceTree = "<group>"; };
+		SPLV000100010001BFA00011 /* SplatViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatViewerView.swift; sourceTree = "<group>"; };
+		3DGS000100010001BFAA0011 /* GaussianSplatViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaussianSplatViewController.swift; sourceTree = "<group>"; };
+		3DGS000100010001BFAA0012 /* GaussianSplat.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GaussianSplat.metal; sourceTree = "<group>"; };
+		3DGS000100010001BFAA0013 /* GaussianSplatTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GaussianSplatTypes.h; sourceTree = "<group>"; };
+		3DGS000200010001BFAA0011 /* GaussianTraining.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GaussianTraining.metal; sourceTree = "<group>"; };
+		MTLS000100010001BFA00011 /* PointCloudRender.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = PointCloudRender.metal; sourceTree = "<group>"; };
+		MTLS000100010001BFA00012 /* OIRSplatRender.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OIRSplatRender.metal; sourceTree = "<group>"; };
+		MTLS000100010001BFA00013 /* QualityMetrics.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = QualityMetrics.metal; sourceTree = "<group>"; };
+		DAV2000100010001BFA00011 /* DepthAnythingV2Small.mlmodelc */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DepthAnythingV2Small.mlmodelc; path = DepthAnythingV2Small.mlmodelc; sourceTree = SOURCE_ROOT; };
+		DAV2000100010001BFA00012 /* DepthAnythingV2Large.mlmodelc */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DepthAnythingV2Large.mlmodelc; path = DepthAnythingV2Large.mlmodelc; sourceTree = SOURCE_ROOT; };
+		MTLS000100010001BFA00014 /* QualityOverlay.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = QualityOverlay.metal; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4107952259E3E5C470C50BDF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CD41308C708A89A541D0FF8D /* Aether3DCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+			01E10E42B248934C9FD337D2 /* Viewer */ = {
+				isa = PBXGroup;
+				children = (
+					SPLV000100010001BFA00011 /* SplatViewerView.swift */,
+				);
+				path = Viewer;
+				sourceTree = "<group>";
+		};
+		5D86232631F7F224284C9F43 /* Capture */ = {
+			isa = PBXGroup;
+			children = (
+				0918BCBB500AC66CFF4D6044 /* ARKitSessionManager.swift */,
+				84947607474B82E0F00D980F /* CameraCapabilities.swift */,
+				187C43DC9422CE4956EA6E8D /* CameraConfig.swift */,
+				699F1D81056EC09D4E9042F4 /* CameraSession.swift */,
+				9925189411403AF7F273853E /* CameraSessionDelegate.swift */,
+				1281C0027AEA8E8061A27D52 /* CameraSessionError.swift */,
+				7C627A72DFE978848D6B1035 /* CaptureMetadata.swift */,
+				7B5B2EFF11D53C99C548D1EA /* ClockProvider.swift */,
+				5CF29EFE4192A04186138DC6 /* IMUDataCollector.swift */,
+				B5E78E0387A5797B36E10C08 /* InterruptionHandler.swift */,
+				2A0B5C9A42D53D2FCEFC332D /* LiDARDepthProcessor.swift */,
+				8DB27B69630B1D302D44FD88 /* RecordingConfig.swift */,
+				0BB9C13F01689D7D61249C05 /* RecordingController.swift */,
+				AB29F99F07DDECB9A64AA783 /* RecordingResult.swift */,
+				34B9E1402832D942C60CAEEB /* ThermalMonitor.swift */,
+				8C1B05A5AF31707735644266 /* TimerScheduler.swift */,
+			);
+			path = Capture;
+			sourceTree = "<group>";
+		};
+		5E8EA9E0C7C574DD4AF3D91A /* Scan */ = {
+			isa = PBXGroup;
+			children = (
+				5C9B21602BAE5F242CFA2DF7 /* ARCameraPreview.swift */,
+				94321A1213424617C89B1099 /* ScanState.swift */,
+				84AA3673A45168FFCF2591D2 /* ScanView.swift */,
+				E8D5AF12C09854B38C432DC3 /* ScanViewModel.swift */,
+			);
+			path = Scan;
+			sourceTree = "<group>";
+		};
+		LPGR000100010001BFA00021 /* LocalPreview */ = {
+			isa = PBXGroup;
+			children = (
+				LPMA000100010001BFA00011 /* LocalPreviewMetricsArchive.swift */,
+				LPPR000100010001BFA00011 /* LocalPreviewProductProfile.swift */,
+			);
+			path = LocalPreview;
+			sourceTree = "<group>";
+		};
+		7A4C2723287C0233041E5D4C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AB4B3856E304CFC23ED880D7 /* Aether3D.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D211E0781BC27D8657D13F12 = {
+			isa = PBXGroup;
+			children = (
+				DAV2000100010001BFA00011 /* DepthAnythingV2Small.mlmodelc */,
+				DAV2000100010001BFA00012 /* DepthAnythingV2Large.mlmodelc */,
+				DF0ABEAF0B3F00AD56629BE0 /* App */,
+				7A4C2723287C0233041E5D4C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D9EAFD3F934EDF4BDD2A6933 /* ScanGuidance */ = {
+			isa = PBXGroup;
+			children = (
+				8D7A8FFF50BF56A9A367C205 /* GuidanceHapticEngine.swift */,
+				21275A3DB358672305FE464C /* GuidanceHints.swift */,
+				BF98C1485BD086E2C77AAC98 /* GuidanceToastPresenter.swift */,
+				PCOI000100010001BFA00011 /* PointCloudOIRPipeline.swift */,
+				6D17226BC03FE07B29725E54 /* ScanCaptureControls.swift */,
+				5CABC53CFB1C86C083D5E792 /* ScanCompletionBridge.swift */,
+			);
+			path = ScanGuidance;
+			sourceTree = "<group>";
+		};
+		A0B200000000000000000021 /* ObjectModeV2 */ = {
+			isa = PBXGroup;
+			children = (
+				A0B200000000000000000011 /* ObjectModeV2CaptureView.swift */,
+				A0B200000000000000000012 /* ObjectModeV2CaptureViewModel.swift */,
+				A0B200000000000000000013 /* ObjectModeV2CaptureRecorder.swift */,
+				A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */,
+				A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */,
+				A0B200000000000000000032 /* model-viewer.min.js */,
+			);
+			path = ObjectModeV2;
+			sourceTree = "<group>";
+		};
+			DF0ABEAF0B3F00AD56629BE0 /* App */ = {
+				isa = PBXGroup;
+				children = (
+					46357E7EDB2D5D315F71F4E3 /* Aether3DApp.swift */,
+					45CBCA499F89466593691E9F /* Assets.xcassets */,
+					5D86232631F7F224284C9F43 /* Capture */,
+					3DGS000100010001BFAA0021 /* GaussianSplatting */,
+					E5EA791A1D41FDA32B8D2F96 /* Home */,
+					LPGR000100010001BFA00021 /* LocalPreview */,
+					A0B200000000000000000021 /* ObjectModeV2 */,
+					5E8EA9E0C7C574DD4AF3D91A /* Scan */,
+				D9EAFD3F934EDF4BDD2A6933 /* ScanGuidance */,
+				MTLS000100010001BFA00021 /* Shaders */,
+				01E10E42B248934C9FD337D2 /* Viewer */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		MTLS000100010001BFA00021 /* Shaders */ = {
+			isa = PBXGroup;
+			children = (
+				MTLS000100010001BFA00011 /* PointCloudRender.metal */,
+				MTLS000100010001BFA00012 /* OIRSplatRender.metal */,
+				MTLS000100010001BFA00013 /* QualityMetrics.metal */,
+				MTLS000100010001BFA00014 /* QualityOverlay.metal */,
+			);
+			path = Shaders;
+			sourceTree = "<group>";
+		};
+			E5EA791A1D41FDA32B8D2F96 /* Home */ = {
+				isa = PBXGroup;
+				children = (
+				C7E1E96BDC919A3DD22CC004 /* HomePage.swift */,
+				65FE3E81A75AD32AB11FAA00 /* HomeViewModel.swift */,
+				3A11C0DE11AA11BB11CC1200 /* LocalPreviewImportRunner.swift */,
+				82D0E6E588C34713A7374018 /* ScanRecord.swift */,
+				1B2806B154F05CE67AB99474 /* ScanRecordCell.swift */,
+				254FAFF2F314487C28A8504F /* ScanRecordStore.swift */,
+			);
+			path = Home;
+			sourceTree = "<group>";
+		};
+		3DGS000100010001BFAA0021 /* GaussianSplatting */ = {
+			isa = PBXGroup;
+			children = (
+				3DGS000100010001BFAA0011 /* GaussianSplatViewController.swift */,
+				3DGS000100010001BFAA0022 /* Shaders */,
+			);
+			path = GaussianSplatting;
+			sourceTree = "<group>";
+		};
+		3DGS000100010001BFAA0022 /* Shaders */ = {
+			isa = PBXGroup;
+			children = (
+				3DGS000100010001BFAA0012 /* GaussianSplat.metal */,
+				3DGS000100010001BFAA0013 /* GaussianSplatTypes.h */,
+				3DGS000200010001BFAA0011 /* GaussianTraining.metal */,
+			);
+			path = Shaders;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		04A4E1C12F76992C98B5D848 /* Aether3DApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9B9F7D6A4A5B0D10A3EFAC6E /* Build configuration list for PBXNativeTarget "Aether3DApp" */;
+			buildPhases = (
+				6EBA58D6FD9E4942497EFB82 /* Sources */,
+				B5A7399EAEFFE0BBDD55915D /* Resources */,
+				4107952259E3E5C470C50BDF /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Aether3DApp;
+			packageProductDependencies = (
+				811F127AC8CD639C232BC3E2 /* Aether3DCore */,
+			);
+			productName = Aether3DApp;
+			productReference = AB4B3856E304CFC23ED880D7 /* Aether3D.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		41FA3CBE131AC3F03DC348C2 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2620;
+				TargetAttributes = {
+					04A4E1C12F76992C98B5D848 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = DA5D7833354B7E17949B217C /* Build configuration list for PBXProject "Aether3DApp" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = D211E0781BC27D8657D13F12;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E5A0B0AF6C5047CB8D9A9D01 /* XCLocalSwiftPackageReference "." */,
+			);
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				04A4E1C12F76992C98B5D848 /* Aether3DApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B5A7399EAEFFE0BBDD55915D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				74EC72F94CA47BD22391EF2F /* Assets.xcassets in Resources */,
+				A0B200000000000000000031 /* model-viewer.min.js in Resources */,
+				DAV2000100010001BFA00001 /* DepthAnythingV2Small.mlmodelc in Resources */,
+				DAV2000100010001BFA00002 /* DepthAnythingV2Large.mlmodelc in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6EBA58D6FD9E4942497EFB82 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				199BD37CE3484BB8B8AC4A48 /* ARCameraPreview.swift in Sources */,
+				70E9A14AECD9BDBCBEF61D15 /* ARKitSessionManager.swift in Sources */,
+				868738ED8472F4B93A6FBDE4 /* Aether3DApp.swift in Sources */,
+				9EB4B45511FEB68A40C0F253 /* CameraCapabilities.swift in Sources */,
+				71A72F1821F2DA70ACE90897 /* CameraConfig.swift in Sources */,
+				D80C8E3E25E0BF6FE6303FFF /* CameraSession.swift in Sources */,
+				6DD416C934E59209B54D47D1 /* CameraSessionDelegate.swift in Sources */,
+				6BDED97F3253456E4C457289 /* CameraSessionError.swift in Sources */,
+				02B842CF49DD12E69F26F6EE /* CaptureMetadata.swift in Sources */,
+				FC14359324F69F9A209E8544 /* ClockProvider.swift in Sources */,
+				3DGS000100010001BFAA0002 /* GaussianSplat.metal in Sources */,
+				3DGS000100010001BFAA0001 /* GaussianSplatViewController.swift in Sources */,
+				DA58AC6A04518722D6A06CEA /* GuidanceHapticEngine.swift in Sources */,
+				139D201128D0D4E8B92F50B1 /* GuidanceHints.swift in Sources */,
+				CAE5EFC418EC4FD4F4B9BCEA /* GuidanceToastPresenter.swift in Sources */,
+				34D655AC21B84FC57DE6287B /* HomePage.swift in Sources */,
+				5E9E5FFFE7946B7C4B3B1FEB /* HomeViewModel.swift in Sources */,
+				3A11C0DE11AA11BB11CC11FF /* LocalPreviewImportRunner.swift in Sources */,
+				LPMA000100010001BFA00001 /* LocalPreviewMetricsArchive.swift in Sources */,
+				LPPR000100010001BFA00001 /* LocalPreviewProductProfile.swift in Sources */,
+				4129A151E0FF4756AFEE8FCE /* IMUDataCollector.swift in Sources */,
+				EAEAF231A78E56AFCAC22692 /* InterruptionHandler.swift in Sources */,
+				46535C5893C1EE6757EDBFBD /* LiDARDepthProcessor.swift in Sources */,
+				A0B200000000000000000005 /* ObjectModeV2CameraPreview.swift in Sources */,
+				A0B200000000000000000003 /* ObjectModeV2CaptureRecorder.swift in Sources */,
+				A0B200000000000000000001 /* ObjectModeV2CaptureView.swift in Sources */,
+				A0B200000000000000000002 /* ObjectModeV2CaptureViewModel.swift in Sources */,
+				A0B200000000000000000004 /* ObjectModeV2GuidanceEngine.swift in Sources */,
+
+					5C6D2E80F97B952C2B1AE92F /* RecordingConfig.swift in Sources */,
+				D220CD8C7AB28ED8FE54DE1E /* RecordingController.swift in Sources */,
+				C40953C670C4F01AE5DC43F6 /* RecordingResult.swift in Sources */,
+				B5E9E0998069AEB592EC8C28 /* ScanCaptureControls.swift in Sources */,
+				76B81AA6B24166965066AA15 /* ScanCompletionBridge.swift in Sources */,
+				DFD2FA37B03B7B58C52A32C6 /* ScanRecord.swift in Sources */,
+				5F80380816E28D09572A2775 /* ScanRecordCell.swift in Sources */,
+				65DD9B648B55B0B3BAE7A0B7 /* ScanRecordStore.swift in Sources */,
+				1AF263B0045892B34535C7D0 /* ScanState.swift in Sources */,
+				15237C4E294396D4584A9C9D /* ScanView.swift in Sources */,
+				371C8E6BDD412A9DC6235D17 /* ScanViewModel.swift in Sources */,
+				C203245060F238D6D73928A1 /* ThermalMonitor.swift in Sources */,
+				026E8D24563064BE2272F0DF /* TimerScheduler.swift in Sources */,
+				PCOI000100010001BFA00001 /* PointCloudOIRPipeline.swift in Sources */,
+				SPLV000100010001BFA00001 /* SplatViewerView.swift in Sources */,
+					3DGS000200010001BFAA0001 /* GaussianTraining.metal in Sources */,
+				MTLS000100010001BFA00001 /* PointCloudRender.metal in Sources */,
+				MTLS000100010001BFA00002 /* OIRSplatRender.metal in Sources */,
+				MTLS000100010001BFA00003 /* QualityMetrics.metal in Sources */,
+				MTLS000100010001BFA00004 /* QualityOverlay.metal in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		2B5E8A1D6CBC7B26C0395C0B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 26AH7V448L;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/aether_cpp/include";
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kyle.Aether3D;
+				PRODUCT_NAME = Aether3D;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A54373DA8498D2795B05ECAA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		E743F3194669D8D85DF9BC12 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		EC11B31E1209C62EEBF6B39A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 26AH7V448L;
+				ENABLE_DEBUG_DYLIB = NO;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/aether_cpp/include";
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kyle.Aether3D;
+				PRODUCT_NAME = Aether3D;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		9B9F7D6A4A5B0D10A3EFAC6E /* Build configuration list for PBXNativeTarget "Aether3DApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EC11B31E1209C62EEBF6B39A /* Debug */,
+				2B5E8A1D6CBC7B26C0395C0B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		DA5D7833354B7E17949B217C /* Build configuration list for PBXProject "Aether3DApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E743F3194669D8D85DF9BC12 /* Debug */,
+				A54373DA8498D2795B05ECAA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		E5A0B0AF6C5047CB8D9A9D01 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		811F127AC8CD639C232BC3E2 /* Aether3DCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E5A0B0AF6C5047CB8D9A9D01 /* XCLocalSwiftPackageReference "." */;
+			productName = Aether3DCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 41FA3CBE131AC3F03DC348C2 /* Project object */;
+}
