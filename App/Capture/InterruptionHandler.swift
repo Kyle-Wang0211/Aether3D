@@ -48,7 +48,7 @@ final class InterruptionHandler: @unchecked Sendable {
         
         // PRIMARY: AVCaptureSession.wasInterruptedNotification
         interruptionObserver = center.addObserver(
-            forName: .AVCaptureSessionWasInterrupted,
+            forName: interruptionNotificationName(),
             object: session,
             queue: .main
         ) { [weak self] notification in
@@ -81,7 +81,7 @@ final class InterruptionHandler: @unchecked Sendable {
         
         // SECONDARY: AVCaptureSession.interruptionEndedNotification
         interruptionEndedObserver = center.addObserver(
-            forName: .AVCaptureSessionInterruptionEnded,
+            forName: interruptionEndedNotificationName(),
             object: session,
             queue: .main
         ) { [weak self] _ in
@@ -141,5 +141,12 @@ final class InterruptionHandler: @unchecked Sendable {
     deinit {
         stopObserving()
     }
-}
 
+    private func interruptionNotificationName() -> Notification.Name {
+        AVCaptureSession.wasInterruptedNotification
+    }
+
+    private func interruptionEndedNotificationName() -> Notification.Name {
+        AVCaptureSession.interruptionEndedNotification
+    }
+}

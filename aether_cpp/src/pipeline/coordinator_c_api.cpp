@@ -234,6 +234,10 @@ int aether_pipeline_coordinator_get_snapshot(
     out->training_step = snapshot.training_step;
     out->assigned_blocks = snapshot.assigned_blocks;
     out->pending_gaussian_count = snapshot.pending_gaussian_count;
+    out->retained_export_gaussians = snapshot.retained_export_gaussians;
+    out->peak_training_gaussians = snapshot.peak_training_gaussians;
+    out->peak_working_set_gaussians = snapshot.peak_working_set_gaussians;
+    out->peak_retained_export_gaussians = snapshot.peak_retained_export_gaussians;
     out->preview_elapsed_ms = snapshot.preview_elapsed_ms;
     out->preview_phase_depth_ms = snapshot.preview_phase_depth_ms;
     out->preview_phase_seed_ms = snapshot.preview_phase_seed_ms;

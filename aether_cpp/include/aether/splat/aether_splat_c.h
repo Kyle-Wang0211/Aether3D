@@ -72,6 +72,9 @@ typedef struct aether_subject_cleanup_stats {
     size_t cutout_kept_splats;
     size_t cleanup_kept_splats;
     size_t cleanup_removed_splats;
+    float  input_scene_span;
+    float  cutout_scene_span;
+    float  cleanup_scene_span;
 } aether_subject_cleanup_stats_t;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -227,6 +230,22 @@ int aether_splat_ply_vertex_count(const char* path, size_t* out_count);
 int aether_splat_subject_cleanup_ply(const char* input_path,
                                       const char* output_path,
                                       aether_subject_cleanup_stats_t* out_stats);
+
+/// Run the subject-first cutout stage only.
+/// This keeps the dominant component plus support / boundary splats and writes
+/// the boundary-refined cutout result to output_path.
+/// Returns 0 on success.
+int aether_splat_subject_cutout_ply(const char* input_path,
+                                     const char* output_path,
+                                     aether_subject_cleanup_stats_t* out_stats);
+
+/// Run the subject-first cleanup stage only on an existing cutout PLY.
+/// This preserves core/support regions while removing isolated low-confidence
+/// splats from the cutout result.
+/// Returns 0 on success.
+int aether_splat_subject_cleanup_cutout_ply(const char* input_path,
+                                             const char* output_path,
+                                             aether_subject_cleanup_stats_t* out_stats);
 
 /// Pack a single GaussianParams into 16-byte PackedSplat.
 /// out_packed must point to 16 bytes.

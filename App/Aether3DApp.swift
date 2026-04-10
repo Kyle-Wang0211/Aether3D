@@ -22,13 +22,20 @@ import BackgroundTasks
 #if canImport(UIKit) && canImport(BackgroundTasks)
 private final class BackgroundTaskCompletionBox: @unchecked Sendable {
     nonisolated(unsafe) private let task: BGTask
+    private let lock = NSLock()
+    private var completed = false
 
     init(task: BGTask) {
         self.task = task
     }
 
-    @MainActor
     func complete(success: Bool) {
+        let shouldComplete = lock.withLock { () -> Bool in
+            guard !completed else { return false }
+            completed = true
+            return true
+        }
+        guard shouldComplete else { return }
         task.setTaskCompleted(success: success)
     }
 }
@@ -38,6 +45,7 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
     static let shared = LocalProcessingContinuedTaskCoordinator()
 
     private static let totalProgressUnits: Int64 = 1000
+    private static let activeProcessingTitle = "Aether3D 正在本地处理"
     private static var taskIdentifier: String {
         "\(Bundle.main.bundleIdentifier ?? "com.aether3d.app").local-processing"
     }
@@ -52,6 +60,10 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
     private var latestCompletedUnits: Int64 = 0
 
     private init() {}
+
+    static func supportsBackgroundGPUExecution() -> Bool {
+        BGTaskScheduler.supportedResources.contains(.gpu)
+    }
 
     func register() {
         guard !registered else { return }
@@ -74,7 +86,7 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
     }
 
     func submit(recordId: UUID, scanName: String?) {
-        let title = "Aether3D 正在本地处理"
+        let title = Self.activeProcessingTitle
         let subtitle = Self.normalizedSubtitle(scanName ?? "本地训练继续进行中")
         lock.withLock {
             activeRecordID = recordId
@@ -84,17 +96,27 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
             latestSubtitle = subtitle
         }
 
+        // Keep only the current run visible to the system UI instead of
+        // accumulating queued historical tasks in the Dynamic Island sheet.
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskIdentifier)
+
         let request = BGContinuedProcessingTaskRequest(
             identifier: Self.taskIdentifier,
             title: title,
             subtitle: subtitle
         )
-        request.strategy = .queue
+        request.strategy = .fail
+        let requestBackgroundGPU = Self.supportsBackgroundGPUExecution()
+        if requestBackgroundGPU {
+            request.requiredResources = .gpu
+        }
 
         do {
             try BGTaskScheduler.shared.submit(request)
             NSLog(
-                "[Aether3D][LocalBG] submitted continued processing record=%@",
+                requestBackgroundGPU
+                    ? "[Aether3D][LocalBG] submitted continued processing record=%@ mode=gpu"
+                    : "[Aether3D][LocalBG] submitted continued processing record=%@ mode=cpu_only",
                 recordId.uuidString
             )
         } catch {
@@ -112,7 +134,10 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
         title: String,
         subtitle: String
     ) {
-        let normalizedSubtitle = Self.normalizedSubtitle(subtitle)
+        let normalizedSubtitle = Self.composedActiveSubtitle(
+            phaseTitle: title,
+            detail: subtitle
+        )
         let completedUnits = Self.completedUnits(for: progressFraction)
         let snapshot = lock.withLock { () -> (BGContinuedProcessingTask?, Int64, String, String)? in
             if activeRecordID == nil {
@@ -121,7 +146,7 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
             guard activeRecordID == recordId else {
                 return nil
             }
-            latestTitle = title
+            latestTitle = Self.activeProcessingTitle
             latestSubtitle = normalizedSubtitle
             latestCompletedUnits = max(latestCompletedUnits, completedUnits)
             return (activeTask, latestCompletedUnits, latestTitle, latestSubtitle)
@@ -162,6 +187,7 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
             task.updateTitle(title, subtitle: normalizedSubtitle)
             task.setTaskCompleted(success: success)
         }
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskIdentifier)
     }
 
     func isBackgroundExecutionActive(for recordId: UUID? = nil) -> Bool {
@@ -196,15 +222,24 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
     }
 
     private func markExpired() {
-        let recordID = lock.withLock { () -> UUID? in
+        let snapshot = lock.withLock { () -> (BGContinuedProcessingTask?, UUID?) in
             taskExpired = true
+            let capturedTask = activeTask
+            let capturedRecordID = activeRecordID
             activeTask = nil
-            return activeRecordID
+            activeRecordID = nil
+            return (capturedTask, capturedRecordID)
         }
         NSLog(
             "[Aether3D][LocalBG] continued processing expired record=%@",
-            recordID?.uuidString ?? "none"
+            snapshot.1?.uuidString ?? "none"
         )
+        // The system-managed continued-processing lease can end even while the
+        // app still has foreground or ordinary background execution available.
+        // Report the lease ending cleanly so Dynamic Island does not show a
+        // spurious "Task failed" badge for work that is still progressing.
+        snapshot.0?.setTaskCompleted(success: true)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskIdentifier)
     }
 
     private static func completedUnits(for progressFraction: Double?) -> Int64 {
@@ -228,6 +263,21 @@ final class LocalProcessingContinuedTaskCoordinator: @unchecked Sendable {
             return trimmed.isEmpty ? "本地训练继续进行中" : trimmed
         }
         return String(trimmed.prefix(72))
+    }
+
+    private static func composedActiveSubtitle(
+        phaseTitle: String,
+        detail: String
+    ) -> String {
+        let normalizedPhaseTitle = normalizedSubtitle(phaseTitle)
+        let normalizedDetail = normalizedSubtitle(detail)
+        if normalizedDetail.isEmpty {
+            return normalizedPhaseTitle.isEmpty ? "本地训练继续进行中" : normalizedPhaseTitle
+        }
+        if normalizedPhaseTitle.isEmpty || normalizedPhaseTitle == normalizedDetail {
+            return normalizedDetail
+        }
+        return normalizedSubtitle("\(normalizedPhaseTitle) · \(normalizedDetail)")
     }
 }
 
@@ -305,10 +355,12 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
         let completionBox = BackgroundTaskCompletionBox(task: task)
         let worker = Task(priority: .background) { [weak self, completionBox] in
             let success = await self?.performCatchUpCycle(trigger: "bg_app_refresh", maxRecords: 2) ?? false
-            await completionBox.complete(success: success)
+            completionBox.complete(success: success)
         }
         task.expirationHandler = {
             worker.cancel()
+            NSLog("[Aether3D][BGResume] app refresh expired; completing task as failed")
+            completionBox.complete(success: false)
         }
     }
 
@@ -317,10 +369,12 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
         let completionBox = BackgroundTaskCompletionBox(task: task)
         let worker = Task(priority: .background) { [weak self, completionBox] in
             let success = await self?.performCatchUpCycle(trigger: "bg_processing", maxRecords: 4) ?? false
-            await completionBox.complete(success: success)
+            completionBox.complete(success: success)
         }
         task.expirationHandler = {
             worker.cancel()
+            NSLog("[Aether3D][BGResume] processing expired; completing task as failed")
+            completionBox.complete(success: false)
         }
     }
 
@@ -546,6 +600,262 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
     }
 }
 
+#if canImport(AVFoundation)
+private final class BackgroundLocalRecoveryCoordinator: @unchecked Sendable {
+    static let shared = BackgroundLocalRecoveryCoordinator()
+
+    private let store = ScanRecordStore()
+    private let lock = NSLock()
+    private var activeRecoveries: Set<String> = []
+
+    private init() {}
+
+    func kickoffImmediateRecovery(reason: String) {
+        let pendingRecords = store.loadRecords()
+            .filter { record in
+                let trimmedRemoteJobID = record.remoteJobId?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return record.artifactPath == nil &&
+                    record.isProcessing &&
+                    record.resolvedProcessingBackend == .localSubjectFirst &&
+                    trimmedRemoteJobID.isEmpty
+            }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        guard !pendingRecords.isEmpty else { return }
+
+        let resumableRecords = pendingRecords.filter(canResumeRecord(_:))
+        let resumableIDs = Set(resumableRecords.map(\.id))
+        let failedCount = store.failOrphanedLocalProcessingRecordsOnColdLaunch(
+            excludingRecordIDs: resumableIDs
+        )
+        if failedCount > 0 {
+            NSLog(
+                "[Aether3D][LaunchRecovery] marked %ld orphaned local processing record(s) as interrupted because no recoverable local video was found",
+                failedCount
+            )
+        }
+
+        guard !resumableRecords.isEmpty else { return }
+        NSLog(
+            "[Aether3D][LaunchRecovery] resuming %ld local processing record(s) from persisted source video",
+            resumableRecords.count
+        )
+        for record in resumableRecords {
+            guard markStarted(record.id) else { continue }
+            Task.detached(priority: .background) { [weak self] in
+                guard let self else { return }
+                await self.resume(record: record, trigger: reason)
+                self.markFinished(record.id)
+            }
+        }
+    }
+
+    private func canResumeRecord(_ record: ScanRecord) -> Bool {
+        sourceVideoURL(for: record) != nil
+    }
+
+    private func markStarted(_ id: UUID) -> Bool {
+        lock.withLock {
+            let token = id.uuidString
+            guard !activeRecoveries.contains(token) else { return false }
+            activeRecoveries.insert(token)
+            return true
+        }
+    }
+
+    private func markFinished(_ id: UUID) {
+        _ = lock.withLock {
+            activeRecoveries.remove(id.uuidString)
+        }
+    }
+
+    private func sourceVideoURL(for record: ScanRecord) -> URL? {
+        guard let sourceRelativePath = record.sourceVideoPath?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !sourceRelativePath.isEmpty else {
+            return nil
+        }
+        let sourceURL = store.baseDirectoryURL().appendingPathComponent(sourceRelativePath)
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            return nil
+        }
+        return sourceURL
+    }
+
+    private func frameSamplingProfile(for record: ScanRecord) -> FrameSamplingProfile {
+        if let rawValue = record.frameSamplingProfile,
+           let profile = FrameSamplingProfile(rawValue: rawValue) {
+            return profile
+        }
+        return FrameSamplingProfile.currentSelection()
+    }
+
+    private func artifactURL(for recordId: UUID) -> URL {
+        store.baseDirectoryURL()
+            .appendingPathComponent("exports", isDirectory: true)
+            .appendingPathComponent("\(recordId.uuidString).ply")
+    }
+
+    private func relativeArtifactPath(for recordId: UUID) -> String {
+        "exports/\(recordId.uuidString).ply"
+    }
+
+    private func startupRuntimeMetrics(
+        sourceRelativePath: String,
+        trigger: String,
+        frameSamplingProfile: FrameSamplingProfile
+    ) -> [String: String] {
+        LocalPreviewProductProfile.canonicalRuntimeMetrics([
+            "processing_backend": ProcessingBackendChoice.localSubjectFirst.rawValue,
+            "native_input_kind": "recorded_video_relaunch_recovery",
+            "native_handoff_from": "cold_launch_recovery",
+            "native_resume_trigger": trigger,
+            "native_active_phase": LocalPreviewWorkflowPhase.depth.phaseName,
+            "native_phase_model": LocalPreviewProductProfile.phaseModelDescriptor(
+                for: .localSubjectFirst
+            ),
+            "source_video": sourceRelativePath,
+            "frame_sampling_profile": frameSamplingProfile.rawValue
+        ])
+    }
+
+    private func resume(record: ScanRecord, trigger: String) async {
+        guard let sourceURL = sourceVideoURL(for: record),
+              let sourceRelativePath = record.sourceVideoPath?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !sourceRelativePath.isEmpty else {
+            store.updateProcessingState(
+                recordId: record.id,
+                status: .failed,
+                statusMessage: "本地处理已中断",
+                detailMessage: "重新启动 app 后尝试恢复这条本地任务，但这次已经找不到可恢复的本地视频输入，所以系统把它标成中断；请回主页重新发起。",
+                progressFraction: nil,
+                estimatedRemainingMinutes: nil,
+                failureReason: "local_processing_interrupted_no_recoverable_source_after_relaunch"
+            )
+            NSLog(
+                "[Aether3D][LaunchRecovery] failed local recovery because source video missing record=%@",
+                record.id.uuidString
+            )
+            return
+        }
+
+        let frameSamplingProfile = frameSamplingProfile(for: record)
+        let runtimeMetrics = startupRuntimeMetrics(
+            sourceRelativePath: sourceRelativePath,
+            trigger: trigger,
+            frameSamplingProfile: frameSamplingProfile
+        )
+        let workflowStageKey =
+            ProcessingBackendChoice.localSubjectFirst.localWorkflowStageKey
+            ?? "local_subject_first"
+        let localModeResultTitle = "本地结果已生成"
+        let localModeFailureTitle = "本地处理失败了"
+        let startupDetail = "检测到上次本地任务在 app 重启前被打断，这次会直接用已落盘视频恢复本地处理。"
+
+        try? FileManager.default.createDirectory(
+            at: artifactURL(for: record.id).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        store.updateProcessingState(
+            recordId: record.id,
+            status: .training,
+            statusMessage: LocalPreviewWorkflowPhase.depth.title,
+            detailMessage: startupDetail,
+            progressFraction: LocalPreviewWorkflowPhase.depth.startFraction,
+            progressBasis: LocalPreviewWorkflowPhase.depth.progressBasis,
+            remoteStageKey: workflowStageKey,
+            remotePhaseName: LocalPreviewWorkflowPhase.depth.phaseName,
+            runtimeMetrics: runtimeMetrics,
+            estimatedRemainingMinutes: nil,
+            sourceVideoPath: sourceRelativePath,
+            frameSamplingProfile: frameSamplingProfile.rawValue,
+            clearRemoteJobId: true
+        )
+
+        let importResult = await LocalPreviewImportRunner.execute(
+            sourceVideoURL: sourceURL,
+            artifactURL: artifactURL(for: record.id),
+            sourceRelativePath: sourceRelativePath,
+            frameSamplingProfile: frameSamplingProfile,
+            processingBackend: .localSubjectFirst,
+            onPhaseUpdate: { [weak self] update in
+                guard let self else { return }
+                self.store.updateProcessingState(
+                    recordId: record.id,
+                    status: update.phase == .export ? .packaging : .training,
+                    statusMessage: update.title,
+                    detailMessage: update.detail,
+                    progressFraction: update.progressFraction,
+                    progressBasis: update.phase.progressBasis,
+                    remoteStageKey: workflowStageKey,
+                    remotePhaseName: update.phase.phaseName,
+                    runtimeMetrics: update.runtimeMetrics,
+                    estimatedRemainingMinutes: nil,
+                    sourceVideoPath: sourceRelativePath,
+                    frameSamplingProfile: frameSamplingProfile.rawValue,
+                    clearRemoteJobId: true
+                )
+            }
+        )
+
+        if importResult.exported {
+            store.updateProcessingState(
+                recordId: record.id,
+                status: .completed,
+                statusMessage: localModeResultTitle,
+                detailMessage: "已经从上次中断处自动恢复，并基于已落盘视频完成本地导出。",
+                progressFraction: 1.0,
+                progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
+                remoteStageKey: workflowStageKey,
+                remotePhaseName: LocalPreviewWorkflowPhase.export.phaseName,
+                runtimeMetrics: importResult.runtimeMetrics,
+                estimatedRemainingMinutes: 0,
+                sourceVideoPath: sourceRelativePath,
+                frameSamplingProfile: frameSamplingProfile.rawValue,
+                clearRemoteJobId: true
+            )
+            store.updateArtifactPath(
+                recordId: record.id,
+                artifactPath: relativeArtifactPath(for: record.id)
+            )
+            NSLog(
+                "[Aether3D][LaunchRecovery] local recorded-video recovery succeeded record=%@",
+                record.id.uuidString
+            )
+            return
+        }
+
+        let failureReason =
+            LocalPreviewProductProfile.runtimeMetricString(
+                "native_failure_reason",
+                from: importResult.runtimeMetrics
+            ) ?? "cold_launch_local_recovery_failed"
+        store.updateProcessingState(
+            recordId: record.id,
+            status: .failed,
+            statusMessage: localModeFailureTitle,
+            detailMessage: "系统已经用已落盘视频自动恢复过一次本地处理，但这次仍然失败了。\n\n\(importResult.detailMessage)",
+            progressFraction: importResult.terminalProgressFraction,
+            progressBasis: importResult.terminalPhase.progressBasis,
+            remoteStageKey: workflowStageKey,
+            remotePhaseName: importResult.terminalPhase.phaseName,
+            runtimeMetrics: importResult.runtimeMetrics,
+            estimatedRemainingMinutes: nil,
+            sourceVideoPath: sourceRelativePath,
+            frameSamplingProfile: frameSamplingProfile.rawValue,
+            failureReason: failureReason
+        )
+        NSLog(
+            "[Aether3D][LaunchRecovery] local recorded-video recovery failed record=%@ reason=%@",
+            record.id.uuidString,
+            failureReason
+        )
+    }
+}
+#endif
+
 private extension NSLock {
     func withLock<T>(_ body: () -> T) -> T {
         lock()
@@ -561,6 +871,16 @@ final class Aether3DAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil
     ) -> Bool {
+        #if canImport(BackgroundTasks)
+        if #available(iOS 26.0, *) {
+            LocalProcessingContinuedTaskCoordinator.shared.register()
+        }
+        BackgroundRemoteResumeCoordinator.shared.register()
+        BackgroundRemoteResumeCoordinator.shared.scheduleIfNeeded(reason: "launch")
+        #endif
+        #if canImport(AVFoundation)
+        BackgroundLocalRecoveryCoordinator.shared.kickoffImmediateRecovery(reason: "cold_launch")
+        #else
         let interruptedLocalJobs = ScanRecordStore().failOrphanedLocalProcessingRecordsOnColdLaunch()
         if interruptedLocalJobs > 0 {
             NSLog(
@@ -568,12 +888,6 @@ final class Aether3DAppDelegate: NSObject, UIApplicationDelegate {
                 interruptedLocalJobs
             )
         }
-        #if canImport(BackgroundTasks)
-        if #available(iOS 26.0, *) {
-            LocalProcessingContinuedTaskCoordinator.shared.register()
-        }
-        BackgroundRemoteResumeCoordinator.shared.register()
-        BackgroundRemoteResumeCoordinator.shared.scheduleIfNeeded(reason: "launch")
         #endif
         return true
     }

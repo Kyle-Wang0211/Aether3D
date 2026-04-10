@@ -4,6 +4,14 @@
 #include "aether/pipeline/pipeline_coordinator.h"
 #include "aether/pipeline/local_preview_runtime.h"
 #include "aether/pipeline/local_preview_seeding.h"
+#include "aether/pipeline/local_subject_first_capture_budget.h"
+#include "aether/pipeline/local_subject_first_capture_overlay.h"
+#include "aether/pipeline/local_subject_first_export_snapshot.h"
+#include "aether/pipeline/local_subject_first_fallback_seeding.h"
+#include "aether/pipeline/local_subject_first_ingest.h"
+#include "aether/pipeline/local_subject_first_refine.h"
+#include "aether/pipeline/local_subject_first_training.h"
+#include "aether/pipeline/runtime_tsdf_gaussian_augmentation.h"
 
 #include <algorithm>
 #include <chrono>
@@ -20,8 +28,6 @@
 #endif
 
 #include "aether/evidence/smart_anti_boost_smoother.h"
-#include "aether/training/dav2_initializer.h"
-#include "aether/training/mvs_initializer.h"
 #include "aether/splat/ply_loader.h"
 #include "aether/tsdf/adaptive_resolution.h"
 
@@ -45,6 +51,13 @@ double duration_ms(
 
 double bytes_to_mib(std::uint64_t bytes) noexcept {
     return static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
+
+std::uint32_t saturating_u32(std::size_t value) noexcept {
+    return static_cast<std::uint32_t>(
+        std::min<std::size_t>(
+            value,
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
 }
 
 ProcessMemoryUsageBytes query_process_memory_usage_bytes() noexcept {
@@ -93,11 +106,101 @@ constexpr std::size_t kDefaultTrainingHardCapSteps = 10000;
 constexpr std::size_t kPreviewTrainingTargetSteps = 1400;
 constexpr std::size_t kPreviewTrainingHardCapSteps = 4000;
 constexpr std::size_t kPreviewMaxTrainingFrames = 24;
-constexpr std::size_t kPreviewFallbackSeedCount = 6000;
-constexpr std::size_t kPreviewInitialSeedCap = 15000;
-constexpr std::size_t kPreviewImportedVideoInitialSeedCap = 30000;
-constexpr float kPreviewImportedVideoMvsPrimaryPriorRange = 6.0f;
-constexpr std::uint32_t kPreviewImportedVideoMvsPrimaryPriorLevels = 0u;
+constexpr std::size_t kPreviewInitialSeedCap = 30000;
+constexpr int kDepthKeyframeColorMaxLongEdge = 640;
+
+inline void store_downsampled_keyframe_rgba(
+    const pipeline::FrameInput& input,
+    std::vector<unsigned char>& out_rgba,
+    int& out_w,
+    int& out_h,
+    float out_intrinsics[9]) noexcept
+{
+    out_rgba.clear();
+    out_w = 0;
+    out_h = 0;
+    std::memset(out_intrinsics, 0, sizeof(float) * 9);
+
+    if (input.rgba.empty() || input.width == 0 || input.height == 0) {
+        return;
+    }
+
+    const int src_w = static_cast<int>(input.width);
+    const int src_h = static_cast<int>(input.height);
+    const int src_long_edge = std::max(src_w, src_h);
+    const float scale = src_long_edge > kDepthKeyframeColorMaxLongEdge
+        ? static_cast<float>(kDepthKeyframeColorMaxLongEdge) /
+            static_cast<float>(src_long_edge)
+        : 1.0f;
+
+    const int dst_w = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<float>(src_w) * scale)));
+    const int dst_h = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<float>(src_h) * scale)));
+    const float scale_x = static_cast<float>(dst_w) / static_cast<float>(src_w);
+    const float scale_y = static_cast<float>(dst_h) / static_cast<float>(src_h);
+
+    std::memcpy(out_intrinsics, input.intrinsics, sizeof(float) * 9);
+    out_intrinsics[0] *= scale_x;
+    out_intrinsics[2] *= scale_x;
+    out_intrinsics[4] *= scale_y;
+    out_intrinsics[5] *= scale_y;
+
+    out_w = dst_w;
+    out_h = dst_h;
+
+    if (dst_w == src_w && dst_h == src_h) {
+        out_rgba = input.rgba;
+        return;
+    }
+
+    out_rgba.resize(
+        static_cast<std::size_t>(dst_w) *
+        static_cast<std::size_t>(dst_h) * 4u);
+    const unsigned char* src = input.rgba.data();
+
+    auto sample_channel = [&](int x, int y, int c) noexcept -> float {
+        x = std::clamp(x, 0, src_w - 1);
+        y = std::clamp(y, 0, src_h - 1);
+        const std::size_t idx =
+            (static_cast<std::size_t>(y) * static_cast<std::size_t>(src_w) +
+             static_cast<std::size_t>(x)) * 4u + static_cast<std::size_t>(c);
+        return static_cast<float>(src[idx]);
+    };
+
+    for (int y = 0; y < dst_h; ++y) {
+        const float src_y = ((static_cast<float>(y) + 0.5f) *
+                             static_cast<float>(src_h) / static_cast<float>(dst_h)) - 0.5f;
+        const int y0 = static_cast<int>(std::floor(src_y));
+        const int y1 = y0 + 1;
+        const float fy = std::clamp(src_y - static_cast<float>(y0), 0.0f, 1.0f);
+
+        for (int x = 0; x < dst_w; ++x) {
+            const float src_x = ((static_cast<float>(x) + 0.5f) *
+                                 static_cast<float>(src_w) / static_cast<float>(dst_w)) - 0.5f;
+            const int x0 = static_cast<int>(std::floor(src_x));
+            const int x1 = x0 + 1;
+            const float fx = std::clamp(src_x - static_cast<float>(x0), 0.0f, 1.0f);
+
+            const std::size_t dst_idx =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_w) +
+                 static_cast<std::size_t>(x)) * 4u;
+            for (int c = 0; c < 4; ++c) {
+                const float s00 = sample_channel(x0, y0, c);
+                const float s10 = sample_channel(x1, y0, c);
+                const float s01 = sample_channel(x0, y1, c);
+                const float s11 = sample_channel(x1, y1, c);
+                const float top = s00 + (s10 - s00) * fx;
+                const float bottom = s01 + (s11 - s01) * fx;
+                const float value = top + (bottom - top) * fy;
+                out_rgba[dst_idx + static_cast<std::size_t>(c)] =
+                    static_cast<unsigned char>(std::clamp(std::lround(value), 0l, 255l));
+            }
+        }
+    }
+}
 
 struct ExportSceneBounds {
     float min[3]{0.0f, 0.0f, 0.0f};
@@ -253,6 +356,20 @@ inline bool should_use_retained_snapshot_for_export(
     return false;
 }
 
+inline void update_peak_counter(
+    std::atomic<std::size_t>& counter,
+    std::size_t candidate) noexcept
+{
+    std::size_t observed = counter.load(std::memory_order_relaxed);
+    while (candidate > observed &&
+           !counter.compare_exchange_weak(
+               observed,
+               candidate,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+}
+
 inline ExportSceneBounds compute_gaussian_bounds(
     const std::vector<splat::GaussianParams>& gaussians) noexcept
 {
@@ -298,8 +415,9 @@ inline ExportSceneBounds compute_gaussian_bounds(
     return bounds;
 }
 
+template <typename SurfacePointT>
 inline ExportSceneBounds compute_surface_bounds(
-    const std::vector<tsdf::SurfacePoint>& surface_points) noexcept
+    const std::vector<SurfacePointT>& surface_points) noexcept
 {
     ExportSceneBounds bounds;
     if (surface_points.empty()) return bounds;
@@ -366,7 +484,8 @@ inline ExportGridKey make_export_grid_key(const splat::GaussianParams& g,
     };
 }
 
-inline ExportGridKey make_export_grid_key(const tsdf::SurfacePoint& p,
+template <typename SurfacePointT>
+inline ExportGridKey make_export_grid_key(const SurfacePointT& p,
                                           float cell_size) noexcept
 {
     const float inv_cell = 1.0f / std::max(cell_size, 1e-5f);
@@ -494,9 +613,10 @@ inline bool project_export_validation_point(const ExportValidationView& view,
     return true;
 }
 
+template <typename SurfacePointT>
 inline void build_export_validation_whitelist_mask(
     ExportValidationView* view,
-    const std::vector<tsdf::SurfacePoint>& surface_points,
+    const std::vector<SurfacePointT>& surface_points,
     float median_scale) noexcept
 {
     if (!view || view->width <= 0 || view->height <= 0 || surface_points.empty()) return;
@@ -693,7 +813,7 @@ inline bool sample_export_validation_whitelist_mask(const ExportValidationView& 
 inline std::vector<splat::GaussianParams> clean_export_gaussians(
     const std::vector<splat::GaussianParams>& input,
     const ExportSceneBounds* whitelist_bounds,
-    const std::vector<tsdf::SurfacePoint>* surface_points,
+    const std::vector<ExportSurfaceSample>* surface_points,
     const std::vector<ExportValidationView>* validation_views,
     ExportCleanupStats* stats_out) noexcept
 {
@@ -1291,21 +1411,6 @@ inline training::TrainingProgress apply_training_budget(
     return progress;
 }
 
-inline std::uint64_t mix64(std::uint64_t x) noexcept {
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    return x;
-}
-
-inline float hash_unit01(std::uint64_t seed) noexcept {
-    constexpr double inv = 1.0 / static_cast<double>(std::numeric_limits<std::uint32_t>::max());
-    const std::uint32_t top = static_cast<std::uint32_t>(mix64(seed) >> 32);
-    return static_cast<float>(static_cast<double>(top) * inv);
-}
-
 inline void normalize3(float& x, float& y, float& z) noexcept {
     const float len = std::sqrt(x * x + y * y + z * z);
     if (len > 1e-6f) {
@@ -1325,80 +1430,6 @@ inline void set_identity4x4(float m[16]) noexcept {
     m[5] = 1.0f;
     m[10] = 1.0f;
     m[15] = 1.0f;
-}
-
-inline bool sample_frame_color_linear(const pipeline::FrameInput& frame,
-                                      float wx,
-                                      float wy,
-                                      float wz,
-                                      float out_rgb[3]) noexcept {
-    if (frame.rgba.empty() || frame.width == 0 || frame.height == 0) return false;
-
-    const float dwx = wx - frame.transform[12];
-    const float dwy = wy - frame.transform[13];
-    const float dwz = wz - frame.transform[14];
-
-    const float cam_x =  (frame.transform[0] * dwx + frame.transform[1] * dwy + frame.transform[2] * dwz);
-    const float cam_y = -(frame.transform[4] * dwx + frame.transform[5] * dwy + frame.transform[6] * dwz);
-    const float cam_z = -(frame.transform[8] * dwx + frame.transform[9] * dwy + frame.transform[10] * dwz);
-    if (cam_z <= 0.1f) return false;
-
-    const float u = frame.intrinsics[0] * cam_x / cam_z + frame.intrinsics[2];
-    const float v = frame.intrinsics[4] * cam_y / cam_z + frame.intrinsics[5];
-    const int iu = static_cast<int>(std::lround(u));
-    const int iv = static_cast<int>(std::lround(v));
-    if (iu < 0 || iv < 0 ||
-        iu >= static_cast<int>(frame.width) ||
-        iv >= static_cast<int>(frame.height)) {
-        return false;
-    }
-
-    const std::size_t idx =
-        (static_cast<std::size_t>(iv) * static_cast<std::size_t>(frame.width) +
-         static_cast<std::size_t>(iu)) * 4u;
-    const std::uint8_t* px = frame.rgba.data() + idx;
-    // Input buffer is BGRA; convert to linear RGB.
-    out_rgb[0] = g_srgb_lut.table[px[2]];
-    out_rgb[1] = g_srgb_lut.table[px[1]];
-    out_rgb[2] = g_srgb_lut.table[px[0]];
-    return true;
-}
-
-inline bool sample_selected_frame_color_linear(
-    const pipeline::SelectedFrame& frame,
-    float wx,
-    float wy,
-    float wz,
-    float out_rgb[3]) noexcept {
-    if (frame.rgba.empty() || frame.width == 0 || frame.height == 0) return false;
-
-    const float dwx = wx - frame.transform[12];
-    const float dwy = wy - frame.transform[13];
-    const float dwz = wz - frame.transform[14];
-
-    const float cam_x =  (frame.transform[0] * dwx + frame.transform[1] * dwy + frame.transform[2] * dwz);
-    const float cam_y = -(frame.transform[4] * dwx + frame.transform[5] * dwy + frame.transform[6] * dwz);
-    const float cam_z = -(frame.transform[8] * dwx + frame.transform[9] * dwy + frame.transform[10] * dwz);
-    if (cam_z <= 0.1f) return false;
-
-    const float u = frame.intrinsics[0] * cam_x / cam_z + frame.intrinsics[2];
-    const float v = frame.intrinsics[1] * cam_y / cam_z + frame.intrinsics[3];
-    const int iu = static_cast<int>(std::lround(u));
-    const int iv = static_cast<int>(std::lround(v));
-    if (iu < 0 || iv < 0 ||
-        iu >= static_cast<int>(frame.width) ||
-        iv >= static_cast<int>(frame.height)) {
-        return false;
-    }
-
-    const std::size_t idx =
-        (static_cast<std::size_t>(iv) * static_cast<std::size_t>(frame.width) +
-         static_cast<std::size_t>(iu)) * 4u;
-    const std::uint8_t* px = frame.rgba.data() + idx;
-    out_rgb[0] = g_srgb_lut.table[px[2]];
-    out_rgb[1] = g_srgb_lut.table[px[1]];
-    out_rgb[2] = g_srgb_lut.table[px[0]];
-    return true;
 }
 
 // ─── GSFusion per-frame quadtree helpers ─────────────────────────────────────
@@ -1818,6 +1849,8 @@ int PipelineCoordinator::on_imported_video_frame(
         has_preview_selected_keyframe_ = false;
         preview_dav2_seed_initialized_ = false;
         preview_last_seed_attempt_depth_frames_ = 0;
+        imported_video_geometry_topup_pre_engine_applied_ = false;
+        imported_video_geometry_topup_post_engine_applied_ = false;
         preview_depth_phase_ms_.store(0, std::memory_order_relaxed);
         preview_seed_phase_ms_.store(0, std::memory_order_relaxed);
         preview_refine_phase_ms_.store(0, std::memory_order_relaxed);
@@ -1842,6 +1875,14 @@ int PipelineCoordinator::on_imported_video_frame(
         preview_seed_quality_milli_sum_.store(0, std::memory_order_relaxed);
         preview_frames_enqueued_.store(0, std::memory_order_relaxed);
         preview_frames_ingested_.store(0, std::memory_order_relaxed);
+        capture_preview_budget_release_requested_.store(false, std::memory_order_relaxed);
+        capture_preview_budget_released_.store(false, std::memory_order_relaxed);
+        export_surface_snapshot_compacted_.store(false, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> snapshot_lock(export_surface_snapshot_mutex_);
+            export_surface_snapshot_.clear();
+            export_surface_snapshot_.shrink_to_fit();
+        }
         preview_depth_frames_since_submit_ = 0;
         has_preview_depth_request_ = false;
         has_video_depth_ = false;
@@ -1860,6 +1901,9 @@ int PipelineCoordinator::on_imported_video_frame(
         training_converged_.store(false, std::memory_order_release);
         features_frozen_.store(false, std::memory_order_release);
         scanning_active_.store(true, std::memory_order_release);
+        if (!tsdf_volume_) {
+            tsdf_volume_ = std::make_unique<tsdf::TSDFVolume>();
+        }
     }
 
     const auto frame_backlog = frame_queue_.size_approx();
@@ -1980,8 +2024,7 @@ EvidenceSnapshot PipelineCoordinator::get_snapshot() const noexcept {
         preview_frames_enqueued_.load(std::memory_order_relaxed);
     snapshot.preview_frames_ingested =
         preview_frames_ingested_.load(std::memory_order_relaxed);
-    snapshot.preview_frame_backlog =
-        static_cast<std::uint32_t>(frame_queue_.size_approx());
+    snapshot.preview_frame_backlog = saturating_u32(frame_queue_.size_approx());
     snapshot.preview_depth_batches_submitted =
         preview_depth_batches_submitted_.load(std::memory_order_relaxed);
     snapshot.preview_depth_results_ready =
@@ -2032,22 +2075,28 @@ PipelineCoordinator::RenderSnapshot PipelineCoordinator::get_render_snapshot() n
 }
 
 void PipelineCoordinator::finish_scanning() noexcept {
-    const bool imported_video_preview_pending =
-        is_local_subject_first_mode() &&
-        preview_frames_enqueued_.load(std::memory_order_acquire) >
-            preview_frames_ingested_.load(std::memory_order_acquire);
+    const auto preview_frames_enqueued =
+        preview_frames_enqueued_.load(std::memory_order_acquire);
+    const auto preview_frames_ingested =
+        preview_frames_ingested_.load(std::memory_order_acquire);
+    const auto freeze_state =
+        local_subject_first_ingest::evaluate_finish_scanning_freeze(
+            is_local_subject_first_mode(),
+            preview_frames_enqueued,
+            preview_frames_ingested);
     // Imported-video local subject-first submits frames in a burst. We should stop
     // accepting new frames now, but defer the actual feature/depth freeze
     // until Thread A has drained the queued imported-video frames. Freezing
     // immediately here cuts off the tail of the queue and leaves later frames
     // stuck with feat=0 / stale depth, which is exactly what turns the result
     // into a cigar/stick.
-    if (!imported_video_preview_pending) {
+    if (freeze_state.should_freeze_features_immediately) {
         // Freeze TSDF integration — prevents Thread A from modifying
         // TSDF volume while main thread reads it during PLY export.
         features_frozen_.store(true, std::memory_order_release);
     }
     scanning_active_.store(false, std::memory_order_release);
+    capture_preview_budget_release_requested_.store(true, std::memory_order_release);
 
     // NOTE: We intentionally do NOT call training_engine_->request_stop() here.
     // Training must continue after scanning finishes — the user watches the
@@ -2058,13 +2107,174 @@ void PipelineCoordinator::finish_scanning() noexcept {
     // Frame drop diagnostic summary
     auto total = frame_counter_.load(std::memory_order_relaxed);
     auto drops = frame_drop_count_.load(std::memory_order_relaxed);
+    local_subject_first_ingest::log_finish_scanning_summary(
+        total,
+        drops,
+        freeze_state,
+        preview_frames_ingested,
+        preview_frames_enqueued);
+}
+
+void PipelineCoordinator::maybe_compact_export_surface_snapshot() noexcept {
+    if (!local_subject_first_export_snapshot::should_compact_export_surface_snapshot(
+            export_surface_snapshot_compacted_.load(std::memory_order_acquire),
+            scanning_active_.load(std::memory_order_acquire),
+            features_frozen_.load(std::memory_order_acquire),
+            tsdf_idle_.load(std::memory_order_acquire),
+            training_started_.load(std::memory_order_acquire))) {
+        return;
+    }
+    compact_export_surface_snapshot_now();
+}
+
+void PipelineCoordinator::compact_export_surface_snapshot_now() noexcept {
+    if (!local_subject_first_export_snapshot::should_compact_export_surface_snapshot(
+            export_surface_snapshot_compacted_.load(std::memory_order_acquire),
+            scanning_active_.load(std::memory_order_acquire),
+            features_frozen_.load(std::memory_order_acquire),
+            tsdf_idle_.load(std::memory_order_acquire),
+            training_started_.load(std::memory_order_acquire))) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(export_surface_snapshot_mutex_);
+    if (export_surface_snapshot_compacted_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    const auto result =
+        local_subject_first_export_snapshot::compact_export_surface_snapshot(
+            tsdf_volume_,
+            runtime_tsdf_gaussian_augmentation_state_.assigned_blocks,
+            export_surface_snapshot_);
+    if (result.should_retry) {
+        return;
+    }
+
+    export_surface_snapshot_compacted_.store(true, std::memory_order_release);
+    local_subject_first_export_snapshot::log_compacted_export_surface_snapshot(result);
+}
+
+bool PipelineCoordinator::load_export_surface_samples(
+    std::vector<ExportSurfaceSample>& out,
+    std::size_t max_points) noexcept
+{
+    out.clear();
+    if (max_points == 0) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(export_surface_snapshot_mutex_);
+        if (local_subject_first_export_snapshot::load_export_surface_samples_from_snapshot(
+                export_surface_snapshot_,
+                max_points,
+                out)) {
+            return true;
+        }
+        if (!tsdf_volume_) {
+            return false;
+        }
+    }
+
+    if (!features_frozen_.load(std::memory_order_acquire)) {
+        features_frozen_.store(true, std::memory_order_release);
+    }
+    for (int i = 0; i < 500 && !tsdf_idle_.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    std::lock_guard<std::mutex> lock(export_surface_snapshot_mutex_);
+    if (local_subject_first_export_snapshot::load_export_surface_samples_from_snapshot(
+            export_surface_snapshot_,
+            max_points,
+            out)) {
+        return true;
+    }
+    if (!tsdf_volume_) {
+        return false;
+    }
+
+    std::vector<tsdf::SurfacePoint> live_surface_points;
+    tsdf_volume_->extract_surface_points(live_surface_points, max_points);
+    local_subject_first_export_snapshot::compact_export_surface_samples(
+        live_surface_points,
+        &out);
+    return !out.empty();
+}
+
+void PipelineCoordinator::maybe_release_capture_preview_budget() noexcept {
+    if (!local_subject_first_capture_budget::should_release_capture_preview_budget(
+            capture_preview_budget_release_requested_.load(std::memory_order_acquire),
+            capture_preview_budget_released_.load(std::memory_order_acquire),
+            scanning_active_.load(std::memory_order_acquire),
+            features_frozen_.load(std::memory_order_acquire))) {
+        return;
+    }
+    release_capture_preview_budget_now();
+}
+
+void PipelineCoordinator::release_capture_preview_budget_now() noexcept {
+    const auto summary =
+        local_subject_first_capture_budget::release_capture_preview_budget(
+            capture_preview_budget_release_requested_,
+            capture_preview_budget_released_,
+            overlay_cache_,
+            last_stable_surface_overlay_,
+            confirmed_overlay_cells_,
+            confirmed_dense_cells_,
+            last_stable_dense_vertices_,
+            pointmap_keyframes_,
+            next_pointmap_keyframe_id_,
+            active_pointmap_keyframe_id_,
+            gsf_seeded_cells_,
+            imported_video_bootstrap_target_points_world_,
+            imported_video_bootstrap_target_normals_world_,
+            imported_video_bootstrap_pose_initialized_,
+            imported_video_bootstrap_pose_,
+            imported_video_bootstrap_intrinsics_initialized_,
+            imported_video_bootstrap_intrinsics_,
+            overlay_last_gen_time_,
+            has_keyframe_,
+            has_preview_selected_keyframe_,
+            depth_keyframes_.size());
+    if (!summary.released) {
+        return;
+    }
+
     std::fprintf(stderr,
-        imported_video_preview_pending
-            ? "[Aether3D] Scan finished: %u frames accepted, %u dropped (%.1f%% loss) — deferring feature freeze until imported-video queue drains (%u/%u ingested)\n"
-            : "[Aether3D] Scan finished: %u frames accepted, %u dropped (%.1f%% loss)\n",
-        total, drops, total > 0 ? 100.0f * drops / (total + drops) : 0.0f,
-        preview_frames_ingested_.load(std::memory_order_relaxed),
-        preview_frames_enqueued_.load(std::memory_order_relaxed));
+        "[Aether3D][CaptureBudget] released capture-only preview caches "
+        "overlay_cache=%zu stable_surface=%zu overlay_cells=%zu dense_cells=%zu "
+        "stable_dense=%zu pointmap_kf=%zu gsf_seeded=%zu bootstrap_pts=%zu bootstrap_normals=%zu "
+        "retained_depth_kf=%zu\n",
+        summary.overlay_cache_count,
+        summary.stable_surface_count,
+        summary.overlay_cell_count,
+        summary.dense_cell_count,
+        summary.stable_dense_count,
+        summary.pointmap_keyframe_count,
+        summary.gsf_seeded_count,
+        summary.bootstrap_point_count,
+        summary.bootstrap_normal_count,
+        summary.retained_depth_keyframes);
+}
+
+void PipelineCoordinator::prune_capture_preview_budget(double timestamp_seconds) noexcept {
+    const auto summary =
+        local_subject_first_capture_budget::prune_capture_preview_budget(
+            timestamp_seconds,
+            confirmed_overlay_cells_,
+            confirmed_dense_cells_);
+
+    if (summary.overlay_removed > 0 || summary.dense_removed > 0) {
+        std::fprintf(stderr,
+            "[Aether3D][CaptureBudget] pruned capture caches overlay_removed=%zu overlay_kept=%zu "
+            "dense_removed=%zu dense_kept=%zu\n",
+            summary.overlay_removed,
+            summary.overlay_kept,
+            summary.dense_removed,
+            summary.dense_kept);
+    }
 }
 
 void PipelineCoordinator::set_thermal_state(int level) noexcept {
@@ -2115,8 +2325,23 @@ core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
     if (is_local_subject_first_mode()) {
         std::vector<splat::GaussianParams> raw_splats;
         training_engine_->export_gaussians(raw_splats);
+        const auto raw_progress = training_engine_->progress();
         const std::size_t raw_exportable = exportable_gaussian_count(raw_splats);
         const std::size_t retained_exportable = exportable_gaussian_count(retained_export_splats_);
+        if (!std::isfinite(raw_progress.loss) && !retained_export_splats_.empty()) {
+            std::fprintf(stderr,
+                "[Aether3D][Export] local_subject_first raw export non-finite loss=%.4f at step=%zu/%zu — using retained healthy snapshot: retained=%zu (exportable=%zu) path=%s\n",
+                raw_progress.loss,
+                raw_progress.step,
+                raw_progress.total_steps,
+                retained_export_splats_.size(),
+                retained_exportable,
+                path ? path : "(null)");
+            return splat::write_ply(
+                path,
+                retained_export_splats_.data(),
+                retained_export_splats_.size());
+        }
         if (should_use_retained_snapshot_for_export(raw_splats, retained_export_splats_)) {
             if (!retained_export_splats_.empty()) {
                 std::fprintf(stderr,
@@ -2196,19 +2421,11 @@ core::Status PipelineCoordinator::export_ply(const char* path) noexcept {
     }
 
     ExportSceneBounds tsdf_bounds;
-    std::vector<tsdf::SurfacePoint> surface_points;
+    std::vector<ExportSurfaceSample> surface_points;
     std::vector<ExportValidationView> validation_views;
     bool has_tsdf_bounds = false;
     float validation_mask_scale_hint = 0.01f;
-    if (tsdf_volume_) {
-        if (!features_frozen_.load(std::memory_order_acquire)) {
-            features_frozen_.store(true, std::memory_order_release);
-        }
-        for (int i = 0; i < 500 && !tsdf_idle_.load(std::memory_order_acquire); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        tsdf_volume_->extract_surface_points(surface_points, 250000);
+    if (load_export_surface_samples(surface_points, 250000)) {
         tsdf_bounds = compute_surface_bounds(surface_points);
         has_tsdf_bounds = tsdf_bounds.valid;
         if (has_tsdf_bounds) {
@@ -2350,17 +2567,12 @@ std::size_t PipelineCoordinator::copy_surface_points_xyz(
     float* out_xyz,
     std::size_t max_points) noexcept
 {
-    if (!tsdf_volume_ || !out_xyz || max_points == 0) return 0;
+    if (!out_xyz || max_points == 0) return 0;
 
-    if (!features_frozen_.load(std::memory_order_acquire)) {
-        features_frozen_.store(true, std::memory_order_release);
+    std::vector<ExportSurfaceSample> surface_points;
+    if (!load_export_surface_samples(surface_points, max_points)) {
+        return 0;
     }
-    for (int i = 0; i < 500 && !tsdf_idle_.load(std::memory_order_acquire); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    std::vector<tsdf::SurfacePoint> surface_points;
-    tsdf_volume_->extract_surface_points(surface_points, max_points);
     if (surface_points.empty()) return 0;
 
     const std::size_t count = std::min(surface_points.size(), max_points);
@@ -2479,11 +2691,27 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
     while (running_.load(std::memory_order_relaxed)) {
         if (!frame_queue_.try_pop(input)) {
+            maybe_release_capture_preview_budget();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
         if (is_local_subject_first_mode() && input.imported_video) {
+            bool logged_import_pause = false;
+            while (running_.load(std::memory_order_relaxed) &&
+                   local_subject_first_refine::should_pause_imported_video_processing(
+                       foreground_active_.load(std::memory_order_acquire))) {
+                local_subject_first_refine::update_import_queue_foreground_state(
+                    false,
+                    logged_import_pause);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!running_.load(std::memory_order_relaxed)) {
+                break;
+            }
+            local_subject_first_refine::update_import_queue_foreground_state(
+                true,
+                logged_import_pause);
             preview_frames_ingested_.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -3344,8 +3572,8 @@ void PipelineCoordinator::frame_thread_func() noexcept {
         const std::uint32_t preview_keyframes_ready =
             preview_keyframe_gate_accepts_.load(std::memory_order_relaxed);
         const std::uint32_t imported_video_min_keyframes_for_bootstrap =
-            std::max<std::uint32_t>(
-                config_.min_frames_to_start_training * 2u,
+            std::max(
+                saturating_u32(config_.min_frames_to_start_training * 2u),
                 6u);
         const bool preview_bootstrap_needed =
             imported_video_preview &&
@@ -3547,7 +3775,7 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 imported_video_preview &&
                 (preview_bootstrap_needed ||
                  preview_frames_ingested_.load(std::memory_order_relaxed) <
-                    static_cast<std::uint32_t>(std::max<std::size_t>(
+                    saturating_u32(std::max<std::size_t>(
                         config_.min_frames_to_start_training + 2u,
                         5u)) ||
                  frame_queue_.size_approx() > 2u);
@@ -3759,11 +3987,14 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                     kf.cx = tsdf_input.cx;
                     kf.cy = tsdf_input.cy;
                     std::memcpy(kf.pose, input.transform, 16 * sizeof(float));
-                    // Store full-res RGBA for Gaussian seed color initialization
-                    kf.rgba = input.rgba;
-                    kf.rgba_w = static_cast<int>(input.width);
-                    kf.rgba_h = static_cast<int>(input.height);
-                    std::memcpy(kf.rgba_intrinsics, input.intrinsics, 9 * sizeof(float));
+                    // Store a downsampled BGRA frame for color lookup so capture memory
+                    // stays bounded even during long scans.
+                    store_downsampled_keyframe_rgba(
+                        input,
+                        kf.rgba,
+                        kf.rgba_w,
+                        kf.rgba_h,
+                        kf.rgba_intrinsics);
 
                     if (depth_keyframes_.size() >= kMaxDepthKeyframes) {
                         depth_keyframes_.erase(depth_keyframes_.begin());
@@ -4077,12 +4308,12 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 (!input.ne_depth.empty() && input.ne_depth_w > 0 && input.ne_depth_h > 0) ||
                 (!input.lidar_depth.empty() && input.lidar_w > 0 && input.lidar_h > 0);
             const bool imported_video_bootstrap_force_select = false;
-            ImportedSubjectFirstKeyframeDecision imported_preview_decision{};
-            const bool imported_preview_stats_enabled =
-                is_local_subject_first_mode() && input.imported_video;
-            if (imported_preview_stats_enabled) {
+            ImportedSubjectFirstKeyframeDecision subject_first_preview_decision{};
+            const bool subject_first_strict_gate_enabled =
+                is_local_subject_first_mode();
+            if (subject_first_strict_gate_enabled) {
                 preview_imported_frames_evaluated_.fetch_add(1, std::memory_order_relaxed);
-                imported_preview_decision =
+                subject_first_preview_decision =
                     local_subject_first_runtime::decide_imported_subject_first_keyframe(
                         has_depth_prior,
                         sel_result,
@@ -4091,11 +4322,11 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                         current_fwd,
                         preview_last_selected_pos_,
                         preview_last_selected_fwd_);
-                if (!sel_result.selected || !imported_preview_decision.accept) {
-                    if (imported_preview_decision.near_duplicate) {
+                if (!sel_result.selected || !subject_first_preview_decision.accept) {
+                    if (subject_first_preview_decision.near_duplicate) {
                         preview_imported_near_duplicate_rejects_.fetch_add(
                             1, std::memory_order_relaxed);
-                    } else if (imported_preview_decision.low_parallax) {
+                    } else if (subject_first_preview_decision.low_parallax) {
                         preview_imported_low_parallax_rejects_.fetch_add(
                             1, std::memory_order_relaxed);
                     }
@@ -4104,13 +4335,13 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
             if ((sel_result.selected || imported_video_bootstrap_force_select) &&
                 is_local_subject_first_mode()) {
-                // Imported-video local subject-first already goes through the repo-native
-                // MonoGS-style FrameSelector, but subject-first imported video
-                // now adds a stronger object-mode gate on top: reject
+                // Subject-first local capture now shares the same stronger
+                // object-mode gate as imported-video replay: reject
                 // near-duplicate / low-parallax viewpoints instead of forcing
-                // weak frames through just to hit the preview budget.
-                if (input.imported_video) {
-                    preview_gate_accepted = imported_preview_decision.accept;
+                // weak frames through just to hit a keyframe budget that later
+                // gets invalidated during local training suitability checks.
+                if (subject_first_strict_gate_enabled) {
+                    preview_gate_accepted = subject_first_preview_decision.accept;
                     if (preview_gate_accepted) {
                         preview_keyframe_gate_accepts_.fetch_add(
                             1, std::memory_order_relaxed);
@@ -4281,24 +4512,24 @@ void PipelineCoordinator::frame_thread_func() noexcept {
 
         evidence_queue_.try_push(std::move(obs));
 
-        if (is_local_subject_first_mode() &&
-            input.imported_video &&
-            !scanning_active_.load(std::memory_order_acquire) &&
-            !features_frozen_.load(std::memory_order_acquire)) {
-            const auto enqueued =
-                preview_frames_enqueued_.load(std::memory_order_relaxed);
-            const auto ingested =
-                preview_frames_ingested_.load(std::memory_order_relaxed);
-            if (enqueued > 0 &&
-                ingested >= enqueued &&
-                frame_queue_.size_approx() == 0u) {
-                features_frozen_.store(true, std::memory_order_release);
-                std::fprintf(stderr,
-                    "[Aether3D][SubjectFirstMode] imported-video queue drained: freezing features after %u/%u ingested frames\n",
-                    ingested,
-                    enqueued);
-            }
+        const auto enqueued =
+            preview_frames_enqueued_.load(std::memory_order_relaxed);
+        const auto ingested =
+            preview_frames_ingested_.load(std::memory_order_relaxed);
+        if (local_subject_first_ingest::should_freeze_features_after_imported_video_drain(
+                is_local_subject_first_mode(),
+                input.imported_video,
+                scanning_active_.load(std::memory_order_acquire),
+                features_frozen_.load(std::memory_order_acquire),
+                enqueued,
+                ingested,
+                frame_queue_.size_approx())) {
+            features_frozen_.store(true, std::memory_order_release);
+            local_subject_first_ingest::log_imported_video_queue_drained_freeze(
+                ingested,
+                enqueued);
         }
+        maybe_release_capture_preview_budget();
     }
 }
 
@@ -4315,20 +4546,16 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
         snapshot.overall_quality = accumulated_quality_;
         snapshot.frame_count = evidence_frame_count_;
         snapshot.selected_frames = selected_frame_count_.load(std::memory_order_relaxed);
-        const bool imported_video_preview_active =
-            is_local_subject_first_mode() &&
-            preview_frames_enqueued_.load(std::memory_order_relaxed) > 0u;
-        snapshot.min_frames_needed =
-            imported_video_preview_active
-                ? std::max<std::size_t>(config_.min_frames_to_start_training * 5u, 12u)
-                : config_.min_frames_to_start_training;
+        snapshot.min_frames_needed = config_.min_frames_to_start_training;
         snapshot.thermal_level = thermal_predictor_.current_level();
         snapshot.scan_complete = !scanning_active_.load(std::memory_order_relaxed);
         snapshot.has_s6_quality = has_s6_quality_.load(std::memory_order_relaxed);
 
         {
             std::lock_guard<std::mutex> tlock3(training_mutex_);
-            snapshot.assigned_blocks = assigned_blocks_.size();
+            snapshot.assigned_blocks =
+                runtime_tsdf_gaussian_augmentation::assigned_block_count(
+                    runtime_tsdf_gaussian_augmentation_state_);
             snapshot.pending_gaussian_count = pending_gaussians_.size();
         }
 
@@ -4473,8 +4700,9 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
             preview_frames_enqueued_.load(std::memory_order_relaxed);
         snapshot.preview_frames_ingested =
             preview_frames_ingested_.load(std::memory_order_relaxed);
-        snapshot.preview_frame_backlog =
-            static_cast<std::uint32_t>(frame_queue_.size_approx());
+        snapshot.preview_frame_backlog = saturating_u32(frame_queue_.size_approx());
+        snapshot.retained_export_gaussians =
+            retained_export_gaussian_count_.load(std::memory_order_relaxed);
 
         // Guard: training_engine_ is a raw pointer written by Thread C.
         // training_started_ (atomic, release by Thread C after creating engine)
@@ -4499,6 +4727,19 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
                 snapshot.training_step = progress.step;
             }
         }
+
+        const std::size_t current_working_set = std::max(
+            snapshot.num_gaussians + snapshot.pending_gaussian_count,
+            std::max(
+                snapshot.assigned_blocks + snapshot.pending_gaussian_count,
+                snapshot.retained_export_gaussians));
+        update_peak_counter(peak_working_set_gaussians_, current_working_set);
+        snapshot.peak_training_gaussians =
+            peak_training_gaussians_.load(std::memory_order_relaxed);
+        snapshot.peak_working_set_gaussians =
+            peak_working_set_gaussians_.load(std::memory_order_relaxed);
+        snapshot.peak_retained_export_gaussians =
+            peak_retained_export_gaussians_.load(std::memory_order_relaxed);
 
         evidence_snapshot_.publish();
     };
@@ -4575,11 +4816,12 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
 void PipelineCoordinator::training_thread_func() noexcept {
     std::vector<SelectedFrame> all_frames;
     SelectedFrame sf;
+    const bool local_subject_first_mode = is_local_subject_first_mode();
 
     // ── Memory cap: prevent OOM (pre-scaled frames ~0.5MB each) ──
-    const std::size_t max_training_frames = is_local_subject_first_mode()
-        ? kPreviewMaxTrainingFrames
-        : std::size_t(30);
+    const std::size_t max_training_frames =
+        local_subject_first_training::max_training_frames_for_mode(
+            local_subject_first_mode);
 
     std::size_t last_reported_frame_count = 0;
     bool engine_created = false;
@@ -4614,10 +4856,14 @@ void PipelineCoordinator::training_thread_func() noexcept {
     bool published_initial_splats = false;
     bool foreground_pause_logged = false;
     bool capture_hold_logged = false;
+    std::size_t last_heartbeat_logged_step = 0;
+    auto last_heartbeat_log_time = std::chrono::steady_clock::now();
+    bool first_train_step_begin_logged = false;
+    bool first_train_step_complete_logged = false;
 
-    auto add_frame_to_engine = [this](const SelectedFrame& f) {
+    auto add_frame_to_engine = [this, local_subject_first_mode](const SelectedFrame& f) {
         const bool preview_metric_depth =
-            is_local_subject_first_mode() &&
+            local_subject_first_mode &&
             f.ne_depth_is_metric &&
             !f.ne_depth.empty() &&
             f.ne_depth_w > 0 &&
@@ -4660,57 +4906,17 @@ void PipelineCoordinator::training_thread_func() noexcept {
     auto build_tsdf_fallback_gaussians =
         [this, &all_frames](std::vector<splat::GaussianParams>& out,
                             std::size_t max_points) -> std::size_t {
-            if (!tsdf_volume_) return 0;
-
             std::vector<tsdf::SurfacePoint> surface_points;
-            tsdf_volume_->extract_surface_points(surface_points, max_points);
-            if (surface_points.empty()) return 0;
-
-            const std::size_t before = out.size();
-            out.reserve(before + surface_points.size());
-
-            for (const auto& sp : surface_points) {
-                splat::GaussianParams g{};
-                g.position[0] = sp.position[0];
-                g.position[1] = sp.position[1];
-                g.position[2] = sp.position[2];
-
-                float sampled_rgb[3] = {0.0f, 0.0f, 0.0f};
-                bool color_ok = false;
-                for (auto it = all_frames.rbegin();
-                     it != all_frames.rend() && !color_ok; ++it) {
-                    color_ok = sample_selected_frame_color_linear(
-                        *it, g.position[0], g.position[1], g.position[2], sampled_rgb);
-                }
-                if (color_ok) {
-                    g.color[0] = sampled_rgb[0];
-                    g.color[1] = sampled_rgb[1];
-                    g.color[2] = sampled_rgb[2];
-                } else {
-                    const float nx = std::fabs(sp.normal[0]);
-                    const float ny = std::fabs(sp.normal[1]);
-                    const float nz = std::fabs(sp.normal[2]);
-                    g.color[0] = std::clamp(0.18f + 0.55f * nx, 0.0f, 1.0f);
-                    g.color[1] = std::clamp(0.16f + 0.58f * ny, 0.0f, 1.0f);
-                    g.color[2] = std::clamp(0.18f + 0.55f * nz, 0.0f, 1.0f);
-                }
-
-                const float weight_norm = std::clamp(
-                    static_cast<float>(sp.weight) / 24.0f, 0.0f, 1.0f);
-                g.opacity = 0.20f + 0.70f * weight_norm;
-                const float scale = std::clamp(
-                    0.004f + (1.0f - weight_norm) * 0.004f, 0.003f, 0.012f);
-                g.scale[0] = scale;
-                g.scale[1] = scale;
-                g.scale[2] = scale;
-                g.rotation[0] = 1.0f;
-                g.rotation[1] = 0.0f;
-                g.rotation[2] = 0.0f;
-                g.rotation[3] = 0.0f;
-                out.push_back(g);
+            {
+                std::lock_guard<std::mutex> snapshot_lock(export_surface_snapshot_mutex_);
+                if (!tsdf_volume_) return 0;
+                tsdf_volume_->extract_surface_points(surface_points, max_points);
             }
-
-            return out.size() - before;
+            return local_subject_first_fallback_seeding::append_tsdf_fallback_gaussians(
+                       surface_points,
+                       all_frames,
+                       out)
+                .seeded;
         };
 
     auto retain_export_snapshot =
@@ -4728,6 +4934,12 @@ void PipelineCoordinator::training_thread_func() noexcept {
                 return;
             }
             retained_export_splats_.swap(splats);
+            retained_export_gaussian_count_.store(
+                retained_export_splats_.size(),
+                std::memory_order_relaxed);
+            update_peak_counter(
+                peak_retained_export_gaussians_,
+                retained_export_splats_.size());
         };
 
     while (running_.load(std::memory_order_relaxed)) {
@@ -4743,25 +4955,13 @@ void PipelineCoordinator::training_thread_func() noexcept {
         // During live capture we only want recording + frame gating + sparse TSDF /
         // overlay evidence. Heavy bootstrap / engine creation / refine is deferred
         // until finish_scanning() flips scanning_active_ to false.
-        if (is_local_subject_first_mode() &&
-            scanning_active_.load(std::memory_order_acquire)) {
-            {
-                std::lock_guard<std::mutex> lock(training_mutex_);
-                pending_gaussians_.clear();
-            }
-            pending_gaussians.clear();
-            if (!capture_hold_logged) {
-                std::fprintf(stderr,
-                    "[Aether3D][TrainThread] local_subject_first capture hold: deferring bootstrap/refine until capture stops\n");
-                capture_hold_logged = true;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        if (local_subject_first_training::apply_capture_hold_if_needed(
+                local_subject_first_mode,
+                scanning_active_.load(std::memory_order_acquire),
+                pending_gaussians,
+                capture_hold_logged)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
             continue;
-        }
-        if (capture_hold_logged) {
-            std::fprintf(stderr,
-                "[Aether3D][TrainThread] local_subject_first capture hold released: bootstrap/refine may begin\n");
-            capture_hold_logged = false;
         }
 
         // Diagnostic
@@ -4776,9 +4976,26 @@ void PipelineCoordinator::training_thread_func() noexcept {
 
         // ── Step 2: Wait until we have frames ──
         if (all_frames.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
             continue;
         }
+
+        auto training_loop_state =
+            local_subject_first_training::make_training_loop_local_state(
+                local_subject_first_mode,
+                all_frames,
+                config_.min_frames_to_start_training,
+                preview_frames_ingested_.load(std::memory_order_relaxed),
+                preview_depth_results_ready_.load(std::memory_order_relaxed),
+                saturating_u32(selected_frame_count_.load(std::memory_order_relaxed)),
+                preview_seed_candidates_.load(std::memory_order_relaxed),
+                preview_seed_accepted_.load(std::memory_order_relaxed),
+                preview_frames_enqueued_.load(std::memory_order_relaxed),
+                scanning_active_.load(std::memory_order_acquire),
+                tsdf_idle_.load(std::memory_order_acquire),
+                pending_gaussians.size(),
+                preview_started_at_,
+                std::chrono::steady_clock::now());
 
         // ── Step 3: Collect pending Gaussians from Thread A ──
         // Thread A populates pending_gaussians_ under training_mutex_ when
@@ -4792,301 +5009,152 @@ void PipelineCoordinator::training_thread_func() noexcept {
             }
         }
 
-        if (!engine_created &&
-            pending_gaussians.empty() &&
-            is_local_subject_first_mode() &&
-            !preview_dav2_seed_initialized_ &&
-            !all_frames.empty()) {
-            const bool has_any_imported_video_frames =
-                std::any_of(
-                    all_frames.begin(),
-                    all_frames.end(),
-                    [](const SelectedFrame& frame) noexcept { return frame.imported_video; });
-            const bool seed_imported_video_preview_only =
-                has_any_imported_video_frames &&
-                std::all_of(
-                    all_frames.begin(),
-                    all_frames.end(),
-                    [](const SelectedFrame& frame) noexcept { return frame.imported_video; });
-            const std::uint32_t imported_video_min_seed_frames =
-                static_cast<std::uint32_t>(std::max<std::size_t>(
-                    config_.min_frames_to_start_training * 5u,
-                    12u));
-            const std::size_t preview_initial_seed_cap =
-                seed_imported_video_preview_only
-                    ? kPreviewImportedVideoInitialSeedCap
-                    : kPreviewInitialSeedCap;
-            const std::size_t imported_video_min_seed_gaussians =
-                std::min<std::size_t>(preview_initial_seed_cap, 12000u);
-            std::vector<const SelectedFrame*> depth_frames;
-            depth_frames.reserve(all_frames.size());
-            for (const auto& frame : all_frames) {
-                if (!frame.imported_video) {
-                    continue;
-                }
-                if (frame.ne_depth.empty() || frame.ne_depth_w == 0 || frame.ne_depth_h == 0) {
-                    continue;
-                }
-                depth_frames.push_back(&frame);
+        if (local_subject_first_training::should_attempt_imported_video_seed_bootstrap(
+                training_loop_state,
+                engine_created,
+                pending_gaussians.empty(),
+                preview_dav2_seed_initialized_,
+                !all_frames.empty())) {
+            auto imported_video_seed_bootstrap =
+                local_subject_first_training::maybe_build_imported_video_seed_bootstrap(
+                    all_frames,
+                    config_.min_frames_to_start_training,
+                    training_loop_state.imported_video_gate.preview_initial_seed_cap,
+                    config_.training.render_width,
+                    config_.training.render_height,
+                    preview_last_seed_attempt_depth_frames_,
+                    dav2_affine_scale_,
+                    dav2_affine_shift_);
+            if (imported_video_seed_bootstrap.attempted) {
+                preview_last_seed_attempt_depth_frames_ =
+                    imported_video_seed_bootstrap.depth_frame_count;
             }
-
-            const bool seed_attempt_already_ran =
-                seed_imported_video_preview_only &&
-                preview_last_seed_attempt_depth_frames_ == depth_frames.size() &&
-                preview_last_seed_attempt_depth_frames_ > 0;
-            const bool seed_ready_to_initialize =
-                !has_any_imported_video_frames ||
-                depth_frames.size() >= imported_video_min_seed_frames;
-
-            if (has_any_imported_video_frames &&
-                !seed_ready_to_initialize &&
-                !depth_frames.empty()) {
-                static std::uint32_t preview_seed_wait_log_count = 0;
-                preview_seed_wait_log_count++;
-                if (preview_seed_wait_log_count <= 8 ||
-                    preview_seed_wait_log_count % 20 == 0) {
-                    std::fprintf(
-                        stderr,
-                        "[Aether3D][TrainThread] Repo MVS seed waiting: %zu/%u imported depth frames ready\n",
-                        depth_frames.size(),
-                        imported_video_min_seed_frames);
-                }
-            } else if (!depth_frames.empty() && !seed_attempt_already_ran) {
-                preview_last_seed_attempt_depth_frames_ = depth_frames.size();
-                const auto preview_seed_phase_t0 = std::chrono::steady_clock::now();
-                std::vector<training::MVSFrame> mvs_frames;
-                mvs_frames.reserve(depth_frames.size());
-                std::size_t imported_video_metric_depth_frames = 0;
-                for (const auto* frame_ptr : depth_frames) {
-                    if (!frame_ptr) {
-                        continue;
-                    }
-                    training::MVSFrame mf{};
-                    mf.rgba = frame_ptr->rgba.data();
-                    mf.width = frame_ptr->width;
-                    mf.height = frame_ptr->height;
-                    std::memcpy(mf.transform, frame_ptr->transform, sizeof(mf.transform));
-                    mf.intrinsics[0] = frame_ptr->intrinsics[0];
-                    mf.intrinsics[1] = frame_ptr->intrinsics[1];
-                    mf.intrinsics[2] = frame_ptr->intrinsics[2];
-                    mf.intrinsics[3] = frame_ptr->intrinsics[3];
-                    if (!frame_ptr->ne_depth.empty() &&
-                        frame_ptr->ne_depth_w > 0 &&
-                        frame_ptr->ne_depth_h > 0) {
-                        if (seed_imported_video_preview_only) {
-                            if (frame_ptr->ne_depth_is_metric) {
-                                imported_video_metric_depth_frames++;
-                            }
-                        } else {
-                            mf.dav2_depth = frame_ptr->ne_depth.data();
-                            mf.dav2_w = frame_ptr->ne_depth_w;
-                            mf.dav2_h = frame_ptr->ne_depth_h;
-                            mf.dav2_is_metric = frame_ptr->ne_depth_is_metric;
-                            if (!mf.dav2_is_metric) {
-                                mf.dav2_scale = dav2_affine_scale_;
-                                mf.dav2_shift = dav2_affine_shift_;
-                            }
-                        }
-                    }
-                    mvs_frames.push_back(mf);
-                }
-
-                std::vector<splat::GaussianParams> imported_video_seeds;
-                core::Status primary_seed_status = core::Status::kInvalidArgument;
-                if (mvs_frames.size() >= 3) {
-                    training::MVSConfig mvs_cfg;
-                    mvs_cfg.depth_width = std::max<std::uint32_t>(
-                        static_cast<std::uint32_t>(160),
-                        static_cast<std::uint32_t>(
-                            std::max<std::size_t>(config_.training.render_width, 320u) / 2u));
-                    mvs_cfg.depth_height = std::max<std::uint32_t>(
-                        static_cast<std::uint32_t>(120),
-                        static_cast<std::uint32_t>(
-                            std::max<std::size_t>(config_.training.render_height, 240u) / 2u));
-                    if (seed_imported_video_preview_only) {
-                        mvs_cfg.dav2_prior_range = kPreviewImportedVideoMvsPrimaryPriorRange;
-                        mvs_cfg.dav2_prior_levels = kPreviewImportedVideoMvsPrimaryPriorLevels;
-                        std::fprintf(
-                            stderr,
-                            "[Aether3D][TrainThread] Repo MVS primary: imported-video DAv2 prior disabled "
-                            "(metric_depth_frames=%zu/%zu)\n",
-                            imported_video_metric_depth_frames,
-                            mvs_frames.size());
-                    }
-                    primary_seed_status = training::mvs_initialize(
-                        mvs_frames.data(),
-                        mvs_frames.size(),
-                        mvs_cfg,
-                        imported_video_seeds);
-                    if (primary_seed_status == core::Status::kOk && !imported_video_seeds.empty()) {
-                        if (imported_video_seeds.size() > preview_initial_seed_cap) {
-                            imported_video_seeds.resize(preview_initial_seed_cap);
-                        }
-                        std::fprintf(stderr,
-                            "[Aether3D][TrainThread] Repo MVS seed bootstrap: +%zu gaussians "
-                            "from %zu imported frames\n",
-                            imported_video_seeds.size(), mvs_frames.size());
-                    }
-                }
-
-                const std::size_t mvs_seed_fallback_threshold =
-                    std::min<std::size_t>(preview_initial_seed_cap, 12000u);
-                if (imported_video_seeds.size() < mvs_seed_fallback_threshold) {
-                    training::DAv2Config dav2_cfg;
-                    dav2_cfg.subsample_step = 2;
-                    const bool have_primary_mvs_seed =
-                        primary_seed_status == core::Status::kOk &&
-                        !imported_video_seeds.empty();
-                    const std::size_t remaining_seed_budget =
-                        imported_video_seeds.size() >= preview_initial_seed_cap
-                            ? 0u
-                            : (preview_initial_seed_cap - imported_video_seeds.size());
-                    const std::size_t dav2_supplement_cap =
-                        have_primary_mvs_seed
-                            ? std::min<std::size_t>(
-                                  std::max<std::size_t>(
-                                      imported_video_seeds.size() / 3u,
-                                      512u),
-                                  2048u)
-                            : remaining_seed_budget;
-                    dav2_cfg.max_points = static_cast<std::uint32_t>(
-                        std::min<std::size_t>(
-                            remaining_seed_budget,
-                            dav2_supplement_cap));
-                    if (dav2_cfg.max_points > 0) {
-                        std::vector<splat::GaussianParams> dav2_supplement;
-                        const auto dav2_status = training::dav2_initialize(
-                            depth_frames.data(),
-                            depth_frames.size(),
-                            dav2_cfg,
-                            dav2_supplement);
-                        if (dav2_status == core::Status::kOk && !dav2_supplement.empty()) {
-                            if (dav2_supplement.size() > dav2_cfg.max_points) {
-                                dav2_supplement.resize(dav2_cfg.max_points);
-                            }
-                            imported_video_seeds.insert(
-                                imported_video_seeds.end(),
-                                dav2_supplement.begin(),
-                                dav2_supplement.end());
-                            std::fprintf(stderr,
-                                imported_video_seeds.size() == dav2_supplement.size()
-                                    ? "[Aether3D][TrainThread] Repo DAv2 fallback seed bootstrap: +%zu gaussians "
-                                      "from %zu imported frames\n"
-                                    : "[Aether3D][TrainThread] Repo DAv2 supplement: +%zu gaussians "
-                                      "after MVS seed bootstrap\n",
-                                dav2_supplement.size(),
-                                depth_frames.size());
-                        } else if (primary_seed_status != core::Status::kOk) {
-                            std::fprintf(stderr,
-                                "[Aether3D][TrainThread] Repo MVS seed bootstrap failed, DAv2 fallback unavailable "
-                                "(status=%d)\n",
-                                static_cast<int>(dav2_status));
-                        }
-                    }
-                }
-                const auto preview_seed_phase_t1 = std::chrono::steady_clock::now();
+            if (imported_video_seed_bootstrap.phase_elapsed_ms > 0) {
                 preview_seed_phase_ms_.fetch_add(
-                    static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            preview_seed_phase_t1 - preview_seed_phase_t0
-                        ).count()),
+                    imported_video_seed_bootstrap.phase_elapsed_ms,
                     std::memory_order_relaxed);
-
-                if (!imported_video_seeds.empty()) {
-                    preview_seed_candidates_.fetch_add(
-                        static_cast<std::uint32_t>(imported_video_seeds.size()),
+            }
+            if (!imported_video_seed_bootstrap.seeds.empty()) {
+                const auto seed_count =
+                    saturating_u32(imported_video_seed_bootstrap.seeds.size());
+                preview_seed_candidates_.fetch_add(
+                    seed_count,
+                    std::memory_order_relaxed);
+                if (!imported_video_seed_bootstrap.seed_evidence_sufficient) {
+                    preview_seed_rejected_.fetch_add(
+                        seed_count,
                         std::memory_order_relaxed);
-                    if (imported_video_seeds.size() > preview_initial_seed_cap) {
-                        imported_video_seeds.resize(preview_initial_seed_cap);
-                    }
-                    const bool seed_evidence_sufficient =
-                        !seed_imported_video_preview_only ||
-                        imported_video_seeds.size() >= imported_video_min_seed_gaussians;
-                    if (!seed_evidence_sufficient) {
-                        preview_seed_rejected_.fetch_add(
-                            static_cast<std::uint32_t>(imported_video_seeds.size()),
-                            std::memory_order_relaxed);
-                        std::fprintf(stderr,
-                            "[Aether3D][TrainThread] Repo seed evidence still thin: %zu/%zu gaussians from %zu imported depth frames — waiting for more evidence\n",
-                            imported_video_seeds.size(),
-                            imported_video_min_seed_gaussians,
-                            depth_frames.size());
-                    } else {
-                        preview_seed_accepted_.fetch_add(
-                            static_cast<std::uint32_t>(imported_video_seeds.size()),
-                            std::memory_order_relaxed);
-                        preview_seed_quality_milli_sum_.fetch_add(
-                            static_cast<std::uint64_t>(imported_video_seeds.size()) * 700ULL,
-                            std::memory_order_relaxed);
-                        pending_gaussians = std::move(imported_video_seeds);
-                        preview_dav2_seed_initialized_ = true;
-                    }
+                } else {
+                    preview_seed_accepted_.fetch_add(
+                        seed_count,
+                        std::memory_order_relaxed);
+                    preview_seed_quality_milli_sum_.fetch_add(
+                        static_cast<std::uint64_t>(seed_count) * 700ULL,
+                        std::memory_order_relaxed);
+                    pending_gaussians =
+                        std::move(imported_video_seed_bootstrap.seeds);
+                    preview_dav2_seed_initialized_ = true;
                 }
             }
         }
 
+        training_loop_state =
+            local_subject_first_training::make_training_loop_local_state(
+                local_subject_first_mode,
+                all_frames,
+                config_.min_frames_to_start_training,
+                preview_frames_ingested_.load(std::memory_order_relaxed),
+                preview_depth_results_ready_.load(std::memory_order_relaxed),
+                saturating_u32(selected_frame_count_.load(std::memory_order_relaxed)),
+                preview_seed_candidates_.load(std::memory_order_relaxed),
+                preview_seed_accepted_.load(std::memory_order_relaxed),
+                preview_frames_enqueued_.load(std::memory_order_relaxed),
+                scanning_active_.load(std::memory_order_acquire),
+                tsdf_idle_.load(std::memory_order_acquire),
+                pending_gaussians.size(),
+                preview_started_at_,
+                std::chrono::steady_clock::now());
+
         // ── Step 3.5: Post-scan fallback seed path ──
         // If TSDF→overlay admission is too strict and produced zero seeds,
         // bootstrap from TSDF surface points so viewer progress can move.
-        if (!engine_created && pending_gaussians.empty()) {
-            const bool scan_finished =
-                !scanning_active_.load(std::memory_order_acquire);
-            const bool imported_video_preview_only =
-                is_local_subject_first_mode() &&
-                !all_frames.empty() &&
-                std::all_of(
-                    all_frames.begin(),
-                    all_frames.end(),
-                    [](const SelectedFrame& frame) noexcept { return frame.imported_video; });
-            const std::uint32_t preview_frames_ingested =
-                preview_frames_ingested_.load(std::memory_order_relaxed);
-            const std::uint32_t preview_depth_results_ready =
-                preview_depth_results_ready_.load(std::memory_order_relaxed);
-            const std::uint32_t preview_selected_frames =
-                selected_frame_count_.load(std::memory_order_relaxed);
-            const std::uint64_t preview_elapsed_ms =
-                is_local_subject_first_mode()
-                    ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - preview_started_at_).count())
-                    : 0;
-            const std::uint32_t imported_video_min_training_frames =
-                static_cast<std::uint32_t>(std::max<std::size_t>(
-                    config_.min_frames_to_start_training * 5u,
-                    12u));
-            const std::uint32_t degraded_min_ingested =
-                static_cast<std::uint32_t>(std::max<std::size_t>(
-                    config_.min_frames_to_start_training * 6u,
-                    16u));
-            const std::uint32_t preview_frames_enqueued =
-                preview_frames_enqueued_.load(std::memory_order_relaxed);
-            const bool imported_video_degraded_seed_ready =
-                imported_video_preview_only &&
-                scan_finished &&
-                features_frozen_.load(std::memory_order_acquire) &&
-                tsdf_idle_.load(std::memory_order_acquire) &&
-                preview_depth_results_ready >= 3u &&
-                preview_frames_enqueued > 0u &&
-                preview_frames_ingested >= degraded_min_ingested &&
-                preview_frames_ingested >= preview_frames_enqueued &&
-                preview_selected_frames >= imported_video_min_training_frames &&
-                preview_elapsed_ms >= 6000u &&
-                (!all_frames.empty() || preview_depth_results_ready > 0u);
-            if (scan_finished &&
-                features_frozen_.load(std::memory_order_acquire) &&
-                tsdf_idle_.load(std::memory_order_acquire) &&
-                (all_frames.size() >= imported_video_min_training_frames ||
-                 imported_video_degraded_seed_ready)) {
-                const std::size_t seeded =
-                    build_tsdf_fallback_gaussians(
-                        pending_gaussians,
-                        is_local_subject_first_mode() ? kPreviewFallbackSeedCount : std::size_t(20000));
-                if (seeded > 0) {
-                    std::fprintf(stderr,
-                        imported_video_preview_only
-                            ? "[Aether3D][TrainThread] Imported-video degraded TSDF seed fallback: +%zu gaussians\n"
-                            : "[Aether3D][TrainThread] Fallback TSDF seed bootstrap: +%zu gaussians\n",
-                        seeded);
+        const auto degraded_fallback_plan =
+            local_subject_first_training::make_degraded_tsdf_fallback_plan(
+                training_loop_state,
+                engine_created,
+                pending_gaussians.empty(),
+                all_frames.size());
+        if (degraded_fallback_plan.should_seed) {
+            const std::size_t seeded =
+                build_tsdf_fallback_gaussians(
+                    pending_gaussians,
+                    degraded_fallback_plan.max_points);
+            local_subject_first_training::log_degraded_tsdf_fallback(
+                degraded_fallback_plan,
+                seeded);
+        }
+
+        training_loop_state =
+            local_subject_first_training::make_training_loop_local_state(
+                local_subject_first_mode,
+                all_frames,
+                config_.min_frames_to_start_training,
+                preview_frames_ingested_.load(std::memory_order_relaxed),
+                preview_depth_results_ready_.load(std::memory_order_relaxed),
+                saturating_u32(selected_frame_count_.load(std::memory_order_relaxed)),
+                preview_seed_candidates_.load(std::memory_order_relaxed),
+                preview_seed_accepted_.load(std::memory_order_relaxed),
+                preview_frames_enqueued_.load(std::memory_order_relaxed),
+                scanning_active_.load(std::memory_order_acquire),
+                tsdf_idle_.load(std::memory_order_acquire),
+                pending_gaussians.size(),
+                preview_started_at_,
+                std::chrono::steady_clock::now());
+
+        std::size_t current_support_gaussians = pending_gaussians.size();
+        if (engine_created) {
+            std::lock_guard<std::mutex> lock(training_export_mutex_);
+            if (training_engine_) {
+                current_support_gaussians += training_engine_->gaussian_count();
+            }
+        }
+
+        const auto imported_video_geometry_topup_plan =
+            local_subject_first_training::make_imported_video_geometry_topup_plan(
+                training_loop_state,
+                engine_created,
+                current_support_gaussians,
+                imported_video_geometry_topup_pre_engine_applied_,
+                imported_video_geometry_topup_post_engine_applied_);
+        if (imported_video_geometry_topup_plan.should_top_up) {
+            const std::size_t seeded = build_tsdf_fallback_gaussians(
+                pending_gaussians,
+                imported_video_geometry_topup_plan.requested_max_points);
+            local_subject_first_training::log_imported_video_geometry_topup(
+                imported_video_geometry_topup_plan,
+                seeded);
+            if (seeded > 0) {
+                if (engine_created) {
+                    imported_video_geometry_topup_post_engine_applied_ = true;
+                } else {
+                    imported_video_geometry_topup_pre_engine_applied_ = true;
                 }
+                training_loop_state =
+                    local_subject_first_training::make_training_loop_local_state(
+                        local_subject_first_mode,
+                        all_frames,
+                        config_.min_frames_to_start_training,
+                        preview_frames_ingested_.load(std::memory_order_relaxed),
+                        preview_depth_results_ready_.load(std::memory_order_relaxed),
+                        saturating_u32(selected_frame_count_.load(std::memory_order_relaxed)),
+                        preview_seed_candidates_.load(std::memory_order_relaxed),
+                        preview_seed_accepted_.load(std::memory_order_relaxed),
+                        preview_frames_enqueued_.load(std::memory_order_relaxed),
+                        scanning_active_.load(std::memory_order_acquire),
+                        tsdf_idle_.load(std::memory_order_acquire),
+                        pending_gaussians.size(),
+                        preview_started_at_,
+                        std::chrono::steady_clock::now());
             }
         }
 
@@ -5095,159 +5163,111 @@ void PipelineCoordinator::training_thread_func() noexcept {
         // selected frame. Wait until the repo-native keyframe path has
         // admitted at least min_frames_to_start_training frames; otherwise the
         // preview collapses into a colored billboard/sheet.
-        const bool imported_video_preview_only =
-            is_local_subject_first_mode() &&
-            !all_frames.empty() &&
-            std::all_of(
-                all_frames.begin(),
-                all_frames.end(),
-                [](const SelectedFrame& frame) noexcept { return frame.imported_video; });
-        const std::uint32_t preview_frames_ingested =
-            preview_frames_ingested_.load(std::memory_order_relaxed);
-        const std::uint32_t preview_depth_results_ready =
-            preview_depth_results_ready_.load(std::memory_order_relaxed);
-        const std::uint32_t preview_selected_frames =
-            selected_frame_count_.load(std::memory_order_relaxed);
-        const std::uint32_t preview_seed_candidates =
-            preview_seed_candidates_.load(std::memory_order_relaxed);
-        const std::uint32_t preview_seed_accepted =
-            preview_seed_accepted_.load(std::memory_order_relaxed);
-        const std::uint64_t preview_elapsed_ms =
-            is_local_subject_first_mode()
-                ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - preview_started_at_).count())
-                : 0;
-        const std::uint32_t imported_video_min_training_frames =
-            static_cast<std::uint32_t>(std::max<std::size_t>(
-                config_.min_frames_to_start_training * 5u,
-                12u));
-        const std::uint32_t degraded_min_ingested =
-            static_cast<std::uint32_t>(std::max<std::size_t>(
-                config_.min_frames_to_start_training * 6u,
-                16u));
-        const std::size_t preview_initial_seed_cap =
-            imported_video_preview_only
-                ? kPreviewImportedVideoInitialSeedCap
-                : kPreviewInitialSeedCap;
-        const std::size_t imported_video_min_seed_gaussians =
-            std::min<std::size_t>(preview_initial_seed_cap, 12000u);
-        const bool imported_video_degraded_ready =
-            imported_video_preview_only &&
-            !scanning_active_.load(std::memory_order_acquire) &&
-            features_frozen_.load(std::memory_order_acquire) &&
-            tsdf_idle_.load(std::memory_order_acquire) &&
-            preview_depth_results_ready >= 3u &&
-            preview_frames_ingested >= degraded_min_ingested &&
-            preview_selected_frames >= imported_video_min_training_frames &&
-            preview_elapsed_ms >= 6000u &&
-            !all_frames.empty();
-        const bool imported_video_primary_ready =
-            all_frames.size() >= imported_video_min_training_frames &&
-            preview_selected_frames >= imported_video_min_training_frames &&
-            pending_gaussians.size() >= imported_video_min_seed_gaussians;
-        const bool ready_to_create_engine =
-            !pending_gaussians.empty() &&
-            (!imported_video_preview_only ||
-             imported_video_primary_ready ||
-             imported_video_degraded_ready);
+        const auto& imported_video_engine_gate =
+            training_loop_state.imported_video_gate;
         if (!engine_created &&
-            imported_video_preview_only &&
-            !ready_to_create_engine) {
+            imported_video_engine_gate.preview_only &&
+            !imported_video_engine_gate.ready_to_create_engine) {
             static std::uint32_t imported_video_gate_diag = 0;
-            imported_video_gate_diag++;
-            if (imported_video_gate_diag <= 12 || imported_video_gate_diag % 30 == 0) {
-                std::fprintf(stderr,
-                    "[Aether3D][TrainGate] waiting imported-video: selected=%u/%u "
-                    "accepted_seed=%u pending=%zu/%zu candidates=%u ingested=%u depth_ready=%u "
-                    "elapsed=%.1fs frozen=%d tsdf_idle=%d degraded_ready=%d\n",
-                    preview_selected_frames,
-                    imported_video_min_training_frames,
-                    preview_seed_accepted,
-                    pending_gaussians.size(),
-                    imported_video_min_seed_gaussians,
-                    preview_seed_candidates,
-                    preview_frames_ingested,
-                    preview_depth_results_ready,
-                    static_cast<double>(preview_elapsed_ms) / 1000.0,
-                    features_frozen_.load(std::memory_order_acquire) ? 1 : 0,
-                    tsdf_idle_.load(std::memory_order_acquire) ? 1 : 0,
-                    imported_video_degraded_ready ? 1 : 0);
-            }
+            local_subject_first_training::maybe_log_imported_video_training_gate_wait(
+                imported_video_gate_diag,
+                imported_video_engine_gate,
+                training_loop_state.preview_selected_frames,
+                training_loop_state.preview_seed_accepted,
+                training_loop_state.preview_seed_candidates,
+                training_loop_state.preview_frames_ingested,
+                training_loop_state.preview_depth_results_ready,
+                training_loop_state.preview_elapsed_ms,
+                features_frozen_.load(std::memory_order_acquire),
+                training_loop_state.tsdf_idle,
+                pending_gaussians.size());
         }
-        if (!engine_created && ready_to_create_engine) {
+        if (!engine_created && imported_video_engine_gate.ready_to_create_engine) {
             try {
-                std::lock_guard<std::mutex> lock(training_export_mutex_);
-                if (is_local_subject_first_mode() &&
-                    pending_gaussians.size() > preview_initial_seed_cap) {
-                    pending_gaussians.resize(preview_initial_seed_cap);
-                }
-
-                const std::size_t base_steps = is_local_subject_first_mode()
-                    ? std::max<std::size_t>(config_.training.max_iterations, kPreviewTrainingTargetSteps)
-                    : std::max<std::size_t>(config_.training.max_iterations, kDefaultTrainingTargetSteps);
-                const std::size_t hard_cap_steps = compute_hard_cap_steps_for_mode(
-                    is_local_subject_first_mode(),
-                    training_hard_cap_steps_.load(std::memory_order_relaxed),
-                    base_steps);
-                training_hard_cap_steps_.store(hard_cap_steps, std::memory_order_relaxed);
-                const std::size_t dynamic_target_steps = compute_target_steps_for_mode(
-                    is_local_subject_first_mode(),
-                    pending_gaussians.size(),
-                    all_frames.size(),
-                    base_steps,
-                    hard_cap_steps);
-                training_target_steps_.store(dynamic_target_steps, std::memory_order_relaxed);
-
-                auto runtime_training_config = config_.training;
-                runtime_training_config.max_iterations = dynamic_target_steps;
-                runtime_training_config.align_to_baseline_3dgs =
-                    is_local_subject_first_mode();
-                training_engine_ = new training::GaussianTrainingEngine(
-                    device_, runtime_training_config);
-
-                auto status = training_engine_->set_initial_point_cloud(
-                    pending_gaussians.data(), pending_gaussians.size());
-                if (status != core::Status::kOk) {
-                    std::fprintf(stderr,
-                        "[Aether3D][TrainThread] set_initial_point_cloud FAILED\n");
-                    delete training_engine_;
-                    training_engine_ = nullptr;
-                    pending_gaussians.clear();
-                    continue;
-                }
-
-                // Seed engine with all currently selected frames.
-                std::size_t seeded_frames = 0;
-                std::uint32_t newest_seeded_index = 0;
-                for (const auto& f : all_frames) {
-                    add_frame_to_engine(f);
-                    seeded_frames++;
-                    if (!has_last_fed_frame || f.frame_index > newest_seeded_index) {
-                        newest_seeded_index = f.frame_index;
+                std::vector<splat::GaussianParams> initial_splats;
+                std::size_t created_gaussian_count = 0;
+                std::size_t created_frame_count = 0;
+                std::size_t created_target_steps = 0;
+                {
+                    std::lock_guard<std::mutex> lock(training_export_mutex_);
+                    if (pending_gaussians.size() >
+                        imported_video_engine_gate.preview_initial_seed_cap) {
+                        pending_gaussians.resize(
+                            imported_video_engine_gate.preview_initial_seed_cap);
                     }
-                }
-                if (seeded_frames > 0) {
-                    has_last_fed_frame = true;
-                    last_fed_frame_index = newest_seeded_index;
-                }
 
-                training_started_.store(true, std::memory_order_release);
-                engine_created = true;
-                pending_gaussians.clear();
+                    const std::size_t base_steps =
+                        local_subject_first_training::training_base_steps_for_mode(
+                            local_subject_first_mode,
+                            config_.training.max_iterations);
+                    const std::size_t hard_cap_steps = compute_hard_cap_steps_for_mode(
+                        local_subject_first_mode,
+                        training_hard_cap_steps_.load(std::memory_order_relaxed),
+                        base_steps);
+                    training_hard_cap_steps_.store(hard_cap_steps, std::memory_order_relaxed);
+                    const std::size_t dynamic_target_steps = compute_target_steps_for_mode(
+                        local_subject_first_mode,
+                        pending_gaussians.size(),
+                        all_frames.size(),
+                        base_steps,
+                        hard_cap_steps);
+                    training_target_steps_.store(dynamic_target_steps, std::memory_order_relaxed);
+
+                    auto runtime_training_config = config_.training;
+                    runtime_training_config.max_iterations = dynamic_target_steps;
+                    runtime_training_config.align_to_baseline_3dgs =
+                        local_subject_first_training::align_to_baseline_3dgs_for_mode(
+                            local_subject_first_mode);
+                    training_engine_ = new training::GaussianTrainingEngine(
+                        device_, runtime_training_config);
+
+                    auto status = training_engine_->set_initial_point_cloud(
+                        pending_gaussians.data(), pending_gaussians.size());
+                    if (status != core::Status::kOk) {
+                        std::fprintf(stderr,
+                            "[Aether3D][TrainThread] set_initial_point_cloud FAILED\n");
+                        delete training_engine_;
+                        training_engine_ = nullptr;
+                        pending_gaussians.clear();
+                        continue;
+                    }
+
+                    // Seed engine with all currently selected frames.
+                    std::size_t seeded_frames = 0;
+                    std::uint32_t newest_seeded_index = 0;
+                    for (const auto& f : all_frames) {
+                        add_frame_to_engine(f);
+                        seeded_frames++;
+                        if (!has_last_fed_frame || f.frame_index > newest_seeded_index) {
+                            newest_seeded_index = saturating_u32(
+                                static_cast<std::size_t>(f.frame_index));
+                        }
+                    }
+                    if (seeded_frames > 0) {
+                        has_last_fed_frame = true;
+                        last_fed_frame_index = newest_seeded_index;
+                    }
+
+                    training_started_.store(true, std::memory_order_release);
+                    engine_created = true;
+                    pending_gaussians.clear();
+
+                    created_gaussian_count = training_engine_->gaussian_count();
+                    created_frame_count = training_engine_->frame_count();
+                    created_target_steps =
+                        training_target_steps_.load(std::memory_order_relaxed);
+                    training_engine_->export_gaussians(initial_splats);
+                }
 
                 std::fprintf(stderr,
                     "[Aether3D][TrainThread] Global engine created: %zu Gaussians, "
                     "%zu frames, target_steps=%zu mode=%s\n",
-                    training_engine_->gaussian_count(),
-                    training_engine_->frame_count(),
-                    training_target_steps_.load(std::memory_order_relaxed),
-                    is_local_subject_first_mode() ? "local_subject_first" : "cloud_default");
+                    created_gaussian_count,
+                    created_frame_count,
+                    created_target_steps,
+                    local_subject_first_training::training_mode_name(
+                        local_subject_first_mode));
 
-                std::vector<splat::GaussianParams> initial_splats;
-                {
-                    std::lock_guard<std::mutex> lock(training_export_mutex_);
-                    training_engine_->export_gaussians(initial_splats);
-                }
                 if (!initial_splats.empty()) {
                     const std::size_t initial_splat_count = initial_splats.size();
                     const bool renderer_alive =
@@ -5266,6 +5286,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
                             : "[Aether3D][TrainThread] Initial export snapshot retained: %zu\n",
                         initial_splat_count);
                 }
+                maybe_compact_export_surface_snapshot();
             } catch (const std::exception& e) {
                 std::fprintf(stderr,
                     "[Aether3D][TrainThread] Engine creation EXCEPTION: %s\n", e.what());
@@ -5296,7 +5317,8 @@ void PipelineCoordinator::training_thread_func() noexcept {
                     add_frame_to_engine(f);
                     newly_added_frames++;
                     if (!has_last_fed_frame || f.frame_index > newest_added_frame) {
-                        newest_added_frame = f.frame_index;
+                        newest_added_frame = saturating_u32(
+                            static_cast<std::size_t>(f.frame_index));
                     }
                 }
 
@@ -5305,21 +5327,26 @@ void PipelineCoordinator::training_thread_func() noexcept {
                         pending_gaussians.data(), pending_gaussians.size());
                 }
 
-                const std::size_t base_steps = is_local_subject_first_mode()
-                    ? std::max<std::size_t>(config_.training.max_iterations, kPreviewTrainingTargetSteps)
-                    : std::max<std::size_t>(config_.training.max_iterations, kDefaultTrainingTargetSteps);
+                const std::size_t base_steps =
+                    local_subject_first_training::training_base_steps_for_mode(
+                        local_subject_first_mode,
+                        config_.training.max_iterations);
                 const std::size_t hard_cap_steps = compute_hard_cap_steps_for_mode(
-                    is_local_subject_first_mode(),
+                    local_subject_first_mode,
                     training_hard_cap_steps_.load(std::memory_order_relaxed),
                     base_steps);
                 training_hard_cap_steps_.store(hard_cap_steps, std::memory_order_relaxed);
                 dynamic_target_steps = compute_target_steps_for_mode(
-                    is_local_subject_first_mode(),
+                    local_subject_first_mode,
                     training_engine_->gaussian_count(),
                     training_engine_->frame_count(),
                     base_steps,
                     hard_cap_steps);
                 total_gaussians = training_engine_->gaussian_count();
+                update_peak_counter(peak_training_gaussians_, total_gaussians);
+                update_peak_counter(
+                    peak_working_set_gaussians_,
+                    total_gaussians + new_gaussian_count);
             }
 
             if (newly_added_frames > 0) {
@@ -5343,6 +5370,7 @@ void PipelineCoordinator::training_thread_func() noexcept {
             }
 
             pending_gaussians.clear();
+            maybe_compact_export_surface_snapshot();
         }
 
         // ── Step 6: Train steps (BATCHED — multiple steps per iteration) ──
@@ -5358,32 +5386,47 @@ void PipelineCoordinator::training_thread_func() noexcept {
         if (engine_created && training_engine_ && !scan_done_refinement) {
             const bool foreground_active =
                 foreground_active_.load(std::memory_order_acquire);
-            if (is_local_subject_first_mode() && !foreground_active) {
-                if (!foreground_pause_logged) {
-                    std::fprintf(stderr,
-                        "[Aether3D][TrainThread] local_subject_first app inactive: using background-safe refine path while host execution remains available\n");
-                    foreground_pause_logged = true;
-                }
-            } else if (foreground_pause_logged) {
-                std::fprintf(stderr,
-                    "[Aether3D][TrainThread] local_subject_first resumed: foreground active, continuing GPU refine\n");
-                foreground_pause_logged = false;
-            }
+            local_subject_first_refine::maybe_update_training_refine_foreground_state(
+                local_subject_first_mode,
+                foreground_active,
+                foreground_pause_logged);
             try {
-                const auto preview_refine_phase_t0 = is_local_subject_first_mode()
-                    ? std::chrono::steady_clock::now()
-                    : std::chrono::steady_clock::time_point{};
+                const auto preview_refine_phase_t0 =
+                    local_subject_first_refine::begin_preview_refine_phase(
+                        local_subject_first_mode);
                 core::Status status = core::Status::kOk;
                 auto batch_t0 = std::chrono::steady_clock::now();
                 std::size_t steps_in_batch = 0;
 
                 for (std::size_t b = 0; b < kTrainBatchSize; ++b) {
                     auto step_t0 = std::chrono::steady_clock::now();
+                    if (!first_train_step_begin_logged) {
+                        std::fprintf(stderr,
+                            "[Aether3D][TrainThread] First train_step begin: "
+                            "gaussians=%zu frames=%zu gpu=%s foreground=%s\n",
+                            training_engine_->gaussian_count(),
+                            training_engine_->frame_count(),
+                            training_engine_->is_gpu_training() ? "YES" : "CPU",
+                            foreground_active ? "YES" : "NO");
+                        first_train_step_begin_logged = true;
+                    }
                     {
                         std::lock_guard<std::mutex> lock(training_export_mutex_);
                         status = training_engine_->train_step();
                     }
                     auto step_t1 = std::chrono::steady_clock::now();
+                    if (!first_train_step_complete_logged) {
+                        const auto first_step_ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                step_t1 - step_t0).count();
+                        std::fprintf(stderr,
+                            "[Aether3D][TrainThread] First train_step returned: "
+                            "status=%d elapsed_ms=%lld gpu=%s\n",
+                            static_cast<int>(status),
+                            static_cast<long long>(first_step_ms),
+                            training_engine_->is_gpu_training() ? "YES" : "CPU");
+                        first_train_step_complete_logged = true;
+                    }
                     steps_in_batch++;
 
                     if (status != core::Status::kOk) break;
@@ -5397,6 +5440,30 @@ void PipelineCoordinator::training_thread_func() noexcept {
                 if (status == core::Status::kOk) {
                     auto progress = training_engine_->progress();
                     auto batch_t1 = std::chrono::steady_clock::now();
+                    const std::size_t gaussians_now = training_engine_->gaussian_count();
+
+                    const bool should_log_heartbeat =
+                        progress.step > 0 &&
+                        (last_heartbeat_logged_step == 0 ||
+                         progress.step <= 10 ||
+                         progress.step >= last_heartbeat_logged_step + 100 ||
+                         std::chrono::duration_cast<std::chrono::seconds>(
+                             batch_t1 - last_heartbeat_log_time).count() >= 5);
+                    if (should_log_heartbeat) {
+                        std::fprintf(stderr,
+                            "[Aether3D][TrainHeartbeat] real_step=%zu/%zu loss=%.4f "
+                            "gaussians=%zu gpu=%s foreground=%s published=%zu\n",
+                            progress.step, progress.total_steps,
+                            progress.loss,
+                            gaussians_now,
+                            training_engine_->is_gpu_training() ? "YES" : "CPU",
+                            foreground_active_.load(std::memory_order_acquire)
+                                ? "YES"
+                                : "NO",
+                            last_published_splat_count);
+                        last_heartbeat_logged_step = progress.step;
+                        last_heartbeat_log_time = batch_t1;
+                    }
 
                     // ── Per-batch timing diagnostics ──
                     // First 10 steps: every step. Then every 20 steps.
@@ -5409,14 +5476,14 @@ void PipelineCoordinator::training_thread_func() noexcept {
                             progress.step, progress.total_steps,
                             progress.loss, steps_in_batch, kTrainBatchSize,
                             batch_ms,
-                            training_engine_->gaussian_count(),
+                            gaussians_now,
                             training_engine_->is_gpu_training() ? "YES" : "CPU");
                     }
 
                     // ── Publish splats every 50 steps ──
                     // CRITICAL: clear + push = REPLACE (not append).
                     // export_gaussians returns ALL Gaussians, not a delta.
-                    const std::size_t gaussians_now = training_engine_->gaussian_count();
+                    update_peak_counter(peak_training_gaussians_, gaussians_now);
                     bool should_publish_splats = false;
                     if (!published_initial_splats) {
                         should_publish_splats = true;  // First visible splat ASAP
@@ -5429,6 +5496,22 @@ void PipelineCoordinator::training_thread_func() noexcept {
                     }
                     if (progress.step >= last_published_step + 12) {
                         should_publish_splats = true;  // Avoid stale viewer snapshots
+                    }
+
+                    if (should_publish_splats) {
+                        if (!std::isfinite(progress.loss)) {
+                            static std::size_t skipped_unhealthy_publish_logs = 0;
+                            skipped_unhealthy_publish_logs++;
+                            if (skipped_unhealthy_publish_logs <= 6 ||
+                                skipped_unhealthy_publish_logs % 20 == 0) {
+                                std::fprintf(
+                                    stderr,
+                                    "[Aether3D][TrainThread] Skipping export snapshot publish at step=%zu due to non-finite loss; retaining last healthy snapshot=%zu\n",
+                                    progress.step,
+                                    retained_export_splats_.size());
+                            }
+                            should_publish_splats = false;
+                        }
                     }
 
                     if (should_publish_splats) {
@@ -5524,18 +5607,10 @@ void PipelineCoordinator::training_thread_func() noexcept {
                         "[Aether3D][TrainPerf] non-OK status=%d batch_ms=%lld\n",
                         static_cast<int>(status), err_ms);
                 }
-                if (is_local_subject_first_mode()) {
-                    const auto preview_refine_phase_t1 = std::chrono::steady_clock::now();
-                    const auto preview_refine_elapsed_ms = static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            preview_refine_phase_t1 - preview_refine_phase_t0
-                        ).count()
-                    );
-                    preview_refine_phase_ms_.fetch_add(
-                        preview_refine_elapsed_ms,
-                        std::memory_order_relaxed
-                    );
-                }
+                local_subject_first_refine::finish_preview_refine_phase(
+                    local_subject_first_mode,
+                    preview_refine_phase_ms_,
+                    preview_refine_phase_t0);
             } catch (const std::exception& e) {
                 std::fprintf(stderr,
                     "[Aether3D][TrainThread] train_step EXCEPTION: %s\n", e.what());
@@ -5980,54 +6055,18 @@ void PipelineCoordinator::generate_overlay_vertices(
     const bool capture_sparse_dense_map =
         is_local_subject_first_mode() &&
         scanning_active_.load(std::memory_order_acquire);
-    // iPhone 12-class headroom:
-    //   32k visible dense points × 32 B ≈ 1 MB CPU-side vertex payload.
-    //   This is still small relative to the preview pipeline budget, but gives
-    //   room-scale scans enough visible headroom before long-horizon LOD kicks in.
-    constexpr std::size_t kCaptureDenseSampleBlocks = 8192u;
-    constexpr std::size_t kCaptureDenseVisibleCap = 32000u;
-    constexpr std::size_t kCaptureDenseReserveCap = 65536u;
-    constexpr float kCaptureDenseVisibleBucketNear = 0.024f;  // 2.4 cm
-    constexpr float kCaptureDenseVisibleBucketMid  = 0.040f;  // 4.0 cm
-    constexpr float kCaptureDenseVisibleBucketFar  = 0.060f;  // 6.0 cm
-    constexpr float kCaptureDenseVisibleBucketVeryFar = 0.085f;  // 8.5 cm
-    constexpr float kCaptureDenseQualifiedQuality = 0.58f;
-    constexpr float kCaptureDenseFarSoftDistanceM = 1.6f;
-    constexpr float kCaptureDenseFarMidDistanceM  = 2.0f;
-    constexpr float kCaptureDenseFarHardDistanceM = 2.6f;
     static double capture_prev_overlay_total_ms = 0.0;
-    std::size_t capture_dense_sample_blocks = kCaptureDenseSampleBlocks;
-    bool capture_dense_bucketing_enabled = false;
-    if (capture_sparse_dense_map) {
-        const std::size_t dense_confirmed_count = confirmed_dense_cells_.size();
-        if (dense_confirmed_count >= 180000u) {
-            capture_dense_sample_blocks = 3072u;
-            capture_dense_bucketing_enabled = true;
-        } else if (dense_confirmed_count >= 90000u) {
-            capture_dense_sample_blocks = 4096u;
-            capture_dense_bucketing_enabled = true;
-        } else if (dense_confirmed_count >= 45000u) {
-            capture_dense_sample_blocks = 6144u;
-            capture_dense_bucketing_enabled = true;
-        }
-        if (capture_prev_overlay_total_ms > 160.0) {
-            capture_dense_sample_blocks = std::min<std::size_t>(capture_dense_sample_blocks, 3072u);
-        } else if (capture_prev_overlay_total_ms > 105.0) {
-            capture_dense_sample_blocks = std::min<std::size_t>(capture_dense_sample_blocks, 4096u);
-        } else if (capture_prev_overlay_total_ms > 70.0) {
-            capture_dense_sample_blocks = std::min<std::size_t>(capture_dense_sample_blocks, 6144u);
-        }
-    }
-    const char* capture_perf_tier = "full";
-    if (capture_sparse_dense_map) {
-        if (capture_dense_sample_blocks <= 3072u) {
-            capture_perf_tier = "sample_3072";
-        } else if (capture_dense_sample_blocks <= 4096u) {
-            capture_perf_tier = "sample_4096";
-        } else if (capture_dense_sample_blocks <= 6144u) {
-            capture_perf_tier = "sample_6144";
-        }
-    }
+    const auto capture_dense_config =
+        capture_sparse_dense_map
+            ? local_subject_first_capture_overlay::choose_capture_dense_sampling(
+                  confirmed_dense_cells_.size(),
+                  capture_prev_overlay_total_ms)
+            : local_subject_first_capture_overlay::CaptureDenseSamplingConfig{};
+    const std::size_t capture_dense_sample_blocks =
+        capture_dense_config.sample_blocks;
+    const bool capture_dense_bucketing_enabled =
+        capture_dense_config.bucketing_enabled;
+    const char* capture_perf_tier = capture_dense_config.perf_tier;
 
     // ── THROTTLE: minimum interval between expensive TSDF quality scans ──
     // get_block_quality_samples() is O(N_blocks × 512 voxels/block).
@@ -6042,13 +6081,10 @@ void PipelineCoordinator::generate_overlay_vertices(
     const auto now = std::chrono::steady_clock::now();
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - overlay_last_gen_time_);
-    const int throttle_ms = !capture_sparse_dense_map
-        ? 3000
-        : (capture_dense_sample_blocks <= 3072u
-            ? 260
-            : (capture_dense_sample_blocks <= 4096u
-                ? 300
-                : (capture_dense_sample_blocks <= 6144u ? 340 : 380)));
+    const int throttle_ms =
+        local_subject_first_capture_overlay::overlay_throttle_ms(
+            capture_sparse_dense_map,
+            capture_dense_sample_blocks);
     if (elapsed.count() < throttle_ms && !overlay_cache_.empty()) {
         pc_data.overlay = overlay_cache_;
         if (capture_sparse_dense_map && !last_stable_dense_vertices_.empty()) {
@@ -6109,7 +6145,9 @@ void PipelineCoordinator::generate_overlay_vertices(
                 "[Aether3D][QualityDiag] blocks=%zu surface=%zu trainable=%zu "
                 "max_q=%.3f avg_q=%.3f max_weight=%.1f assigned=%zu\n",
                 samples.size(), surface_count, trainable_count,
-                max_q, avg_q, max_w, assigned_blocks_.size());
+                max_q, avg_q, max_w,
+                runtime_tsdf_gaussian_augmentation::assigned_block_count(
+                    runtime_tsdf_gaussian_augmentation_state_));
         }
     }
 
@@ -6149,402 +6187,67 @@ void PipelineCoordinator::generate_overlay_vertices(
     // Rate limiter: token bucket prevents burst creation of too many Gaussians
     // when scanning reveals a large area at once. Smooth 20K/s steady flow,
     // 50K burst capacity. Prevents training engine from being overwhelmed.
-    if (!capture_sparse_dense_map) {
-        // ── Token bucket refill ──
-        if (!gaussian_bucket_initialized_) {
-            gaussian_bucket_tokens_ = kGaussianBucketCapacity;
-            gaussian_bucket_last_refill_ = now;
-            gaussian_bucket_initialized_ = true;
-        } else {
-            auto refill_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - gaussian_bucket_last_refill_);
-            if (refill_elapsed.count() > 0) {
-                std::size_t refill = static_cast<std::size_t>(
-                    static_cast<double>(kGaussianRefillRate) *
-                    static_cast<double>(refill_elapsed.count()) / 1000.0);
-                gaussian_bucket_tokens_ = std::min(
-                    gaussian_bucket_tokens_ + refill, kGaussianBucketCapacity);
-                gaussian_bucket_last_refill_ = now;
-            }
-        }
+    //
+    // Imported-video local subject-first no longer uses this runtime TSDF→GS
+    // augmentation path. That mode now boots from repo MVS / DAv2 seeds and,
+    // if evidence is still thin, the dedicated degraded TSDF fallback above.
+    const bool imported_video_runtime_tsdf_augmentation =
+        is_local_subject_first_mode() && frame_input.imported_video;
+    if (runtime_tsdf_gaussian_augmentation::should_run_runtime_tsdf_gaussian_augmentation(
+            capture_sparse_dense_map,
+            imported_video_runtime_tsdf_augmentation)) {
+        runtime_tsdf_gaussian_augmentation::ColorFrameView current_color_frame{};
+        current_color_frame.rgba =
+            frame_input.rgba.empty() ? nullptr : frame_input.rgba.data();
+        current_color_frame.width = frame_input.width;
+        current_color_frame.height = frame_input.height;
+        std::memcpy(
+            current_color_frame.transform,
+            frame_input.transform,
+            sizeof(current_color_frame.transform));
+        std::memcpy(
+            current_color_frame.intrinsics,
+            frame_input.intrinsics,
+            sizeof(current_color_frame.intrinsics));
 
-        constexpr float kBaseVoxelSize = tsdf::VOXEL_SIZE_MID;  // 0.01m (10mm)
-        const bool bootstrap_seed_mode = assigned_blocks_.size() < 4096;
-        const float min_weight_for_gaussian = bootstrap_seed_mode ? 0.35f : 2.0f;
-        const float min_alt_weight = bootstrap_seed_mode ? 0.9f : 6.0f;
-        const std::uint32_t min_alt_occupied = bootstrap_seed_mode ? 4u : 32u;
-        constexpr std::size_t kMaxSeedsPerBlock = 512;    // S1: full block capacity (8×8×8)
-        constexpr float kGoldenAngle = 2.39996322f;       // π(3 − √5) — Fibonacci spiral
-        const float block_world_size = kBaseVoxelSize *
-            static_cast<float>(tsdf::BLOCK_SIZE);
-        // S2: Camera position for per-block depth-adaptive voxel scale
-        const float cam_x = overlay_cam_pos_[0];
-        const float cam_y = overlay_cam_pos_[1];
-        const float cam_z = overlay_cam_pos_[2];
-        std::vector<splat::GaussianParams> new_gaussians;
-        // Reserve a bounded amount: 4% of samples qualify (surface + weight),
-        // each contributing up to 512 seeds. Cap at 300K to avoid huge allocation.
-        // 50K blocks × 4% qualify × 60 seeds ≈ 120K → reserve 200K is safe.
-        constexpr std::size_t kReserveSeeds = 200000;
-        new_gaussians.reserve(std::min(samples.size() * 4, kReserveSeeds));
-        std::size_t seeded_blocks = 0;
-        std::size_t sampled_colors = 0;
-        std::size_t fallback_colors = 0;
-        std::size_t blocks_checked = 0;
-        std::size_t blocks_rejected_surface = 0;
-        std::size_t blocks_rejected_weight = 0;
-
-        for (const auto& s : samples) {
-            if (s.occupied_count == 0) continue;
-            blocks_checked++;
-
-            // Gate: either has_surface OR (high weight + enough occupied voxels)
-            const bool surface_ok = s.has_surface;
-            const bool alt_ok = (s.avg_weight >= min_alt_weight && s.occupied_count >= min_alt_occupied);
-            if (!surface_ok && !alt_ok) {
-                blocks_rejected_surface++;
+        std::vector<runtime_tsdf_gaussian_augmentation::ColorFrameView> color_keyframes;
+        color_keyframes.reserve(depth_keyframes_.size());
+        for (const auto& keyframe : depth_keyframes_) {
+            if (keyframe.rgba.empty() || keyframe.rgba_w <= 0 || keyframe.rgba_h <= 0) {
                 continue;
             }
-            if (s.avg_weight < min_weight_for_gaussian) {
-                blocks_rejected_weight++;
-                continue;
-            }
-
-            // Spatial hash key from block center
-            tsdf::BlockIndex idx(
-                static_cast<int32_t>(std::floor(s.center[0] / block_world_size)),
-                static_cast<int32_t>(std::floor(s.center[1] / block_world_size)),
-                static_cast<int32_t>(std::floor(s.center[2] / block_world_size)));
-            auto key = block_hash_key(idx);
-            if (assigned_blocks_.count(key) > 0) continue;
-
-            // Token bucket rate limit: prevent burst Gaussian creation
-            if (gaussian_bucket_tokens_ == 0) break;  // No tokens left this call
-
-            assigned_blocks_.insert(key);
-            seeded_blocks++;
-
-            // Rotation + tangent basis from TSDF surface normal.
-            float nx = s.normal[0], ny = s.normal[1], nz = s.normal[2];
-            float nlen = std::sqrt(nx*nx + ny*ny + nz*nz);
-            float q_w = 1.0f, q_x = 0.0f, q_y = 0.0f, q_z = 0.0f;
-            if (nlen > 0.001f) {
-                nx /= nlen; ny /= nlen; nz /= nlen;
-                float dot = nz;  // dot((0,0,1), normal)
-                if (dot < -0.999f) {
-                    q_w = 0.0f; q_x = 1.0f; q_y = 0.0f; q_z = 0.0f;
-                } else {
-                    const float cx_ = -ny;  // cross((0,0,1), normal)
-                    const float cy_ = nx;
-                    const float cz_ = 0.0f;
-                    float w_ = 1.0f + dot;
-                    float qlen = std::sqrt(cx_*cx_ + cy_*cy_ + cz_*cz_ + w_*w_);
-                    q_w = w_ / qlen;
-                    q_x = cx_ / qlen;
-                    q_y = cy_ / qlen;
-                    q_z = cz_ / qlen;
-                }
-            } else {
-                nx = 0.0f; ny = 1.0f; nz = 0.0f;
-            }
-
-            // Build an orthonormal tangent basis for in-block seed spreading.
-            float ref_x = 0.0f, ref_y = 1.0f, ref_z = 0.0f;
-            if (std::fabs(ny) > 0.9f) {
-                ref_x = 1.0f; ref_y = 0.0f; ref_z = 0.0f;
-            }
-            float tx = ref_y * nz - ref_z * ny;
-            float ty = ref_z * nx - ref_x * nz;
-            float tz = ref_x * ny - ref_y * nx;
-            float tlen = std::sqrt(tx*tx + ty*ty + tz*tz);
-            if (tlen > 1e-6f) {
-                tx /= tlen; ty /= tlen; tz /= tlen;
-            } else {
-                tx = 1.0f; ty = 0.0f; tz = 0.0f;
-            }
-            float bx = ny * tz - nz * ty;
-            float by = nz * tx - nx * tz;
-            float bz = nx * ty - ny * tx;
-
-            // ── S2: Adaptive voxel scale — near objects get finer resolution ──
-            // TSDF adaptive tiers: 5mm (< 1m), 10mm (1-3m), 20mm (> 3m).
-            // For near blocks, we subdivide each voxel into sub-voxels,
-            // creating 4× more Gaussians at half the size.
-            // For far blocks, we use larger Gaussians but fewer of them.
-            const float blk_dx = s.surface_center[0] - cam_x;
-            const float blk_dy = s.surface_center[1] - cam_y;
-            const float blk_dz = s.surface_center[2] - cam_z;
-            const float block_depth = std::sqrt(blk_dx*blk_dx + blk_dy*blk_dy + blk_dz*blk_dz);
-
-            float effective_voxel_size = kBaseVoxelSize;  // 10mm default
-            if (block_depth < tsdf::DEPTH_NEAR_THRESHOLD) {
-                // Near tier (< 1m): smaller Gaussian scale for fine geometry
-                effective_voxel_size = tsdf::VOXEL_SIZE_NEAR;  // 0.005m
-            } else if (block_depth > tsdf::DEPTH_FAR_THRESHOLD) {
-                // Far tier (> 3m): larger Gaussian scale for far surfaces
-                effective_voxel_size = tsdf::VOXEL_SIZE_FAR;  // 0.02m
-            }
-            const float weight_norm = std::min(s.avg_weight / 16.0f, 1.0f);
-            const float quality_norm = std::clamp(s.composite_quality, 0.0f, 1.0f);
-            const float occupancy_norm = std::clamp(
-                static_cast<float>(s.occupied_count) / 96.0f, 0.0f, 1.0f);
-            float seed_density =
-                0.18f + 0.34f * quality_norm + 0.24f * weight_norm + 0.24f * occupancy_norm;
-            if (block_depth < tsdf::DEPTH_NEAR_THRESHOLD) {
-                seed_density += 0.18f;
-            } else if (block_depth > tsdf::DEPTH_FAR_THRESHOLD) {
-                seed_density -= 0.08f;
-            }
-            seed_density = std::clamp(seed_density, 0.125f, 0.625f);
-            // Photo-SLAM-style pacing: avoid seeding every good block at max capacity.
-            // This keeps online training from saturating CPU/GPU too early while still
-            // allowing steady >1M growth via later densify.
-            std::size_t seeds_per_block = static_cast<std::size_t>(
-                std::llround(static_cast<double>(kMaxSeedsPerBlock) * seed_density));
-            seeds_per_block = std::clamp<std::size_t>(seeds_per_block, 64u, 320u);
-            // Spread radius covers the full block face (not just 1 voxel)
-            const float spread_radius = block_world_size * 0.45f;
-            // Per-Gaussian scale: ~1 effective voxel in-plane, thin along normal
-            const float base_scale = effective_voxel_size * 0.7f;
-
-            const float seeds_f = static_cast<float>(seeds_per_block);
-
-            for (std::size_t seed_idx = 0; seed_idx < seeds_per_block; ++seed_idx) {
-                const std::uint64_t seed =
-                    static_cast<std::uint64_t>(key) ^
-                    (0x9E3779B97F4A7C15ULL + seed_idx * 0x94D049BB133111EBULL);
-                const float jitter_c = hash_unit01(seed + 41u);
-
-                // Fibonacci spiral for uniform disk coverage
-                const float angle = static_cast<float>(seed_idx) * kGoldenAngle;
-                const float radial = (seed_idx == 0)
-                    ? 0.0f
-                    : spread_radius * std::sqrt(
-                          static_cast<float>(seed_idx) / seeds_f);
-                const float c = std::cos(angle);
-                const float ss = std::sin(angle);
-
-                // In-plane offset (tangent disk)
-                const float ox = (tx * c + bx * ss) * radial;
-                const float oy = (ty * c + by * ss) * radial;
-                const float oz = (tz * c + bz * ss) * radial;
-
-                // Thin normal jitter for 3D spread (±half voxel along normal)
-                const float nj = (hash_unit01(seed + 59u) - 0.5f) * effective_voxel_size * 0.5f;
-
-                splat::GaussianParams g{};
-                g.position[0] = s.surface_center[0] + ox + nx * nj;
-                g.position[1] = s.surface_center[1] + oy + ny * nj;
-                g.position[2] = s.surface_center[2] + oz + nz * nj;
-
-                float sampled_rgb[3] = {0.0f, 0.0f, 0.0f};
-                bool color_ok = sample_frame_color_linear(
-                    frame_input,
-                    g.position[0], g.position[1], g.position[2],
-                    sampled_rgb);
-                // If current frame misses (camera has moved away), try keyframes.
-                // This fixes colorHit=0% for objects like bookshelves that are only
-                // visible from specific past viewpoints (not the current frame).
-                if (!color_ok) {
-                    for (auto it = depth_keyframes_.rbegin();
-                         it != depth_keyframes_.rend() && !color_ok; ++it) {
-                        if (it->rgba.empty()) continue;
-                        FrameInput kf_input;
-                        kf_input.rgba = it->rgba;
-                        kf_input.width  = static_cast<std::uint32_t>(it->rgba_w);
-                        kf_input.height = static_cast<std::uint32_t>(it->rgba_h);
-                        std::memcpy(kf_input.transform,   it->pose,           16 * sizeof(float));
-                        std::memcpy(kf_input.intrinsics, it->rgba_intrinsics,  9 * sizeof(float));
-                        color_ok = sample_frame_color_linear(
-                            kf_input,
-                            g.position[0], g.position[1], g.position[2],
-                            sampled_rgb);
-                    }
-                }
-                const bool strict_preview_color =
-                    is_local_subject_first_mode() && frame_input.imported_video;
-                if (color_ok) {
-                    g.color[0] = sampled_rgb[0];
-                    g.color[1] = sampled_rgb[1];
-                    g.color[2] = sampled_rgb[2];
-                    sampled_colors++;
-                } else if (strict_preview_color) {
-                    continue;
-                } else {
-                    // Fallback if no keyframe sees this point either.
-                    const float base_luma = std::clamp(
-                        0.08f + 0.42f * quality_norm + 0.10f * weight_norm,
-                        0.06f, 0.72f);
-                    g.color[0] = base_luma * (0.92f + 0.14f * jitter_c);
-                    g.color[1] = base_luma * (0.90f + 0.10f * (1.0f - jitter_c));
-                    g.color[2] = base_luma * (0.95f + 0.08f * (1.0f - weight_norm));
-                    fallback_colors++;
-                }
-
-                g.opacity = 0.25f + 0.60f * weight_norm;  // [0.25, 0.85]
-                const float anis = 0.75f + 0.50f * jitter_c;
-                g.scale[0] = base_scale * anis;
-                g.scale[1] = base_scale * (1.60f - anis);
-                g.scale[2] = effective_voxel_size * (0.10f + 0.12f * (1.0f - quality_norm));
-
-                g.rotation[0] = q_w;
-                g.rotation[1] = q_x;
-                g.rotation[2] = q_y;
-                g.rotation[3] = q_z;
-                new_gaussians.push_back(g);
-            }
-
-            // Consume tokens for this block's Gaussians
-            if (seeds_per_block <= gaussian_bucket_tokens_) {
-                gaussian_bucket_tokens_ -= seeds_per_block;
-            } else {
-                gaussian_bucket_tokens_ = 0;
-            }
+            runtime_tsdf_gaussian_augmentation::ColorFrameView keyframe_view{};
+            keyframe_view.rgba = keyframe.rgba.data();
+            keyframe_view.width = static_cast<std::uint32_t>(keyframe.rgba_w);
+            keyframe_view.height = static_cast<std::uint32_t>(keyframe.rgba_h);
+            std::memcpy(
+                keyframe_view.transform,
+                keyframe.pose,
+                sizeof(keyframe_view.transform));
+            std::memcpy(
+                keyframe_view.intrinsics,
+                keyframe.rgba_intrinsics,
+                sizeof(keyframe_view.intrinsics));
+            color_keyframes.push_back(keyframe_view);
         }
 
-        if (new_gaussians.empty() && !samples.empty() && gaussian_bucket_tokens_ > 0) {
-            static std::uint32_t empty_seed_diag = 0;
-            empty_seed_diag++;
-            if (empty_seed_diag <= 10 || (empty_seed_diag % 60 == 0)) {
-                std::fprintf(stderr,
-                    "[Aether3D][TSDF→GS] empty primary seeding: checked=%zu reject_surface=%zu "
-                    "reject_weight=%zu bucket=%zu assigned=%zu bootstrap=%d "
-                    "minW=%.2f altW=%.2f altOcc=%d\n",
-                    blocks_checked, blocks_rejected_surface, blocks_rejected_weight,
-                    gaussian_bucket_tokens_, assigned_blocks_.size(),
-                    bootstrap_seed_mode ? 1 : 0,
-                    min_weight_for_gaussian, min_alt_weight, min_alt_occupied);
-            }
-            std::size_t emergency_blocks = 0;
-            constexpr std::size_t kEmergencyMaxBlocks = 96;
-            constexpr std::size_t kEmergencyMaxSeedsPerBlock = 8;
-
-            for (const auto& s : samples) {
-                if (emergency_blocks >= kEmergencyMaxBlocks || gaussian_bucket_tokens_ == 0) break;
-                if (s.occupied_count == 0) continue;
-                if (!s.has_surface && s.avg_weight < 0.35f) continue;
-
-                tsdf::BlockIndex idx(
-                    static_cast<int32_t>(std::floor(s.center[0] / block_world_size)),
-                    static_cast<int32_t>(std::floor(s.center[1] / block_world_size)),
-                    static_cast<int32_t>(std::floor(s.center[2] / block_world_size)));
-                auto key = block_hash_key(idx);
-                if (assigned_blocks_.count(key) > 0) continue;
-
-                assigned_blocks_.insert(key);
-                seeded_blocks++;
-                emergency_blocks++;
-
-                std::size_t seeds_per_block = std::max<std::size_t>(
-                    1, std::min<std::size_t>(
-                           kEmergencyMaxSeedsPerBlock,
-                           static_cast<std::size_t>(s.occupied_count / 8 + 1)));
-                if (seeds_per_block > gaussian_bucket_tokens_) {
-                    seeds_per_block = gaussian_bucket_tokens_;
-                }
-
-                float nx = s.normal[0], ny = s.normal[1], nz = s.normal[2];
-                const float nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
-                if (nlen > 1e-6f) {
-                    nx /= nlen; ny /= nlen; nz /= nlen;
-                } else {
-                    nx = 0.0f; ny = 1.0f; nz = 0.0f;
-                }
-
-                for (std::size_t seed_idx = 0; seed_idx < seeds_per_block; ++seed_idx) {
-                    const std::uint64_t seed =
-                        static_cast<std::uint64_t>(key) ^
-                        (0x9E3779B97F4A7C15ULL + seed_idx * 0x94D049BB133111EBULL);
-                    const float jitter =
-                        (hash_unit01(seed + 17u) - 0.5f) * kBaseVoxelSize * 0.35f;
-
-                    splat::GaussianParams g{};
-                    const float px = s.has_surface ? s.surface_center[0] : s.center[0];
-                    const float py = s.has_surface ? s.surface_center[1] : s.center[1];
-                    const float pz = s.has_surface ? s.surface_center[2] : s.center[2];
-                    g.position[0] = px + nx * jitter;
-                    g.position[1] = py + ny * jitter;
-                    g.position[2] = pz + nz * jitter;
-
-                    float sampled_rgb[3] = {0.0f, 0.0f, 0.0f};
-                    const bool strict_preview_color =
-                        is_local_subject_first_mode() && frame_input.imported_video;
-                    if (sample_frame_color_linear(frame_input, g.position[0], g.position[1], g.position[2], sampled_rgb)) {
-                        g.color[0] = sampled_rgb[0];
-                        g.color[1] = sampled_rgb[1];
-                        g.color[2] = sampled_rgb[2];
-                        sampled_colors++;
-                    } else if (strict_preview_color) {
-                        continue;
-                    } else {
-                        const float q = std::clamp(s.composite_quality, 0.0f, 1.0f);
-                        const float luma = std::clamp(0.12f + 0.35f * q, 0.08f, 0.55f);
-                        g.color[0] = luma;
-                        g.color[1] = luma;
-                        g.color[2] = luma;
-                        fallback_colors++;
-                    }
-
-                    const float weight_norm = std::clamp(s.avg_weight / 8.0f, 0.0f, 1.0f);
-                    g.opacity = 0.20f + 0.50f * weight_norm;
-                    const float scale = std::max(0.0025f, kBaseVoxelSize * 0.55f);
-                    g.scale[0] = scale;
-                    g.scale[1] = scale;
-                    g.scale[2] = scale * 0.7f;
-                    g.rotation[0] = 1.0f;
-                    g.rotation[1] = 0.0f;
-                    g.rotation[2] = 0.0f;
-                    g.rotation[3] = 0.0f;
-                    new_gaussians.push_back(g);
-                }
-
-                if (seeds_per_block <= gaussian_bucket_tokens_) {
-                    gaussian_bucket_tokens_ -= seeds_per_block;
-                } else {
-                    gaussian_bucket_tokens_ = 0;
-                }
-            }
-
-            if (!new_gaussians.empty()) {
-                std::fprintf(stderr,
-                    "[Aether3D][TSDF→GS] emergency seeding activated: +%zu gaussians from %zu blocks\n",
-                    new_gaussians.size(), emergency_blocks);
-            }
-        }
-
-        if (!new_gaussians.empty()) {
+        auto seed_result =
+            runtime_tsdf_gaussian_augmentation::build_runtime_tsdf_gaussian_seeds(
+                runtime_tsdf_gaussian_augmentation_state_,
+                samples,
+                current_color_frame,
+                color_keyframes,
+                overlay_cam_pos_[0],
+                overlay_cam_pos_[1],
+                overlay_cam_pos_[2],
+                is_local_subject_first_mode() && frame_input.imported_video,
+                now);
+        if (!seed_result.gaussians.empty()) {
             std::lock_guard<std::mutex> lock(training_mutex_);
-            pending_gaussians_.insert(pending_gaussians_.end(),
-                new_gaussians.begin(), new_gaussians.end());
-
-            static std::size_t total_created = 0;
-            total_created += new_gaussians.size();
-            const float density =
-                seeded_blocks > 0
-                    ? static_cast<float>(new_gaussians.size()) / static_cast<float>(seeded_blocks)
-                    : 0.0f;
-            const float color_hit =
-                (sampled_colors + fallback_colors) > 0
-                    ? (100.0f * static_cast<float>(sampled_colors) /
-                       static_cast<float>(sampled_colors + fallback_colors))
-                    : 0.0f;
-            // Compute average initial color for diagnostic
-            float avg_r = 0, avg_g = 0, avg_b = 0;
-            for (const auto& ng : new_gaussians) {
-                avg_r += ng.color[0]; avg_g += ng.color[1]; avg_b += ng.color[2];
-            }
-            if (!new_gaussians.empty()) {
-                float inv = 1.0f / static_cast<float>(new_gaussians.size());
-                avg_r *= inv; avg_g *= inv; avg_b *= inv;
-            }
-            std::fprintf(stderr,
-                "[Aether3D][TSDF→GS] +%zu Gaussians from %zu blocks "
-                "(density=%.1f/block, colorHit=%.1f%%, avg_rgb=[%.3f,%.3f,%.3f], "
-                "total=%zu, assigned=%zu, checked=%zu, reject_surface=%zu, reject_weight=%zu)\n",
-                new_gaussians.size(), seeded_blocks, density, color_hit,
-                avg_r, avg_g, avg_b,
-                total_created, assigned_blocks_.size(),
-                blocks_checked, blocks_rejected_surface, blocks_rejected_weight);
+            pending_gaussians_.insert(
+                pending_gaussians_.end(),
+                seed_result.gaussians.begin(),
+                seed_result.gaussians.end());
         }
     }
 
@@ -7097,11 +6800,14 @@ void PipelineCoordinator::generate_overlay_vertices(
     // ═══════════════════════════════════════════════════════════════════
     std::size_t depth_rejected = 0;
     const bool strict_depth_filter =
-        !capture_sparse_dense_map &&
-        (depth_keyframes_.size() >= 5) &&
-        !warmup_overlay;
+        local_subject_first_capture_overlay::should_use_strict_depth_filter(
+            capture_sparse_dense_map,
+            depth_keyframes_.size(),
+            warmup_overlay);
     const std::size_t max_depth_filter_keyframes =
-        capture_sparse_dense_map ? 3u : depth_keyframes_.size();
+        local_subject_first_capture_overlay::max_depth_filter_keyframes(
+            capture_sparse_dense_map,
+            depth_keyframes_.size());
     if (depth_keyframes_.size() >= 3) {
         std::vector<OverlayCandidate> depth_passed;
         depth_passed.reserve(candidates.size());
@@ -7286,6 +6992,26 @@ void PipelineCoordinator::generate_overlay_vertices(
             }
 
             if (!strict_depth_filter) {
+                if (capture_sparse_dense_map) {
+                    // Capture dense-map used to auto-pass cells with zero checks or
+                    // a single accidental match. That lenient bootstrap route is what
+                    // let some "floating" monocular points enter the live pointmap.
+                    const auto relaxed_capture_gate =
+                        local_subject_first_capture_overlay::evaluate_relaxed_capture_depth_gate(
+                            warmup_overlay,
+                            frame_input.ne_depth_is_metric,
+                            checked,
+                            consistent);
+                    if (!relaxed_capture_gate.accept) {
+                        ++depth_rejected;
+                    } else {
+                        OverlayCandidate passed = cand;
+                        passed.support_views = relaxed_capture_gate.support_views;
+                        depth_passed.push_back(std::move(passed));
+                    }
+                    continue;
+                }
+
                 if (checked == 0) {
                     OverlayCandidate passed = cand;
                     passed.support_views = 1.0f;
@@ -7473,7 +7199,7 @@ void PipelineCoordinator::generate_overlay_vertices(
         auto& pointmap_kf = pointmap_keyframes_.back();
         if (pointmap_kf.id == active_pointmap_keyframe_id_) {
             pointmap_kf.observed_cell_count =
-                static_cast<std::uint32_t>(current_dense_frame_cells.size());
+                saturating_u32(current_dense_frame_cells.size());
             float conf_sum = 0.0f;
             std::uint32_t conf_count = 0;
             for (const auto key : current_dense_frame_cells) {
@@ -7525,6 +7251,10 @@ void PipelineCoordinator::generate_overlay_vertices(
         }
     }
 
+    if (capture_sparse_dense_map) {
+        prune_capture_preview_budget(frame_input.timestamp);
+    }
+
     // Emit ALL confirmed tiles (monotonic — never fewer than before)
     // Apply frustum culling for rendering efficiency
     struct SortableVertex {
@@ -7540,7 +7270,8 @@ void PipelineCoordinator::generate_overlay_vertices(
             current_frame_cells.find(key) != current_frame_cells.end();
         const double staleness = frame_input.timestamp - ct.last_update_ts;
         const double hold_seconds =
-            0.30 + 0.45 * static_cast<double>(std::clamp(ct.stability, 0.0f, 1.0f));
+            local_subject_first_capture_overlay::overlay_hold_seconds(
+                ct.stability);
         // Confirmed tiles persist briefly even without a fresh hit, which prevents
         // flicker and gives low-motion windows enough continuity for P2/P3 checks.
         if (!bootstrap_overlay_mode &&
@@ -7568,13 +7299,11 @@ void PipelineCoordinator::generate_overlay_vertices(
         sv.vertex.normal[1] = ct.normal[1];
         sv.vertex.normal[2] = ct.normal[2];
         sv.vertex.size = kTileHalf;
-        const float support_norm = std::clamp(ct.support_count / 6.0f, 0.0f, 1.0f);
-        const float stability_norm = std::clamp(ct.stability, 0.0f, 1.0f);
-        const float display_quality = std::clamp(
-            0.30f * ct.quality +
-            0.40f * support_norm +
-            0.30f * stability_norm,
-            0.0f, 1.0f);
+        const float display_quality =
+            local_subject_first_capture_overlay::overlay_display_quality(
+                ct.quality,
+                ct.support_count,
+                ct.stability);
         sv.vertex.quality = display_quality;
         sv.dist_sq = dsq;
         output.push_back(sv);
@@ -7647,8 +7376,8 @@ void PipelineCoordinator::generate_overlay_vertices(
                 return a.dist_sq < b.dist_sq;
             });
     }
-    if (capture_sparse_dense_map && output.size() > 1200u) {
-        output.resize(1200u);
+    if (capture_sparse_dense_map && output.size() > 3000u) {
+        output.resize(3000u);
     }
 
     pc_data.overlay.reserve(output.size());
@@ -7668,7 +7397,9 @@ void PipelineCoordinator::generate_overlay_vertices(
     pc_data.vertices.clear();
     pc_data.vertices.reserve(std::min<std::size_t>(
         confirmed_dense_cells_.size(),
-        capture_sparse_dense_map ? kCaptureDenseReserveCap : 1600u));
+        capture_sparse_dense_map
+            ? local_subject_first_capture_overlay::kCaptureDenseReserveCap
+            : 1600u));
     struct SortablePoint {
         PointCloudVertex vertex;
         float dist_sq;
@@ -7679,7 +7410,9 @@ void PipelineCoordinator::generate_overlay_vertices(
     std::vector<SortablePoint> dense_output;
     dense_output.reserve(std::min<std::size_t>(
         confirmed_dense_cells_.size(),
-        capture_sparse_dense_map ? kCaptureDenseReserveCap : 1600u));
+        capture_sparse_dense_map
+            ? local_subject_first_capture_overlay::kCaptureDenseReserveCap
+            : 1600u));
     std::size_t dense_fresh_candidates = 0;
     std::size_t dense_held_candidates = 0;
     std::size_t dense_low_quality_suppressed = 0;
@@ -7693,13 +7426,21 @@ void PipelineCoordinator::generate_overlay_vertices(
              active_pointmap_keyframe_id_ >= dc.last_keyframe_id)
                 ? (active_pointmap_keyframe_id_ - dc.last_keyframe_id)
                 : 0u;
-        const double hold_seconds = capture_sparse_dense_map
-            ? (7.50 + 3.00 * static_cast<double>(std::clamp(dc.stability, 0.0f, 1.0f)) +
-               0.60 * static_cast<double>(std::min<std::uint32_t>(dc.unique_keyframes_seen, 8u)))
-            : (1.20 + 1.20 * static_cast<double>(std::clamp(dc.stability, 0.0f, 1.0f)) +
-               0.25 * static_cast<double>(std::min<std::uint32_t>(dc.unique_keyframes_seen, 4u)));
+        const bool weak_capture_cell =
+            local_subject_first_capture_overlay::is_weak_capture_dense_cell(
+                capture_sparse_dense_map,
+                dc.unique_keyframes_seen,
+                dc.display_quality_peak);
+        const double hold_seconds =
+            local_subject_first_capture_overlay::dense_hold_seconds(
+                capture_sparse_dense_map,
+                weak_capture_cell,
+                dc.stability,
+                dc.unique_keyframes_seen);
         const std::uint32_t capture_max_keyframe_age =
-            18u + 3u * std::min<std::uint32_t>(dc.unique_keyframes_seen, 8u);
+            local_subject_first_capture_overlay::dense_capture_max_keyframe_age(
+                weak_capture_cell,
+                dc.unique_keyframes_seen);
         if (!bootstrap_overlay_mode && !seen_this_frame) {
             if (capture_sparse_dense_map) {
                 const bool has_keyframe_retention =
@@ -7725,7 +7466,9 @@ void PipelineCoordinator::generate_overlay_vertices(
             // highest-confidence surface anchor, but preserve more of the
             // canonical point so the overlay stays locked instead of jittering
             // with short-lived best-position updates.
-            const float anchor_bias = std::clamp(0.18f + 0.12f * dc.stability, 0.18f, 0.30f);
+            const float anchor_bias =
+                local_subject_first_capture_overlay::dense_anchor_bias(
+                    dc.stability);
             const float keep_canonical = 1.0f - anchor_bias;
             render_px = keep_canonical * render_px + anchor_bias * dc.best_position[0];
             render_py = keep_canonical * render_py + anchor_bias * dc.best_position[1];
@@ -7750,44 +7493,39 @@ void PipelineCoordinator::generate_overlay_vertices(
 
         // Use a pure pointmap-confidence score for display, matching the
         // weighted_pointmap spirit: one canonical point plus accumulated confidence.
-        const float average_confidence =
-            dc.confidence_accum / std::max(1.0f, static_cast<float>(dc.update_count));
-        const float average_display_quality = std::clamp(
-            std::log1pf(std::max(0.0f, average_confidence)) / std::log1pf(4.0f),
-            0.0f,
-            1.0f);
-        const float keyframe_support_norm = std::clamp(
-            static_cast<float>(dc.unique_keyframes_seen) / 3.0f,
-            0.0f,
-            1.0f);
-        const float display_quality = std::clamp(
-            0.85f * std::max(average_display_quality, dc.display_quality_peak) +
-            0.15f * keyframe_support_norm,
-            0.0f,
-            1.0f);
-        const bool monocular_capture_depth =
-            capture_sparse_dense_map && !frame_input.ne_depth_is_metric;
-        if (monocular_capture_depth) {
-            const bool far_soft_unstable =
-                d > kCaptureDenseFarSoftDistanceM && display_quality < 0.66f;
-            const bool far_mid_unstable =
-                d > kCaptureDenseFarMidDistanceM && display_quality < 0.74f;
-            const bool far_hard_unstable =
-                d > kCaptureDenseFarHardDistanceM && display_quality < 0.84f;
-            if (far_soft_unstable || far_mid_unstable || far_hard_unstable) {
-                ++dense_far_suppressed;
-                continue;
-            }
-        }
-        if (capture_sparse_dense_map && display_quality < kCaptureDenseQualifiedQuality) {
+        const float average_display_quality =
+            local_subject_first_capture_overlay::dense_average_display_quality(
+                dc.confidence_accum,
+                dc.update_count);
+        const float display_quality =
+            local_subject_first_capture_overlay::dense_render_display_quality(
+                average_display_quality,
+                dc.display_quality_peak,
+                dc.unique_keyframes_seen);
+        const auto dense_suppression_reason =
+            local_subject_first_capture_overlay::classify_capture_dense_suppression(
+                capture_sparse_dense_map,
+                frame_input.ne_depth_is_metric,
+                dc.unique_keyframes_seen,
+                display_quality,
+                d);
+        if (dense_suppression_reason ==
+            local_subject_first_capture_overlay::DenseSuppressionReason::kLowQuality) {
             ++dense_low_quality_suppressed;
+            continue;
+        }
+        if (dense_suppression_reason ==
+            local_subject_first_capture_overlay::DenseSuppressionReason::kFar) {
+            ++dense_far_suppressed;
             continue;
         }
 
         const float r = 0.18f;
         const float g = 1.0f;
         const float b = 0.26f;
-        const float quality_alpha = 0.82f + 0.12f * display_quality;
+        const float quality_alpha =
+            local_subject_first_capture_overlay::dense_point_alpha(
+                display_quality);
 
         SortablePoint sp;
         sp.vertex.position[0] = render_px;
@@ -7796,12 +7534,17 @@ void PipelineCoordinator::generate_overlay_vertices(
         sp.vertex.color[0] = r;
         sp.vertex.color[1] = g;
         sp.vertex.color[2] = b;
-        sp.vertex.size = capture_sparse_dense_map ? 7.5f : 8.5f;
+        sp.vertex.size =
+            local_subject_first_capture_overlay::dense_point_size(
+                capture_sparse_dense_map);
         sp.vertex.alpha = quality_alpha;
         sp.dist_sq = dsq;
         sp.display_quality = display_quality;
         sp.held = !seen_this_frame;
-        sp.fresh = seen_this_frame || staleness <= 1.25 || keyframe_age <= 1u;
+        sp.fresh = local_subject_first_capture_overlay::is_dense_point_fresh(
+            seen_this_frame,
+            staleness,
+            keyframe_age);
         if (sp.fresh) {
             ++dense_fresh_candidates;
         }
@@ -7816,16 +7559,15 @@ void PipelineCoordinator::generate_overlay_vertices(
         dense_output.size() > 1u) {
         auto dense_visible_bucket_key = [&](const SortablePoint& sp) -> std::int64_t {
             int tier = 0;
-            float bucket_size = kCaptureDenseVisibleBucketNear;
+            float bucket_size =
+                local_subject_first_capture_overlay::dense_visible_bucket_size(
+                    sp.dist_sq);
             if (sp.dist_sq > 9.0f) {
                 tier = 3;
-                bucket_size = kCaptureDenseVisibleBucketVeryFar;
             } else if (sp.dist_sq > 4.0f) {
                 tier = 2;
-                bucket_size = kCaptureDenseVisibleBucketFar;
             } else if (sp.dist_sq > 1.44f) {
                 tier = 1;
-                bucket_size = kCaptureDenseVisibleBucketMid;
             }
             const float dense_visible_bucket_inv = 1.0f / bucket_size;
             const int gx = static_cast<int>(std::floor(
@@ -7896,7 +7638,9 @@ void PipelineCoordinator::generate_overlay_vertices(
     const std::size_t dense_visible_before_cap = dense_output.size();
     std::size_t dense_fresh_kept = 0;
     std::size_t dense_held_kept = 0;
-    if (capture_sparse_dense_map && dense_output.size() > kCaptureDenseVisibleCap) {
+    if (capture_sparse_dense_map &&
+        dense_output.size() >
+            local_subject_first_capture_overlay::kCaptureDenseVisibleCap) {
         auto dist_sort = [](const SortablePoint& a, const SortablePoint& b) {
             return a.dist_sq < b.dist_sq;
         };
@@ -7915,8 +7659,9 @@ void PipelineCoordinator::generate_overlay_vertices(
         std::sort(stable_points.begin(), stable_points.end(), dist_sort);
 
         std::vector<SortablePoint> clipped;
-        clipped.reserve(kCaptureDenseVisibleCap);
-        const std::size_t limit = kCaptureDenseVisibleCap;
+        clipped.reserve(local_subject_first_capture_overlay::kCaptureDenseVisibleCap);
+        const std::size_t limit =
+            local_subject_first_capture_overlay::kCaptureDenseVisibleCap;
         const std::size_t target_fresh_quota = std::min<std::size_t>(
             fresh_points.size(),
             std::max<std::size_t>(limit / 4, 6000u));
@@ -8038,6 +7783,13 @@ void PipelineCoordinator::start_threads() noexcept {
     running_.store(true, std::memory_order_release);
     scanning_active_.store(true, std::memory_order_release);
     foreground_active_.store(true, std::memory_order_release);
+    capture_preview_budget_release_requested_.store(false, std::memory_order_relaxed);
+    capture_preview_budget_released_.store(false, std::memory_order_relaxed);
+    export_surface_snapshot_compacted_.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> snapshot_lock(export_surface_snapshot_mutex_);
+        export_surface_snapshot_.clear();
+    }
     if (config_.is_local_subject_first_mode()) {
         preview_started_at_ = std::chrono::steady_clock::now();
     }

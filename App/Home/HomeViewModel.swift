@@ -18,6 +18,14 @@ import SwiftUI
 import AVFoundation
 #endif
 
+private struct HomePersistedObjectModeViewerBundle {
+    let defaultArtifactRelativePath: String
+    let localManifestRelativePath: String
+    let localComparisonAssetPath: String?
+    let localComparisonMetricsPath: String?
+    let localHQArtifactPath: String?
+}
+
 @MainActor
 final class HomeViewModel: ObservableObject {
     @Published var scanRecords: [ScanRecord] = []
@@ -112,6 +120,7 @@ final class HomeViewModel: ObservableObject {
         loadRecords(scheduleRemoteResume: false)
     }
 
+    @discardableResult
     func refreshRecord(id: UUID) -> ScanRecord? {
         let refreshed = store.record(id: id)
         if let refreshed {
@@ -219,15 +228,18 @@ final class HomeViewModel: ObservableObject {
         }
 
         let backend = record.resolvedProcessingBackend
+        let isObjectFastPublish = isObjectFastPublishRecord(record)
         store.updateProcessingState(
             recordId: record.id,
             status: .preparing,
             statusMessage: backend.usesLocalPreviewPipeline
                 ? "正在重新启动本地处理"
-                : "正在重新发起远端训练",
+                : (isObjectFastPublish ? "正在重新发起新远端生成" : "正在重新发起远端训练"),
             detailMessage: backend.usesLocalPreviewPipeline
                 ? "这次会重新走手机本地处理链路。"
-                : "这次会重新走后台上传与远端调度流程。",
+                : (isObjectFastPublish
+                    ? "这次会重新走新远端 Splat-SLAM 对象链路。"
+                    : "这次会重新走后台上传与远端调度流程。"),
             progressFraction: 0.01,
             estimatedRemainingMinutes: nil,
             clearRemoteJobId: true,
@@ -243,7 +255,11 @@ final class HomeViewModel: ObservableObject {
                     processingBackend: backend
                 )
             } else {
-                await self.runRemoteBuild(for: record.id, sourceVideoURL: sourceURL, allowLocalFallback: false)
+                if isObjectFastPublish {
+                    await self.runObjectFastPublishBuild(for: record.id, sourceVideoURL: sourceURL)
+                } else {
+                    await self.runRemoteBuild(for: record.id, sourceVideoURL: sourceURL, allowLocalFallback: false)
+                }
             }
         }
     }
@@ -364,8 +380,14 @@ final class HomeViewModel: ObservableObject {
         )
         loadRecords(scheduleRemoteResume: false)
 
+        NSLog(
+            "[Aether3D][HomeLocalRun] manual local processing start record=%@ backend=%@ source=%@",
+            recordId.uuidString,
+            processingBackend.rawValue,
+            sourceRelativePath
+        )
         let result = await Task.detached(priority: .userInitiated) {
-            LocalPreviewImportRunner.execute(
+            await LocalPreviewImportRunner.execute(
                 sourceVideoURL: sourceVideoURL,
                 artifactURL: artifactURL,
                 sourceRelativePath: sourceRelativePath,
@@ -378,6 +400,12 @@ final class HomeViewModel: ObservableObject {
                 }
             )
         }.value
+        NSLog(
+            "[Aether3D][HomeLocalRun] manual local processing end record=%@ exported=%@ terminal_phase=%@",
+            recordId.uuidString,
+            result.exported ? "YES" : "NO",
+            result.terminalPhase.phaseName
+        )
 
         if result.exported {
             store.updateProcessingState(
@@ -562,7 +590,8 @@ final class HomeViewModel: ObservableObject {
         let awaitingCancelConfirmation = record.status == .cancelled && record.failureReason == "cancel_requested_unconfirmed"
         let resumableFailedRemoteRecord = shouldResumeFailedRemoteRecord(record)
         let resumableCompletedRemoteRecord = shouldResumeCompletedRemoteRecord(record)
-        guard record.artifactPath == nil,
+        let allowProcessingArtifactResume = isObjectFastPublishRecord(record) && record.isProcessing
+        guard (record.artifactPath == nil || allowProcessingArtifactResume),
               (record.isProcessing || awaitingCancelConfirmation || resumableFailedRemoteRecord || resumableCompletedRemoteRecord),
               let remoteJobId = record.remoteJobId,
               !remoteJobId.isEmpty else {
@@ -601,11 +630,15 @@ final class HomeViewModel: ObservableObject {
             sourceVideoPath: record.sourceVideoPath,
             remoteJobId: remoteJobId
         )
-        refreshRecord(id: record.id)
+        _ = refreshRecord(id: record.id)
 
         Task {
-            await self.resumeRemoteBuild(for: record.id, jobId: remoteJobId)
-            await MainActor.run {
+            if self.isObjectFastPublishRecord(record) {
+                await self.resumeObjectFastPublishBuild(for: record.id, jobId: remoteJobId)
+            } else {
+                await self.resumeRemoteBuild(for: record.id, jobId: remoteJobId)
+            }
+            _ = await MainActor.run {
                 self.activeRecoveryRecordIDs.remove(record.id)
             }
         }
@@ -622,7 +655,8 @@ final class HomeViewModel: ObservableObject {
     }
 
     private func shouldForceImmediateRemoteResume(_ record: ScanRecord) -> Bool {
-        guard record.artifactPath == nil,
+        let allowProcessingArtifactResume = isObjectFastPublishRecord(record) && record.isProcessing
+        guard (record.artifactPath == nil || allowProcessingArtifactResume),
               let remoteJobId = record.remoteJobId,
               !remoteJobId.isEmpty else {
             return false
@@ -714,6 +748,82 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
+    private func runObjectFastPublishBuild(for recordId: UUID, sourceVideoURL: URL) async {
+        let broker = BackgroundUploadBrokerClient.shared
+
+        do {
+            let jobId = try await broker.createJobAndUpload(
+                videoURL: sourceVideoURL,
+                clientRecordId: recordId,
+                captureOrigin: "object_mode_v2",
+                pipelineProfile: objectFastPublishPipelineProfile()
+            ) { [weak self] progress in
+                await MainActor.run {
+                    self?.store.updateProcessingState(
+                        recordId: recordId,
+                        status: .uploading,
+                        statusMessage: progress.isFinalizing ? "正在确认上传" : "正在上传对象素材",
+                        detailMessage: progress.isFinalizing
+                            ? "所有分片已发送，正在等远端确认并排队。"
+                            : "新远端对象模式正在上传素材，并准备默认成品。",
+                        progressFraction: min(max(progress.fraction ?? 0.02, 0.02), 0.16),
+                        progressBasis: progress.isFinalizing ? "upload_finalizing" : "uploading",
+                        remoteStageKey: "uploading",
+                        runtimeMetrics: self?.objectFastPublishRuntimeMetrics(
+                            stageKey: "uploading",
+                            detail: progress.isFinalizing ? "upload_finalizing" : "uploading_source",
+                            remoteJobId: nil,
+                            defaultArtifactReady: false
+                        ),
+                        uploadedBytes: progress.uploadedBytes,
+                        totalBytes: progress.totalBytes,
+                        estimatedRemainingMinutes: nil,
+                        remoteJobId: nil
+                    )
+                    self?.loadRecords(scheduleRemoteResume: false)
+                }
+            }
+
+            store.updateProcessingState(
+                recordId: recordId,
+                status: .queued,
+                statusMessage: "远端已接收任务",
+                detailMessage: "对象成品正在排队并准备处理。",
+                progressFraction: 0.18,
+                progressBasis: "queued",
+                remoteStageKey: "queued",
+                runtimeMetrics: objectFastPublishRuntimeMetrics(
+                    stageKey: "queued",
+                    detail: "queued_for_worker",
+                    remoteJobId: jobId,
+                    defaultArtifactReady: false
+                ),
+                remoteJobId: jobId
+            )
+            loadRecords(scheduleRemoteResume: false)
+
+            await resumeObjectFastPublishBuild(for: recordId, jobId: jobId)
+        } catch {
+            store.updateProcessingState(
+                recordId: recordId,
+                status: .failed,
+                statusMessage: "新远端生成失败",
+                detailMessage: error.localizedDescription,
+                progressFraction: store.record(id: recordId)?.displayProgressFraction,
+                progressBasis: "failed",
+                remoteStageKey: "failed",
+                runtimeMetrics: objectFastPublishRuntimeMetrics(
+                    stageKey: "failed",
+                    detail: error.localizedDescription,
+                    remoteJobId: store.record(id: recordId)?.remoteJobId,
+                    defaultArtifactReady: false
+                ),
+                failureReason: "object_fast_publish_failed"
+            )
+            loadRecords(scheduleRemoteResume: false)
+        }
+    }
+
     private func resumeRemoteBuild(for recordId: UUID, jobId: String) async {
         let runner = PipelineRunner(backend: preferredRemoteBackend)
         let result = await runner.resumeGenerate(jobId: jobId) { [weak self] snapshot in
@@ -728,6 +838,532 @@ final class HomeViewModel: ObservableObject {
         case .fail(let reason, _):
             failRecord(recordId: recordId, reason: reason, detailOverride: store.record(id: recordId)?.detailMessage)
         }
+    }
+
+    private func resumeObjectFastPublishBuild(for recordId: UUID, jobId: String) async {
+        let broker = BackgroundUploadBrokerClient.shared
+        var transientPollFailures = 0
+        var defaultArtifactReady = store.record(id: recordId)?.artifactPath != nil
+
+        while true {
+            let status: JobStatus
+            do {
+                status = try await broker.pollStatus(jobId: jobId)
+                transientPollFailures = 0
+            } catch {
+                transientPollFailures += 1
+                if transientPollFailures <= 12 {
+                    store.updateProcessingState(
+                        recordId: recordId,
+                        status: .reconstructing,
+                        statusMessage: "正在重新连接远端状态",
+                        detailMessage: "网络短暂波动，系统正在继续拉取新远端任务状态。",
+                        progressFraction: max(store.record(id: recordId)?.displayProgressFraction ?? 0.12, 0.12),
+                        progressBasis: "network_retry",
+                        remoteStageKey: "network_retry",
+                        runtimeMetrics: objectFastPublishRuntimeMetrics(
+                            stageKey: "network_retry",
+                            detail: "retrying_status_poll",
+                            remoteJobId: jobId,
+                            defaultArtifactReady: defaultArtifactReady
+                        ),
+                        remoteJobId: jobId
+                    )
+                    loadRecords(scheduleRemoteResume: false)
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    continue
+                }
+
+                store.updateProcessingState(
+                    recordId: recordId,
+                    status: .failed,
+                    statusMessage: "新远端状态拉取失败",
+                    detailMessage: error.localizedDescription,
+                    progressFraction: store.record(id: recordId)?.displayProgressFraction,
+                    progressBasis: "failed",
+                    remoteStageKey: "failed",
+                    runtimeMetrics: objectFastPublishRuntimeMetrics(
+                        stageKey: "failed",
+                        detail: error.localizedDescription,
+                        remoteJobId: jobId,
+                        defaultArtifactReady: defaultArtifactReady
+                    ),
+                    remoteJobId: jobId,
+                    failureReason: "object_fast_publish_poll_failed"
+                )
+                loadRecords(scheduleRemoteResume: false)
+                return
+            }
+
+            switch status {
+            case .pending(let progress), .processing(let progress):
+                persistObjectFastPublishProgress(
+                    recordId: recordId,
+                    remoteJobId: jobId,
+                    progress: progress,
+                    defaultArtifactReady: defaultArtifactReady
+                )
+            case .downloadReady(let progress):
+                if !defaultArtifactReady {
+                    do {
+                        let bundle = try await broker.downloadObjectModeViewerBundle(jobId: jobId)
+                        let persistedBundle = try persistObjectFastPublishViewerBundle(
+                            bundle,
+                            recordId: recordId
+                        )
+                        persistObjectFastPublishDefaultReady(
+                            recordId: recordId,
+                            remoteJobId: jobId,
+                            progress: progress,
+                            artifactPath: persistedBundle.defaultArtifactRelativePath,
+                            viewerManifestPath: persistedBundle.localManifestRelativePath,
+                            comparisonAssetPath: persistedBundle.localComparisonAssetPath,
+                            comparisonMetricsPath: persistedBundle.localComparisonMetricsPath
+                        )
+                        defaultArtifactReady = true
+                    } catch {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .failed,
+                            statusMessage: "默认成品下载失败",
+                            detailMessage: error.localizedDescription,
+                            progressFraction: progress.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
+                            progressBasis: progress.progressBasis,
+                            remoteStageKey: progress.stageKey,
+                            remotePhaseName: progress.phaseName,
+                            currentTier: progress.currentTier,
+                            runtimeMetrics: objectFastPublishRuntimeMetrics(
+                                stageKey: progress.stageKey,
+                                detail: error.localizedDescription,
+                                remoteJobId: jobId,
+                                defaultArtifactReady: false,
+                                remoteMetrics: progress.runtimeMetrics
+                            ),
+                            remoteJobId: jobId,
+                            failureReason: "object_fast_publish_default_download_failed"
+                        )
+                        loadRecords(scheduleRemoteResume: false)
+                        return
+                    }
+                } else {
+                    persistObjectFastPublishProgress(
+                        recordId: recordId,
+                        remoteJobId: jobId,
+                        progress: progress,
+                        defaultArtifactReady: true
+                    )
+                }
+            case .completed(let progress):
+                do {
+                    let relativePath: String
+                    let viewerManifestPath: String?
+                    let comparisonAssetPath: String?
+                    let comparisonMetricsPath: String?
+                    let hqAssetPath: String?
+                    let bundle = try await broker.downloadObjectModeViewerBundle(jobId: jobId)
+                    let persistedBundle = try persistObjectFastPublishViewerBundle(
+                        bundle,
+                        recordId: recordId
+                    )
+                    relativePath = persistedBundle.defaultArtifactRelativePath
+                    viewerManifestPath = persistedBundle.localManifestRelativePath
+                    comparisonAssetPath = persistedBundle.localComparisonAssetPath
+                    comparisonMetricsPath = persistedBundle.localComparisonMetricsPath
+                    hqAssetPath = persistedBundle.localHQArtifactPath
+                    persistObjectFastPublishCompleted(
+                        recordId: recordId,
+                        remoteJobId: jobId,
+                        progress: progress,
+                        artifactPath: relativePath,
+                        viewerManifestPath: viewerManifestPath,
+                        comparisonAssetPath: comparisonAssetPath,
+                        comparisonMetricsPath: comparisonMetricsPath,
+                        hqAssetPath: hqAssetPath
+                    )
+                } catch {
+                    store.updateProcessingState(
+                        recordId: recordId,
+                        status: .failed,
+                        statusMessage: "对象成品回传失败",
+                        detailMessage: error.localizedDescription,
+                        progressFraction: progress?.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
+                        progressBasis: progress?.progressBasis,
+                        remoteStageKey: progress?.stageKey,
+                        remotePhaseName: progress?.phaseName,
+                        currentTier: progress?.currentTier,
+                        runtimeMetrics: objectFastPublishRuntimeMetrics(
+                            stageKey: progress?.stageKey,
+                            detail: error.localizedDescription,
+                            remoteJobId: jobId,
+                            defaultArtifactReady: defaultArtifactReady,
+                            remoteMetrics: progress?.runtimeMetrics ?? [:]
+                        ),
+                        remoteJobId: jobId,
+                        failureReason: "object_fast_publish_complete_download_failed"
+                    )
+                    loadRecords(scheduleRemoteResume: false)
+                }
+                return
+            case .failed(let reason, let progress):
+                store.updateProcessingState(
+                    recordId: recordId,
+                    status: .failed,
+                    statusMessage: "新远端生成失败",
+                    detailMessage: reason,
+                    progressFraction: progress?.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
+                    progressBasis: progress?.progressBasis,
+                    remoteStageKey: progress?.stageKey,
+                    remotePhaseName: progress?.phaseName,
+                    currentTier: progress?.currentTier,
+                    runtimeMetrics: objectFastPublishRuntimeMetrics(
+                        stageKey: progress?.stageKey,
+                        detail: reason,
+                        remoteJobId: jobId,
+                        defaultArtifactReady: defaultArtifactReady,
+                        remoteMetrics: progress?.runtimeMetrics ?? [:]
+                    ),
+                    remoteJobId: jobId,
+                    failureReason: "object_fast_publish_failed"
+                )
+                loadRecords(scheduleRemoteResume: false)
+                return
+            }
+
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    private func isObjectFastPublishRecord(_ record: ScanRecord) -> Bool {
+        record.isObjectFastPublishV1
+    }
+
+    private func objectFastPublishPipelineProfile() -> [String: String] {
+        [
+            "strategy": "object_splatslam_v1",
+            "capture_mode": "guided_object",
+            "artifact_contract_version": "object_publish_v1",
+            "first_result_kind": "canonicalized_object_splat",
+            "hq_refine": "optional_graphdeco_3dgs",
+            "optional_mesh_export": "enabled",
+            "target_zone_mode": "subject",
+        ]
+    }
+
+    private func objectFastPublishRuntimeMetrics(
+        stageKey: String?,
+        detail: String?,
+        remoteJobId: String?,
+        defaultArtifactReady: Bool,
+        remoteMetrics: [String: String] = [:],
+        localViewerManifestPath: String? = nil,
+        localComparisonAssetPath: String? = nil,
+        localComparisonMetricsPath: String? = nil,
+        localHQArtifactPath: String? = nil
+    ) -> [String: String] {
+        var metrics = remoteMetrics
+        metrics["pipeline_strategy"] = "object_splatslam_v1"
+        metrics["artifact_contract_version"] = "object_publish_v1"
+        metrics["first_result_kind"] = "canonicalized_object_splat"
+        metrics["hq_refine"] = "optional_graphdeco_3dgs"
+        metrics["optional_mesh_export"] = "enabled"
+        metrics["default_artifact_ready"] = defaultArtifactReady ? "true" : "false"
+        if let stageKey, !stageKey.isEmpty {
+            metrics["remote_stage_key"] = stageKey
+        }
+        if let detail, !detail.isEmpty {
+            metrics["remote_detail"] = detail
+        }
+        if let remoteJobId, !remoteJobId.isEmpty {
+            metrics["remote_job_id"] = remoteJobId
+        }
+        if let localViewerManifestPath, !localViewerManifestPath.isEmpty {
+            metrics["local_viewer_manifest_path"] = localViewerManifestPath
+        }
+        if let localComparisonAssetPath, !localComparisonAssetPath.isEmpty {
+            metrics["local_comparison_asset_path"] = localComparisonAssetPath
+        }
+        if let localComparisonMetricsPath, !localComparisonMetricsPath.isEmpty {
+            metrics["local_comparison_metrics_path"] = localComparisonMetricsPath
+        }
+        if let localHQArtifactPath, !localHQArtifactPath.isEmpty {
+            metrics["local_hq_asset_path"] = localHQArtifactPath
+        }
+        return metrics
+    }
+
+    private func objectFastPublishStatus(for progress: RemoteJobProgress, defaultArtifactReady: Bool) -> ScanRecordStatus {
+        let stageKey = progress.stageKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        switch stageKey {
+        case "uploading":
+            return .uploading
+        case "queued":
+            return .queued
+        case "curate", "object_mask", "splatslam_prepare", "splatslam_bootstrap", "splatslam_tracking", "splatslam", "splatslam_mapping", "splatslam_finalize", "support_plane", "splat_cleanup":
+            return .reconstructing
+        case "hq_refine", "refine_3dgs":
+            return .training
+        case "publish_default_splat", "publish_default", "publish_hq", "optional_mesh_export", "artifact_upload":
+            return .packaging
+        case "downloading":
+            return .downloading
+        default:
+            return defaultArtifactReady ? .packaging : .reconstructing
+        }
+    }
+
+    private func persistObjectFastPublishProgress(
+        recordId: UUID,
+        remoteJobId: String,
+        progress: RemoteJobProgress,
+        defaultArtifactReady: Bool
+    ) {
+        let existingMetrics = store.record(id: recordId)?.runtimeMetrics
+        let status = objectFastPublishStatus(for: progress, defaultArtifactReady: defaultArtifactReady)
+        let detailSuffix = defaultArtifactReady ? "默认成品已可打开，HQ 会继续增强。" : nil
+        let detail: String? = {
+            let base = progress.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let base, !base.isEmpty, let detailSuffix {
+                return "\(base) \(detailSuffix)"
+            }
+            if let base, !base.isEmpty {
+                return base
+            }
+            return detailSuffix
+        }()
+
+        store.updateProcessingState(
+            recordId: recordId,
+            status: status,
+            statusMessage: progress.title ?? "正在生成对象成品",
+            detailMessage: detail,
+            progressFraction: progress.progressFraction,
+            progressBasis: progress.progressBasis,
+            remoteStageKey: progress.stageKey,
+            remotePhaseName: progress.phaseName,
+            currentTier: progress.currentTier,
+            runtimeMetrics: objectFastPublishRuntimeMetrics(
+                stageKey: progress.stageKey,
+                detail: progress.detail,
+                remoteJobId: remoteJobId,
+                defaultArtifactReady: defaultArtifactReady,
+                remoteMetrics: progress.runtimeMetrics,
+                localViewerManifestPath: existingMetrics?["local_viewer_manifest_path"],
+                localComparisonAssetPath: existingMetrics?["local_comparison_asset_path"],
+                localComparisonMetricsPath: existingMetrics?["local_comparison_metrics_path"]
+            ),
+            estimatedRemainingMinutes: progress.etaMinutes,
+            remoteJobId: remoteJobId
+        )
+        loadRecords(scheduleRemoteResume: false)
+    }
+
+    private func persistObjectFastPublishDefaultReady(
+        recordId: UUID,
+        remoteJobId: String,
+        progress: RemoteJobProgress,
+        artifactPath: String,
+        viewerManifestPath: String?,
+        comparisonAssetPath: String?,
+        comparisonMetricsPath: String?
+    ) {
+        guard var record = store.record(id: recordId) else { return }
+        let now = Date()
+        record.artifactPath = artifactPath
+        record.remoteJobId = remoteJobId
+        record.status = .packaging
+        record.statusMessage = progress.title ?? "默认成品已就绪"
+        record.detailMessage = "默认成品已下载，可从首页打开；HQ 会继续增强。"
+        record.progressFraction = max(progress.progressFraction ?? 0.92, 0.92)
+        record.progressBasis = progress.progressBasis
+        record.remoteStageKey = progress.stageKey
+        record.remotePhaseName = progress.phaseName
+        record.currentTier = progress.currentTier
+        record.runtimeMetrics = objectFastPublishRuntimeMetrics(
+            stageKey: progress.stageKey,
+            detail: progress.detail,
+            remoteJobId: remoteJobId,
+            defaultArtifactReady: true,
+            remoteMetrics: progress.runtimeMetrics,
+            localViewerManifestPath: viewerManifestPath,
+            localComparisonAssetPath: comparisonAssetPath,
+            localComparisonMetricsPath: comparisonMetricsPath,
+            localHQArtifactPath: nil
+        )
+        record.processingStartedAt = record.processingStartedAt ?? record.createdAt
+        record.processingCompletedAt = nil
+        record.processingElapsedSeconds = now.timeIntervalSince(record.processingStartedAt ?? record.createdAt)
+        record.updatedAt = now
+        store.saveRecord(record)
+        loadRecords(scheduleRemoteResume: false)
+    }
+
+    private func persistObjectFastPublishCompleted(
+        recordId: UUID,
+        remoteJobId: String,
+        progress: RemoteJobProgress?,
+        artifactPath: String,
+        viewerManifestPath: String?,
+        comparisonAssetPath: String?,
+        comparisonMetricsPath: String?,
+        hqAssetPath: String?
+    ) {
+        guard var record = store.record(id: recordId) else { return }
+        let now = Date()
+        let startedAt = record.processingStartedAt ?? record.createdAt
+        record.artifactPath = artifactPath
+        record.remoteJobId = nil
+        record.status = .completed
+        record.statusMessage = "对象成品已完成"
+        record.detailMessage = progress?.detail ?? "默认成品已完成，可从首页直接打开。"
+        record.progressFraction = 1.0
+        record.progressBasis = progress?.progressBasis
+        record.remoteStageKey = progress?.stageKey
+        record.remotePhaseName = progress?.phaseName
+        record.currentTier = progress?.currentTier
+        record.runtimeMetrics = objectFastPublishRuntimeMetrics(
+            stageKey: progress?.stageKey,
+            detail: progress?.detail,
+            remoteJobId: remoteJobId,
+            defaultArtifactReady: true,
+            remoteMetrics: progress?.runtimeMetrics ?? [:],
+            localViewerManifestPath: viewerManifestPath,
+            localComparisonAssetPath: comparisonAssetPath,
+            localComparisonMetricsPath: comparisonMetricsPath,
+            localHQArtifactPath: hqAssetPath
+        )
+        record.processingStartedAt = startedAt
+        record.processingCompletedAt = now
+        record.processingElapsedSeconds = max(0, now.timeIntervalSince(startedAt))
+        record.updatedAt = now
+        record.failureReason = nil
+        store.saveRecord(record)
+        loadRecords(scheduleRemoteResume: false)
+    }
+
+    private func persistObjectFastPublishArtifactFile(_ artifactURL: URL, recordId: UUID) throws -> String {
+        let exportsDirectory = store.baseDirectoryURL().appendingPathComponent("exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: exportsDirectory, withIntermediateDirectories: true)
+        let pathExtension = artifactURL.pathExtension.isEmpty ? "glb" : artifactURL.pathExtension.lowercased()
+        let targetURL = exportsDirectory.appendingPathComponent("\(recordId.uuidString).\(pathExtension)")
+        if artifactURL.standardizedFileURL.path == targetURL.standardizedFileURL.path {
+            return "exports/\(targetURL.lastPathComponent)"
+        }
+        if FileManager.default.fileExists(atPath: targetURL.path) {
+            try FileManager.default.removeItem(at: targetURL)
+        }
+        try FileManager.default.copyItem(at: artifactURL, to: targetURL)
+        return "exports/\(targetURL.lastPathComponent)"
+    }
+
+    private func persistObjectFastPublishViewerBundle(
+        _ bundle: BrokerDownloadedObjectModeViewerBundle,
+        recordId: UUID
+    ) throws -> HomePersistedObjectModeViewerBundle {
+        let exportsDirectory = store.baseDirectoryURL().appendingPathComponent("exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: exportsDirectory, withIntermediateDirectories: true)
+
+        func copyArtifact(_ sourceURL: URL, fileName: String) throws -> URL {
+            let destinationURL = exportsDirectory.appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+            return destinationURL
+        }
+
+        let defaultExtension = bundle.defaultArtifact.localURL.pathExtension.isEmpty ? "ply" : bundle.defaultArtifact.localURL.pathExtension.lowercased()
+        let defaultDestinationURL = try copyArtifact(
+            bundle.defaultArtifact.localURL,
+            fileName: "\(recordId.uuidString).\(defaultExtension)"
+        )
+
+        var cleanedRelativePath: String?
+        if let comparisonArtifact = bundle.comparisonArtifact {
+            let cleanedExtension = comparisonArtifact.localURL.pathExtension.isEmpty ? "ply" : comparisonArtifact.localURL.pathExtension.lowercased()
+            let cleanedURL = try copyArtifact(
+                comparisonArtifact.localURL,
+                fileName: "\(recordId.uuidString).cleanup.\(cleanedExtension)"
+            )
+            cleanedRelativePath = "exports/\(cleanedURL.lastPathComponent)"
+        }
+
+        var compareMetricsRelativePath: String?
+        if let comparisonMetrics = bundle.comparisonMetrics {
+            let compareExtension = comparisonMetrics.localURL.pathExtension.isEmpty ? "json" : comparisonMetrics.localURL.pathExtension.lowercased()
+            let compareURL = try copyArtifact(
+                comparisonMetrics.localURL,
+                fileName: "\(recordId.uuidString).cleanup_compare.\(compareExtension)"
+            )
+            compareMetricsRelativePath = "exports/\(compareURL.lastPathComponent)"
+        }
+
+        var hqRelativePath: String?
+        if let hqArtifact = bundle.hqArtifact {
+            let hqExtension = hqArtifact.localURL.pathExtension.isEmpty ? "splat" : hqArtifact.localURL.pathExtension.lowercased()
+            let hqURL = try copyArtifact(
+                hqArtifact.localURL,
+                fileName: "\(recordId.uuidString).hq.\(hqExtension)"
+            )
+            hqRelativePath = "exports/\(hqURL.lastPathComponent)"
+        }
+
+        var remoteManifestPayload: [String: Any] = [:]
+        if let remoteManifest = bundle.viewerManifest,
+           let data = try? Data(contentsOf: remoteManifest.localURL),
+           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            remoteManifestPayload = payload
+        }
+
+        var localManifestPayload: [String: Any] = [
+            "version": remoteManifestPayload["version"] ?? "object_publish_v1",
+            "default_asset": [
+                "kind": bundle.defaultArtifact.format,
+                "path": defaultDestinationURL.lastPathComponent,
+                "ready": true,
+            ],
+        ]
+        if let cleanedRelativePath {
+            localManifestPayload["cleaned_asset"] = [
+                "kind": bundle.comparisonArtifact?.format ?? "ply",
+                "path": URL(fileURLWithPath: cleanedRelativePath).lastPathComponent,
+                "ready": true,
+            ]
+        }
+        if let compareMetricsRelativePath {
+            localManifestPayload["cleanup_compare"] = [
+                "kind": "json",
+                "path": URL(fileURLWithPath: compareMetricsRelativePath).lastPathComponent,
+                "ready": true,
+            ]
+        }
+        if let hqRelativePath {
+            localManifestPayload["hq_asset"] = [
+                "kind": bundle.hqArtifact?.format ?? "splat",
+                "path": URL(fileURLWithPath: hqRelativePath).lastPathComponent,
+                "ready": true,
+            ]
+        }
+        if let cameraPreset = remoteManifestPayload["camera_preset"] {
+            localManifestPayload["camera_preset"] = cameraPreset
+        }
+        if let supportPatchBounds = remoteManifestPayload["support_patch_bounds"] {
+            localManifestPayload["support_patch_bounds"] = supportPatchBounds
+        }
+
+        let localManifestURL = exportsDirectory.appendingPathComponent("\(recordId.uuidString).viewer_manifest.json")
+        if FileManager.default.fileExists(atPath: localManifestURL.path) {
+            try FileManager.default.removeItem(at: localManifestURL)
+        }
+        let manifestData = try JSONSerialization.data(withJSONObject: localManifestPayload, options: [.prettyPrinted, .sortedKeys])
+        try manifestData.write(to: localManifestURL, options: .atomic)
+
+        return HomePersistedObjectModeViewerBundle(
+            defaultArtifactRelativePath: "exports/\(defaultDestinationURL.lastPathComponent)",
+            localManifestRelativePath: "exports/\(localManifestURL.lastPathComponent)",
+            localComparisonAssetPath: cleanedRelativePath,
+            localComparisonMetricsPath: compareMetricsRelativePath,
+            localHQArtifactPath: hqRelativePath
+        )
     }
 
     private func failureDetail(for reason: FailReason) -> String {

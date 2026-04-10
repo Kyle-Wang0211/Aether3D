@@ -26,6 +26,7 @@ struct ScanView: View {
     @State private var completedRecord: ScanRecord?
     @State private var showViewer = false
     @State private var hasHandedOffToProcessing = false
+    @State private var stopBlockedAlertMessage: String?
 
     init(processingBackend: ProcessingBackendChoice = ProcessingBackendChoice.currentSelection()) {
         let normalizedBackend = processingBackend.normalizedForActiveUse
@@ -105,7 +106,9 @@ struct ScanView: View {
                         isCapturing: viewModel.scanState == .capturing,
                         modeTitle: isSubjectFirstMode ? nil : "标准扫描模式",
                         helperText: isSubjectFirstMode
-                            ? nil
+                            ? (viewModel.subjectFirstCaptureCanFinishLocally
+                                ? "已满足当前本地结束条件；满意就可以结束。"
+                                : "还没到本地结束条件；先按提示补新角度或补够关键帧。")
                             : "围绕场景缓慢移动，尽量补全主要视角。",
                         onStart: { viewModel.startCapture(processingBackend: processingBackend) },
                         onStop: { handleStop() },
@@ -129,6 +132,32 @@ struct ScanView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             viewModel.setForegroundActive(newPhase == .active)
+        }
+        .alert(
+            "还不能结束",
+            isPresented: Binding(
+                get: { stopBlockedAlertMessage != nil },
+                set: { presented in
+                    if !presented {
+                        stopBlockedAlertMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button("继续拍摄", role: .cancel) {
+                stopBlockedAlertMessage = nil
+            }
+            Button("仍然结束", role: .destructive) {
+                let blockedMessage = stopBlockedAlertMessage
+                stopBlockedAlertMessage = nil
+                NSLog(
+                    "[Aether3D] handleStop: overriding local subject-first finish gate after user confirmation: %@",
+                    blockedMessage ?? "(missing detail)"
+                )
+                proceedWithStop()
+            }
+        } message: {
+            Text("\(stopBlockedAlertMessage ?? "")\n\n如果你现在就结束，结果可能会比继续补新角度更不完整。")
         }
 #if canImport(UIKit) && canImport(Metal)
         .fullScreenCover(isPresented: $showViewer) {
@@ -361,7 +390,9 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
             }
 
             Text(
-                "当前方案：\(processingBackend.displayLabel) · \(FrameSamplingProfile.currentSelection().displayLabel)。云端高质量会走当前成功链；本地处理会优先在手机上给出单目预览。"
+                processingBackend == .localSubjectFirst
+                    ? "当前方案：\(processingBackend.displayLabel)。本地方案固定走全量输入，优先在手机上直接完成单目本地处理。"
+                    : "当前方案：\(processingBackend.displayLabel) · \(FrameSamplingProfile.currentSelection().displayLabel)。云端高质量会走当前成功链。"
             )
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.48))
@@ -378,9 +409,10 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
     }
 
     private var subjectFirstCaptureDashboard: some View {
+        let keyframeProgress = viewModel.subjectFirstCaptureMinimumProgressFraction
         let progressTint: Color =
-            viewModel.captureKeyframeProgressFraction >= 1.0 ? .green :
-            (viewModel.captureKeyframeProgressFraction >= 0.6 ? .orange : .cyan)
+            keyframeProgress >= 1.0 ? .green :
+            (keyframeProgress >= 0.6 ? .orange : .cyan)
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -390,12 +422,21 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
 
                 Spacer()
 
-                Text("\(viewModel.debugSelectedFrames) / \(max(viewModel.captureKeyframeRecommendedTarget, 1))")
+                Text(viewModel.subjectFirstCaptureMinimumProgressText)
                     .font(.system(size: 17, weight: .bold, design: .rounded))
                     .foregroundColor(.white.opacity(0.92))
             }
 
-            keyframeProgressBar(tint: progressTint)
+            progressBar(progress: keyframeProgress, tint: progressTint, height: 12)
+
+            Text(viewModel.subjectFirstCaptureMinimumGuidanceText)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.58))
+
+            Text(viewModel.subjectFirstCaptureHUDHint)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.58))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(18)
         .background(
@@ -536,9 +577,8 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
         )
     }
 
-    private func keyframeProgressBar(tint: Color) -> some View {
-        let targetCount = max(viewModel.captureKeyframeRecommendedTarget, 1)
-        let progressFraction = min(1.0, Double(viewModel.debugSelectedFrames) / Double(targetCount))
+    private func progressBar(progress: Double, tint: Color, height: CGFloat) -> some View {
+        let progressFraction = min(max(progress, 0.0), 1.0)
 
         return GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
@@ -550,7 +590,34 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
                     .frame(width: width * CGFloat(progressFraction))
             }
         }
-        .frame(height: 12)
+        .frame(height: height)
+    }
+
+    private func metricProgressRow(
+        title: String,
+        valueText: String,
+        progress: Double,
+        tint: Color,
+        detailText: String? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.88))
+                Spacer()
+                Text(valueText)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.92))
+            }
+            progressBar(progress: progress, tint: tint, height: 8)
+            if let detailText, !detailText.isEmpty {
+                Text(detailText)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.54))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private enum OverlayButtonStyle {
@@ -591,10 +658,29 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
     }
 
     private func handleStop() {
+        guard !hasHandedOffToProcessing else { return }
+
+        if processingBackend == .localSubjectFirst,
+           let blockMessage = viewModel.subjectFirstCaptureFinishBlockMessage {
+            NSLog("[Aether3D] handleStop: blocked local subject-first finish: %@", blockMessage)
+            stopBlockedAlertMessage = blockMessage
+            return
+        }
+
+        proceedWithStop()
+    }
+
+    private func proceedWithStop() {
+        guard !hasHandedOffToProcessing else { return }
+
         NSLog("[Aether3D] handleStop: IMMEDIATE navigation to viewer")
+        if processingBackend == .localSubjectFirst {
+            viewModel.beginViewerTransitionForegroundGrace()
+        }
 
         let recordId = UUID()
-        let frameSamplingProfile = FrameSamplingProfile.currentSelection()
+        let frameSamplingProfile: FrameSamplingProfile =
+            processingBackend == .localSubjectFirst ? .full : FrameSamplingProfile.currentSelection()
         let captureGravity = viewModel.captureGravityMetadata()
         let record = ScanRecord(
             id: recordId,
@@ -629,8 +715,8 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
             viewModel.transition(to: .finishing)
         }
 
-        showViewer = true
         viewModel.startBackgroundExport(recordId: recordId, processingBackend: processingBackend)
+        showViewer = true
     }
 
     private func transitionToSafeTerminalState() {
@@ -649,9 +735,14 @@ private struct LiveSparseDenseMapOverlayView: UIViewRepresentable {
     }
 
     private var stopDetailMessage: String {
-        processingBackend == .cloud
-            ? "现在会进入黑色等待页。你可以留在这里，也可以返回主页稍后继续。"
-            : "现在会进入等待页；手机会先读取这段录制视频，再按深度先验 → 初始化高斯 → 本地 refine → cutout → cleanup 这条链路继续处理。"
+        if processingBackend == .cloud {
+            return "现在会进入黑色等待页。你可以留在这里，也可以返回主页稍后继续。"
+        }
+        if processingBackend == .localSubjectFirst &&
+            viewModel.usesLiveLocalCoordinatorHandoffAfterStop {
+            return "现在会进入等待页；会直接沿用拍摄阶段已经通过当前本地标准的关键帧继续训练，不再重新导入视频再审一遍。"
+        }
+        return "现在会进入等待页；手机会先读取这段录制视频，再按深度先验 → 初始化高斯 → 本地 refine → cutout → cleanup 这条链路继续处理。"
     }
 }
 #endif

@@ -1521,7 +1521,7 @@ public final class PipelineRunner: @unchecked Sendable {
         }
 
         let uploadMonitor = BrokerUploadMonitor()
-        let uploadTask = Task { [weak self] in
+        _ = Task { [weak self] in
             guard let self else { return }
             do {
                 await brokerClient.sendClientEvent(
@@ -1566,9 +1566,10 @@ public final class PipelineRunner: @unchecked Sendable {
                 try await uploadMonitor.reconcile(with: status)
             }
         )
-        _ = await prepareFinalizationTask.result
-        _ = await uploadTask.result
-        try await uploadMonitor.throwIfFailed()
+        // Once the artifact is back on-device, finish immediately instead of
+        // waiting on background-upload bookkeeping that can linger after the
+        // remote job is already done.
+        prepareFinalizationTask.cancel()
         let url = try self.writeSplatToDocuments(data: splatData, format: format, jobId: jobId)
         let artifact = ArtifactRef(localPath: url, format: format)
         let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)

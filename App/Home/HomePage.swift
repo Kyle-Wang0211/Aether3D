@@ -34,12 +34,20 @@ struct HomePage: View {
         case en
     }
 
+    private enum HomeProcessingMode: String {
+        case remote
+        case remoteV2
+        case local
+    }
+
     @StateObject private var viewModel = HomeViewModel()
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(FrameSamplingProfile.userDefaultsKey) private var selectedFrameSamplingProfileRaw = FrameSamplingProfile.full.rawValue
     @AppStorage(ProcessingBackendChoice.userDefaultsKey) private var selectedProcessingBackendRaw = ProcessingBackendChoice.cloud.rawValue
+    @AppStorage("aether.homeProcessingMode") private var homeProcessingModeRaw = HomeProcessingMode.remote.rawValue
     @AppStorage("aether.homeLanguage") private var homeLanguageRaw = HomeLanguage.zh.rawValue
     @State private var navigateToScan = false
+    @State private var navigateToObjectModeV2 = false
     @State private var selectedRecord: ScanRecord?
     @State private var showViewer = false
 
@@ -57,15 +65,20 @@ struct HomePage: View {
     }
 
     private var selectedProcessingBackend: ProcessingBackendChoice {
-        ProcessingBackendChoice.resolvedStoredSelection(rawValue: selectedProcessingBackendRaw)
+        switch selectedHomeProcessingMode {
+        case .remote, .remoteV2:
+            return .cloud
+        case .local:
+            return .localSubjectFirst
+        }
     }
 
     private var effectiveSelectedProcessingBackend: ProcessingBackendChoice {
         selectedProcessingBackend
     }
 
-    private var displayedProcessingBackends: [ProcessingBackendChoice] {
-        [.cloud, .localSubjectFirst]
+    private var selectedHomeProcessingMode: HomeProcessingMode {
+        HomeProcessingMode(rawValue: homeProcessingModeRaw) ?? .remote
     }
 
     private var homeLanguage: HomeLanguage {
@@ -168,6 +181,14 @@ struct HomePage: View {
         ) {
             ScanView(processingBackend: effectiveSelectedProcessingBackend)
         }
+        .fullScreenCover(
+            isPresented: $navigateToObjectModeV2,
+            onDismiss: {
+                viewModel.loadRecords()
+            }
+        ) {
+            ObjectModeV2CaptureView()
+        }
         #endif
         #if canImport(UIKit) && canImport(Metal)
         .fullScreenCover(
@@ -178,15 +199,27 @@ struct HomePage: View {
             }
         ) {
             if let record = selectedRecord {
-                SplatViewerView(
-                    record: record,
-                    homeViewModel: viewModel,
-                    onReturnHome: {
-                        viewModel.loadRecords()
-                        selectedRecord = nil
-                        showViewer = false
-                    }
-                )
+                if record.isObjectFastPublishV1 {
+                    ObjectFastPublishRecordViewer(
+                        record: record,
+                        homeViewModel: viewModel,
+                        onDismiss: {
+                            viewModel.loadRecords()
+                            selectedRecord = nil
+                            showViewer = false
+                        }
+                    )
+                } else {
+                    SplatViewerView(
+                        record: record,
+                        homeViewModel: viewModel,
+                        onReturnHome: {
+                            viewModel.loadRecords()
+                            selectedRecord = nil
+                            showViewer = false
+                        }
+                    )
+                }
             } else {
                 ZStack {
                     Color.black.ignoresSafeArea()
@@ -308,7 +341,9 @@ struct HomePage: View {
                             Label(
                                 record.resolvedProcessingBackend.usesLocalPreviewPipeline
                                     ? t("重新运行本地处理", "Run Local Processing Again")
-                                    : t("重试远端", "Retry Remote"),
+                                    : (record.isObjectFastPublishV1
+                                        ? t("重试新远端", "Retry New Remote")
+                                        : t("重试远端", "Retry Remote")),
                                 systemImage: "arrow.clockwise"
                             )
                         }
@@ -321,7 +356,9 @@ struct HomePage: View {
                             Label(
                                 record.resolvedProcessingBackend.usesLocalPreviewPipeline
                                     ? t("重新运行本地处理", "Run Local Processing Again")
-                                    : t("重新发送到丹麦 5090", "Resend to Denmark 5090"),
+                                    : (record.isObjectFastPublishV1
+                                        ? t("重新发送到新远端", "Resend to New Remote")
+                                        : t("重新发送到丹麦 5090", "Resend to Denmark 5090")),
                                 systemImage: "arrow.clockwise"
                             )
                         }
@@ -347,7 +384,7 @@ struct HomePage: View {
                 .font(.system(size: 17))
                 .foregroundColor(.gray)
 
-            Text(t("你可以直接拍摄，也可以先选一个已有视频，按远端高质量或本地处理两条方案处理。", "You can start recording right away, or choose an existing video and process it with either remote high quality or local processing."))
+            Text(t("你可以直接拍摄，也可以先选一个已有视频，按远端高质量、新远端或本地处理三条方案处理。", "You can start recording right away, or choose an existing video and process it with remote high quality, new remote, or local processing."))
                 .font(.system(size: 13))
                 .multilineTextAlignment(.center)
                 .foregroundColor(.white.opacity(0.52))
@@ -425,7 +462,11 @@ struct HomePage: View {
             #endif
             selectedRecord = nil
             showViewer = false
-            navigateToScan = true
+            if selectedHomeProcessingMode == .remoteV2 {
+                navigateToObjectModeV2 = true
+            } else {
+                navigateToScan = true
+            }
         }) {
             Text(t("开始拍摄", "Start Capture"))
                 .font(.system(size: 17, weight: .bold))
@@ -471,14 +512,14 @@ struct HomePage: View {
             Text(t("处理方案", "Processing Mode"))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(.white)
-            Text(t("这里只有两条主路线：远端高质量和本地处理。本地方案就是手机本地链路。", "There are only two main routes here: remote high quality and local processing. The local route is simply the on-device pipeline."))
+            Text(t("这里先给你三条入口：远端高质量、新远端和本地处理。新远端是对象模式 V2 入口。", "There are three entry routes here: remote high quality, new remote, and local processing. New Remote is the Object Mode V2 entry."))
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.60))
 
             HStack(spacing: 10) {
-                ForEach(displayedProcessingBackends, id: \.rawValue) { backend in
-                    processingBackendButton(backend)
-                }
+                processingModeButton(.remote)
+                processingModeButton(.remoteV2)
+                processingModeButton(.local)
             }
         }
         .padding(14)
@@ -494,25 +535,33 @@ struct HomePage: View {
         .padding(.horizontal, 16)
     }
 
-    private func processingBackendButton(_ backend: ProcessingBackendChoice) -> some View {
-        let isSelected = effectiveSelectedProcessingBackend == backend
+    private func processingModeButton(_ mode: HomeProcessingMode) -> some View {
+        let isSelected = selectedHomeProcessingMode == mode
         return Button {
-            selectedProcessingBackendRaw = backend.rawValue
+            homeProcessingModeRaw = mode.rawValue
+            selectedProcessingBackendRaw = canonicalBackend(for: mode).rawValue
         } label: {
-            VStack(spacing: 4) {
-                Text(processingBackendTitle(backend))
+            VStack(spacing: 5) {
+                Image(systemName: processingModeIcon(mode))
                     .font(.system(size: 15, weight: .bold))
-                Text(processingBackendDetail(backend))
+
+                Text(processingModeTitle(mode))
+                    .font(.system(size: 15, weight: .bold))
+
+                Text(processingModeDetail(mode))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(isSelected ? Color.black.opacity(0.70) : Color.white.opacity(0.58))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
             }
             .foregroundColor(isSelected ? .black : .white)
             .frame(maxWidth: .infinity)
-            .frame(height: 56)
-            .background(isSelected ? Color.white : Color.white.opacity(0.06))
+            .frame(height: 72)
+            .background(processingModeBackground(mode: mode, isSelected: isSelected))
             .overlay(
                 RoundedRectangle(cornerRadius: 16)
-                    .stroke(isSelected ? Color.white : Color.white.opacity(0.08), lineWidth: 1)
+                    .stroke(processingModeStroke(mode: mode, isSelected: isSelected), lineWidth: 1)
             )
             .cornerRadius(16)
         }
@@ -545,33 +594,50 @@ struct HomePage: View {
     }
 
     private var secondaryActionButton: some View {
-        let selectVideoTitle = useEnglish ? "Choose Video" : "选择视频"
+        let useGuidedOnlyFlow = selectedHomeProcessingMode == .remoteV2
+        let selectVideoTitle = useGuidedOnlyFlow
+            ? (useEnglish ? "Guided Only" : "仅支持拍摄")
+            : (useEnglish ? "Choose Video" : "选择视频")
         return Group {
             #if canImport(PhotosUI)
-            PhotosPicker(
-                selection: $selectedVideoItem,
-                matching: .videos,
-                photoLibrary: .shared()
-            ) {
+            if useGuidedOnlyFlow {
                 HStack(spacing: 8) {
-                    Image(systemName: "film")
+                    Image(systemName: "viewfinder")
                     Text(selectVideoTitle)
                 }
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.white)
+                .foregroundColor(.white.opacity(0.45))
                 .frame(maxWidth: .infinity)
                 .frame(height: 56)
-                .background(Color.white.opacity(0.10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 28)
-                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                )
+                .background(Color.white.opacity(0.06))
+                .overlay(RoundedRectangle(cornerRadius: 28).stroke(Color.white.opacity(0.10), lineWidth: 1))
                 .cornerRadius(28)
+            } else {
+                PhotosPicker(
+                    selection: $selectedVideoItem,
+                    matching: .videos,
+                    photoLibrary: .shared()
+                ) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "film")
+                        Text(selectVideoTitle)
+                    }
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 56)
+                    .background(Color.white.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28)
+                            .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                    )
+                    .cornerRadius(28)
+                }
             }
             #else
             Button(action: {}) {
                 HStack(spacing: 8) {
-                    Image(systemName: "film")
+                    Image(systemName: useGuidedOnlyFlow ? "viewfinder" : "film")
                     Text(selectVideoTitle)
                 }
                 .font(.system(size: 16, weight: .semibold))
@@ -640,6 +706,436 @@ struct HomePage: View {
 
 }
 
+private struct ObjectFastPublishRecordViewer: View {
+    @Environment(\.scenePhase) private var scenePhase
+    let record: ScanRecord
+    @ObservedObject var homeViewModel: HomeViewModel
+    let onDismiss: () -> Void
+
+    @State private var currentRecord: ScanRecord
+    @State private var refreshTask: Task<Void, Never>?
+    @State private var showDefaultArtifact = false
+
+    init(record: ScanRecord, homeViewModel: HomeViewModel, onDismiss: @escaping () -> Void) {
+        self.record = record
+        self.homeViewModel = homeViewModel
+        self.onDismiss = onDismiss
+        _currentRecord = State(initialValue: record)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.ignoresSafeArea()
+
+            if let artifactURL, currentRecord.status == .completed {
+                ObjectModeV2DefaultArtifactViewer(
+                    url: artifactURL,
+                    manifestURL: viewerManifestURL,
+                    onDismiss: onDismiss
+                )
+            } else {
+                ObjectModeV2ProcessingSurface(
+                    snapshot: processingSnapshot,
+                    onOpen: artifactURL != nil ? {
+                        showDefaultArtifact = true
+                    } : nil,
+                    onClose: onDismiss
+                )
+            }
+        }
+        .fullScreenCover(isPresented: $showDefaultArtifact) {
+            if let artifactURL {
+                ObjectModeV2DefaultArtifactViewer(url: artifactURL, manifestURL: viewerManifestURL) {
+                    showDefaultArtifact = false
+                }
+            } else {
+                Color.black.ignoresSafeArea()
+            }
+        }
+        .onAppear {
+            forceRemoteRefresh()
+            startRefreshLoop()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            forceRemoteRefresh()
+        }
+        .onDisappear {
+            refreshTask?.cancel()
+            refreshTask = nil
+        }
+    }
+
+    private var artifactURL: URL? {
+        guard let relativePath = currentRecord.artifactPath, !relativePath.isEmpty else { return nil }
+        return ScanRecordStore().baseDirectoryURL().appendingPathComponent(relativePath)
+    }
+
+    private var viewerManifestURL: URL? {
+        guard let relativePath = currentRecord.runtimeMetrics?["local_viewer_manifest_path"],
+              !relativePath.isEmpty else { return nil }
+        return ScanRecordStore().baseDirectoryURL().appendingPathComponent(relativePath)
+    }
+
+    private var statusHero: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("OBJECT MODE BETA")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.white.opacity(0.52))
+
+            Text(currentRecord.displayStatusMessage)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(.white)
+
+            Text(currentRecord.detailMessage ?? "新远端对象模式会先生成默认成品，再继续增强 HQ。")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white.opacity(0.70))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var contextCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                statusChip(title: "状态", value: currentRecord.status.rawValue.capitalized, tint: statusTint)
+                statusChip(title: "进度", value: currentRecord.progressPercentText ?? "--", tint: .white.opacity(0.14))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                ProgressView(value: min(max(currentRecord.displayProgressFraction, 0.02), currentRecord.status == .completed ? 1.0 : 0.99))
+                    .tint(statusTint)
+
+                HStack {
+                    Text(currentRecord.remoteStageKey ?? "waiting")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.72))
+                    Spacer()
+                    if let eta = currentRecord.estimatedRemainingMinutes {
+                        Text("约 \(eta) 分钟")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.60))
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 22)
+                .fill(Color.white.opacity(0.07))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+
+    private func artifactReadyCard(artifactURL: URL) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("默认成品已就绪")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.white)
+
+            Text("你可以先打开默认成品继续看；如果 HQ 还在跑，系统会继续增强。")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.white.opacity(0.68))
+
+            HStack(spacing: 12) {
+                Button(action: {
+                    showDefaultArtifact = true
+                }) {
+                    Text("Open Default")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.white)
+                        .clipShape(Capsule())
+                }
+
+                ShareLink(item: artifactURL) {
+                    Text("分享文件")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(Capsule())
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 22)
+                .fill(Color(red: 0.10, green: 0.18, blue: 0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(Color.green.opacity(0.30), lineWidth: 1)
+                )
+        )
+    }
+
+    private var detailCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("任务详情")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(.white)
+
+            if let remoteJobId = currentRecord.remoteJobId, !remoteJobId.isEmpty {
+                Text("Job ID: \(remoteJobId)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.55))
+            }
+
+            if let detail = currentRecord.detailMessage, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 22)
+                .fill(Color.white.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+
+    private func statusChip(title: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.white.opacity(0.48))
+            Text(value)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(tint)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var statusTint: Color {
+        switch currentRecord.status {
+        case .failed:
+            return Color.red.opacity(0.22)
+        case .completed:
+            return Color.green.opacity(0.22)
+        default:
+            return Color.white.opacity(0.10)
+        }
+    }
+
+    private var processingSnapshot: ObjectModeV2ProcessingSnapshot {
+        let lockAccent = Color(red: 0.95, green: 0.79, blue: 0.12)
+        #if canImport(UIKit)
+        return ObjectModeV2ProcessingSnapshot(
+            heroBadge: "OBJECT MODE BETA",
+            heroTitle: processingHeroTitle,
+            heroSubtitle: processingHeroSubtitle,
+            heroImage: heroImage,
+            canOpenArtifact: artifactURL != nil,
+            isFailed: currentRecord.status == .failed,
+            modeValue: "Guided",
+            lockValue: "Open",
+            lockAccent: lockAccent,
+            stageCards: processingStageCards,
+            stats: [
+                .init(title: "Frames", value: acceptedFramesText),
+                .init(title: "Orbit", value: orbitText),
+                .init(title: "Status", value: processingStatusSummary)
+            ],
+            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
+        )
+        #else
+        return ObjectModeV2ProcessingSnapshot(
+            heroBadge: "OBJECT MODE BETA",
+            heroTitle: processingHeroTitle,
+            heroSubtitle: processingHeroSubtitle,
+            canOpenArtifact: artifactURL != nil,
+            isFailed: currentRecord.status == .failed,
+            modeValue: "Guided",
+            lockValue: "Open",
+            lockAccent: lockAccent,
+            stageCards: processingStageCards,
+            stats: [
+                .init(title: "Frames", value: acceptedFramesText),
+                .init(title: "Orbit", value: orbitText),
+                .init(title: "Status", value: processingStatusSummary)
+            ],
+            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
+        )
+        #endif
+    }
+
+    #if canImport(UIKit)
+    private var heroImage: UIImage? {
+        guard let relativePath = currentRecord.thumbnailPath, !relativePath.isEmpty else { return nil }
+        let url = ScanRecordStore().baseDirectoryURL().appendingPathComponent(relativePath)
+        return UIImage(contentsOfFile: url.path)
+    }
+    #endif
+
+    private var acceptedFramesText: String {
+        currentRecord.runtimeMetrics?["accepted_live_frames"] ?? "--"
+    }
+
+    private var orbitText: String {
+        if let orbit = currentRecord.runtimeMetrics?["orbit_completion_percent"], !orbit.isEmpty {
+            return "\(orbit)%"
+        }
+        return "--"
+    }
+
+    private var processingStatusSummary: String {
+        switch currentRecord.status {
+        case .failed:
+            return "Failed"
+        case .completed:
+            return "Done"
+        case .queued:
+            return "Queued"
+        default:
+            return "Live"
+        }
+    }
+
+    private var processingHeroTitle: String {
+        switch currentRecord.status {
+        case .failed:
+            return "对象成品生成失败"
+        case .completed:
+            return "对象成品已完成"
+        default:
+            return "正在生成对象成品"
+        }
+    }
+
+    private var processingHeroSubtitle: String {
+        if let detail = currentRecord.detailMessage, !detail.isEmpty {
+            return detail
+        }
+        if currentRecord.status == .failed {
+            return currentRecord.failureReason ?? "远端任务失败。"
+        }
+        return "系统会先生成默认成品；下载完成后即可打开，HQ 会继续增强。"
+    }
+
+    private var processingStageCards: [ObjectModeV2StageCard] {
+        [
+            ObjectModeV2StageCard(
+                id: .defaultStage,
+                title: "Default",
+                subtitle: "默认成品",
+                state: defaultStageState
+            ),
+            ObjectModeV2StageCard(
+                id: .hq,
+                title: "HQ",
+                subtitle: "高清成品",
+                state: hqStageState
+            )
+        ]
+    }
+
+    private var defaultStageState: ObjectModeV2StageUIState {
+        if currentRecord.status == .failed {
+            return .failed(currentRecord.failureReason ?? currentRecord.detailMessage)
+        }
+        if artifactURL != nil || currentRecord.status == .completed {
+            return .ready
+        }
+        return .processing(defaultStageProgress)
+    }
+
+    private var hqStageState: ObjectModeV2StageUIState {
+        if currentRecord.status == .failed {
+            return .idle
+        }
+        if currentRecord.status == .completed {
+            return .ready
+        }
+
+        let stageKey = normalizedStageKey
+        switch stageKey {
+        case "hq_refine", "refine_3dgs":
+            return .processing(max(currentRecord.displayProgressFraction, 0.45))
+        case "artifact_upload" where artifactURL != nil:
+            return .processing(max(currentRecord.displayProgressFraction, 0.99))
+        case "publish_hq":
+            return .processing(max(currentRecord.displayProgressFraction, 0.92))
+        default:
+            return artifactURL != nil ? .processing(0.12) : .idle
+        }
+    }
+
+    private var defaultStageProgress: Double {
+        let fraction = currentRecord.displayProgressFraction
+        switch normalizedStageKey {
+        case "queued":
+            return max(fraction, 0.18)
+        case "curate":
+            return max(fraction, 0.22)
+        case "object_mask":
+            return max(fraction, 0.34)
+        case "splatslam_prepare":
+            return max(fraction, 0.46)
+        case "splatslam_bootstrap":
+            return max(fraction, 0.52)
+        case "splatslam_tracking":
+            return max(fraction, 0.56)
+        case "splatslam", "splatslam_mapping":
+            return max(fraction, 0.58)
+        case "splatslam_finalize":
+            return max(fraction, 0.74)
+        case "publish_default_splat":
+            return max(fraction, 0.82)
+        case "artifact_upload":
+            return max(fraction, 0.88)
+        case "support_plane":
+            return max(fraction, 0.72)
+        case "splat_cleanup":
+            return max(fraction, 0.82)
+        case "optional_mesh_export":
+            return max(fraction, 0.88)
+        case "publish_default", "export":
+            return max(fraction, 0.94)
+        default:
+            return max(fraction, 0.12)
+        }
+    }
+
+    private var normalizedStageKey: String {
+        (currentRecord.remoteStageKey ?? currentRecord.runtimeMetrics?["remote_stage_key"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func refreshCurrentRecord() {
+        currentRecord = homeViewModel.refreshRecord(id: record.id) ?? currentRecord
+    }
+
+    private func forceRemoteRefresh() {
+        refreshCurrentRecord()
+        homeViewModel.resumeRemoteJobIfNeeded(currentRecord, force: true)
+    }
+
+    private func startRefreshLoop() {
+        refreshTask?.cancel()
+        refreshTask = Task { @MainActor in
+            while !Task.isCancelled {
+                refreshCurrentRecord()
+                homeViewModel.resumeRemoteJobIfNeeded(currentRecord, force: false)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+        }
+    }
+}
+
 private extension HomePage {
     var languageToggleButton: some View {
         Button {
@@ -702,20 +1198,90 @@ private extension HomePage {
         }
     }
 
-    func processingBackendTitle(_ backend: ProcessingBackendChoice) -> String {
-        let backend = backend.normalizedForActiveUse
-        if !useEnglish {
-            return backend == .cloud ? "远端" : "本地"
+    private func canonicalBackend(for mode: HomeProcessingMode) -> ProcessingBackendChoice {
+        switch mode {
+        case .remote, .remoteV2:
+            return .cloud
+        case .local:
+            return .localSubjectFirst
         }
-        return backend == .cloud ? "Remote" : "Local"
     }
 
-    func processingBackendDetail(_ backend: ProcessingBackendChoice) -> String {
-        let backend = backend.normalizedForActiveUse
+    private func processingModeTitle(_ mode: HomeProcessingMode) -> String {
         if !useEnglish {
-            return backend == .cloud ? "高质量" : "本地处理"
+            switch mode {
+            case .remote:
+                return "远端"
+            case .remoteV2:
+                return "新远端"
+            case .local:
+                return "本地"
+            }
         }
-        return backend == .cloud ? "High Quality" : "Local Processing"
+        switch mode {
+        case .remote:
+            return "Remote"
+        case .remoteV2:
+            return "New Remote"
+        case .local:
+            return "Local"
+        }
+    }
+
+    private func processingModeDetail(_ mode: HomeProcessingMode) -> String {
+        if !useEnglish {
+            switch mode {
+            case .remote:
+                return "高质量"
+            case .remoteV2:
+                return "对象模式 V2"
+            case .local:
+                return "本地处理"
+            }
+        }
+        switch mode {
+        case .remote:
+            return "High Quality"
+        case .remoteV2:
+            return "Object Mode V2"
+        case .local:
+            return "Local Processing"
+        }
+    }
+
+    private func processingModeIcon(_ mode: HomeProcessingMode) -> String {
+        switch mode {
+        case .remote:
+            return "cloud.fill"
+        case .remoteV2:
+            return "sparkles"
+        case .local:
+            return "iphone.gen3"
+        }
+    }
+
+    private func processingModeBackground(mode: HomeProcessingMode, isSelected: Bool) -> Color {
+        guard isSelected else { return Color.white.opacity(0.06) }
+        switch mode {
+        case .remote:
+            return .white
+        case .remoteV2:
+            return Color(red: 0.82, green: 0.94, blue: 0.55)
+        case .local:
+            return Color(red: 0.28, green: 0.83, blue: 0.58)
+        }
+    }
+
+    private func processingModeStroke(mode: HomeProcessingMode, isSelected: Bool) -> Color {
+        guard isSelected else { return Color.white.opacity(0.08) }
+        switch mode {
+        case .remote:
+            return .white
+        case .remoteV2:
+            return Color(red: 0.82, green: 0.94, blue: 0.55)
+        case .local:
+            return Color(red: 0.28, green: 0.83, blue: 0.58)
+        }
     }
 
     static func importErrorDescription(_ error: Error) -> String {

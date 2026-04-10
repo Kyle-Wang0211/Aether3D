@@ -24,6 +24,38 @@ import AVFoundation
 ///   Documents/Aether3D/exports/         — Final PLY / JSON outputs
 ///   Documents/Aether3D/imports/         — Imported or staged videos for retry
 public final class ScanRecordStore {
+    private final class DurationResolutionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: TimeInterval = 0
+
+        func store(_ newValue: TimeInterval) {
+            lock.lock()
+            value = newValue
+            lock.unlock()
+        }
+
+        func load() -> TimeInterval {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    private final class BlockingSignal: @unchecked Sendable {
+        private let semaphore = DispatchSemaphore(value: 0)
+
+        func signal() {
+            semaphore.signal()
+        }
+
+        @discardableResult
+        func wait(timeout: DispatchTime) -> DispatchTimeoutResult {
+            semaphore.wait(timeout: timeout)
+        }
+    }
+
+    private static let staleLocalFrozenStatusMessage = "这条旧本地任务不会自动重新排队"
+    private static let staleLocalFrozenDetailMessage = "这是之前停在本地处理阶段的旧记录。为了避免旧素材一打开 app 就自动重新排队，系统已经把它标记为已取消。原始视频仍保留在手机里；只有你手动点“重新运行本地处理”时，才会再次使用这段视频。"
 
     private let baseDirectory: URL
     private let jsonFileURL: URL
@@ -84,8 +116,8 @@ public final class ScanRecordStore {
 
                 if !hasRemoteJob, age >= localPendingGraceSeconds {
                     records[index].status = .cancelled
-                    records[index].statusMessage = "这条旧素材不会自动上传"
-                    records[index].detailMessage = "这是之前停在本地准备阶段的旧记录。为了避免过去的素材一打开 app 就自动排队，系统已经把它冻结了。原始视频仍保留在手机里；只有你手动点“重新发送到丹麦 5090”时才会再次上传。"
+                    records[index].statusMessage = Self.staleLocalFrozenStatusMessage
+                    records[index].detailMessage = Self.staleLocalFrozenDetailMessage
                     records[index].progressFraction = nil
                     records[index].uploadedBytes = nil
                     records[index].totalBytes = nil
@@ -163,9 +195,25 @@ public final class ScanRecordStore {
         }
     }
 
+    public func orphanedLocalProcessingRecordsOnColdLaunch() -> [ScanRecord] {
+        queue.sync {
+            let records = loadRecordsUnsafe()
+            cachedRecords = records
+            return records.filter { record in
+                let trimmedRemoteJobID = record.remoteJobId?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return record.artifactPath == nil &&
+                    record.isProcessing &&
+                    record.resolvedProcessingBackend == .localSubjectFirst &&
+                    trimmedRemoteJobID.isEmpty
+            }
+        }
+    }
+
     @discardableResult
     public func failOrphanedLocalProcessingRecordsOnColdLaunch(
-        now: Date = Date()
+        now: Date = Date(),
+        excludingRecordIDs: Set<UUID> = []
     ) -> Int {
         queue.sync {
             var records = loadRecordsUnsafe()
@@ -177,21 +225,61 @@ public final class ScanRecordStore {
                 guard records[index].artifactPath == nil,
                       records[index].isProcessing,
                       records[index].resolvedProcessingBackend == .localSubjectFirst,
+                      !excludingRecordIDs.contains(records[index].id),
                       trimmedRemoteJobID.isEmpty else {
                     continue
                 }
 
                 let startedAt = records[index].processingStartedAt ?? records[index].createdAt
+                let recoverableSourceVideoURL: URL? = {
+                    guard let sourceVideoPath = records[index].sourceVideoPath?
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                          !sourceVideoPath.isEmpty else {
+                        return nil
+                    }
+                    let candidate = baseDirectory.appendingPathComponent(sourceVideoPath)
+                    return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
+                }()
+                let alreadyAttemptedColdLaunchRecovery: Bool = {
+                    let inputKind = LocalPreviewProductProfile.runtimeMetricString(
+                        "native_input_kind",
+                        from: records[index].runtimeMetrics
+                    )
+                    let handoff = LocalPreviewProductProfile.runtimeMetricString(
+                        "native_handoff_from",
+                        from: records[index].runtimeMetrics
+                    )
+                    let normalizedFailureReason = records[index].failureReason?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return inputKind == "recorded_video_relaunch_recovery" ||
+                        handoff == "cold_launch_recovery" ||
+                        normalizedFailureReason == "cold_launch_local_recovery_failed" ||
+                        normalizedFailureReason == "local_processing_interrupted_after_failed_relaunch_recovery"
+                }()
                 records[index].status = .failed
                 records[index].statusMessage = "本地处理已中断"
-                records[index].detailMessage = "这次本地处理依赖上一次 app 进程里的 live bridge。重新启动 app 后，这条本地任务已经无法继续，所以系统把它标成中断；请回主页重新发起。"
+                records[index].detailMessage = {
+                    if alreadyAttemptedColdLaunchRecovery {
+                        return "这条旧本地任务在 app 重启后已经自动走过一次“已落盘视频恢复”，但那次恢复也没能跑通。为了避免它每次启动都自动重试、反复卡在旧状态，系统这次直接把它标成中断；如果你还想继续，只能从主页手动重新发起。"
+                    }
+                    return recoverableSourceVideoURL == nil
+                        ? "这次本地处理依赖上一次 app 进程里的 live bridge。重新启动 app 后，本来可以尝试切到已落盘视频恢复，但这次没有找到可恢复的视频输入，所以系统把它标成中断；请回主页重新发起。"
+                        : "这次本地处理依赖上一次 app 进程里的 live bridge。重新启动 app 后，这条本地任务没有被新的恢复链接管，所以系统把它标成中断；请回主页重新发起。"
+                }()
                 records[index].progressFraction = nil
                 records[index].uploadedBytes = nil
                 records[index].totalBytes = nil
                 records[index].uploadBytesPerSecond = nil
                 records[index].estimatedRemainingMinutes = nil
                 records[index].remoteJobId = nil
-                records[index].failureReason = "local_processing_interrupted_after_relaunch"
+                records[index].failureReason = {
+                    if alreadyAttemptedColdLaunchRecovery {
+                        return "local_processing_interrupted_after_failed_relaunch_recovery"
+                    }
+                    return recoverableSourceVideoURL == nil
+                        ? "local_processing_interrupted_no_recoverable_source_after_relaunch"
+                        : "local_processing_interrupted_after_relaunch"
+                }()
                 records[index].processingCompletedAt = now
                 records[index].processingElapsedSeconds = max(0, now.timeIntervalSince(startedAt))
                 records[index].updatedAt = now
@@ -438,7 +526,10 @@ public final class ScanRecordStore {
                         record.remoteStageKey = nil
                         record.remotePhaseName = nil
                         record.currentTier = nil
-                        record.runtimeMetrics = nil
+                        record.runtimeMetrics = Self.preservedObjectFastPublishIdentityMetrics(
+                            existing: record.runtimeMetrics,
+                            incoming: runtimeMetrics
+                        )
                     }
                 } else if status == .preparing && !regressedStage {
                     record.remoteJobId = nil
@@ -544,6 +635,56 @@ public final class ScanRecordStore {
         case (nil, nil):
             return nil
         }
+    }
+
+    private static func preservedObjectFastPublishIdentityMetrics(
+        existing: [String: String]?,
+        incoming: [String: String]?
+    ) -> [String: String]? {
+        func normalizedMetric(_ metrics: [String: String]?, key: String) -> String? {
+            metrics?[key]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }
+
+        let existingStrategy = normalizedMetric(existing, key: "pipeline_strategy")
+        let incomingStrategy = normalizedMetric(incoming, key: "pipeline_strategy")
+        let existingContract = normalizedMetric(existing, key: "artifact_contract_version")
+        let incomingContract = normalizedMetric(incoming, key: "artifact_contract_version")
+
+        let isObjectFastPublishIdentity =
+            existingStrategy == "object_fast_publish_v1" ||
+            existingStrategy == "object_splatslam_v1" ||
+            incomingStrategy == "object_fast_publish_v1" ||
+            incomingStrategy == "object_splatslam_v1" ||
+            existingContract == "object_publish_v1" ||
+            incomingContract == "object_publish_v1"
+
+        guard isObjectFastPublishIdentity else {
+            return nil
+        }
+
+        let preservedKeys = [
+            "pipeline_strategy",
+            "artifact_contract_version",
+            "first_result_kind",
+            "hq_refine",
+            "optional_mesh_export",
+            "capture_mode",
+            "target_zone_mode",
+            "client_live_selection_source",
+            "visual_gate_version",
+        ]
+
+        var preserved: [String: String] = [:]
+        for key in preservedKeys {
+            if let value = incoming?[key] ?? existing?[key],
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                preserved[key] = value
+            }
+        }
+        preserved["default_artifact_ready"] = "false"
+        return preserved.isEmpty ? nil : preserved
     }
 
     private static func mergedStatus(
@@ -918,6 +1059,17 @@ public final class ScanRecordStore {
                     didMutate = true
                 }
             }
+
+            if normalizedRecords[index].failureReason == "stale_local_processing_frozen" {
+                if normalizedRecords[index].statusMessage != Self.staleLocalFrozenStatusMessage {
+                    normalizedRecords[index].statusMessage = Self.staleLocalFrozenStatusMessage
+                    didMutate = true
+                }
+                if normalizedRecords[index].detailMessage != Self.staleLocalFrozenDetailMessage {
+                    normalizedRecords[index].detailMessage = Self.staleLocalFrozenDetailMessage
+                    didMutate = true
+                }
+            }
         }
 
         if didMutate {
@@ -1046,24 +1198,27 @@ public final class ScanRecordStore {
 
     private static func sourceVideoDuration(at url: URL) -> TimeInterval {
         #if canImport(AVFoundation)
-        let asset = AVURLAsset(url: url)
-        let key = "duration"
-        let semaphore = DispatchSemaphore(value: 0)
-        asset.loadValuesAsynchronously(forKeys: [key]) {
-            semaphore.signal()
-        }
-        _ = semaphore.wait(timeout: .now() + 0.6)
-        var error: NSError?
-        let status = asset.statusOfValue(forKey: key, error: &error)
-        if status == .loaded,
-           let duration = asset.value(forKey: key) as? CMTime {
-            let seconds = duration.seconds
-            if seconds.isFinite, seconds > 0 {
-                return seconds
+        let resultBox = DurationResolutionBox()
+        let signal = BlockingSignal()
+
+        Task.detached(priority: .utility) {
+            defer { signal.signal() }
+            let asset = AVURLAsset(url: url)
+            guard let duration = try? await asset.load(.duration) else {
+                return
             }
+            let seconds = duration.seconds
+            guard duration.isNumeric, seconds.isFinite, seconds > 0 else {
+                return
+            }
+            resultBox.store(seconds)
         }
-        #endif
+
+        _ = signal.wait(timeout: .now() + 1.0)
+        return resultBox.load()
+        #else
         return 0
+        #endif
     }
 }
 

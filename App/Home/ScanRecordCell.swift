@@ -389,6 +389,9 @@ struct ScanRecordCell: View {
     }
 
     private var processingBackendBadgeTitle: String {
+        if record.isObjectFastPublishV1 {
+            return useEnglish ? "New Remote" : "新远端"
+        }
         if useEnglish {
             return record.resolvedProcessingBackend == .cloud ? "Remote" : "Local"
         }
@@ -396,7 +399,12 @@ struct ScanRecordCell: View {
     }
 
     private var processingBackendBadgeColor: Color {
-        record.resolvedProcessingBackend == .cloud ? Color.cyan.opacity(0.92) : Color.green.opacity(0.85)
+        if record.isObjectFastPublishV1 {
+            return Color.orange.opacity(0.92)
+        }
+        return record.resolvedProcessingBackend == .cloud
+            ? Color.cyan.opacity(0.92)
+            : Color.green.opacity(0.85)
     }
 
     private var cardBackgroundColor: Color {

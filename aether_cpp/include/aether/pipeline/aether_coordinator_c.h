@@ -91,6 +91,10 @@ typedef struct {
     size_t training_step;                 // Current global training step
     size_t assigned_blocks;               // Surface blocks → Gaussians (geometry gate, NOT S6+)
     size_t pending_gaussian_count;        // Gaussians waiting in queue for engine
+    size_t retained_export_gaussians;     // Current retained export snapshot size
+    size_t peak_training_gaussians;       // Peak live trainer gaussian count
+    size_t peak_working_set_gaussians;    // Peak trainer + pending working set
+    size_t peak_retained_export_gaussians; // Peak retained export snapshot size
 
     // Local preview diagnostics (internal archival only)
     uint64_t preview_elapsed_ms;

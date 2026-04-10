@@ -12,9 +12,6 @@ import Foundation
 
 #if canImport(SwiftUI) && canImport(UIKit) && canImport(Metal)
 import SwiftUI
-#if canImport(simd)
-import simd
-#endif
 
 /// Post-scan 3D viewer: renders Gaussian splats on a black background.
 ///
@@ -25,6 +22,28 @@ import simd
 ///
 /// Uses GaussianSplatViewController internally (MTKView + Metal rendering).
 struct SplatViewerView: View {
+    private enum ViewerArtifactVariant: String, CaseIterable, Identifiable {
+        case published
+        case raw
+        case cutout
+        case cleanup
+
+        var id: String { rawValue }
+
+        var labelText: String {
+            switch self {
+            case .published:
+                return "结果"
+            case .raw:
+                return "Raw"
+            case .cutout:
+                return "Cutout"
+            case .cleanup:
+                return "Cleanup"
+            }
+        }
+    }
+
     let record: ScanRecord
     var scanViewModel: ScanViewModel? = nil
     var homeViewModel: HomeViewModel? = nil
@@ -33,6 +52,7 @@ struct SplatViewerView: View {
     @State private var isLoading = true
     @State private var currentRecord: ScanRecord
     @State private var refreshTask: Task<Void, Never>?
+    @State private var selectedArtifactVariant: ViewerArtifactVariant = .published
 
     init(
         record: ScanRecord,
@@ -48,7 +68,11 @@ struct SplatViewerView: View {
     }
 
     var body: some View {
-        let artifactURL = resolvedArtifactURL()
+        let availableVariants = availableArtifactVariants(for: currentRecord)
+        let artifactURL = resolvedArtifactURL(
+            for: selectedArtifactVariant,
+            in: currentRecord
+        )
 
         ZStack {
             // Pure black background
@@ -59,13 +83,9 @@ struct SplatViewerView: View {
                 let _ = NSLog("[Aether3D] SplatViewerView: loading PLY from %@", url.path)
                 SplatViewerRepresentable(
                     artifactURL: url,
-                    captureGravityUpX: currentRecord.captureGravityUpX,
-                    captureGravityUpY: currentRecord.captureGravityUpY,
-                    captureGravityUpZ: currentRecord.captureGravityUpZ,
-                    captureGravitySource: currentRecord.captureGravitySource,
-                    captureGravityConfidence: currentRecord.captureGravityConfidence,
                     onLoaded: { isLoading = false }
                 )
+                .id("\(selectedArtifactVariant.rawValue):\(url.path)")
                 .ignoresSafeArea()
             } else {
                 waitingOrFallbackView
@@ -103,6 +123,11 @@ struct SplatViewerView: View {
                 }
                 .padding(.top, 8)
 
+                if availableVariants.count > 1 {
+                    artifactVariantSwitcher(availableVariants: availableVariants)
+                        .padding(.top, 10)
+                }
+
                 Spacer()
 
                 // Loading indicator (centered, only when loading 3DGS model)
@@ -135,6 +160,7 @@ struct SplatViewerView: View {
         .navigationBarHidden(true)
         .statusBarHidden(true)
         .onAppear {
+            syncSelectedArtifactVariant(preservingSelection: false)
             startRefreshLoopIfNeeded()
         }
         .onDisappear {
@@ -169,17 +195,30 @@ struct SplatViewerView: View {
     }
 
     private var hasUnreadyArtifactReference: Bool {
-        currentRecord.artifactPath != nil && resolvedArtifactURL() == nil
+        currentRecord.artifactPath != nil &&
+            resolvedArtifactURL(for: selectedArtifactVariant, in: currentRecord) == nil
     }
 
-    private static func validatedArtifactURL(for record: ScanRecord) -> URL? {
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let m = Int(seconds) / 60
+        let s = Int(seconds) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+
+    // MARK: - Helpers
+
+    private static func artifactBaseURL(for record: ScanRecord) -> URL? {
         guard let relativePath = record.artifactPath else { return nil }
         let documents = FileManager.default.urls(
             for: .documentDirectory, in: .userDomainMask
         )[0]
-        let url = documents
+        return documents
             .appendingPathComponent("Aether3D")
             .appendingPathComponent(relativePath)
+    }
+
+    private static func validatedArtifactURL(at url: URL?) -> URL? {
+        guard let url else { return nil }
         let path = url.path
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         do {
@@ -192,8 +231,180 @@ struct SplatViewerView: View {
         return url
     }
 
-    private func resolvedArtifactURL() -> URL? {
-        Self.validatedArtifactURL(for: currentRecord)
+    private static func validatedArtifactURL(for record: ScanRecord) -> URL? {
+        validatedArtifactURL(at: artifactBaseURL(for: record))
+    }
+
+    private func resolvedArtifactURL(
+        for variant: ViewerArtifactVariant,
+        in record: ScanRecord
+    ) -> URL? {
+        switch variant {
+        case .published:
+            return Self.validatedArtifactURL(for: record)
+        case .raw:
+            return resolvedSidecarArtifactURL(
+                metricKey: "native_subject_raw_path",
+                suffix: ".raw.ply",
+                in: record
+            )
+        case .cutout:
+            return resolvedSidecarArtifactURL(
+                metricKey: "native_subject_cutout_path",
+                suffix: ".cutout.ply",
+                in: record
+            )
+        case .cleanup:
+            return resolvedSidecarArtifactURL(
+                metricKey: "native_subject_cleanup_path",
+                suffix: ".cleanup.ply",
+                in: record
+            )
+        }
+    }
+
+    private func resolvedSidecarArtifactURL(
+        metricKey: String,
+        suffix: String,
+        in record: ScanRecord
+    ) -> URL? {
+        if let absolutePath = LocalPreviewProductProfile.runtimeMetricString(
+            metricKey,
+            from: record.runtimeMetrics
+        ) {
+            let absoluteURL = URL(fileURLWithPath: absolutePath)
+            if let validated = Self.validatedArtifactURL(at: absoluteURL) {
+                return validated
+            }
+        }
+
+        guard let baseURL = Self.artifactBaseURL(for: record) else { return nil }
+        let sidecarURL = baseURL.deletingLastPathComponent().appendingPathComponent(
+            baseURL.deletingPathExtension().lastPathComponent + suffix
+        )
+        return Self.validatedArtifactURL(at: sidecarURL)
+    }
+
+    private func availableArtifactVariants(for record: ScanRecord) -> [ViewerArtifactVariant] {
+        let splitVariants = ViewerArtifactVariant.allCases.filter { variant in
+            guard variant != .published else { return false }
+            return resolvedArtifactURL(for: variant, in: record) != nil
+        }
+        if !splitVariants.isEmpty {
+            return splitVariants
+        }
+        if resolvedArtifactURL(for: .published, in: record) != nil {
+            return [.published]
+        }
+        return []
+    }
+
+    private func preferredArtifactVariant(for record: ScanRecord) -> ViewerArtifactVariant? {
+        if let selectedStage = LocalPreviewProductProfile.runtimeMetricString(
+            "native_subject_selected_stage",
+            from: record.runtimeMetrics
+        )?.lowercased() {
+            switch selectedStage {
+            case "raw":
+                return .raw
+            case "cutout":
+                return .cutout
+            case "cleanup":
+                return .cleanup
+            default:
+                break
+            }
+        }
+        if resolvedArtifactURL(for: .cleanup, in: record) != nil {
+            return .cleanup
+        }
+        if resolvedArtifactURL(for: .cutout, in: record) != nil {
+            return .cutout
+        }
+        if resolvedArtifactURL(for: .raw, in: record) != nil {
+            return .raw
+        }
+        if resolvedArtifactURL(for: .published, in: record) != nil {
+            return .published
+        }
+        return nil
+    }
+
+    private func syncSelectedArtifactVariant(
+        for record: ScanRecord? = nil,
+        preservingSelection: Bool
+    ) {
+        let targetRecord = record ?? currentRecord
+        let variants = availableArtifactVariants(for: targetRecord)
+        guard !variants.isEmpty else { return }
+        if preservingSelection && variants.contains(selectedArtifactVariant) {
+            return
+        }
+        if let preferred = preferredArtifactVariant(for: targetRecord),
+           variants.contains(preferred) {
+            selectedArtifactVariant = preferred
+            return
+        }
+        selectedArtifactVariant = variants[0]
+    }
+
+    private func selectArtifactVariant(_ variant: ViewerArtifactVariant) {
+        guard variant != selectedArtifactVariant else { return }
+        selectedArtifactVariant = variant
+        if resolvedArtifactURL(for: variant, in: currentRecord) != nil {
+            isLoading = true
+        }
+    }
+
+    @ViewBuilder
+    private func artifactVariantSwitcher(
+        availableVariants: [ViewerArtifactVariant]
+    ) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                ForEach(availableVariants) { variant in
+                    Button(action: { selectArtifactVariant(variant) }) {
+                        Text(variant.labelText)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(
+                                selectedArtifactVariant == variant
+                                    ? .black
+                                    : .white.opacity(0.88)
+                            )
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule()
+                                    .fill(
+                                        selectedArtifactVariant == variant
+                                            ? Color.white.opacity(0.94)
+                                            : Color.white.opacity(0.10)
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 8) {
+                metricCapsule(text: "当前查看 \(selectedArtifactVariant.labelText)")
+                if let publishedVariant = preferredArtifactVariant(for: currentRecord),
+                   availableVariants.contains(publishedVariant),
+                   publishedVariant != selectedArtifactVariant {
+                    metricCapsule(text: "最终使用 \(publishedVariant.labelText)")
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.black.opacity(0.50))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
     }
 
     private var waitingStageView: some View {
@@ -256,7 +467,9 @@ struct SplatViewerView: View {
         refreshTask?.cancel()
         refreshTask = nil
 
-        let shouldPollForArtifact = currentRecord.artifactPath != nil && resolvedArtifactURL() == nil
+        let shouldPollForArtifact =
+            currentRecord.artifactPath != nil &&
+            resolvedArtifactURL(for: selectedArtifactVariant, in: currentRecord) == nil
         guard shouldPollForArtifact || currentRecord.isProcessing else {
             return
         }
@@ -269,8 +482,11 @@ struct SplatViewerView: View {
                 guard let refreshed = store.record(id: recordID) else { break }
                 await MainActor.run {
                     currentRecord = refreshed
+                    syncSelectedArtifactVariant(for: refreshed, preservingSelection: true)
                 }
-                let artifactReady = Self.validatedArtifactURL(for: refreshed) != nil
+                let artifactReady =
+                    !availableArtifactVariants(for: refreshed).isEmpty ||
+                    Self.validatedArtifactURL(for: refreshed) != nil
                 let waitingOnArtifact = refreshed.artifactPath != nil
                 if artifactReady {
                     break
@@ -285,14 +501,6 @@ struct SplatViewerView: View {
                 }
                 try? await Task.sleep(nanoseconds: 900_000_000)
             }
-        }
-    }
-
-    private func closeExperience() {
-        if let onReturnHome {
-            onReturnHome()
-        } else {
-            dismiss()
         }
     }
 
@@ -399,14 +607,13 @@ struct SplatViewerView: View {
         .padding(.horizontal, 20)
     }
 
-    private func formatDuration(_ seconds: TimeInterval) -> String {
-        let m = Int(seconds) / 60
-        let s = Int(seconds) % 60
-        return String(format: "%02d:%02d", m, s)
+    private func closeExperience() {
+        if let onReturnHome {
+            onReturnHome()
+        } else {
+            dismiss()
+        }
     }
-
-    // MARK: - Helpers
-
 }
 
 // MARK: - UIViewControllerRepresentable wrapper
@@ -415,23 +622,11 @@ struct SplatViewerView: View {
 /// Configures the file URL and handles lifecycle.
 struct SplatViewerRepresentable: UIViewControllerRepresentable {
     let artifactURL: URL
-    let captureGravityUpX: Float?
-    let captureGravityUpY: Float?
-    let captureGravityUpZ: Float?
-    let captureGravitySource: String?
-    let captureGravityConfidence: Float?
     var onLoaded: (() -> Void)?
 
     func makeUIViewController(context: Context) -> GaussianSplatViewController {
         let vc = GaussianSplatViewController()
         vc.fileURL = artifactURL
-        if let x = captureGravityUpX,
-           let y = captureGravityUpY,
-           let z = captureGravityUpZ {
-            vc.preferredSceneUp = SIMD3<Float>(x, y, z)
-            vc.preferredSceneUpSource = captureGravitySource
-            vc.preferredSceneUpConfidence = captureGravityConfidence
-        }
         return vc
     }
 

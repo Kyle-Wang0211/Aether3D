@@ -236,6 +236,477 @@ inline std::vector<aether::splat::GaussianParams> split_boundary_gaussian(
     return outputs;
 }
 
+struct SubjectAnalysisResult {
+    bool passthrough{false};
+    std::size_t mask_seed_kept{0};
+    float scene_span{0.0f};
+    float voxel_size{0.03f};
+    SubjectBounds scene_bounds;
+    SubjectBounds dominant_bounds;
+    float footprint_margin{0.0f};
+    float bottom_band_height{0.0f};
+    float bottom_band_limit{0.0f};
+    float boundary_split_threshold{0.0f};
+    float boundary_soft_threshold{0.0f};
+    std::vector<SubjectMaskSignal> signals;
+};
+
+struct SubjectCutoutStageResult {
+    std::vector<aether::splat::GaussianParams> gaussians;
+    aether_subject_cleanup_stats_t stats{};
+};
+
+struct SubjectCleanupStageResult {
+    std::vector<aether::splat::GaussianParams> gaussians;
+    aether_subject_cleanup_stats_t stats{};
+};
+
+inline float gaussian_collection_span(
+    const std::vector<aether::splat::GaussianParams>& gaussians
+) noexcept {
+    if (gaussians.empty()) return 0.0f;
+    SubjectBounds bounds;
+    for (const auto& gaussian : gaussians) {
+        expand_bounds(bounds, gaussian);
+    }
+    return component_span(bounds);
+}
+
+inline void initialize_subject_stats(
+    aether_subject_cleanup_stats_t& stats,
+    std::size_t input_splats,
+    float input_scene_span
+) noexcept {
+    stats = aether_subject_cleanup_stats_t{};
+    stats.input_splats = input_splats;
+    stats.input_scene_span = input_scene_span;
+}
+
+inline SubjectAnalysisResult analyze_subject_input(
+    const std::vector<aether::splat::GaussianParams>& input,
+    bool promote_reject_to_boundary
+) {
+    SubjectAnalysisResult analysis;
+    analysis.signals.reserve(input.size());
+    for (const auto& gaussian : input) {
+        expand_bounds(analysis.scene_bounds, gaussian);
+    }
+    analysis.scene_span = std::max(component_span(analysis.scene_bounds), 0.10f);
+    analysis.voxel_size = std::max(0.03f, analysis.scene_span / 42.0f);
+
+    std::unordered_map<SubjectVoxelKey, std::size_t, SubjectVoxelKeyHash> voxel_counts;
+    voxel_counts.reserve(input.size());
+    for (const auto& gaussian : input) {
+        if (!is_candidate_for_subject_component(gaussian, analysis.scene_span)) {
+            continue;
+        }
+        ++voxel_counts[make_voxel_key(gaussian, analysis.voxel_size)];
+    }
+
+    if (voxel_counts.empty()) {
+        analysis.passthrough = true;
+        analysis.mask_seed_kept = input.size();
+        analysis.dominant_bounds = analysis.scene_bounds;
+        analysis.signals.resize(input.size());
+        for (auto& signal : analysis.signals) {
+            signal.stage = SubjectMaskStage::kCore;
+            signal.component_score = 1.0f;
+        }
+        return analysis;
+    }
+
+    std::unordered_set<SubjectVoxelKey, SubjectVoxelKeyHash> visited;
+    visited.reserve(voxel_counts.size());
+    std::unordered_set<SubjectVoxelKey, SubjectVoxelKeyHash> dominant_component;
+    dominant_component.reserve(voxel_counts.size());
+    std::size_t dominant_score = 0;
+
+    for (const auto& entry : voxel_counts) {
+        const SubjectVoxelKey& start_key = entry.first;
+        if (visited.find(start_key) != visited.end()) {
+            continue;
+        }
+        std::queue<SubjectVoxelKey> queue;
+        std::vector<SubjectVoxelKey> component;
+        std::size_t component_score = 0;
+        queue.push(start_key);
+        visited.insert(start_key);
+
+        while (!queue.empty()) {
+            const SubjectVoxelKey key = queue.front();
+            queue.pop();
+            component.push_back(key);
+            component_score += voxel_counts[key];
+
+            for (const auto& offset : kAxisNeighborOffsets) {
+                SubjectVoxelKey next{
+                    key.x + offset[0],
+                    key.y + offset[1],
+                    key.z + offset[2]
+                };
+                if (voxel_counts.find(next) == voxel_counts.end()) {
+                    continue;
+                }
+                if (visited.insert(next).second) {
+                    queue.push(next);
+                }
+            }
+        }
+
+        if (component_score > dominant_score) {
+            dominant_score = component_score;
+            dominant_component.clear();
+            for (const auto& key : component) {
+                dominant_component.insert(key);
+            }
+        }
+    }
+
+    if (dominant_component.empty()) {
+        dominant_component.reserve(voxel_counts.size());
+        for (const auto& entry : voxel_counts) {
+            dominant_component.insert(entry.first);
+        }
+    }
+
+    std::unordered_set<SubjectVoxelKey, SubjectVoxelKeyHash> dominant_shell;
+    dominant_shell.reserve(dominant_component.size());
+    for (const auto& key : dominant_component) {
+        const int face_neighbors = axis_neighbor_count(dominant_component, key);
+        const std::size_t local_density = voxel_counts[key];
+        if (face_neighbors < 6 || local_density <= 2) {
+            dominant_shell.insert(key);
+        }
+    }
+
+    for (const auto& gaussian : input) {
+        const auto key = make_voxel_key(gaussian, analysis.voxel_size);
+        if (dominant_component.find(key) != dominant_component.end()) {
+            expand_bounds(analysis.dominant_bounds, gaussian);
+        }
+    }
+    if (!is_finite_bounds(analysis.dominant_bounds)) {
+        analysis.dominant_bounds = analysis.scene_bounds;
+    }
+
+    const float dominant_span_x = std::max(
+        0.05f,
+        analysis.dominant_bounds.max_x - analysis.dominant_bounds.min_x
+    );
+    const float dominant_span_y = std::max(
+        0.05f,
+        analysis.dominant_bounds.max_y - analysis.dominant_bounds.min_y
+    );
+    const float dominant_span_z = std::max(
+        0.05f,
+        analysis.dominant_bounds.max_z - analysis.dominant_bounds.min_z
+    );
+    analysis.footprint_margin = std::max(
+        0.05f,
+        std::max(dominant_span_x, dominant_span_z) * 0.10f
+    );
+    analysis.bottom_band_height = std::max(0.03f, dominant_span_y * 0.12f);
+    analysis.bottom_band_limit = analysis.dominant_bounds.min_y + analysis.bottom_band_height;
+    const float shell_margin = std::max(
+        analysis.voxel_size * 1.8f,
+        std::max(dominant_span_x, dominant_span_z) * 0.04f
+    );
+    const float shell_y_margin = std::max(
+        analysis.voxel_size * 1.5f,
+        dominant_span_y * 0.08f
+    );
+    analysis.boundary_split_threshold = std::max(
+        analysis.voxel_size * 1.4f,
+        std::max(dominant_span_x, dominant_span_z) * 0.035f
+    );
+    analysis.boundary_soft_threshold = std::max(
+        analysis.voxel_size * 1.1f,
+        std::max(dominant_span_x, dominant_span_z) * 0.022f
+    );
+
+    auto in_support_band = [&](const aether::splat::GaussianParams& gaussian) -> bool {
+        return gaussian.position[0] >= analysis.dominant_bounds.min_x - analysis.footprint_margin &&
+            gaussian.position[0] <= analysis.dominant_bounds.max_x + analysis.footprint_margin &&
+            gaussian.position[2] >= analysis.dominant_bounds.min_z - analysis.footprint_margin &&
+            gaussian.position[2] <= analysis.dominant_bounds.max_z + analysis.footprint_margin &&
+            gaussian.position[1] <= analysis.bottom_band_limit;
+    };
+
+    auto near_shell_band = [&](const aether::splat::GaussianParams& gaussian) -> bool {
+        if (gaussian.position[0] < analysis.dominant_bounds.min_x - shell_margin ||
+            gaussian.position[0] > analysis.dominant_bounds.max_x + shell_margin ||
+            gaussian.position[2] < analysis.dominant_bounds.min_z - shell_margin ||
+            gaussian.position[2] > analysis.dominant_bounds.max_z + shell_margin ||
+            gaussian.position[1] < analysis.dominant_bounds.min_y - analysis.bottom_band_height ||
+            gaussian.position[1] > analysis.dominant_bounds.max_y + shell_y_margin) {
+            return false;
+        }
+
+        const auto key = make_voxel_key(gaussian, analysis.voxel_size);
+        if (dominant_shell.find(key) != dominant_shell.end()) {
+            return true;
+        }
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    SubjectVoxelKey next{ key.x + dx, key.y + dy, key.z + dz };
+                    if (dominant_shell.find(next) != dominant_shell.end()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    };
+
+    for (const auto& gaussian : input) {
+        const auto key = make_voxel_key(gaussian, analysis.voxel_size);
+        const bool in_dominant = dominant_component.find(key) != dominant_component.end();
+        const bool support_candidate = in_support_band(gaussian) && gaussian.opacity >= 0.02f;
+        const bool boundary_candidate =
+            near_shell_band(gaussian) &&
+            gaussian.opacity >= 0.018f &&
+            average_scale(gaussian) >= 1e-5f &&
+            max_scale(gaussian) <= std::max(0.10f, analysis.scene_span * 0.12f);
+
+        SubjectMaskSignal signal{};
+        signal.component_score = in_dominant ? 1.0f : 0.0f;
+        signal.support_score = support_candidate
+            ? clamp01(0.55f + gaussian.opacity * 0.45f)
+            : 0.0f;
+        signal.boundary_score = boundary_candidate
+            ? clamp01(
+                  0.45f +
+                  gaussian.opacity * 0.40f +
+                  std::max(
+                      0.0f,
+                      1.0f - max_scale(gaussian) /
+                          std::max(analysis.boundary_split_threshold, 1e-4f)
+                  ) * 0.15f
+              )
+            : 0.0f;
+
+        if (in_dominant) {
+            signal.stage = SubjectMaskStage::kCore;
+        } else if (boundary_candidate && signal.boundary_score >= signal.support_score) {
+            signal.stage = SubjectMaskStage::kBoundary;
+        } else if (support_candidate) {
+            signal.stage = SubjectMaskStage::kSupport;
+        } else {
+            signal.stage = promote_reject_to_boundary
+                ? SubjectMaskStage::kBoundary
+                : SubjectMaskStage::kReject;
+        }
+
+        if (signal.stage != SubjectMaskStage::kReject) {
+            analysis.mask_seed_kept++;
+        }
+        analysis.signals.push_back(signal);
+    }
+
+    return analysis;
+}
+
+inline SubjectCutoutStageResult apply_subject_cutout(
+    const std::vector<aether::splat::GaussianParams>& input,
+    const SubjectAnalysisResult& analysis
+) {
+    SubjectCutoutStageResult result;
+    initialize_subject_stats(result.stats, input.size(), analysis.scene_span);
+
+    if (analysis.passthrough) {
+        result.gaussians = input;
+        result.stats.mask_seed_kept_splats = input.size();
+        result.stats.boundary_refined_splats = input.size();
+        result.stats.cutout_kept_splats = input.size();
+        result.stats.cleanup_kept_splats = input.size();
+        result.stats.cutout_scene_span = gaussian_collection_span(result.gaussians);
+        result.stats.cleanup_scene_span = result.stats.cutout_scene_span;
+        return result;
+    }
+
+    if (analysis.mask_seed_kept == 0) {
+        result.gaussians = input;
+        result.stats.mask_seed_kept_splats = 0;
+        result.stats.cutout_kept_splats = input.size();
+        result.stats.cleanup_kept_splats = input.size();
+        result.stats.cutout_scene_span = gaussian_collection_span(result.gaussians);
+        result.stats.cleanup_scene_span = result.stats.cutout_scene_span;
+        return result;
+    }
+
+    result.gaussians.reserve(analysis.mask_seed_kept);
+    std::size_t boundary_refined_outputs = 0;
+    std::size_t boundary_split_extra = 0;
+
+    for (std::size_t i = 0; i < input.size() && i < analysis.signals.size(); ++i) {
+        const auto& gaussian = input[i];
+        const auto& signal = analysis.signals[i];
+        if (signal.stage == SubjectMaskStage::kReject) {
+            continue;
+        }
+        if (signal.stage != SubjectMaskStage::kBoundary) {
+            result.gaussians.push_back(gaussian);
+            continue;
+        }
+
+        const float largest_scale = max_scale(gaussian);
+        if (largest_scale >= analysis.boundary_split_threshold && gaussian.opacity >= 0.028f) {
+            auto split = split_boundary_gaussian(gaussian, 0.34f, 0.56f);
+            boundary_refined_outputs += split.size();
+            if (split.size() > 1) {
+                boundary_split_extra += split.size() - 1;
+            }
+            result.gaussians.insert(result.gaussians.end(), split.begin(), split.end());
+            continue;
+        }
+
+        aether::splat::GaussianParams refined = gaussian;
+        if (largest_scale >= analysis.boundary_soft_threshold) {
+            int major_axis = 0;
+            if (refined.scale[1] > refined.scale[major_axis]) major_axis = 1;
+            if (refined.scale[2] > refined.scale[major_axis]) major_axis = 2;
+            for (int axis = 0; axis < 3; ++axis) {
+                refined.scale[axis] = std::max(
+                    1e-5f,
+                    refined.scale[axis] * (axis == major_axis ? 0.78f : 0.92f)
+                );
+            }
+            refined.opacity = clamp01(refined.opacity * 0.92f);
+        }
+        ++boundary_refined_outputs;
+        result.gaussians.push_back(refined);
+    }
+
+    if (result.gaussians.empty()) {
+        result.gaussians = input;
+    }
+
+    result.stats.mask_seed_kept_splats = analysis.mask_seed_kept;
+    result.stats.boundary_refined_splats = boundary_refined_outputs;
+    result.stats.boundary_split_splats = boundary_split_extra;
+    result.stats.cutout_kept_splats = result.gaussians.size();
+    result.stats.cleanup_kept_splats = result.gaussians.size();
+    result.stats.cutout_scene_span = gaussian_collection_span(result.gaussians);
+    result.stats.cleanup_scene_span = result.stats.cutout_scene_span;
+    return result;
+}
+
+inline SubjectCleanupStageResult apply_subject_cleanup(
+    const std::vector<aether::splat::GaussianParams>& input,
+    const SubjectAnalysisResult& analysis
+) {
+    SubjectCleanupStageResult result;
+    initialize_subject_stats(
+        result.stats,
+        input.size(),
+        gaussian_collection_span(input)
+    );
+    result.stats.mask_seed_kept_splats = analysis.mask_seed_kept;
+    result.stats.boundary_refined_splats = input.size();
+    result.stats.cutout_kept_splats = input.size();
+    result.stats.cutout_scene_span = result.stats.input_scene_span;
+
+    if (analysis.passthrough || input.empty()) {
+        result.gaussians = input;
+        result.stats.cleanup_kept_splats = input.size();
+        result.stats.cleanup_scene_span = result.stats.input_scene_span;
+        return result;
+    }
+
+    std::unordered_map<SubjectVoxelKey, std::size_t, SubjectVoxelKeyHash> cutout_voxel_counts;
+    cutout_voxel_counts.reserve(input.size());
+    for (const auto& gaussian : input) {
+        ++cutout_voxel_counts[make_voxel_key(gaussian, analysis.voxel_size)];
+    }
+
+    auto neighbor_weight = [&](const SubjectVoxelKey& key) -> std::size_t {
+        std::size_t total = 0;
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    SubjectVoxelKey next{ key.x + dx, key.y + dy, key.z + dz };
+                    auto it = cutout_voxel_counts.find(next);
+                    if (it != cutout_voxel_counts.end()) {
+                        total += it->second;
+                    }
+                }
+            }
+        }
+        return total;
+    };
+
+    const float extreme_scale = std::max(0.10f, analysis.scene_span * 0.12f);
+    const float loose_margin = analysis.footprint_margin * 1.8f;
+    result.gaussians.reserve(input.size());
+
+    for (std::size_t i = 0; i < input.size() && i < analysis.signals.size(); ++i) {
+        const auto& gaussian = input[i];
+        const auto& signal = analysis.signals[i];
+        const auto key = make_voxel_key(gaussian, analysis.voxel_size);
+        const bool preserve_core = signal.stage == SubjectMaskStage::kCore;
+        const bool preserve_support = signal.stage == SubjectMaskStage::kSupport;
+        if (preserve_core || preserve_support) {
+            result.gaussians.push_back(gaussian);
+            continue;
+        }
+
+        const std::size_t local_count = cutout_voxel_counts[key];
+        const std::size_t nearby_count = neighbor_weight(key);
+        const bool isolated = local_count <= 1 && nearby_count <= 2;
+        const bool too_faint = gaussian.opacity < 0.035f;
+        const bool too_large = max_scale(gaussian) > extreme_scale;
+        const bool far_outside_footprint =
+            gaussian.position[0] < analysis.dominant_bounds.min_x - loose_margin ||
+            gaussian.position[0] > analysis.dominant_bounds.max_x + loose_margin ||
+            gaussian.position[2] < analysis.dominant_bounds.min_z - loose_margin ||
+            gaussian.position[2] > analysis.dominant_bounds.max_z + loose_margin;
+        const bool likely_contact_bridge =
+            !far_outside_footprint &&
+            gaussian.position[1] <= analysis.bottom_band_limit + analysis.bottom_band_height * 0.9f &&
+            nearby_count >= 1 &&
+            gaussian.opacity >= 0.02f;
+        const bool boundary_consistent =
+            signal.boundary_score >= 0.45f &&
+            nearby_count >= 1 &&
+            gaussian.opacity >= 0.018f;
+
+        if (isolated && (too_faint || too_large || far_outside_footprint) &&
+            !likely_contact_bridge && !boundary_consistent) {
+            continue;
+        }
+
+        result.gaussians.push_back(gaussian);
+    }
+
+    if (result.gaussians.empty()) {
+        result.gaussians = input;
+    }
+
+    result.stats.cleanup_kept_splats = result.gaussians.size();
+    result.stats.cleanup_removed_splats =
+        result.stats.cutout_kept_splats > result.stats.cleanup_kept_splats
+            ? result.stats.cutout_kept_splats - result.stats.cleanup_kept_splats
+            : 0;
+    result.stats.cleanup_scene_span = gaussian_collection_span(result.gaussians);
+    return result;
+}
+
+inline int write_subject_stage_ply(
+    const char* output_path,
+    const std::vector<aether::splat::GaussianParams>& gaussians
+) {
+    if (!output_path || gaussians.empty()) return -1;
+    const auto write_status = aether::splat::write_ply(
+        output_path,
+        gaussians.data(),
+        gaussians.size()
+    );
+    return aether::core::is_ok(write_status) ? 0 : -1;
+}
+
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -518,362 +989,89 @@ int aether_splat_subject_cleanup_ply(const char* input_path,
     if (!aether::core::is_ok(status)) return -1;
     if (result.gaussians.empty()) return -1;
 
-    aether_subject_cleanup_stats_t stats{};
-    stats.input_splats = result.gaussians.size();
+    const auto cutout_analysis = analyze_subject_input(result.gaussians, false);
+    const auto cutout_stage = apply_subject_cutout(result.gaussians, cutout_analysis);
 
-    SubjectBounds scene_bounds;
-    for (const auto& gaussian : result.gaussians) {
-        expand_bounds(scene_bounds, gaussian);
+    if (cutout_stage.gaussians.empty()) {
+        return -1;
     }
-    const float scene_span = std::max(component_span(scene_bounds), 0.10f);
-    const float voxel_size = std::max(0.03f, scene_span / 42.0f);
 
-    std::unordered_map<SubjectVoxelKey, std::size_t, SubjectVoxelKeyHash> voxel_counts;
-    voxel_counts.reserve(result.gaussians.size());
-    for (const auto& gaussian : result.gaussians) {
-        if (!is_candidate_for_subject_component(gaussian, scene_span)) {
-            continue;
+    const bool cutout_passed_through =
+        cutout_stage.stats.cutout_kept_splats == result.gaussians.size() &&
+        (cutout_analysis.passthrough || cutout_stage.stats.mask_seed_kept_splats == 0);
+    if (cutout_passed_through) {
+        if (write_subject_stage_ply(output_path, cutout_stage.gaussians) != 0) {
+            return -1;
         }
-        ++voxel_counts[make_voxel_key(gaussian, voxel_size)];
-    }
-
-    if (voxel_counts.empty()) {
-        const auto write_status = aether::splat::write_ply(
-            output_path,
-            result.gaussians.data(),
-            result.gaussians.size()
-        );
-        if (!aether::core::is_ok(write_status)) return -1;
-        stats.mask_seed_kept_splats = result.gaussians.size();
-        stats.boundary_refined_splats = result.gaussians.size();
-        stats.boundary_split_splats = 0;
-        stats.cutout_kept_splats = result.gaussians.size();
-        stats.cleanup_kept_splats = result.gaussians.size();
-        stats.cleanup_removed_splats = 0;
-        if (out_stats) *out_stats = stats;
+        if (out_stats) {
+            *out_stats = cutout_stage.stats;
+        }
         return 0;
     }
 
-    std::unordered_set<SubjectVoxelKey, SubjectVoxelKeyHash> visited;
-    visited.reserve(voxel_counts.size());
-    std::unordered_set<SubjectVoxelKey, SubjectVoxelKeyHash> dominant_component;
-    dominant_component.reserve(voxel_counts.size());
-    std::size_t dominant_score = 0;
-
-    for (const auto& entry : voxel_counts) {
-        const SubjectVoxelKey& start_key = entry.first;
-        if (visited.find(start_key) != visited.end()) {
-            continue;
-        }
-        std::queue<SubjectVoxelKey> queue;
-        std::vector<SubjectVoxelKey> component;
-        std::size_t component_score = 0;
-        queue.push(start_key);
-        visited.insert(start_key);
-
-        while (!queue.empty()) {
-            const SubjectVoxelKey key = queue.front();
-            queue.pop();
-            component.push_back(key);
-            component_score += voxel_counts[key];
-
-            for (const auto& offset : kAxisNeighborOffsets) {
-                SubjectVoxelKey next{
-                    key.x + offset[0],
-                    key.y + offset[1],
-                    key.z + offset[2]
-                };
-                if (voxel_counts.find(next) == voxel_counts.end()) {
-                    continue;
-                }
-                if (visited.insert(next).second) {
-                    queue.push(next);
-                }
-            }
-        }
-
-        if (component_score > dominant_score) {
-            dominant_score = component_score;
-            dominant_component.clear();
-            for (const auto& key : component) {
-                dominant_component.insert(key);
-            }
-        }
+    const auto cleanup_analysis = analyze_subject_input(cutout_stage.gaussians, true);
+    const auto cleanup_stage = apply_subject_cleanup(cutout_stage.gaussians, cleanup_analysis);
+    if (cleanup_stage.gaussians.empty()) {
+        return -1;
+    }
+    if (write_subject_stage_ply(output_path, cleanup_stage.gaussians) != 0) {
+        return -1;
     }
 
-    if (dominant_component.empty()) {
-        dominant_component.reserve(voxel_counts.size());
-        for (const auto& entry : voxel_counts) {
-            dominant_component.insert(entry.first);
-        }
-    }
-
-    std::unordered_set<SubjectVoxelKey, SubjectVoxelKeyHash> dominant_shell;
-    dominant_shell.reserve(dominant_component.size());
-    for (const auto& key : dominant_component) {
-        const int face_neighbors = axis_neighbor_count(dominant_component, key);
-        const std::size_t local_density = voxel_counts[key];
-        if (face_neighbors < 6 || local_density <= 2) {
-            dominant_shell.insert(key);
-        }
-    }
-
-    SubjectBounds dominant_bounds;
-    for (const auto& gaussian : result.gaussians) {
-        const auto key = make_voxel_key(gaussian, voxel_size);
-        if (dominant_component.find(key) != dominant_component.end()) {
-            expand_bounds(dominant_bounds, gaussian);
-        }
-    }
-    if (!is_finite_bounds(dominant_bounds)) {
-        dominant_bounds = scene_bounds;
-    }
-
-    const float dominant_span_x = std::max(0.05f, dominant_bounds.max_x - dominant_bounds.min_x);
-    const float dominant_span_y = std::max(0.05f, dominant_bounds.max_y - dominant_bounds.min_y);
-    const float dominant_span_z = std::max(0.05f, dominant_bounds.max_z - dominant_bounds.min_z);
-    const float footprint_margin = std::max(0.05f, std::max(dominant_span_x, dominant_span_z) * 0.10f);
-    const float bottom_band_height = std::max(0.03f, dominant_span_y * 0.12f);
-    const float bottom_band_limit = dominant_bounds.min_y + bottom_band_height;
-    const float shell_margin = std::max(voxel_size * 1.8f, std::max(dominant_span_x, dominant_span_z) * 0.04f);
-    const float shell_y_margin = std::max(voxel_size * 1.5f, dominant_span_y * 0.08f);
-    const float boundary_split_threshold = std::max(voxel_size * 1.4f, std::max(dominant_span_x, dominant_span_z) * 0.035f);
-    const float boundary_soft_threshold = std::max(voxel_size * 1.1f, std::max(dominant_span_x, dominant_span_z) * 0.022f);
-
-    auto in_support_band = [&](const aether::splat::GaussianParams& gaussian) -> bool {
-        return gaussian.position[0] >= dominant_bounds.min_x - footprint_margin &&
-            gaussian.position[0] <= dominant_bounds.max_x + footprint_margin &&
-            gaussian.position[2] >= dominant_bounds.min_z - footprint_margin &&
-            gaussian.position[2] <= dominant_bounds.max_z + footprint_margin &&
-            gaussian.position[1] <= bottom_band_limit;
-    };
-
-    auto near_shell_band = [&](const aether::splat::GaussianParams& gaussian) -> bool {
-        if (gaussian.position[0] < dominant_bounds.min_x - shell_margin ||
-            gaussian.position[0] > dominant_bounds.max_x + shell_margin ||
-            gaussian.position[2] < dominant_bounds.min_z - shell_margin ||
-            gaussian.position[2] > dominant_bounds.max_z + shell_margin ||
-            gaussian.position[1] < dominant_bounds.min_y - bottom_band_height ||
-            gaussian.position[1] > dominant_bounds.max_y + shell_y_margin) {
-            return false;
-        }
-
-        const auto key = make_voxel_key(gaussian, voxel_size);
-        if (dominant_shell.find(key) != dominant_shell.end()) {
-            return true;
-        }
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dz = -1; dz <= 1; ++dz) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue;
-                    SubjectVoxelKey next{ key.x + dx, key.y + dy, key.z + dz };
-                    if (dominant_shell.find(next) != dominant_shell.end()) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    };
-
-    std::vector<aether::splat::GaussianParams> mask_seed_gaussians;
-    mask_seed_gaussians.reserve(result.gaussians.size());
-    std::vector<SubjectMaskSignal> mask_seed_signals;
-    mask_seed_signals.reserve(result.gaussians.size());
-
-    for (const auto& gaussian : result.gaussians) {
-        const auto key = make_voxel_key(gaussian, voxel_size);
-        const bool in_dominant = dominant_component.find(key) != dominant_component.end();
-        const bool support_candidate = in_support_band(gaussian) && gaussian.opacity >= 0.02f;
-        const bool boundary_candidate =
-            near_shell_band(gaussian) &&
-            gaussian.opacity >= 0.018f &&
-            average_scale(gaussian) >= 1e-5f &&
-            max_scale(gaussian) <= std::max(0.10f, scene_span * 0.12f);
-
-        SubjectMaskSignal signal{};
-        signal.component_score = in_dominant ? 1.0f : 0.0f;
-        signal.support_score = support_candidate ? clamp01(0.55f + gaussian.opacity * 0.45f) : 0.0f;
-        signal.boundary_score = boundary_candidate
-            ? clamp01(0.45f + gaussian.opacity * 0.40f +
-                      std::max(0.0f, 1.0f - max_scale(gaussian) / std::max(boundary_split_threshold, 1e-4f)) * 0.15f)
-            : 0.0f;
-
-        if (in_dominant) {
-            signal.stage = SubjectMaskStage::kCore;
-        } else if (boundary_candidate && signal.boundary_score >= signal.support_score) {
-            signal.stage = SubjectMaskStage::kBoundary;
-        } else if (support_candidate) {
-            signal.stage = SubjectMaskStage::kSupport;
-        } else {
-            signal.stage = SubjectMaskStage::kReject;
-        }
-
-        if (signal.stage == SubjectMaskStage::kReject) {
-            continue;
-        }
-        mask_seed_gaussians.push_back(gaussian);
-        mask_seed_signals.push_back(signal);
-    }
-
-    if (mask_seed_gaussians.empty()) {
-        const auto write_status = aether::splat::write_ply(
-            output_path,
-            result.gaussians.data(),
-            result.gaussians.size()
-        );
-        if (!aether::core::is_ok(write_status)) return -1;
-        stats.mask_seed_kept_splats = 0;
-        stats.boundary_refined_splats = 0;
-        stats.boundary_split_splats = 0;
-        stats.cutout_kept_splats = result.gaussians.size();
-        stats.cleanup_kept_splats = result.gaussians.size();
-        stats.cleanup_removed_splats = 0;
-        if (out_stats) *out_stats = stats;
-        return 0;
-    }
-
-    stats.mask_seed_kept_splats = mask_seed_gaussians.size();
-
-    std::vector<aether::splat::GaussianParams> boundary_refined_gaussians;
-    boundary_refined_gaussians.reserve(mask_seed_gaussians.size());
-    std::vector<SubjectMaskSignal> boundary_refined_signals;
-    boundary_refined_signals.reserve(mask_seed_signals.size());
-
-    std::size_t boundary_refined_outputs = 0;
-    std::size_t boundary_split_extra = 0;
-
-    for (std::size_t i = 0; i < mask_seed_gaussians.size(); ++i) {
-        const auto& gaussian = mask_seed_gaussians[i];
-        const auto& signal = mask_seed_signals[i];
-        if (signal.stage != SubjectMaskStage::kBoundary) {
-            boundary_refined_gaussians.push_back(gaussian);
-            boundary_refined_signals.push_back(signal);
-            continue;
-        }
-
-        const float largest_scale = max_scale(gaussian);
-        if (largest_scale >= boundary_split_threshold && gaussian.opacity >= 0.028f) {
-            auto split = split_boundary_gaussian(gaussian, 0.34f, 0.56f);
-            boundary_refined_outputs += split.size();
-            if (split.size() > 1) {
-                boundary_split_extra += split.size() - 1;
-            }
-            for (const auto& child : split) {
-                boundary_refined_gaussians.push_back(child);
-                boundary_refined_signals.push_back(signal);
-            }
-            continue;
-        }
-
-        aether::splat::GaussianParams refined = gaussian;
-        if (largest_scale >= boundary_soft_threshold) {
-            int major_axis = 0;
-            if (refined.scale[1] > refined.scale[major_axis]) major_axis = 1;
-            if (refined.scale[2] > refined.scale[major_axis]) major_axis = 2;
-            for (int axis = 0; axis < 3; ++axis) {
-                refined.scale[axis] = std::max(
-                    1e-5f,
-                    refined.scale[axis] * (axis == major_axis ? 0.78f : 0.92f)
-                );
-            }
-            refined.opacity = clamp01(refined.opacity * 0.92f);
-        }
-        ++boundary_refined_outputs;
-        boundary_refined_gaussians.push_back(refined);
-        boundary_refined_signals.push_back(signal);
-    }
-
-    stats.boundary_refined_splats = boundary_refined_outputs;
-    stats.boundary_split_splats = boundary_split_extra;
-    stats.cutout_kept_splats = boundary_refined_gaussians.size();
-
-    std::unordered_map<SubjectVoxelKey, std::size_t, SubjectVoxelKeyHash> cutout_voxel_counts;
-    cutout_voxel_counts.reserve(boundary_refined_gaussians.size());
-    for (const auto& gaussian : boundary_refined_gaussians) {
-        ++cutout_voxel_counts[make_voxel_key(gaussian, voxel_size)];
-    }
-
-    std::vector<aether::splat::GaussianParams> cleaned_gaussians;
-    cleaned_gaussians.reserve(boundary_refined_gaussians.size());
-
-    auto neighbor_weight = [&](const SubjectVoxelKey& key) -> std::size_t {
-        std::size_t total = 0;
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dz = -1; dz <= 1; ++dz) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue;
-                    SubjectVoxelKey next{ key.x + dx, key.y + dy, key.z + dz };
-                    auto it = cutout_voxel_counts.find(next);
-                    if (it != cutout_voxel_counts.end()) {
-                        total += it->second;
-                    }
-                }
-            }
-        }
-        return total;
-    };
-
-    const float extreme_scale = std::max(0.10f, scene_span * 0.12f);
-    const float loose_margin = footprint_margin * 1.8f;
-
-    for (std::size_t i = 0; i < boundary_refined_gaussians.size(); ++i) {
-        const auto& gaussian = boundary_refined_gaussians[i];
-        const auto& signal = boundary_refined_signals[i];
-        const auto key = make_voxel_key(gaussian, voxel_size);
-        const bool preserve_core = signal.stage == SubjectMaskStage::kCore;
-        const bool preserve_support = signal.stage == SubjectMaskStage::kSupport;
-        if (preserve_core || preserve_support) {
-            cleaned_gaussians.push_back(gaussian);
-            continue;
-        }
-
-        const std::size_t local_count = cutout_voxel_counts[key];
-        const std::size_t nearby_count = neighbor_weight(key);
-        const bool isolated = local_count <= 1 && nearby_count <= 2;
-        const bool too_faint = gaussian.opacity < 0.035f;
-        const bool too_large = max_scale(gaussian) > extreme_scale;
-        const bool far_outside_footprint =
-            gaussian.position[0] < dominant_bounds.min_x - loose_margin ||
-            gaussian.position[0] > dominant_bounds.max_x + loose_margin ||
-            gaussian.position[2] < dominant_bounds.min_z - loose_margin ||
-            gaussian.position[2] > dominant_bounds.max_z + loose_margin;
-        const bool likely_contact_bridge =
-            !far_outside_footprint &&
-            gaussian.position[1] <= bottom_band_limit + bottom_band_height * 0.9f &&
-            nearby_count >= 1 &&
-            gaussian.opacity >= 0.02f;
-        const bool boundary_consistent =
-            signal.boundary_score >= 0.45f &&
-            nearby_count >= 1 &&
-            gaussian.opacity >= 0.018f;
-
-        if (isolated && (too_faint || too_large || far_outside_footprint) &&
-            !likely_contact_bridge && !boundary_consistent) {
-            continue;
-        }
-
-        cleaned_gaussians.push_back(gaussian);
-    }
-
-    if (cleaned_gaussians.empty()) {
-        cleaned_gaussians = boundary_refined_gaussians;
-    }
-
-    stats.cleanup_kept_splats = cleaned_gaussians.size();
-    stats.cleanup_removed_splats =
-        stats.cutout_kept_splats > stats.cleanup_kept_splats
-            ? stats.cutout_kept_splats - stats.cleanup_kept_splats
-            : 0;
-
-    const auto write_status = aether::splat::write_ply(
-        output_path,
-        cleaned_gaussians.data(),
-        cleaned_gaussians.size()
-    );
-    if (!aether::core::is_ok(write_status)) return -1;
+    aether_subject_cleanup_stats_t stats = cutout_stage.stats;
+    stats.cleanup_kept_splats = cleanup_stage.stats.cleanup_kept_splats;
+    stats.cleanup_removed_splats = cleanup_stage.stats.cleanup_removed_splats;
+    stats.cleanup_scene_span = cleanup_stage.stats.cleanup_scene_span;
     if (out_stats) {
         *out_stats = stats;
+    }
+    return 0;
+}
+
+int aether_splat_subject_cutout_ply(const char* input_path,
+                                     const char* output_path,
+                                     aether_subject_cleanup_stats_t* out_stats) {
+    if (!input_path || !output_path) return -1;
+
+    aether::splat::PlyLoadResult result;
+    auto status = aether::splat::load_ply(input_path, result);
+    if (!aether::core::is_ok(status)) return -1;
+    if (result.gaussians.empty()) return -1;
+
+    const auto analysis = analyze_subject_input(result.gaussians, false);
+    const auto cutout_stage = apply_subject_cutout(result.gaussians, analysis);
+    if (cutout_stage.gaussians.empty()) {
+        return -1;
+    }
+    if (write_subject_stage_ply(output_path, cutout_stage.gaussians) != 0) {
+        return -1;
+    }
+    if (out_stats) {
+        *out_stats = cutout_stage.stats;
+    }
+    return 0;
+}
+
+int aether_splat_subject_cleanup_cutout_ply(const char* input_path,
+                                             const char* output_path,
+                                             aether_subject_cleanup_stats_t* out_stats) {
+    if (!input_path || !output_path) return -1;
+
+    aether::splat::PlyLoadResult result;
+    auto status = aether::splat::load_ply(input_path, result);
+    if (!aether::core::is_ok(status)) return -1;
+    if (result.gaussians.empty()) return -1;
+
+    const auto analysis = analyze_subject_input(result.gaussians, true);
+    const auto cleanup_stage = apply_subject_cleanup(result.gaussians, analysis);
+    if (cleanup_stage.gaussians.empty()) {
+        return -1;
+    }
+    if (write_subject_stage_ply(output_path, cleanup_stage.gaussians) != 0) {
+        return -1;
+    }
+    if (out_stats) {
+        *out_stats = cleanup_stage.stats;
     }
     return 0;
 }

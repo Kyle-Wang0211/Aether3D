@@ -31,6 +31,7 @@ protocol CameraSessionProtocol: AnyObject {
     
     func configure(orientation: UIInterfaceOrientation) throws
     func startRunning()
+    func stopRunning()
     func startRecording(to url: URL, delegate: AVCaptureFileOutputRecordingDelegate)
     func stopRecording()
     func reconfigureAfterInterruption(orientation: UIInterfaceOrientation) throws
@@ -450,6 +451,15 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
             }
         }
     }
+
+    func stopRunning() {
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.captureSession.isRunning {
+                self.captureSession.stopRunning()
+            }
+        }
+    }
     
     func startRecording(to url: URL, delegate: AVCaptureFileOutputRecordingDelegate) {
         sessionQueue.async { [weak self] in
@@ -522,33 +532,9 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
     }
 
     private func applyVideoOrientation(connection: AVCaptureConnection, orientation: UIInterfaceOrientation) {
-        if #available(iOS 17.0, *) {
-            let angle = rotationAngle(for: orientation)
-            if connection.isVideoRotationAngleSupported(angle) {
-                connection.videoRotationAngle = angle
-            }
-        } else {
-            applyLegacyVideoOrientation(connection: connection, orientation: orientation)
-        }
-    }
-
-    @available(iOS, deprecated: 17.0)
-    private func applyLegacyVideoOrientation(connection: AVCaptureConnection, orientation: UIInterfaceOrientation) {
-        guard connection.isVideoOrientationSupported else { return }
-        connection.videoOrientation = legacyVideoOrientation(for: orientation)
-    }
-
-    @available(iOS, deprecated: 17.0)
-    private func legacyVideoOrientation(for orientation: UIInterfaceOrientation) -> AVCaptureVideoOrientation {
-        switch orientation {
-        case .landscapeLeft:
-            return .landscapeRight
-        case .landscapeRight:
-            return .landscapeLeft
-        case .portraitUpsideDown:
-            return .portraitUpsideDown
-        default:
-            return .portrait
+        let angle = rotationAngle(for: orientation)
+        if connection.isVideoRotationAngleSupported(angle) {
+            connection.videoRotationAngle = angle
         }
     }
 

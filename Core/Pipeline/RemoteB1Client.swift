@@ -10,7 +10,7 @@
 
 import Foundation
 
-enum RemoteB1ClientError: Error {
+public enum RemoteB1ClientError: Error {
     case notConfigured
     case networkError(String)
     case networkTimeout
@@ -20,17 +20,17 @@ enum RemoteB1ClientError: Error {
     case jobFailed(String)
 }
 
-enum RemoteUploadPhase: String, Sendable {
+public enum RemoteUploadPhase: String, Sendable {
     case transferring
     case finalizing
 }
 
-struct RemoteUploadProgress: Sendable {
-    let uploadedBytes: Int64
-    let totalBytes: Int64
-    let phase: RemoteUploadPhase
+public struct RemoteUploadProgress: Sendable {
+    public let uploadedBytes: Int64
+    public let totalBytes: Int64
+    public let phase: RemoteUploadPhase
 
-    init(
+    public init(
         uploadedBytes: Int64,
         totalBytes: Int64,
         phase: RemoteUploadPhase = .transferring
@@ -40,29 +40,29 @@ struct RemoteUploadProgress: Sendable {
         self.phase = phase
     }
 
-    var fraction: Double? {
+    public var fraction: Double? {
         guard totalBytes > 0 else { return nil }
         return min(max(Double(uploadedBytes) / Double(totalBytes), 0.0), 1.0)
     }
 
-    var isFinalizing: Bool {
+    public var isFinalizing: Bool {
         phase == .finalizing
     }
 }
 
-struct RemoteJobProgress: Sendable {
-    let progressFraction: Double?
-    let stageKey: String?
-    let phaseName: String?
-    let currentTier: String?
-    let title: String?
-    let detail: String?
-    let etaMinutes: Int?
-    let elapsedSeconds: Int?
-    let progressBasis: String?
-    let runtimeMetrics: [String: String]
+public struct RemoteJobProgress: Sendable {
+    public let progressFraction: Double?
+    public let stageKey: String?
+    public let phaseName: String?
+    public let currentTier: String?
+    public let title: String?
+    public let detail: String?
+    public let etaMinutes: Int?
+    public let elapsedSeconds: Int?
+    public let progressBasis: String?
+    public let runtimeMetrics: [String: String]
 
-    init(
+    public init(
         progressFraction: Double?,
         stageKey: String?,
         phaseName: String? = nil,
@@ -104,7 +104,7 @@ extension RemoteB1Client {
     }
 }
 
-enum JobStatus: Sendable {
+public enum JobStatus: Sendable {
     case pending(RemoteJobProgress)
     case processing(RemoteJobProgress)
     case downloadReady(RemoteJobProgress)

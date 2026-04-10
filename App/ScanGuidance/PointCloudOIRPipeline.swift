@@ -101,6 +101,9 @@ public final class PointCloudOIRPipeline: OverlayEncodable {
     private var accumTexture: MTLTexture?
     private var revealTexture: MTLTexture?
     private var currentTextureSize: SIMD2<Int> = .zero
+    private let overlayRenderPassDescriptor = MTLRenderPassDescriptor()
+    private let accumRenderPassDescriptor = MTLRenderPassDescriptor()
+    private let compositeRenderPassDescriptor = MTLRenderPassDescriptor()
 
     // ─── Triple-Buffered Data ───
     private let inflightSemaphore: DispatchSemaphore
@@ -629,7 +632,7 @@ public final class PointCloudOIRPipeline: OverlayEncodable {
         if let ovPSO = overlayPSO, overlayCount > 0, !renderPointCloudPass {
             // Transparent sparse dense-map overlay.
             // Keep the camera feed untouched and draw only the real overlay tiles.
-            let overlayRPD = MTLRenderPassDescriptor()
+            let overlayRPD = overlayRenderPassDescriptor
             overlayRPD.colorAttachments[0].texture = renderPassDescriptor.colorAttachments[0].texture
             overlayRPD.colorAttachments[0].loadAction = .load
             overlayRPD.colorAttachments[0].storeAction = .store
@@ -663,7 +666,7 @@ public final class PointCloudOIRPipeline: OverlayEncodable {
         if splatCount > 0, let accumPSO = oirAccumPSO,
            let accumTex = accumTexture, let revealTex = revealTexture {
 
-            let accumRPD = MTLRenderPassDescriptor()
+            let accumRPD = accumRenderPassDescriptor
 
             // Accumulation target: clear to (0, 0, 0, 0)
             accumRPD.colorAttachments[0].texture = accumTex
@@ -697,7 +700,7 @@ public final class PointCloudOIRPipeline: OverlayEncodable {
             // ─── Pass 3: OIR Composite (to drawable) ───
             if let compositePSO = oirCompositePSO {
                 // Second render pass to the same drawable (load existing content)
-                let compositeRPD = MTLRenderPassDescriptor()
+                let compositeRPD = compositeRenderPassDescriptor
                 compositeRPD.colorAttachments[0].texture = renderPassDescriptor.colorAttachments[0].texture
                 compositeRPD.colorAttachments[0].loadAction = .load
                 compositeRPD.colorAttachments[0].storeAction = .store

@@ -1,0 +1,2510 @@
+import Foundation
+
+#if canImport(SwiftUI)
+import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#if canImport(QuickLook)
+import QuickLook
+#endif
+#endif
+
+struct ObjectModeV2CaptureView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var viewModel = ObjectModeV2CaptureViewModel()
+    @State private var reticlePulse = false
+    @State private var showLockFlash = false
+    @State private var showLockBadge = false
+    @State private var lockBadgePulse = false
+    @State private var showRecordingCarryover = false
+    @State private var showAcceptedFrameFlash = false
+
+    private let minFrames = 20
+    private let maxFrames = 150
+
+    var body: some View {
+        ZStack {
+            if viewModel.shouldShowProcessingOverlay {
+                processingScreen
+            } else {
+                captureScreen
+            }
+        }
+        .background(Color.black.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .statusBarHidden(false)
+        .fullScreenCover(isPresented: $viewModel.isArtifactViewerPresented) {
+            if let artifactURL = viewModel.downloadedArtifactURL {
+                ObjectModeV2DefaultArtifactViewer(url: artifactURL, manifestURL: viewModel.manifestURL) {
+                    viewModel.isArtifactViewerPresented = false
+                }
+            } else {
+                Color.black.ignoresSafeArea()
+            }
+        }
+        .onAppear {
+            reticlePulse = true
+            viewModel.onAppear()
+        }
+        .onDisappear {
+            viewModel.onDisappear()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            viewModel.noteScenePhase(newPhase)
+        }
+        .onChange(of: viewModel.isTargetLocked) { _, isLocked in
+            if isLocked {
+                showLockBadge = true
+                showLockFlash = true
+                lockBadgePulse = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.48) {
+                    withAnimation(.easeOut(duration: 0.24)) {
+                        showLockFlash = false
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.92)) {
+                        lockBadgePulse = false
+                    }
+                }
+            } else {
+                showLockFlash = false
+                showLockBadge = false
+                lockBadgePulse = false
+            }
+        }
+        .onChange(of: viewModel.isRecording) { _, isRecording in
+            if isRecording && viewModel.isTargetLocked {
+                showRecordingCarryover = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    withAnimation(.easeOut(duration: 0.28)) {
+                        showRecordingCarryover = false
+                    }
+                }
+            } else if !isRecording {
+                showRecordingCarryover = false
+            }
+        }
+        .onChange(of: viewModel.acceptedFrameFeedbackTick) { _, _ in
+            withAnimation(.easeOut(duration: 0.08)) {
+                showAcceptedFrameFlash = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    showAcceptedFrameFlash = false
+                }
+            }
+        }
+        .animation(.spring(response: 0.42, dampingFraction: 0.88), value: isPreCaptureUI)
+        .animation(.easeInOut(duration: 0.24), value: viewModel.shouldShowProcessingOverlay)
+    }
+
+    private var captureScreen: some View {
+        ZStack {
+            cameraLayer
+
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.32),
+                    Color.black.opacity(0.06),
+                    Color.black.opacity(0.18),
+                    Color.black.opacity(0.55)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                topBar
+                Spacer()
+                centerPreview
+                Spacer()
+                bottomHud
+            }
+        }
+    }
+
+    private var processingScreen: some View {
+        ObjectModeV2ProcessingSurface(
+            snapshot: processingSnapshot,
+            onOpen: viewModel.downloadedArtifactURL != nil ? { viewModel.openRecord() } : nil,
+            onClose: {
+                viewModel.prepareForDismiss()
+                dismiss()
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var cameraLayer: some View {
+        #if canImport(UIKit) && canImport(AVFoundation)
+        if viewModel.shouldShowProcessingOverlay {
+            Color.black.ignoresSafeArea()
+        } else {
+            ObjectModeV2CameraPreview(session: viewModel.previewSession, bridge: viewModel.previewBridge)
+                .ignoresSafeArea()
+        }
+        #else
+        Color.black.ignoresSafeArea()
+        #endif
+    }
+
+    private var topBar: some View {
+        ZStack {
+            HStack {
+                if isPreCaptureUI {
+                    guidedTopPill
+                }
+                Spacer()
+                Button(action: {
+                    viewModel.prepareForDismiss()
+                    dismiss()
+                }) {
+                    Circle()
+                        .fill(Color.black.opacity(0.35))
+                        .overlay(
+                            Image(systemName: "xmark")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(.white.opacity(0.9))
+                        )
+                        .frame(width: 38, height: 38)
+                }
+            }
+
+            VStack(spacing: 8) {
+                Circle()
+                    .fill(trackingIndicatorColor)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: trackingIndicatorColor.opacity(0.6), radius: 6)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+    }
+
+    private var centerPreview: some View {
+        VStack(spacing: 18) {
+            ZStack {
+                if isPreCaptureUI {
+                    preCaptureReticle
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.96)),
+                            removal: .opacity
+                        ))
+                } else {
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .transition(.asymmetric(
+                            insertion: .opacity,
+                            removal: .opacity
+                        ))
+                }
+            }
+            .frame(width: isPreCaptureUI ? 268 : 1, height: isPreCaptureUI ? 322 : 1)
+
+            if let cameraError = viewModel.cameraError {
+                Text(cameraError)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color(red: 1.0, green: 0.83, blue: 0.40))
+                    .clipShape(Capsule())
+            }
+        }
+    }
+
+    private var bottomHud: some View {
+        VStack(spacing: 18) {
+            if viewModel.manifestURL != nil {
+                processingStatusCard
+            }
+
+            if isPreCaptureUI {
+                preCaptureBottomHud
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                hintPill
+
+                HStack(alignment: .bottom, spacing: 26) {
+                    leftAnchor
+                    captureButton
+                    trailingDock
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.bottom, 18)
+    }
+
+    private var processingOverlay: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.82),
+                    Color.black.opacity(0.74),
+                    Color.black.opacity(0.88)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                processingHero
+
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("OBJECT MODE BETA")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white.opacity(0.55))
+                            Text(processingHeroTitle)
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(.white)
+                            Text(processingHeroSubtitle)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.white.opacity(0.72))
+                        }
+                        Spacer()
+                        if viewModel.downloadedArtifactURL != nil {
+                            Button(action: {
+                                viewModel.openRecord()
+                            }) {
+                                Text("Open")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.black)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(Color.white)
+                                    .clipShape(Capsule())
+                            }
+                        } else if viewModel.processingFailureReason != nil {
+                            Text("失败")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.black)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color(red: 1.0, green: 0.58, blue: 0.58))
+                                .clipShape(Capsule())
+                        } else {
+                            ProgressView()
+                                .tint(.white)
+                        }
+                    }
+
+                    processingContextCard
+
+                    stageProgressBand
+
+                    HStack(spacing: 10) {
+                        statChip(title: "Frames", value: "\(min(viewModel.acceptedFrames, maxFrames))")
+                        statChip(title: "Orbit", value: "\(Int(viewModel.orbitCompletion * 100))%")
+                        statChip(title: "Status", value: processingStatusSummary)
+                    }
+
+                    ForEach(viewModel.visibleStageCards) { card in
+                        HStack(spacing: 12) {
+                            Circle()
+                                .fill(stageColor(card.state))
+                                .frame(width: 10, height: 10)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(card.title)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text(stageSubtitle(for: card))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.66))
+                            }
+                            Spacer()
+                            stageTrailingLabel(for: card.state)
+                        }
+                        .padding(.vertical, 4)
+                    }
+
+                    HStack(spacing: 10) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.white.opacity(0.75))
+                        Text("你可以留在这里等待，也可以稍后在作品列表里继续查看。")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.6))
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(18)
+                .background(Color.white.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .padding(.horizontal, 24)
+            }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        viewModel.prepareForDismiss()
+                        dismiss()
+                    }) {
+                        Circle()
+                            .fill(Color.black.opacity(0.35))
+                            .overlay(
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundColor(.white.opacity(0.9))
+                            )
+                            .frame(width: 38, height: 38)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                Spacer()
+            }
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+    }
+
+    private var processingSnapshot: ObjectModeV2ProcessingSnapshot {
+        let lockAccent = viewModel.isTargetLocked
+            ? targetZoneAccentColor
+            : Color(red: 0.95, green: 0.79, blue: 0.12)
+
+        #if canImport(UIKit)
+        return ObjectModeV2ProcessingSnapshot(
+            heroBadge: "OBJECT MODE BETA",
+            heroTitle: processingHeroTitle,
+            heroSubtitle: processingHeroSubtitle,
+            heroImage: viewModel.acceptedFrameThumbnails.last?.image,
+            canOpenArtifact: viewModel.downloadedArtifactURL != nil,
+            isFailed: viewModel.processingFailureReason != nil,
+            modeValue: "Guided",
+            lockValue: viewModel.isTargetLocked ? "Confirmed" : "Open",
+            lockAccent: lockAccent,
+            stageCards: viewModel.visibleStageCards,
+            stats: [
+                .init(title: "Frames", value: "\(min(viewModel.acceptedFrames, maxFrames))"),
+                .init(title: "Orbit", value: "\(Int(viewModel.orbitCompletion * 100))%"),
+                .init(title: "Status", value: processingStatusSummary)
+            ],
+            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
+        )
+        #else
+        return ObjectModeV2ProcessingSnapshot(
+            heroBadge: "OBJECT MODE BETA",
+            heroTitle: processingHeroTitle,
+            heroSubtitle: processingHeroSubtitle,
+            canOpenArtifact: viewModel.downloadedArtifactURL != nil,
+            isFailed: viewModel.processingFailureReason != nil,
+            modeValue: "Guided",
+            lockValue: viewModel.isTargetLocked ? "Confirmed" : "Open",
+            lockAccent: lockAccent,
+            stageCards: viewModel.visibleStageCards,
+            stats: [
+                .init(title: "Frames", value: "\(min(viewModel.acceptedFrames, maxFrames))"),
+                .init(title: "Orbit", value: "\(Int(viewModel.orbitCompletion * 100))%"),
+                .init(title: "Status", value: processingStatusSummary)
+            ],
+            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
+        )
+        #endif
+    }
+
+    private var processingHero: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 250, height: 250)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+
+            #if canImport(UIKit)
+            if let latest = viewModel.acceptedFrameThumbnails.last {
+                ZStack(alignment: .bottom) {
+                    Image(uiImage: latest.image)
+                        .resizable()
+                        .scaledToFill()
+                        .saturation(0.12)
+                        .frame(width: 210, height: 210)
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+                        .opacity(0.82)
+
+                    LinearGradient(
+                        colors: [
+                            Color.clear,
+                            Color.black.opacity(0.18),
+                            Color.black.opacity(0.42)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(width: 210, height: 210)
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+                    Text("正在生成默认成品 / HQ")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.44))
+                        .clipShape(Capsule())
+                        .padding(.bottom, 14)
+                }
+            } else {
+                DraftObjectPreview(
+                    acceptedFrames: viewModel.acceptedFrames,
+                    orbitCompletion: viewModel.orbitCompletion,
+                    isRecording: false,
+                    highlightFlash: false,
+                    thumbnails: viewModel.acceptedFrameThumbnails
+                )
+                .frame(width: 210, height: 220)
+            }
+            #else
+            DraftObjectPreview(
+                acceptedFrames: viewModel.acceptedFrames,
+                orbitCompletion: viewModel.orbitCompletion,
+                isRecording: false,
+                highlightFlash: false
+            )
+            .frame(width: 210, height: 220)
+            #endif
+        }
+    }
+
+    private var stageProgressBand: some View {
+        HStack(spacing: 10) {
+            ForEach(viewModel.visibleStageCards) { card in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(card.title)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.white)
+
+                    Capsule()
+                        .fill(stageColor(card.state))
+                        .frame(height: 6)
+
+                    Text(stageBandDetail(for: card))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.58))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+        }
+    }
+
+    private func statChip(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white.opacity(0.46))
+            Text(value)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var processingContextCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("CAPTURE CONTEXT")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white.opacity(0.48))
+
+            HStack(spacing: 10) {
+                processingContextChip(
+                    title: "Mode",
+                    value: "Guided",
+                    accent: .white
+                )
+                processingContextChip(
+                    title: "Lock",
+                    value: viewModel.isTargetLocked ? "Confirmed" : "Open",
+                    accent: viewModel.isTargetLocked ? targetZoneAccentColor : Color(red: 0.95, green: 0.79, blue: 0.12)
+                )
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func processingContextChip(title: String, value: String, accent: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(.white.opacity(0.44))
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 7, height: 7)
+                Text(value)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var processingStatusCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(processingCardTitle)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+                Spacer()
+                if viewModel.downloadedArtifactURL != nil {
+                    Button(action: {
+                        viewModel.openRecord()
+                    }) {
+                        Text("Open")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Color.white)
+                            .clipShape(Capsule())
+                    }
+                } else {
+                    Text(processingCardBadgeTitle)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.white)
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(spacing: 10) {
+                ForEach(viewModel.visibleStageCards) { card in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(stageColor(card.state))
+                            .frame(width: 8, height: 8)
+                        Text(card.title)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(Capsule())
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.black.opacity(0.48))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var hintPill: some View {
+        VStack(spacing: 8) {
+            if viewModel.isTargetLocked {
+                HStack(spacing: 8) {
+                    Image(systemName: "scope")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("TRACKING OBJECT")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(.black)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(targetZoneAccentColor)
+                .clipShape(Capsule())
+            }
+
+            Text(hintText)
+                .font(.system(size: 13, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .foregroundColor(.black.opacity(0.88))
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(Color.white.opacity(0.94))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var captureBudgetDock: some View {
+        VStack(spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ACCEPTED FRAMES")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white.opacity(0.58))
+                    HStack(alignment: .lastTextBaseline, spacing: 8) {
+                        Text("\(min(viewModel.acceptedFrames, maxFrames))")
+                            .font(.system(size: 30, weight: .bold))
+                            .foregroundColor(.white)
+                        Text(captureReadinessLabel)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(captureReadinessColor)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(captureReadinessColor.opacity(0.16))
+                            .clipShape(Capsule())
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                acceptedFrameStrip
+            }
+
+            VStack(spacing: 8) {
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.16))
+                        .frame(height: 6)
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.95, green: 0.79, blue: 0.12),
+                                    Color(red: 0.99, green: 0.92, blue: 0.55)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(frameBudgetProgress * 308, 8), height: 6)
+
+                    HStack(spacing: 0) {
+                        Circle()
+                            .fill(Color.white.opacity(0.28))
+                            .frame(width: 8, height: 8)
+                        Spacer()
+                        Circle()
+                            .fill(Color.white.opacity(0.14))
+                            .frame(width: 8, height: 8)
+                    }
+                    .frame(width: 308)
+
+                    VStack(spacing: 6) {
+                        Text("\(min(viewModel.acceptedFrames, maxFrames))")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(Color.white)
+                            .clipShape(Capsule())
+
+                        Circle()
+                            .fill(Color(red: 0.95, green: 0.79, blue: 0.12))
+                            .frame(width: 12, height: 12)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.72), lineWidth: 2)
+                            )
+                    }
+                    .offset(x: min(max(frameBudgetProgress * 308 - 16, 0), 292), y: -22)
+                }
+                .frame(width: 308, height: 28)
+
+                HStack {
+                    Text("20 (MIN)")
+                    Spacer()
+                    Text("150 (MAX)")
+                }
+                .frame(width: 308)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white.opacity(0.88))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(Color.black.opacity(0.42))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private var leftAnchor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(viewModel.isRecording ? "REC" : "OBJECT")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.white.opacity(0.72))
+            Text(String(format: "%02d:%02d", viewModel.recordingSeconds / 60, viewModel.recordingSeconds % 60))
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(.white)
+        }
+        .frame(width: 72, alignment: .leading)
+    }
+
+    private var preCaptureBottomHud: some View {
+        VStack(spacing: 16) {
+            preCaptureInstruction
+
+            HStack(alignment: .center, spacing: 18) {
+                Spacer(minLength: 0)
+                captureButton
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var preCaptureInstruction: some View {
+        Text(preCaptureInstructionText)
+            .font(.system(size: 13, weight: .semibold))
+            .multilineTextAlignment(.center)
+            .foregroundColor(.black.opacity(0.88))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(Color.white.opacity(0.96))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var targetModeSelector: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("GUIDED TARGET")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white.opacity(0.52))
+                    Text("Tell Guided whether you're framing one subject or a small group.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.58))
+                }
+                Spacer()
+                if viewModel.isTargetLocked {
+                    Text("LOCKED")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(targetZoneAccentColor)
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(spacing: 10) {
+                ForEach(ObjectModeV2TargetZoneMode.allCases, id: \.rawValue) { mode in
+                    Button(action: {
+                        withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) {
+                            viewModel.setTargetZoneMode(mode)
+                        }
+                    }) {
+                        VStack(spacing: 3) {
+                            Text(mode.title)
+                                .font(.system(size: 13, weight: .bold))
+                            Text(mode.subtitle)
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(viewModel.targetZoneMode == mode ? .black : .white.opacity(0.8))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(viewModel.targetZoneMode == mode ? Color.white : Color.black.opacity(0.28))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+
+                if viewModel.isTargetLocked {
+                    Button(action: {
+                        withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) {
+                            viewModel.resetTargetLock()
+                        }
+                    }) {
+                        Text("Reset")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(Color.black.opacity(0.36))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.black.opacity(0.30))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var captureButton: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.88)) {
+                viewModel.toggleCapture()
+            }
+        }) {
+            ZStack {
+                Circle()
+                    .stroke(Color.white, lineWidth: 4)
+                    .frame(width: 78, height: 78)
+
+                Circle()
+                    .fill(Color.black.opacity(0.75))
+                    .frame(width: 66, height: 66)
+
+                if viewModel.isRunning {
+                    ProgressView()
+                        .tint(.white)
+                } else if viewModel.isRecording {
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(Color.white)
+                            .frame(width: 8, height: 24)
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(Color.white)
+                            .frame(width: 8, height: 24)
+                    }
+                } else {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 28, height: 28)
+                }
+            }
+        }
+        .disabled(!(viewModel.canStartCapture || viewModel.canStopCapture))
+        .accessibilityLabel(viewModel.isRecording ? "结束采集并生成" : "开始对象采集")
+    }
+
+    private var trailingDock: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Text(viewModel.manifestURL != nil ? "READY" : "FRAMES")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.white.opacity(0.68))
+
+            if viewModel.manifestURL != nil {
+                Button(action: {
+                    viewModel.openRecord()
+                }) {
+                    Text("Open")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 64, height: 30)
+                        .background(Color.white.opacity(0.14))
+                        .clipShape(Capsule())
+                }
+            } else {
+                acceptedFramesBadge
+            }
+        }
+        .frame(width: 86, alignment: .trailing)
+    }
+
+    private var acceptedFramesBadge: some View {
+        VStack(spacing: 6) {
+            Text("有效帧")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white.opacity(0.62))
+            Text("\(viewModel.acceptedFrames)")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundColor(.white)
+
+            Text(acceptedFramesStatusTitle)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(acceptedFramesStatusAccent)
+                .clipShape(Capsule())
+
+            Text(acceptedFramesStatusSubtitle)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.white.opacity(0.54))
+                .multilineTextAlignment(.center)
+        }
+        .frame(width: 82)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.34))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var acceptedFramesStatusTitle: String {
+        if !viewModel.isRecording {
+            return "待开始"
+        }
+        if viewModel.acceptedFrames >= minFrames {
+            return "可生成"
+        }
+        if viewModel.acceptedFrames == 0 {
+            return "找角度"
+        }
+        return "继续拍"
+    }
+
+    private var acceptedFramesStatusSubtitle: String {
+        if !viewModel.isRecording {
+            return "开始录制后自动挑帧"
+        }
+        if viewModel.acceptedFrames >= minFrames {
+            return "已经达到最小数量"
+        }
+        let remaining = max(minFrames - viewModel.acceptedFrames, 0)
+        return "还差 \(remaining) 帧"
+    }
+
+    private var acceptedFramesStatusAccent: Color {
+        if !viewModel.isRecording {
+            return Color.white
+        }
+        if viewModel.acceptedFrames >= minFrames {
+            return Color(red: 0.54, green: 0.96, blue: 0.62)
+        }
+        return Color(red: 0.95, green: 0.79, blue: 0.12)
+    }
+
+    @ViewBuilder
+    private var draftPreviewView: some View {
+        #if canImport(UIKit)
+        DraftObjectPreview(
+            acceptedFrames: viewModel.acceptedFrames,
+            orbitCompletion: viewModel.orbitCompletion,
+            isRecording: viewModel.isRecording,
+            highlightFlash: showAcceptedFrameFlash,
+            thumbnails: viewModel.acceptedFrameThumbnails
+        )
+        .frame(width: 234, height: 286)
+        .overlay(alignment: .top) {
+            if viewModel.isTargetLocked {
+                recordingLockHeader
+                    .padding(.top, 18)
+                    .padding(.horizontal, 8)
+            }
+        }
+        .overlay {
+            if showRecordingCarryover && viewModel.isTargetLocked {
+                recordingTargetCarryover
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+        }
+        #else
+        DraftObjectPreview(
+            acceptedFrames: viewModel.acceptedFrames,
+            orbitCompletion: viewModel.orbitCompletion,
+            isRecording: viewModel.isRecording,
+            highlightFlash: showAcceptedFrameFlash
+        )
+        .frame(width: 234, height: 286)
+        .overlay(alignment: .top) {
+            if viewModel.isTargetLocked {
+                recordingLockHeader
+                    .padding(.top, 18)
+                    .padding(.horizontal, 8)
+            }
+        }
+        .overlay {
+            if showRecordingCarryover && viewModel.isTargetLocked {
+                recordingTargetCarryover
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var miniFrameStackView: some View {
+        #if canImport(UIKit)
+        MiniFrameStack(
+            acceptedFrames: viewModel.acceptedFrames,
+            thumbnails: viewModel.acceptedFrameThumbnails
+        )
+        #else
+        MiniFrameStack(acceptedFrames: viewModel.acceptedFrames)
+        #endif
+    }
+
+    private var frameBudgetProgress: CGFloat {
+        CGFloat(min(Double(viewModel.acceptedFrames) / Double(maxFrames), 1.0))
+    }
+
+    private var captureReadinessLabel: String {
+        if viewModel.acceptedFrames < minFrames {
+            return "MORE"
+        }
+        if viewModel.acceptedFrames < 60 {
+            return "GOOD"
+        }
+        return "RICH"
+    }
+
+    private var captureReadinessColor: Color {
+        if viewModel.acceptedFrames < minFrames {
+            return Color(red: 0.98, green: 0.76, blue: 0.24)
+        }
+        if viewModel.acceptedFrames < 60 {
+            return Color(red: 0.67, green: 0.95, blue: 0.58)
+        }
+        return Color(red: 0.50, green: 0.84, blue: 1.0)
+    }
+
+    private var hintText: String {
+        if viewModel.isPreparingCamera {
+            return "Preparing camera"
+        }
+        if viewModel.isRunning {
+            return "Building default and HQ assets"
+        }
+        return viewModel.guidanceText
+    }
+
+    private var processingStatusSummary: String {
+        if viewModel.processingFailureReason != nil {
+            return "Failed"
+        }
+        if viewModel.stageCards.allSatisfy({ if case .ready = $0.state { return true } else { return false } }) {
+            return "Done"
+        }
+        if viewModel.stageCards.contains(where: { if case .processing = $0.state { return true } else { return false } }) {
+            return "Live"
+        }
+        return "Queued"
+    }
+
+    private var trackingIndicatorColor: Color {
+        if viewModel.cameraError != nil {
+            return Color.red
+        }
+        if viewModel.isPreparingCamera {
+            return Color.orange
+        }
+        return Color.green
+    }
+
+    private func stageColor(_ state: ObjectModeV2StageUIState) -> Color {
+        switch state {
+        case .idle:
+            return Color.white.opacity(0.35)
+        case .processing:
+            return Color(red: 0.95, green: 0.79, blue: 0.12)
+        case .ready:
+            return Color(red: 0.54, green: 0.96, blue: 0.62)
+        case .failed:
+            return Color(red: 1.0, green: 0.46, blue: 0.46)
+        }
+    }
+
+    private func stageSubtitle(for card: ObjectModeV2StageCard) -> String {
+        switch card.state {
+        case .idle:
+            return card.subtitle
+        case .processing:
+            return "正在生成 \(card.title) 资产"
+        case .ready:
+            return "\(card.title) 已可用于查看"
+        case .failed(let reason):
+            return reason ?? "\(card.title) 生成失败"
+        }
+    }
+
+    @ViewBuilder
+    private func stageTrailingLabel(for state: ObjectModeV2StageUIState) -> some View {
+        switch state {
+        case .idle:
+            Text("等待中")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white.opacity(0.5))
+        case .processing(let progress):
+            Text(progress.map { "\((Int($0 * 100)))%" } ?? "处理中")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(red: 0.95, green: 0.79, blue: 0.12))
+                .clipShape(Capsule())
+        case .ready:
+            Text("已完成")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(red: 0.54, green: 0.96, blue: 0.62))
+                .clipShape(Capsule())
+        case .failed:
+            Text("失败")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(red: 1.0, green: 0.58, blue: 0.58))
+                .clipShape(Capsule())
+        }
+    }
+
+    private var acceptedFrameStrip: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            #if canImport(UIKit)
+            AcceptedFrameStrip(
+                thumbnails: viewModel.acceptedFrameThumbnails,
+                pulseLatest: showAcceptedFrameFlash
+            )
+            #else
+            AcceptedFrameStrip()
+            #endif
+
+            Text("系统自动挑选稳定关键帧")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white.opacity(0.54))
+        }
+    }
+
+    private func stageBandDetail(for card: ObjectModeV2StageCard) -> String {
+        switch card.state {
+        case .idle:
+            return "等待"
+        case .processing(let progress):
+            if let progress {
+                return "\(Int(progress * 100))%"
+            }
+            return "处理中"
+        case .ready:
+            return "完成"
+        case .failed:
+            return "失败"
+        }
+    }
+
+    private var coverageOrb: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.14), lineWidth: 4)
+                .frame(width: 56, height: 56)
+
+            Circle()
+                .trim(from: 0, to: max(min(viewModel.orbitCompletion, 1), 0.02))
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.95, green: 0.79, blue: 0.12),
+                            captureReadinessColor
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                )
+                .frame(width: 56, height: 56)
+                .rotationEffect(.degrees(-90))
+
+            VStack(spacing: 2) {
+                Text("\(Int(viewModel.orbitCompletion * 100))")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+                Text(stabilityLabel)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.white.opacity(0.56))
+            }
+        }
+    }
+
+    private var modeTabs: some View {
+        HStack(spacing: 18) {
+            modeTab("SPACE", selected: false)
+            modeTab("OBJECT", selected: true)
+            HStack(spacing: 4) {
+                modeTab("AI CAPTURE", selected: false)
+                Text("AI")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .background(Color.purple.opacity(0.92))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .offset(y: -8)
+            }
+            modeTab("360", selected: false)
+        }
+        .padding(.top, 2)
+    }
+
+    private func modeTab(_ title: String, selected: Bool) -> some View {
+        Text(title)
+            .font(.system(size: 12, weight: selected ? .bold : .semibold))
+            .foregroundColor(selected ? Color(red: 0.93, green: 0.84, blue: 0.46) : .white.opacity(0.62))
+    }
+
+    private var guidedTopPill: some View {
+        HStack(spacing: 8) {
+            Image(systemName: viewModel.isTargetLocked ? "scope" : "viewfinder")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(targetZoneAccentColor)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Guided")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                Text(viewModel.isTargetLocked ? "Object Locked" : "Object Mode")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.white.opacity(0.64))
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .background(Color.black.opacity(0.30))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .clipShape(Capsule())
+    }
+
+    private var preCaptureReticle: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            let anchor = CGPoint(
+                x: size.width * viewModel.targetZoneAnchor.x,
+                y: size.height * viewModel.targetZoneAnchor.y
+            )
+            let zoneSize = targetZoneSize(in: size)
+
+            ZStack {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onEnded { value in
+                                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                                    viewModel.lockTarget(at: value.location, in: size)
+                                }
+                            }
+                    )
+
+                if showLockFlash {
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .stroke(targetZoneAccentColor.opacity(0.95), lineWidth: 2)
+                        .frame(width: zoneSize.width + 42, height: zoneSize.height + 42)
+                        .position(anchor)
+                        .scaleEffect(showLockFlash ? 1.08 : 0.94)
+                        .opacity(showLockFlash ? 0 : 0.9)
+                }
+
+                targetPulse(size: zoneSize)
+                    .position(anchor)
+
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.10 : 0.03))
+                    .frame(width: zoneSize.width, height: zoneSize.height)
+                    .position(anchor)
+
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(targetZoneAccentColor.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+                    .frame(width: zoneSize.width + 18, height: zoneSize.height + 18)
+                    .position(anchor)
+
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.95 : 0.42), lineWidth: viewModel.isTargetLocked ? 2.2 : 1.2)
+                    .frame(width: zoneSize.width, height: zoneSize.height)
+                    .position(anchor)
+
+                TargetZoneCornerMarks(color: targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.95 : 0.46))
+                    .frame(width: zoneSize.width + 10, height: zoneSize.height + 10)
+                    .position(anchor)
+
+                Circle()
+                    .fill(targetZoneAccentColor)
+                    .frame(width: 8, height: 8)
+                    .position(anchor)
+
+                if showLockBadge || viewModel.isTargetLocked {
+                    targetLockBadge
+                        .position(x: anchor.x, y: anchor.y - (zoneSize.height * 0.5) - 22)
+                        .transition(.scale.combined(with: .opacity))
+                }
+
+                if viewModel.isTargetLocked {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(targetZoneAccentColor)
+                        .background(
+                            Circle()
+                                .fill(Color.black.opacity(0.36))
+                                .frame(width: 24, height: 24)
+                        )
+                        .position(x: anchor.x + zoneSize.width * 0.5 - 8, y: anchor.y - zoneSize.height * 0.5 + 8)
+                }
+
+                VStack {
+                    Spacer()
+                    Text(viewModel.isTargetLocked ? lockedTargetText : "Tap to lock your object")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.62))
+                }
+            }
+        }
+    }
+
+    private var isPreCaptureUI: Bool {
+        !viewModel.isRecording && !viewModel.shouldShowProcessingOverlay && viewModel.manifestURL == nil && viewModel.acceptedFrames == 0
+    }
+
+    private var processingCardTitle: String {
+        if viewModel.processingFailureReason != nil {
+            return "生成失败"
+        }
+        if viewModel.downloadedArtifactURL != nil || viewModel.visibleStageCards.allSatisfy({ if case .ready = $0.state { return true } else { return false } }) {
+            return "生成完成"
+        }
+        return "正在生成对象成品"
+    }
+
+    private var processingCardBadgeTitle: String {
+        if viewModel.processingFailureReason != nil {
+            return "失败"
+        }
+        return viewModel.downloadedArtifactURL != nil ? "可查看" : "请稍候"
+    }
+
+    private var processingHeroTitle: String {
+        viewModel.processingFailureReason == nil ? "正在生成对象成品" : "对象成品生成失败"
+    }
+
+    private var processingHeroSubtitle: String {
+        if let failureReason = viewModel.processingFailureReason, !failureReason.isEmpty {
+            return failureReason
+        }
+        return "系统会先生成默认成品；下载完成后即可打开，HQ 会继续增强。"
+    }
+
+    private var stabilityLabel: String {
+        if viewModel.stabilityScore < 0.4 {
+            return "HOLD"
+        }
+        if viewModel.stabilityScore < 0.7 {
+            return "OK"
+        }
+        return "GOOD"
+    }
+
+    private var preCaptureInstructionText: String {
+        if viewModel.isTargetLocked {
+            return "Object locked. Keep it inside the target zone,\nthen tap record to begin."
+        }
+        return "Point your camera at the object,\nthen tap the target area to lock it."
+    }
+
+    private var recordingLockHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "scope")
+                .font(.system(size: 11, weight: .bold))
+            Text("OBJECT LOCK ACTIVE")
+                .font(.system(size: 11, weight: .bold))
+        }
+        .foregroundColor(.black)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(targetZoneAccentColor)
+        .clipShape(Capsule())
+        .shadow(color: Color.black.opacity(0.12), radius: 6, y: 2)
+    }
+
+    private var recordingTargetCarryover: some View {
+        let size = CGSize(width: 92, height: 92)
+
+        return ZStack {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(targetZoneAccentColor.opacity(0.92), lineWidth: 2)
+                .frame(width: size.width, height: size.height)
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(targetZoneAccentColor.opacity(0.24), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+                .frame(width: size.width + 16, height: size.height + 16)
+            Text("Locked Object")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(targetZoneAccentColor)
+                .padding(.top, size.height + 28)
+        }
+    }
+
+    private var lockedTargetText: String {
+        "Object locked"
+    }
+
+    private func targetZoneSize(in size: CGSize) -> CGSize {
+        CGSize(width: min(92, size.width * 0.34), height: min(92, size.height * 0.24))
+    }
+
+    private var targetZoneAccentColor: Color {
+        viewModel.isTargetLocked ? Color(red: 0.54, green: 0.96, blue: 0.62) : .white
+    }
+
+    private func targetPulse(size: CGSize) -> some View {
+        RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .stroke(targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.26 : 0.12), lineWidth: 1)
+            .frame(width: size.width + 28, height: size.height + 28)
+            .scaleEffect(reticlePulse ? 1.05 : 0.96)
+            .opacity(reticlePulse ? (viewModel.isTargetLocked ? 0.36 : 0.30) : 0.10)
+            .animation(
+                .easeInOut(duration: 1.8).repeatForever(autoreverses: true),
+                value: reticlePulse
+            )
+    }
+
+    private var targetLockBadge: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "scope")
+                .font(.system(size: 11, weight: .bold))
+            Text("OBJECT LOCKED")
+                .font(.system(size: 11, weight: .bold))
+        }
+        .foregroundColor(.black)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(targetZoneAccentColor)
+        .clipShape(Capsule())
+        .shadow(color: Color.black.opacity(lockBadgePulse ? 0.26 : 0.16), radius: lockBadgePulse ? 14 : 8, y: 3)
+        .scaleEffect(lockBadgePulse ? 1.08 : 1.0)
+    }
+}
+
+private struct TargetZoneCornerMarks: View {
+    let color: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            let w = proxy.size.width
+            let h = proxy.size.height
+            let l = min(w, h) * 0.16
+
+            Path { path in
+                path.move(to: CGPoint(x: 0, y: l))
+                path.addLine(to: CGPoint(x: 0, y: 0))
+                path.addLine(to: CGPoint(x: l, y: 0))
+
+                path.move(to: CGPoint(x: w - l, y: 0))
+                path.addLine(to: CGPoint(x: w, y: 0))
+                path.addLine(to: CGPoint(x: w, y: l))
+
+                path.move(to: CGPoint(x: 0, y: h - l))
+                path.addLine(to: CGPoint(x: 0, y: h))
+                path.addLine(to: CGPoint(x: l, y: h))
+
+                path.move(to: CGPoint(x: w - l, y: h))
+                path.addLine(to: CGPoint(x: w, y: h))
+                path.addLine(to: CGPoint(x: w, y: h - l))
+            }
+            .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+        }
+    }
+}
+
+private struct MiniFrameStack: View {
+    let acceptedFrames: Int
+    #if canImport(UIKit)
+    let thumbnails: [ObjectModeV2AcceptedFrameThumbnail]
+    #endif
+
+    var body: some View {
+        ZStack {
+            #if canImport(UIKit)
+            if !thumbnails.isEmpty {
+                let recent = Array(thumbnails.suffix(3))
+                ForEach(Array(recent.enumerated()), id: \.element.id) { index, thumbnail in
+                    Image(uiImage: thumbnail.image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 24, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.22), lineWidth: 0.8)
+                        )
+                        .rotationEffect(.degrees(Double(index - 1) * 6))
+                        .offset(x: CGFloat(index - 1) * 6, y: CGFloat(index - 1) * -1)
+                }
+            } else {
+                placeholderStack
+            }
+            #else
+            placeholderStack
+            #endif
+
+            VStack(spacing: 3) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.78))
+                Text("\(acceptedFrames)")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white)
+            }
+        }
+    }
+
+    private var placeholderStack: some View {
+        ZStack {
+            ForEach(0..<3, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.white.opacity(0.08 + Double(index) * 0.04))
+                    .frame(width: 24, height: 30)
+                    .rotationEffect(.degrees(Double(index - 1) * 6))
+                    .offset(x: CGFloat(index - 1) * 6, y: CGFloat(index - 1) * -1)
+            }
+        }
+    }
+}
+
+private struct AcceptedFrameStrip: View {
+    #if canImport(UIKit)
+    var thumbnails: [ObjectModeV2AcceptedFrameThumbnail] = []
+    var pulseLatest: Bool = false
+    #endif
+
+    var body: some View {
+        HStack(spacing: 6) {
+            #if canImport(UIKit)
+            if !thumbnails.isEmpty {
+                let recent = Array(thumbnails.suffix(5))
+                ForEach(Array(recent.enumerated()), id: \.element.id) { index, thumbnail in
+                    let isLatest = index == recent.count - 1
+                    Image(uiImage: thumbnail.image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 30, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(
+                                    Color.white.opacity(isLatest ? (pulseLatest ? 0.86 : 0.42) : 0.14),
+                                    lineWidth: isLatest ? (pulseLatest ? 2.0 : 1.4) : 1
+                                )
+                        )
+                        .shadow(
+                            color: isLatest
+                                ? Color.white.opacity(pulseLatest ? 0.34 : 0.0)
+                                : Color.black.opacity(0),
+                            radius: pulseLatest && isLatest ? 10 : 0,
+                            y: 0
+                        )
+                        .shadow(color: Color.black.opacity(isLatest ? 0.24 : 0), radius: 6, y: 2)
+                        .scaleEffect(isLatest && pulseLatest ? 1.08 : 1.0)
+                }
+            } else {
+                placeholder
+            }
+            #else
+            placeholder
+            #endif
+        }
+    }
+
+    private var placeholder: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<5, id: \.self) { _ in
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 30, height: 40)
+            }
+        }
+    }
+}
+
+private struct DraftObjectPreview: View {
+    let acceptedFrames: Int
+    let orbitCompletion: Double
+    let isRecording: Bool
+    let highlightFlash: Bool
+    #if canImport(UIKit)
+    let thumbnails: [ObjectModeV2AcceptedFrameThumbnail]
+    #endif
+
+    private var pointCount: Int {
+        max(24, min(acceptedFrames * 3, 220))
+    }
+
+    private var shellOpacity: Double {
+        min(0.32 + Double(acceptedFrames) / 240.0, 0.72)
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack {
+                supportBase(size: size)
+                ghostComposite(size: size)
+                coreObjectShell(size: size)
+                pointCloudLayer(size: size)
+
+                DraftGhostMaskShape()
+                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                    .frame(width: size.width * 0.44, height: size.height * 0.74)
+                    .offset(y: size.height * -0.02)
+
+                DraftGhostMaskShape()
+                    .fill(Color.white.opacity(0.03))
+                    .frame(width: size.width * 0.40, height: size.height * 0.68)
+                    .offset(y: size.height * -0.02)
+
+                if highlightFlash {
+                    DraftGhostMaskShape()
+                        .fill(Color.white.opacity(0.14))
+                        .frame(width: size.width * 0.42, height: size.height * 0.70)
+                        .offset(y: size.height * -0.02)
+                }
+
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.white.opacity(0.03), lineWidth: 1)
+                    .frame(width: size.width * 0.30, height: size.height * 0.78)
+                    .offset(y: size.height * -0.02)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func supportBase(size: CGSize) -> some View {
+        ZStack {
+            Ellipse()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.white.opacity(0.28),
+                            Color.white.opacity(0.11),
+                            Color.white.opacity(0.02)
+                        ],
+                        center: .center,
+                        startRadius: 6,
+                        endRadius: size.width * 0.42
+                    )
+                )
+                .frame(width: size.width * 0.86, height: size.height * 0.22)
+                .offset(y: size.height * 0.30)
+
+            Ellipse()
+                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                .frame(width: size.width * 0.70, height: size.height * 0.12)
+                .offset(y: size.height * 0.29)
+
+            if highlightFlash {
+                Ellipse()
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: size.width * 0.78, height: size.height * 0.14)
+                    .offset(y: size.height * 0.29)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ghostComposite(size: CGSize) -> some View {
+        #if canImport(UIKit)
+        if !thumbnails.isEmpty {
+            let recent = Array(thumbnails.suffix(4))
+            ForEach(Array(recent.enumerated()), id: \.element.id) { index, thumbnail in
+                Image(uiImage: thumbnail.image)
+                    .resizable()
+                    .scaledToFill()
+                    .saturation(0.08)
+                    .contrast(1.12)
+                    .frame(
+                        width: size.width * (0.31 + CGFloat(index) * 0.05),
+                        height: size.height * (0.48 + CGFloat(index) * 0.055)
+                    )
+                    .clipShape(DraftGhostMaskShape())
+                    .overlay(
+                        DraftGhostMaskShape()
+                            .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                    )
+                    .blur(radius: CGFloat(max(0, 4 - index)))
+                    .opacity(shellOpacity * (0.16 + Double(index) * 0.12))
+                    .offset(
+                        x: CGFloat(index - 1) * 8 + CGFloat(orbitCompletion - 0.5) * 18,
+                        y: CGFloat(index - 1) * -6
+                    )
+            }
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private func coreObjectShell(size: CGSize) -> some View {
+        #if canImport(UIKit)
+        if let latest = thumbnails.last {
+            Image(uiImage: latest.image)
+                .resizable()
+                .scaledToFill()
+                .saturation(0.18)
+                .contrast(1.18)
+                .frame(width: size.width * 0.32, height: size.height * 0.58)
+                .clipShape(DraftGhostMaskShape())
+                .overlay(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.18),
+                            Color.white.opacity(0.02),
+                            Color.black.opacity(0.06)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .clipShape(DraftGhostMaskShape())
+                )
+                .overlay(
+                    DraftGhostMaskShape()
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+                .opacity(0.52 + shellOpacity * 0.18)
+                .offset(y: size.height * -0.02)
+
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.26),
+                            Color.white.opacity(0.02)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: size.width * 0.05, height: size.height * 0.40)
+                .blur(radius: 1.2)
+                .offset(x: size.width * 0.04, y: size.height * -0.08)
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private func pointCloudLayer(size: CGSize) -> some View {
+        ForEach(0..<pointCount, id: \.self) { index in
+            let point = point(for: index)
+            Circle()
+                .fill(point.color)
+                .frame(width: point.size, height: point.size)
+                .position(x: point.x * size.width, y: point.y * size.height)
+                .opacity(point.opacity)
+        }
+
+        ForEach(0..<max(18, acceptedFrames / 2), id: \.self) { index in
+            let seed = Double((index * 19) % 137) / 137.0
+            Circle()
+                .fill(Color.white.opacity(0.12 + seed * 0.18))
+                .frame(width: 1.0 + seed * 1.6, height: 1.0 + seed * 1.6)
+                .position(
+                    x: size.width * (0.22 + CGFloat(seed) * 0.56),
+                    y: size.height * (0.74 + CGFloat(sin(Double(index) * 0.5)) * 0.05)
+                )
+        }
+
+        ForEach(0..<max(10, acceptedFrames / 3), id: \.self) { index in
+            let progress = Double(index) / Double(max(10, acceptedFrames / 3))
+            Capsule()
+                .fill(Color.white.opacity(0.04 + progress * 0.06))
+                .frame(width: 2, height: 8 + progress * 10)
+                .rotationEffect(.degrees(progress * 24 - 12))
+                .position(
+                    x: size.width * (0.40 + CGFloat(progress) * 0.20),
+                    y: size.height * (0.26 + CGFloat(progress) * 0.34)
+                )
+        }
+    }
+
+    private func point(for index: Int) -> (x: CGFloat, y: CGFloat, size: CGFloat, opacity: Double, color: Color) {
+        let seed = Double((index * 37) % 251) / 251.0
+        let swirl = Double(index) / Double(max(pointCount - 1, 1))
+        let radius = 0.07 + seed * 0.16 + orbitCompletion * 0.08
+        let angle = swirl * .pi * 6.4 + orbitCompletion * .pi * 2.0
+
+        let columnBias = 0.5 + cos(angle) * radius * (0.42 + min(Double(acceptedFrames) / 120.0, 0.35))
+        let heightProfile = 0.84 - swirl * 0.58 - abs(sin(angle * 0.6)) * 0.06
+        let noiseX = sin(Double(index) * 0.9) * 0.01
+        let noiseY = cos(Double(index) * 0.73) * 0.012
+
+        let x = min(max(columnBias + noiseX, 0.1), 0.9)
+        let y = min(max(heightProfile + noiseY, 0.14), 0.93)
+
+        let size = CGFloat(1.1 + (seed * 1.8))
+        let opacity = 0.28 + seed * 0.55 + (isRecording ? 0.06 : 0)
+        let color = Color(
+            red: 0.94,
+            green: 0.96 - seed * 0.15,
+            blue: 0.90 - seed * 0.22
+        )
+        return (CGFloat(x), CGFloat(y), size, opacity, color)
+    }
+}
+
+private struct DraftGhostMaskShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let width = rect.width
+        let height = rect.height
+
+        var path = Path()
+        path.move(to: CGPoint(x: width * 0.35, y: height * 0.05))
+        path.addQuadCurve(
+            to: CGPoint(x: width * 0.65, y: height * 0.05),
+            control: CGPoint(x: width * 0.5, y: height * -0.02)
+        )
+        path.addQuadCurve(
+            to: CGPoint(x: width * 0.82, y: height * 0.36),
+            control: CGPoint(x: width * 0.86, y: height * 0.13)
+        )
+        path.addQuadCurve(
+            to: CGPoint(x: width * 0.74, y: height * 0.95),
+            control: CGPoint(x: width * 0.88, y: height * 0.82)
+        )
+        path.addQuadCurve(
+            to: CGPoint(x: width * 0.26, y: height * 0.95),
+            control: CGPoint(x: width * 0.5, y: height * 1.02)
+        )
+        path.addQuadCurve(
+            to: CGPoint(x: width * 0.18, y: height * 0.36),
+            control: CGPoint(x: width * 0.12, y: height * 0.82)
+        )
+        path.addQuadCurve(
+            to: CGPoint(x: width * 0.35, y: height * 0.05),
+            control: CGPoint(x: width * 0.14, y: height * 0.13)
+        )
+        path.closeSubpath()
+        return path
+    }
+}
+
+#endif
+
+#if canImport(SwiftUI) && canImport(UIKit) && canImport(QuickLook)
+
+private struct ObjectModeV2ViewerAssetDescriptor: Decodable {
+    let kind: String?
+    let path: String
+    let ready: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case path
+        case ready
+    }
+}
+
+private struct ObjectModeV2ViewerManifestFile: Decodable {
+    let defaultAsset: ObjectModeV2ViewerAssetDescriptor?
+    let cleanedAsset: ObjectModeV2ViewerAssetDescriptor?
+    let cleanupCompare: ObjectModeV2ViewerAssetDescriptor?
+    let hqAsset: ObjectModeV2ViewerAssetDescriptor?
+
+    enum CodingKeys: String, CodingKey {
+        case defaultAsset = "default_asset"
+        case cleanedAsset = "cleaned_asset"
+        case cleanupCompare = "cleanup_compare"
+        case hqAsset = "hq_asset"
+    }
+}
+
+private struct ObjectModeV2CleanupCompareSummary: Decodable {
+    let rawPointCount: Int?
+    let keptPointCount: Int?
+    let removedPointCount: Int?
+    let keptRatio: Double?
+    let removedRatio: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case rawPointCount = "raw_point_count"
+        case keptPointCount = "kept_point_count"
+        case removedPointCount = "removed_point_count"
+        case keptRatio = "kept_ratio"
+        case removedRatio = "removed_ratio"
+    }
+}
+
+struct ObjectModeV2DefaultArtifactViewer: View {
+    let url: URL
+    let manifestURL: URL?
+    let onDismiss: () -> Void
+
+    @State private var displayMode: ViewerMode = .defaultStage
+
+    private enum ViewerMode: String {
+        case defaultStage = "Default"
+        case cleanup = "Cleanup"
+        case hq = "HQ"
+    }
+
+    init(url: URL, manifestURL: URL? = nil, onDismiss: @escaping () -> Void) {
+        self.url = url
+        self.manifestURL = manifestURL
+        self.onDismiss = onDismiss
+    }
+
+    private var isSplatArtifact: Bool {
+        let suffix = activeArtifactURL.pathExtension.lowercased()
+        return suffix == "ply" || suffix == "splat" || suffix == "spz"
+    }
+
+    private var parsedManifest: ObjectModeV2ViewerManifestFile? {
+        guard let manifestURL,
+              let data = try? Data(contentsOf: manifestURL) else { return nil }
+        return try? JSONDecoder().decode(ObjectModeV2ViewerManifestFile.self, from: data)
+    }
+
+    private var cleanupCompareSummary: ObjectModeV2CleanupCompareSummary? {
+        guard let asset = parsedManifest?.cleanupCompare,
+              let compareURL = resolvedURL(for: asset),
+              let data = try? Data(contentsOf: compareURL) else { return nil }
+        return try? JSONDecoder().decode(ObjectModeV2CleanupCompareSummary.self, from: data)
+    }
+
+    private var cleanedArtifactURL: URL? {
+        guard let asset = parsedManifest?.cleanedAsset else { return nil }
+        return resolvedURL(for: asset)
+    }
+
+    private var hqArtifactURL: URL? {
+        guard let asset = parsedManifest?.hqAsset,
+              asset.ready != false else { return nil }
+        return resolvedURL(for: asset)
+    }
+
+    private var availableModes: [ViewerMode] {
+        var modes: [ViewerMode] = [.defaultStage]
+        if cleanedArtifactURL != nil {
+            modes.append(.cleanup)
+        }
+        if hqArtifactURL != nil {
+            modes.append(.hq)
+        }
+        return modes
+    }
+
+    private var activeArtifactURL: URL {
+        switch displayMode {
+        case .cleanup:
+            if let cleanedArtifactURL {
+                return cleanedArtifactURL
+            }
+        case .hq:
+            if let hqArtifactURL {
+                return hqArtifactURL
+            }
+        case .defaultStage:
+            break
+        }
+        if let defaultAsset = parsedManifest?.defaultAsset,
+           let resolvedDefaultURL = resolvedURL(for: defaultAsset) {
+            return resolvedDefaultURL
+        }
+        return url
+    }
+
+    private var compareSummaryText: String? {
+        guard let summary = cleanupCompareSummary else { return nil }
+        if let removedRatio = summary.removedRatio {
+            return String(format: "清理掉 %.0f%% 噪点", removedRatio * 100)
+        }
+        if let removedPointCount = summary.removedPointCount,
+           let rawPointCount = summary.rawPointCount,
+           rawPointCount > 0 {
+            let ratio = (Double(removedPointCount) / Double(rawPointCount)) * 100
+            return String(format: "清理掉 %.0f%% 噪点", ratio)
+        }
+        return nil
+    }
+
+    private func resolvedURL(for asset: ObjectModeV2ViewerAssetDescriptor) -> URL? {
+        if asset.path.hasPrefix("/") {
+            return URL(fileURLWithPath: asset.path)
+        }
+        if let manifestURL {
+            return manifestURL.deletingLastPathComponent().appendingPathComponent(asset.path)
+        }
+        return nil
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.ignoresSafeArea()
+
+            if isSplatArtifact {
+                SplatViewerRepresentable(artifactURL: activeArtifactURL)
+                    .id(activeArtifactURL.path)
+                    .ignoresSafeArea()
+            } else if QLPreviewController.canPreview(activeArtifactURL as NSURL) {
+                ObjectModeV2QuickLookPreview(url: activeArtifactURL)
+                    .ignoresSafeArea()
+            } else {
+                VStack(spacing: 18) {
+                    Image(systemName: "shippingbox.fill")
+                        .font(.system(size: 48, weight: .bold))
+                        .foregroundColor(.white.opacity(0.9))
+                    Text("\(displayMode.rawValue) 结果已下载")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundColor(.white)
+                    Text(activeArtifactURL.lastPathComponent)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.68))
+                    ShareLink(item: activeArtifactURL) {
+                        Text("分享文件")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(Color.white.opacity(0.14))
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+
+            HStack {
+                if availableModes.count > 1 {
+                    HStack(spacing: 8) {
+                        ForEach(availableModes, id: \.rawValue) { mode in
+                            Button(action: {
+                                displayMode = mode
+                            }) {
+                                Text(mode.rawValue)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(displayMode == mode ? .black : .white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        Capsule()
+                                            .fill(displayMode == mode ? Color.white : Color.white.opacity(0.14))
+                                    )
+                            }
+                        }
+                    }
+                }
+                if let compareSummaryText {
+                    Text(compareSummaryText)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.82))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.34))
+                        .clipShape(Capsule())
+                }
+                Spacer()
+                Button(action: onDismiss) {
+                    Circle()
+                        .fill(Color.black.opacity(0.38))
+                        .overlay(
+                            Image(systemName: "xmark")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(.white)
+                        )
+                        .frame(width: 38, height: 38)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+        }
+    }
+}
+
+private struct ObjectModeV2QuickLookPreview: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url)
+    }
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        controller.view.backgroundColor = .black
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: QLPreviewController, context: Context) {}
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        let url: URL
+
+        init(url: URL) {
+            self.url = url
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            url as NSURL
+        }
+    }
+}
+
+struct ObjectModeV2ProcessingStat: Identifiable {
+    let id = UUID()
+    let title: String
+    let value: String
+}
+
+struct ObjectModeV2ProcessingSnapshot {
+    let heroBadge: String
+    let heroTitle: String
+    let heroSubtitle: String
+    #if canImport(UIKit)
+    let heroImage: UIImage?
+    #endif
+    let canOpenArtifact: Bool
+    let isFailed: Bool
+    let modeValue: String
+    let lockValue: String
+    let lockAccent: Color
+    let stageCards: [ObjectModeV2StageCard]
+    let stats: [ObjectModeV2ProcessingStat]
+    let footerText: String
+}
+
+struct ObjectModeV2ProcessingSurface: View {
+    let snapshot: ObjectModeV2ProcessingSnapshot
+    let onOpen: (() -> Void)?
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.82),
+                    Color.black.opacity(0.74),
+                    Color.black.opacity(0.88)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                processingHero
+
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(snapshot.heroBadge)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white.opacity(0.55))
+                            Text(snapshot.heroTitle)
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(.white)
+                            Text(snapshot.heroSubtitle)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.white.opacity(0.72))
+                        }
+                        Spacer()
+                        if let onOpen {
+                            Button(action: onOpen) {
+                                Text("Open")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.black)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(Color.white)
+                                    .clipShape(Capsule())
+                            }
+                        } else if snapshot.isFailed {
+                            Text("失败")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.black)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color(red: 1.0, green: 0.58, blue: 0.58))
+                                .clipShape(Capsule())
+                        } else {
+                            ProgressView()
+                                .tint(.white)
+                        }
+                    }
+
+                    processingContextCard
+                    stageProgressBand
+
+                    HStack(spacing: 10) {
+                        ForEach(snapshot.stats) { stat in
+                            statChip(title: stat.title, value: stat.value)
+                        }
+                    }
+
+                    ForEach(snapshot.stageCards) { card in
+                        HStack(spacing: 12) {
+                            Circle()
+                                .fill(stageColor(card.state))
+                                .frame(width: 10, height: 10)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(card.title)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text(stageSubtitle(for: card))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.66))
+                            }
+                            Spacer()
+                            stageTrailingLabel(for: card.state)
+                        }
+                        .padding(.vertical, 4)
+                    }
+
+                    HStack(spacing: 10) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.white.opacity(0.75))
+                        Text(snapshot.footerText)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.6))
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(18)
+                .background(Color.white.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .padding(.horizontal, 24)
+            }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: onClose) {
+                        Circle()
+                            .fill(Color.black.opacity(0.35))
+                            .overlay(
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundColor(.white.opacity(0.9))
+                            )
+                            .frame(width: 38, height: 38)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                Spacer()
+            }
+        }
+    }
+
+    private var processingHero: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 250, height: 250)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+
+            #if canImport(UIKit)
+            if let image = snapshot.heroImage {
+                ZStack(alignment: .bottom) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .saturation(0.12)
+                        .frame(width: 210, height: 210)
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+                        .opacity(0.82)
+
+                    LinearGradient(
+                        colors: [
+                            Color.clear,
+                            Color.black.opacity(0.18),
+                            Color.black.opacity(0.42)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(width: 210, height: 210)
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+                    Text(snapshot.canOpenArtifact ? "默认成品已就绪 / HQ" : "正在生成默认成品 / HQ")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.44))
+                        .clipShape(Capsule())
+                        .padding(.bottom, 14)
+                }
+            } else {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(width: 210, height: 210)
+                    .overlay(
+                        Image(systemName: snapshot.isFailed ? "xmark.octagon.fill" : "square.stack.3d.up.fill")
+                            .font(.system(size: 42, weight: .semibold))
+                            .foregroundColor(snapshot.isFailed ? Color.red.opacity(0.8) : Color.white.opacity(0.65))
+                    )
+            }
+            #else
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+                .frame(width: 210, height: 210)
+            #endif
+        }
+    }
+
+    private var processingContextCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("CAPTURE CONTEXT")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white.opacity(0.48))
+
+            HStack(spacing: 10) {
+                processingContextChip(
+                    title: "Mode",
+                    value: snapshot.modeValue,
+                    accent: .white
+                )
+                processingContextChip(
+                    title: "Lock",
+                    value: snapshot.lockValue,
+                    accent: snapshot.lockAccent
+                )
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func processingContextChip(title: String, value: String, accent: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(.white.opacity(0.44))
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 7, height: 7)
+                Text(value)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var stageProgressBand: some View {
+        HStack(spacing: 10) {
+            ForEach(snapshot.stageCards) { card in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(card.title)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.white)
+
+                    Capsule()
+                        .fill(stageColor(card.state))
+                        .frame(height: 6)
+
+                    Text(stageBandDetail(for: card))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.58))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.white.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+        }
+    }
+
+    private func statChip(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white.opacity(0.46))
+            Text(value)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func stageColor(_ state: ObjectModeV2StageUIState) -> Color {
+        switch state {
+        case .idle:
+            return Color.white.opacity(0.35)
+        case .processing:
+            return Color(red: 0.95, green: 0.79, blue: 0.12)
+        case .ready:
+            return Color(red: 0.54, green: 0.96, blue: 0.62)
+        case .failed:
+            return Color(red: 1.0, green: 0.46, blue: 0.46)
+        }
+    }
+
+    private func stageSubtitle(for card: ObjectModeV2StageCard) -> String {
+        switch card.state {
+        case .idle:
+            return card.subtitle
+        case .processing:
+            return "正在生成 \(card.title) 资产"
+        case .ready:
+            return "\(card.title) 已可用于查看"
+        case .failed(let reason):
+            return reason ?? "\(card.title) 生成失败"
+        }
+    }
+
+    @ViewBuilder
+    private func stageTrailingLabel(for state: ObjectModeV2StageUIState) -> some View {
+        switch state {
+        case .idle:
+            Text("等待中")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white.opacity(0.5))
+        case .processing(let progress):
+            Text(progress.map { "\((Int($0 * 100)))%" } ?? "处理中")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(red: 0.95, green: 0.79, blue: 0.12))
+                .clipShape(Capsule())
+        case .ready:
+            Text("已完成")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(red: 0.54, green: 0.96, blue: 0.62))
+                .clipShape(Capsule())
+        case .failed:
+            Text("失败")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(red: 1.0, green: 0.58, blue: 0.58))
+                .clipShape(Capsule())
+        }
+    }
+
+    private func stageBandDetail(for card: ObjectModeV2StageCard) -> String {
+        switch card.state {
+        case .idle:
+            return "等待"
+        case .processing(let progress):
+            if let progress {
+                return "\(Int(progress * 100))%"
+            }
+            return "处理中"
+        case .ready:
+            return "完成"
+        case .failed:
+            return "失败"
+        }
+    }
+}
+
+#endif

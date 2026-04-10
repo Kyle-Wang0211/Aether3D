@@ -56,6 +56,7 @@ final class ScanViewModel: ObservableObject {
     private struct LocalProcessingHostState {
         let foregroundActive: Bool
         let backgroundContinuationActive: Bool
+        let gpuExecutionAllowed: Bool
     }
 
     // MARK: - Published State (drives SwiftUI)
@@ -80,6 +81,13 @@ final class ScanViewModel: ObservableObject {
     @Published var captureWeakGeometryCount: Int = 0
     @Published var captureRecoverableGeometryCount: Int = 0
     @Published var captureStableGeometryCount: Int = 0
+    private var subjectFirstDirectionCoverageLatch = SubjectFirstDirectionCoverage()
+    private var subjectFirstOrbitReferenceHorizontal: SIMD3<Float>?
+    private var subjectFirstOrbitStableCenter: SIMD3<Float>?
+    private var subjectFirstOrbitLastWrappedAngleDeg: Double?
+    private var subjectFirstOrbitAccumulatedAngleDeg: Double = 0
+    private var subjectFirstOrbitMinAccumulatedAngleDeg: Double = 0
+    private var subjectFirstOrbitMaxAccumulatedAngleDeg: Double = 0
 
 
     // MARK: - Existing Components (REUSE, DO NOT RECREATE)
@@ -127,6 +135,7 @@ final class ScanViewModel: ObservableObject {
     private var selectedProcessingBackend: ProcessingBackendChoice
     private var activeCoordinatorBackend: ProcessingBackendChoice?
     private var localProcessingBackgroundContinuationRequested: Bool = false
+    private var foregroundActiveGraceDeadline: CFAbsoluteTime = 0
     #if canImport(UIKit)
     private var localProcessingBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var localProcessingBackgroundTaskExpired: Bool = false
@@ -156,6 +165,14 @@ final class ScanViewModel: ObservableObject {
 
     private var shouldStreamOverlayPipelineDuringCapture: Bool {
         scanState == .capturing
+    }
+
+    private static let viewerTransitionForegroundGraceSeconds: CFTimeInterval = 3.0
+
+    private func shouldHoldForegroundDuringViewerTransition(
+        now: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
+    ) -> Bool {
+        foregroundActiveGraceDeadline > 0 && now < foregroundActiveGraceDeadline
     }
 
     var prefersMinimalARCaptureRuntime: Bool {
@@ -204,6 +221,12 @@ final class ScanViewModel: ObservableObject {
     @Published var debugMinFramesNeeded: Int = 4       // min_frames_to_start_training from C++
     @Published var debugKeyframeGateAccepts: Int = 0   // Live keyframes admitted by native gate
     @Published var debugKeyframeGateRejects: Int = 0   // Live frames rejected as near-duplicate / weak motion
+    @Published var debugImportedFramesEvaluated: Int = 0
+    @Published var debugImportedLowParallaxRejects: Int = 0
+    @Published var debugImportedNearDuplicateRejects: Int = 0
+    @Published var debugImportedSelectedTranslationMeanMm: Double = 0.0
+    @Published var debugImportedSelectedRotationMeanDeg: Double = 0.0
+    @Published var debugImportedSelectedOverlapMean: Double = 0.0
     @Published var debugIsGPUTraining: Bool = false    // GPU vs CPU training path
     @Published var debugHasS6Quality: Bool = false     // S6+ quality reached (display only, 0.85)
 
@@ -269,6 +292,7 @@ final class ScanViewModel: ObservableObject {
         let frameIndex: Int
         let timestampS: Double
         let coverage: Double
+        let cameraPosition: SIMD3<Float>
         let cameraIntrinsics: simd_float3x3?
         let tiles: [RawWorldStateTile]
     }
@@ -288,6 +312,67 @@ final class ScanViewModel: ObservableObject {
         let recommendedMin: Int
         let recommendedTarget: Int
         let recommendedMax: Int
+    }
+
+    private struct SubjectFirstDirectionCoverage: Sendable {
+        var hasLeftOrbit = false
+        var hasRightOrbit = false
+        var hasFarOrbit = false
+        var hasHighAngle = false
+        var hasLowAngle = false
+
+        mutating func merge(_ other: SubjectFirstDirectionCoverage) {
+            hasLeftOrbit = hasLeftOrbit || other.hasLeftOrbit
+            hasRightOrbit = hasRightOrbit || other.hasRightOrbit
+            hasFarOrbit = hasFarOrbit || other.hasFarOrbit
+            hasHighAngle = hasHighAngle || other.hasHighAngle
+            hasLowAngle = hasLowAngle || other.hasLowAngle
+        }
+
+        var horizontalCount: Int {
+            [hasLeftOrbit, hasRightOrbit, hasFarOrbit]
+                .filter { $0 }
+                .count
+        }
+
+        var verticalCount: Int {
+            (hasHighAngle || hasLowAngle) ? 1 : 0
+        }
+
+        var missingHorizontalLabels: [String] {
+            var missing: [String] = []
+            if !hasLeftOrbit { missing.append("左侧新角度") }
+            if !hasRightOrbit { missing.append("右侧新角度") }
+            if !hasFarOrbit { missing.append("绕到另一侧") }
+            return missing
+        }
+
+        var missingVerticalLabels: [String] {
+            verticalCount >= 1 ? [] : ["高角度或低角度"]
+        }
+
+        var orbitGuidanceText: String {
+            if horizontalCount >= 2 {
+                if hasFarOrbit {
+                    return "主要可见方向已经补到，满意就可以结束"
+                }
+                return "半圈方向已经补到；贴墙或靠边物体不用等整圈"
+            }
+            if missingHorizontalLabels.isEmpty {
+                return "主要可见方向已经补到，满意就可以结束"
+            }
+            return "还可以补：\(missingHorizontalLabels.joined(separator: "、"))"
+        }
+
+        var verticalGuidanceText: String {
+            if hasHighAngle {
+                return "已补高角度"
+            }
+            if hasLowAngle {
+                return "已补低角度"
+            }
+            return "至少补一次高角度或低角度"
+        }
     }
 
     private struct WorldStateNeighbor: Codable, Sendable {
@@ -354,23 +439,29 @@ final class ScanViewModel: ObservableObject {
             frameIndex: Int,
             timestamp: TimeInterval,
             coverage: Float,
+            cameraTransform: simd_float4x4,
             cameraIntrinsics: simd_float3x3?,
             renderData: PipelineCoordinatorBridge.RenderData?
-        ) {
+        ) -> RawWorldStateFrame {
             if firstTimestamp == nil {
                 firstTimestamp = timestamp
             }
             let baseTimestamp = firstTimestamp ?? timestamp
             let timestampS = max(0.0, timestamp - baseTimestamp)
-            frames.append(
-                RawWorldStateFrame(
-                    frameIndex: frameIndex,
-                    timestampS: timestampS,
-                    coverage: Double(max(0.0, min(1.0, coverage))),
-                    cameraIntrinsics: cameraIntrinsics,
-                    tiles: ScanViewModel.extractRawWorldStateTiles(from: renderData)
-                )
+            let frame = RawWorldStateFrame(
+                frameIndex: frameIndex,
+                timestampS: timestampS,
+                coverage: Double(max(0.0, min(1.0, coverage))),
+                cameraPosition: SIMD3<Float>(
+                    cameraTransform.columns.3.x,
+                    cameraTransform.columns.3.y,
+                    cameraTransform.columns.3.z
+                ),
+                cameraIntrinsics: cameraIntrinsics,
+                tiles: ScanViewModel.extractRawWorldStateTiles(from: renderData)
             )
+            frames.append(frame)
+            return frame
         }
     }
 
@@ -1150,7 +1241,34 @@ final class ScanViewModel: ObservableObject {
     }
 
     func setForegroundActive(_ active: Bool) {
-        coordinatorBridge?.setForegroundActive(active)
+        let now = CFAbsoluteTimeGetCurrent()
+        if active {
+            foregroundActiveGraceDeadline = 0
+        }
+        let backgroundGPUActive = backgroundGPUExecutionAllowed()
+        let effectiveActive =
+            active ||
+            shouldHoldForegroundDuringViewerTransition(now: now) ||
+            backgroundGPUActive
+        coordinatorBridge?.setForegroundActive(effectiveActive)
+        #if canImport(UIKit)
+        if effectiveActive {
+            localProcessingBackgroundTaskExpired = false
+            endLocalProcessingBackgroundTask(
+                reason: backgroundGPUActive
+                    ? "continued_processing_gpu_active"
+                    : "foreground_signal"
+            )
+        } else {
+            beginLocalProcessingBackgroundTaskIfNeeded()
+        }
+        #endif
+    }
+
+    func beginViewerTransitionForegroundGrace(seconds: CFTimeInterval? = nil) {
+        let effectiveSeconds = max(seconds ?? Self.viewerTransitionForegroundGraceSeconds, 0.0)
+        foregroundActiveGraceDeadline = CFAbsoluteTimeGetCurrent() + effectiveSeconds
+        coordinatorBridge?.setForegroundActive(true)
     }
 
     private func setLocalProcessingBackgroundContinuationEnabled(_ enabled: Bool) {
@@ -1158,6 +1276,7 @@ final class ScanViewModel: ObservableObject {
         #if canImport(UIKit)
         if enabled {
             localProcessingBackgroundTaskExpired = false
+            beginLocalProcessingBackgroundTaskIfNeeded()
         } else {
             localProcessingBackgroundTaskExpired = false
             endLocalProcessingBackgroundTask(reason: "disabled")
@@ -1195,6 +1314,16 @@ final class ScanViewModel: ObservableObject {
         UIApplication.shared.endBackgroundTask(taskID)
         NSLog("[Aether3D] Local processing background task ended reason=%@", reason)
     }
+
+    private func backgroundGPUExecutionAllowed() -> Bool {
+        guard localProcessingBackgroundContinuationRequested else { return false }
+        if #available(iOS 26.0, *),
+           LocalProcessingContinuedTaskCoordinator.supportsBackgroundGPUExecution(),
+           LocalProcessingContinuedTaskCoordinator.shared.isBackgroundExecutionActive() {
+            return true
+        }
+        return false
+    }
     #endif
 
     private func currentLocalProcessingHostState() -> LocalProcessingHostState {
@@ -1205,45 +1334,66 @@ final class ScanViewModel: ObservableObject {
             endLocalProcessingBackgroundTask(reason: "foreground_resumed")
             return LocalProcessingHostState(
                 foregroundActive: true,
-                backgroundContinuationActive: false
+                backgroundContinuationActive: false,
+                gpuExecutionAllowed: true
             )
         case .background:
             guard localProcessingBackgroundContinuationRequested else {
                 return LocalProcessingHostState(
                     foregroundActive: false,
-                    backgroundContinuationActive: false
+                    backgroundContinuationActive: false,
+                    gpuExecutionAllowed: false
                 )
             }
+            beginLocalProcessingBackgroundTaskIfNeeded()
+            let continuedGPUActive = backgroundGPUExecutionAllowed()
             if #available(iOS 26.0, *),
                LocalProcessingContinuedTaskCoordinator.shared.isBackgroundExecutionActive() {
+                endLocalProcessingBackgroundTask(reason: "continued_processing_attached")
                 return LocalProcessingHostState(
                     foregroundActive: false,
-                    backgroundContinuationActive: true
+                    backgroundContinuationActive: true,
+                    gpuExecutionAllowed: continuedGPUActive
                 )
             }
-            if !localProcessingBackgroundTaskExpired {
-                beginLocalProcessingBackgroundTaskIfNeeded()
+            if localProcessingBackgroundTaskID != .invalid && !localProcessingBackgroundTaskExpired {
+                return LocalProcessingHostState(
+                    foregroundActive: false,
+                    backgroundContinuationActive: true,
+                    gpuExecutionAllowed: false
+                )
+            }
+            endLocalProcessingBackgroundTask(reason: "background_local_processing_unavailable")
+            return LocalProcessingHostState(
+                foregroundActive: false,
+                backgroundContinuationActive: false,
+                gpuExecutionAllowed: false
+            )
+        case .inactive:
+            if shouldHoldForegroundDuringViewerTransition() {
+                return LocalProcessingHostState(
+                    foregroundActive: true,
+                    backgroundContinuationActive: false,
+                    gpuExecutionAllowed: true
+                )
             }
             return LocalProcessingHostState(
                 foregroundActive: false,
-                backgroundContinuationActive:
-                    localProcessingBackgroundTaskID != .invalid && !localProcessingBackgroundTaskExpired
-            )
-        case .inactive:
-            return LocalProcessingHostState(
-                foregroundActive: false,
-                backgroundContinuationActive: false
+                backgroundContinuationActive: false,
+                gpuExecutionAllowed: false
             )
         @unknown default:
             return LocalProcessingHostState(
                 foregroundActive: false,
-                backgroundContinuationActive: false
+                backgroundContinuationActive: false,
+                gpuExecutionAllowed: false
             )
         }
         #else
         return LocalProcessingHostState(
             foregroundActive: true,
-            backgroundContinuationActive: false
+            backgroundContinuationActive: false,
+            gpuExecutionAllowed: true
         )
         #endif
     }
@@ -1344,6 +1494,12 @@ final class ScanViewModel: ObservableObject {
             debugMinFramesNeeded = Int(snapshot.min_frames_needed)
             debugKeyframeGateAccepts = Int(snapshot.onDeviceKeyframeGateAccepts)
             debugKeyframeGateRejects = Int(snapshot.onDeviceKeyframeGateRejects)
+            debugImportedFramesEvaluated = Int(snapshot.onDeviceImportedFramesEvaluated)
+            debugImportedLowParallaxRejects = Int(snapshot.onDeviceImportedLowParallaxRejects)
+            debugImportedNearDuplicateRejects = Int(snapshot.onDeviceImportedNearDuplicateRejects)
+            debugImportedSelectedTranslationMeanMm = Double(snapshot.onDeviceImportedSelectedTranslationMeanMm)
+            debugImportedSelectedRotationMeanDeg = Double(snapshot.onDeviceImportedSelectedRotationMeanDeg)
+            debugImportedSelectedOverlapMean = Double(snapshot.onDeviceImportedSelectedOverlapMean)
             debugIsGPUTraining = coordinatorBridge?.isGPUTraining ?? false
             debugHasS6Quality = snapshot.has_s6_quality != 0
 
@@ -1386,14 +1542,12 @@ final class ScanViewModel: ObservableObject {
             stabilityWarning != stabilityWarningActive ||
             exposureWarning != exposureWarningActive
 
-        if let lightEstimate {
-            if tier.enableHaptics && exposureWarning {
-                _ = hapticEngine.fire(
-                    pattern: .exposureAbnormal,
-                    timestamp: feedbackTimestamp,
-                    toastPresenter: toastPresenter
-                )
-            }
+        if lightEstimate != nil, tier.enableHaptics && exposureWarning {
+            _ = hapticEngine.fire(
+                pattern: .exposureAbnormal,
+                timestamp: feedbackTimestamp,
+                toastPresenter: toastPresenter
+            )
         }
 
         var renderDataForFrame: PipelineCoordinatorBridge.RenderData?
@@ -1476,13 +1630,15 @@ final class ScanViewModel: ObservableObject {
         #endif
 
         if shouldRecordWorldStateFrame {
-            worldStateRecorder.recordFrame(
+            let recordedFrame = worldStateRecorder.recordFrame(
                 frameIndex: max(0, frameCounter - 1),
                 timestamp: timestamp,
                 coverage: coveragePercent,
+                cameraTransform: stabilizedTransform,
                 cameraIntrinsics: cameraIntrinsics,
                 renderData: renderDataForFrame
             )
+            updateSubjectFirstDirectionCoverage(with: recordedFrame)
         }
     }
 
@@ -1926,6 +2082,12 @@ final class ScanViewModel: ObservableObject {
             debugMinFramesNeeded = Int(snapshot.min_frames_needed)
             debugKeyframeGateAccepts = Int(snapshot.onDeviceKeyframeGateAccepts)
             debugKeyframeGateRejects = Int(snapshot.onDeviceKeyframeGateRejects)
+            debugImportedFramesEvaluated = Int(snapshot.onDeviceImportedFramesEvaluated)
+            debugImportedLowParallaxRejects = Int(snapshot.onDeviceImportedLowParallaxRejects)
+            debugImportedNearDuplicateRejects = Int(snapshot.onDeviceImportedNearDuplicateRejects)
+            debugImportedSelectedTranslationMeanMm = Double(snapshot.onDeviceImportedSelectedTranslationMeanMm)
+            debugImportedSelectedRotationMeanDeg = Double(snapshot.onDeviceImportedSelectedRotationMeanDeg)
+            debugImportedSelectedOverlapMean = Double(snapshot.onDeviceImportedSelectedOverlapMean)
             debugIsGPUTraining = bridge.isGPUTraining
             debugHasS6Quality = snapshot.has_s6_quality != 0
             debugNumGaussians = Int(snapshot.num_gaussians)
@@ -2217,6 +2379,9 @@ final class ScanViewModel: ObservableObject {
             return ScanViewModel.sampleSurfacePoints(from: coordinatorBridge?.getRenderData())
         }()
         let selectedFrameSamplingProfile = {
+            if processingBackend == .localSubjectFirst {
+                return FrameSamplingProfile.full
+            }
             let store = ScanRecordStore()
             if let rawValue = store.record(id: recordId)?.frameSamplingProfile,
                let profile = FrameSamplingProfile(rawValue: rawValue) {
@@ -2240,6 +2405,14 @@ final class ScanViewModel: ObservableObject {
         let bridge = coordinatorBridge
         let useLiveLocalCoordinatorHandoff =
             processingBackend == .localSubjectFirst && bridge != nil
+        if processingBackend == .localSubjectFirst {
+            NSLog(
+                "[Aether3D][LocalPipeline] post-stop bridge_available=%@ selected_frames_at_stop=%d source_video_pending=%@",
+                bridge != nil ? "YES" : "NO",
+                debugSelectedFrames,
+                remoteVideoRecorder != nil ? "YES" : "NO"
+            )
+        }
         if !useLiveLocalCoordinatorHandoff {
             // Stop the live coordinator before recorded-video processing begins.
             // Otherwise the live capture bridge can bootstrap its own post-stop
@@ -2263,7 +2436,7 @@ final class ScanViewModel: ObservableObject {
                         : "Aether3D 本地处理已结束"
                     let finalSubtitle = finalSuccess
                         ? "结果已生成，可回到 App 查看"
-                        : "如果你手动划掉 app 或系统中止后台任务，处理会结束"
+                        : "如果系统收回后台配额，重新打开 App 后会尝试从已落盘视频继续恢复"
                     Task {
                         if #available(iOS 26.0, *) {
                             LocalProcessingContinuedTaskCoordinator.shared.finish(
@@ -2343,14 +2516,29 @@ final class ScanViewModel: ObservableObject {
                     "native_peak_gaussians",
                     from: runtimeMetrics
                 )
+                let retainedGaussians = runtimeMetricInt(
+                    "native_current_retained_export_gaussians",
+                    from: runtimeMetrics
+                )
+                let peakRetainedGaussians = runtimeMetricInt(
+                    "native_peak_retained_export_gaussians",
+                    from: runtimeMetrics
+                )
                 let peakWorkingSet = runtimeMetricInt(
                     "native_peak_working_set",
                     from: runtimeMetrics
                 )
+                let exportFailureReason =
+                    LocalPreviewProductProfile.runtimeMetricString(
+                        "native_export_failure_reason",
+                        from: runtimeMetrics
+                    ) ?? ""
                 guard captureSelectedFrames > 0 ||
                     peakWorkingSet > 0 ||
                     peakGaussians > 0 ||
-                    currentGaussians > 0 else {
+                    currentGaussians > 0 ||
+                    retainedGaussians > 0 ||
+                    peakRetainedGaussians > 0 else {
                     return base
                 }
 
@@ -2362,23 +2550,35 @@ final class ScanViewModel: ObservableObject {
                     components.append("本地链工作集峰值约 \(peakWorkingSet) 个")
                 }
                 if peakGaussians > 0 {
-                    if currentGaussians > 0 && currentGaussians != peakGaussians {
-                        components.append(
-                            "训练高斯峰值 \(peakGaussians) 个，导出失败时当前 \(currentGaussians) 个"
-                        )
-                    } else {
-                        components.append("训练高斯峰值 \(peakGaussians) 个")
+                    var gaussianDetail = "训练高斯峰值 \(peakGaussians) 个"
+                    if retainedGaussians > 0 {
+                        gaussianDetail += "，保留导出快照 \(retainedGaussians) 个"
+                    } else if peakRetainedGaussians > 0 {
+                        gaussianDetail += "，历史保留快照峰值 \(peakRetainedGaussians) 个"
                     }
+                    if currentGaussians > 0 && currentGaussians != peakGaussians {
+                        gaussianDetail += "，导出失败时训练器当前 \(currentGaussians) 个"
+                    }
+                    components.append(gaussianDetail)
+                } else if retainedGaussians > 0 {
+                    components.append("保留导出快照 \(retainedGaussians) 个")
                 } else if currentGaussians > 0 {
-                    components.append("导出失败时当前训练高斯 \(currentGaussians) 个")
+                    components.append("导出失败时训练器当前 \(currentGaussians) 个")
                 }
 
                 let collapseLikely =
                     peakWorkingSet >= max(2048, currentGaussians * 8) &&
                     max(peakGaussians, currentGaussians) <= peakWorkingSet / 2
-                let diagnosis = collapseLikely
-                    ? "这说明初始化阶段的工作集并不等于最终可导出的训练高斯；后面的 refine / cleanup 已经发生了明显收缩。"
-                    : "初始化阶段看到的工作集不是最终训练高斯，所以它本来就可能显著大于导出时的真实高斯数。"
+                let diagnosis: String
+                if exportFailureReason == "native_training_never_started" {
+                    diagnosis = "这次更像是训练器还没真正启动，本地 handoff 就提前结束了；如果你之前看到过高步数，那更可能是 staged 预备进度，不是实际 refine 步数。"
+                } else if exportFailureReason == "native_failed_precondition" && retainedGaussians == 0 {
+                    diagnosis = "这次更像是导出时没有留住健康的 retained/export 快照，并不等于训练根本没跑起来。"
+                } else if collapseLikely {
+                    diagnosis = "这说明初始化阶段的工作集并不等于最终可导出的训练高斯；后面的 refine / cleanup 已经发生了明显收缩。"
+                } else {
+                    diagnosis = "初始化阶段看到的工作集不是最终训练高斯，所以它本来就可能显著大于导出时的真实高斯数。"
+                }
                 return "\(base)\n\n口径说明：\(components.joined(separator: "；"))。\(diagnosis)"
             }
 
@@ -2467,16 +2667,17 @@ final class ScanViewModel: ObservableObject {
                     snapshot: aether_evidence_snapshot_t?,
                     progress: aether_coordinator_training_progress_t?
                 ) -> Bool {
-                    if bridge.isTraining {
-                        return true
-                    }
-                    if let progress, progress.step > 0 || progress.num_gaussians > 0 {
-                        return true
-                    }
-                    if let snapshot, snapshot.num_gaussians > 0 {
-                        return true
-                    }
-                    return false
+                    _ = snapshot
+                    _ = progress
+                    return bridge.isTraining
+                }
+
+                func realTrainingProgress(
+                    _ progress: aether_coordinator_training_progress_t?,
+                    trainingStarted: Bool
+                ) -> aether_coordinator_training_progress_t? {
+                    guard trainingStarted else { return nil }
+                    return progress
                 }
 
                 func seedMetricText(snapshot: aether_evidence_snapshot_t?) -> String {
@@ -2500,24 +2701,29 @@ final class ScanViewModel: ObservableObject {
                     progress: aether_coordinator_training_progress_t?,
                     trainingStarted: Bool
                 ) -> String {
-                    let step = Int(progress?.step ?? 0)
-                    let totalSteps = Int(progress?.total_steps ?? 0)
-                    let gaussians = Int(progress?.num_gaussians ?? 0)
+                    let effectiveProgress = realTrainingProgress(
+                        progress,
+                        trainingStarted: trainingStarted
+                    )
+                    let step = Int(effectiveProgress?.step ?? 0)
+                    let totalSteps = Int(effectiveProgress?.total_steps ?? 0)
+                    let gaussians = Int(effectiveProgress?.num_gaussians ?? 0)
                     if totalSteps > 0 && step > 0 {
                         if gaussians > 0 {
                             return "\(step) / \(totalSteps) 步 · \(gaussians) 个高斯"
                         }
                         return "\(step) / \(totalSteps) 步"
                     }
-                    if gaussians > 0 {
-                        return "\(gaussians) 个高斯 · 启动中"
-                    }
                     if trainingStarted {
-                        let snapshotGaussians = Int(snapshot?.num_gaussians ?? 0)
-                        if snapshotGaussians > 0 {
-                            return "\(snapshotGaussians) 个高斯 · 启动中"
+                        if totalSteps > 0 {
+                            return "等待第 1 步"
                         }
-                        return "训练启动中"
+                        return "训练器已创建，等待训练进度"
+                    }
+                    let pendingGaussians = Int(snapshot?.pending_gaussian_count ?? 0)
+                    let assignedBlocks = Int(snapshot?.assigned_blocks ?? 0)
+                    if pendingGaussians > 0 || assignedBlocks > 0 {
+                        return "准备训练中"
                     }
                     return "等待开始"
                 }
@@ -2539,10 +2745,16 @@ final class ScanViewModel: ObservableObject {
                             end
                         )
                     case .refine:
+                        guard bridge.isTraining else {
+                            return phase.defaultActiveFraction
+                        }
                         let step = Double(progress?.step ?? 0)
                         let totalSteps = Double(progress?.total_steps ?? 0)
-                        guard totalSteps > 0, step > 0 else {
-                            return phase.defaultActiveFraction
+                        guard totalSteps > 0 else {
+                            return phase.startFraction
+                        }
+                        guard step > 0 else {
+                            return phase.startFraction
                         }
                         let ratio = min(max(step / totalSteps, 0.0), 1.0)
                         let end = LocalPreviewWorkflowPhase.export.startFraction - 0.02
@@ -2557,10 +2769,80 @@ final class ScanViewModel: ObservableObject {
                     }
                 }
 
+                struct NativeActivityFingerprint: Equatable {
+                    let trainingStarted: Bool
+                    let selectedFrames: Int
+                    let acceptedSeeds: Int
+                    let pendingGaussians: Int
+                    let assignedBlocks: Int
+                    let snapshotGaussians: Int
+                    let snapshotTrainingStep: Int
+                    let progressStep: Int
+                    let progressTotalSteps: Int
+                    let progressGaussians: Int
+                }
+
+                let nativeActivityStallSeconds = 20.0
                 var latestSnapshot = bridge.getSnapshot()
                 var latestProgress: aether_coordinator_training_progress_t? = bridge.trainingProgress()
                 var latestRuntimeMetrics = startupRuntimeMetrics
                 var reachedSteps = 0
+                var lastLoggedRealTrainingHeartbeatStep = 0
+                var latestNativeActivityFingerprint: NativeActivityFingerprint?
+                var lastNativeActivityAt = CFAbsoluteTimeGetCurrent()
+                var latestNativeActivityAgeSeconds = 0.0
+                var trainingStartupStalled = false
+
+                func refreshNativeActivityAge(
+                    snapshot: aether_evidence_snapshot_t?,
+                    progress: aether_coordinator_training_progress_t?,
+                    trainingStarted: Bool
+                ) -> Double {
+                    let fingerprint = NativeActivityFingerprint(
+                        trainingStarted: trainingStarted,
+                        selectedFrames: Int(snapshot?.selected_frames ?? 0),
+                        acceptedSeeds: Int(snapshot?.onDeviceSeedAccepted ?? 0),
+                        pendingGaussians: Int(snapshot?.pending_gaussian_count ?? 0),
+                        assignedBlocks: Int(snapshot?.assigned_blocks ?? 0),
+                        snapshotGaussians: Int(snapshot?.num_gaussians ?? 0),
+                        snapshotTrainingStep: Int(snapshot?.training_step ?? 0),
+                        progressStep: Int(progress?.step ?? 0),
+                        progressTotalSteps: Int(progress?.total_steps ?? 0),
+                        progressGaussians: Int(progress?.num_gaussians ?? 0)
+                    )
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if fingerprint != latestNativeActivityFingerprint {
+                        latestNativeActivityFingerprint = fingerprint
+                        lastNativeActivityAt = now
+                        latestNativeActivityAgeSeconds = 0.0
+                        return 0.0
+                    }
+                    latestNativeActivityAgeSeconds = max(0.0, now - lastNativeActivityAt)
+                    return latestNativeActivityAgeSeconds
+                }
+
+                func logRealTrainingHeartbeat(
+                    _ progress: aether_coordinator_training_progress_t?,
+                    phase: LocalPreviewWorkflowPhase
+                ) {
+                    guard let progress else { return }
+                    let step = Int(progress.step)
+                    let totalSteps = Int(progress.total_steps)
+                    guard step > 0, totalSteps > 0 else { return }
+                    guard lastLoggedRealTrainingHeartbeatStep == 0 ||
+                            step <= 10 ||
+                            step >= lastLoggedRealTrainingHeartbeatStep + 100 else {
+                        return
+                    }
+                    lastLoggedRealTrainingHeartbeatStep = step
+                    NSLog(
+                        "[Aether3D][TrainHeartbeat] live_capture phase=%@ real_step=%d/%d loss=%.4f",
+                        phase.phaseName,
+                        step,
+                        totalSteps,
+                        progress.loss
+                    )
+                }
 
                 func publishLiveCapturePhase(
                     _ phase: LocalPreviewWorkflowPhase,
@@ -2572,7 +2854,17 @@ final class ScanViewModel: ObservableObject {
                         snapshot: latestSnapshot,
                         progress: latestProgress
                     )
-                    reachedSteps = max(reachedSteps, Int(latestProgress?.step ?? 0))
+                    let effectiveProgress = realTrainingProgress(
+                        latestProgress,
+                        trainingStarted: trainingStarted
+                    )
+                    let nativeActivityAgeSeconds = refreshNativeActivityAge(
+                        snapshot: latestSnapshot,
+                        progress: effectiveProgress,
+                        trainingStarted: trainingStarted
+                    )
+                    reachedSteps = max(reachedSteps, Int(effectiveProgress?.step ?? 0))
+                    logRealTrainingHeartbeat(effectiveProgress, phase: phase)
 
                     var metrics = LocalPreviewMetricsArchive.runtimeMetrics(
                         snapshot: latestSnapshot,
@@ -2587,9 +2879,18 @@ final class ScanViewModel: ObservableObject {
                     metrics["native_seed_phase_metric_text"] = seedMetricText(snapshot: latestSnapshot)
                     metrics["native_refine_phase_metric_text"] = refineMetricText(
                         snapshot: latestSnapshot,
-                        progress: latestProgress,
+                        progress: effectiveProgress,
                         trainingStarted: trainingStarted
                     )
+                    metrics["native_last_activity_age_seconds"] = String(
+                        format: "%.1f",
+                        nativeActivityAgeSeconds
+                    )
+                    metrics["native_wait_state"] = trainingStarted
+                        ? (Int(effectiveProgress?.step ?? 0) > 0
+                            ? "training_active"
+                            : "waiting_first_step")
+                        : "waiting_training_start"
                     if phase == .export {
                         metrics["native_export_phase_metric_text"] = "导出中"
                     }
@@ -2611,7 +2912,7 @@ final class ScanViewModel: ObservableObject {
                     let progressFraction = phaseFraction(
                         phase: phase,
                         snapshot: latestSnapshot,
-                        progress: latestProgress
+                        progress: effectiveProgress
                     )
                     let detailText = detail ?? phase.detailMessage
                     let targetStatus: ScanRecordStatus = phase == .export ? .packaging : .training
@@ -2654,9 +2955,9 @@ final class ScanViewModel: ObservableObject {
                             )
                         )
                         self.backgroundExportStatusMessage = phase.title
-                        if let progress = latestProgress, progress.total_steps > 0 {
+                        if let progress = effectiveProgress, progress.total_steps > 0 {
                             self.trainingProgress = Float(progress.step) / Float(progress.total_steps)
-                        } else if phase == .seed {
+                        } else if phase == .seed || phase == .refine {
                             self.trainingProgress = 0.0
                         }
                         self.trainingActive = trainingStarted || phase != .export
@@ -2666,7 +2967,7 @@ final class ScanViewModel: ObservableObject {
                 _ = bridge.finishScanning()
                 NSLog("[Aether3D] Background export: finishScanning() on live capture bridge")
                 let initialHostState = await currentHostState()
-                bridge.setForegroundActive(initialHostState.foregroundActive)
+                bridge.setForegroundActive(initialHostState.gpuExecutionAllowed)
 
                 var trainingStarted = detectTrainingStarted(
                     snapshot: latestSnapshot,
@@ -2679,18 +2980,20 @@ final class ScanViewModel: ObservableObject {
 
                 while CFAbsoluteTimeGetCurrent() < trainingDeadline && !trainingStarted {
                     let hostState = await currentHostState()
-                    bridge.setForegroundActive(hostState.foregroundActive)
+                    bridge.setForegroundActive(hostState.gpuExecutionAllowed)
                     if hostState.foregroundActive {
                         await publishLiveCapturePhase(.seed)
                     } else if hostState.backgroundContinuationActive {
                         await publishLiveCapturePhase(
                             .seed,
-                            detail: "系统后台任务已接管，本地训练会继续运行；如果系统条件变化或你手动划掉 app，这次处理会中断。"
+                            detail: hostState.gpuExecutionAllowed
+                                ? "系统后台任务已接管，本地 GPU 训练会继续运行；即使系统稍后收回后台配额，重新打开 App 后也会尝试从已落盘视频继续恢复。"
+                                : "系统正在给这次本地任务保留后台时间；如果 GPU 配额不可用，训练会等待到回到前台，或在重新打开 App 后从已落盘视频继续恢复。"
                         )
                     } else {
                         await publishLiveCapturePhase(
                             .seed,
-                            detail: "App 当前不在前台，本地训练会等你回到前台后继续。"
+                            detail: "App 当前不在前台，本地 GPU 训练会等待恢复；回到前台后会继续，若系统回收进程则会在重新打开 App 后尝试从已落盘视频继续恢复。"
                         )
                         trainingDeadline += max(budget.ingestPollIntervalSeconds, 0.10)
                     }
@@ -2701,6 +3004,18 @@ final class ScanViewModel: ObservableObject {
                     if trainingStarted {
                         break
                     }
+                    if hostState.foregroundActive &&
+                        latestNativeActivityAgeSeconds >= nativeActivityStallSeconds {
+                        trainingStartupStalled = true
+                        NSLog(
+                            "[Aether3D][TrainStartupWatchdog] live_capture no native activity before training start age=%.1fs selected_frames=%d pending=%d assigned=%d -> aborting wait",
+                            latestNativeActivityAgeSeconds,
+                            Int(latestSnapshot?.selected_frames ?? 0),
+                            Int(latestSnapshot?.pending_gaussian_count ?? 0),
+                            Int(latestSnapshot?.assigned_blocks ?? 0)
+                        )
+                        break
+                    }
                     await sleepForPollingInterval()
                 }
 
@@ -2709,40 +3024,53 @@ final class ScanViewModel: ObservableObject {
                     if let progress = latestProgress ?? bridge.trainingProgress() {
                         let totalSteps = Int(progress.total_steps)
                         if totalSteps > 0 {
-                            exportMinSteps = max(
+                            let desiredFloor = max(
                                 exportMinSteps,
                                 Int((Double(totalSteps) * 0.60).rounded(.awayFromZero))
                             )
+                            exportMinSteps = min(totalSteps, desiredFloor)
                         }
                     }
 
                     while CFAbsoluteTimeGetCurrent() < trainingDeadline {
-                    let hostState = await currentHostState()
-                    bridge.setForegroundActive(hostState.foregroundActive)
-                    if hostState.foregroundActive {
-                        await publishLiveCapturePhase(.refine)
-                    } else if hostState.backgroundContinuationActive {
-                        await publishLiveCapturePhase(
-                            .refine,
-                            detail: "系统后台任务已接管，本地 refine 会继续运行；如果系统条件变化或你手动划掉 app，这次处理会中断。"
+                        let hostState = await currentHostState()
+                        bridge.setForegroundActive(hostState.gpuExecutionAllowed)
+                        if hostState.foregroundActive {
+                            await publishLiveCapturePhase(.refine)
+                        } else if hostState.backgroundContinuationActive {
+                            await publishLiveCapturePhase(
+                                .refine,
+                                detail: hostState.gpuExecutionAllowed
+                                    ? "系统后台任务已接管，本地 GPU refine 会继续运行；即使系统稍后收回后台配额，重新打开 App 后也会尝试从已落盘视频继续恢复。"
+                                    : "系统正在给这次本地任务保留后台时间；如果 GPU 配额不可用，refine 会等待到回到前台，或在重新打开 App 后从已落盘视频继续恢复。"
+                            )
+                        } else {
+                            await publishLiveCapturePhase(
+                                .refine,
+                                detail: "App 当前不在前台，本地 GPU refine 会等待恢复；回到前台后会继续，若系统回收进程则会在重新打开 App 后尝试从已落盘视频继续恢复。"
+                            )
+                            trainingDeadline += max(budget.ingestPollIntervalSeconds, 0.10)
+                        }
+                        trainingStarted = detectTrainingStarted(
+                            snapshot: latestSnapshot,
+                            progress: latestProgress
                         )
-                    } else {
-                        await publishLiveCapturePhase(
-                            .refine,
-                            detail: "App 当前不在前台，本地 refine 会在你回到前台后继续。"
-                        )
-                        trainingDeadline += max(budget.ingestPollIntervalSeconds, 0.10)
-                    }
-                    trainingStarted = detectTrainingStarted(
-                        snapshot: latestSnapshot,
-                        progress: latestProgress
-                    )
-                    let currentStep = Int(latestProgress?.step ?? 0)
+                        let currentStep = trainingStarted ? Int(latestProgress?.step ?? 0) : 0
+                        let currentTotalSteps = trainingStarted ? Int(latestProgress?.total_steps ?? 0) : 0
+                        let currentGaussians = trainingStarted ? Int(latestProgress?.num_gaussians ?? 0) : 0
                         reachedSteps = max(reachedSteps, currentStep)
-                        if currentStep >= exportMinSteps {
+                        if hostState.foregroundActive &&
+                            latestNativeActivityAgeSeconds >= nativeActivityStallSeconds {
+                            NSLog(
+                                "[Aether3D][TrainStartupWatchdog] live_capture no native activity during refine age=%.1fs step=%d total_steps=%d gaussians=%d -> exporting current snapshot",
+                                latestNativeActivityAgeSeconds,
+                                currentStep,
+                                currentTotalSteps,
+                                currentGaussians
+                            )
                             break
                         }
-                        if !trainingStarted && currentStep > 0 {
+                        if trainingStarted && currentStep >= exportMinSteps {
                             break
                         }
                         await sleepForPollingInterval()
@@ -2754,42 +3082,62 @@ final class ScanViewModel: ObservableObject {
                     reachedSteps
                 )
 
-                await publishLiveCapturePhase(.export)
                 let exportAttemptLimit = max(budget.exportAttemptLimit, 1)
                 var exportAttempts = 0
                 var exportElapsedMs: UInt64 = 0
                 var exportFileSizeBytes: UInt64 = 0
-                var lastExportStatusCode: Int32 = -999
-                var lastExportStatusReason = "not_started"
+                var lastExportStatusCode: Int32 = -5
+                var lastExportStatusReason = "native_training_never_started"
                 var exported = false
-                while exportAttempts < exportAttemptLimit {
-                    exportAttempts += 1
-                    let exportAttemptStart = CFAbsoluteTimeGetCurrent()
-                    let exportResult = bridge.exportPLYResult(path: plyURL.path)
-                    exportElapsedMs += UInt64(
-                        max(0, (CFAbsoluteTimeGetCurrent() - exportAttemptStart) * 1000.0)
-                    )
-                    lastExportStatusCode = exportResult.statusCode
-                    lastExportStatusReason = exportResult.statusReason
-                    exportFileSizeBytes = max(exportFileSizeBytes, exportResult.fileSizeBytes)
-                    if exportResult.succeeded {
-                        exported = true
-                        NSLog("[Aether3D] ✅ Background export: live capture trained PLY → %@", plyURL.path)
-                        break
-                    }
-                    NSLog(
-                        "[Aether3D] ❌ Background export: live capture export failed attempt=%d status=%d reason=%@",
-                        exportAttempts,
-                        exportResult.statusCode,
-                        exportResult.statusReason
-                    )
-                    let hostState = await currentHostState()
-                    bridge.setForegroundActive(hostState.foregroundActive)
+                let rawArtifactURL = LocalPreviewImportRunner.subjectRawArtifactPath(for: plyURL)
+                if trainingStarted || reachedSteps > 0 {
                     await publishLiveCapturePhase(.export)
-                    if exportAttempts < exportAttemptLimit && (bridge.isTraining || reachedSteps > 0) {
-                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    lastExportStatusCode = -999
+                    lastExportStatusReason = "not_started"
+                    while exportAttempts < exportAttemptLimit {
+                        exportAttempts += 1
+                        let exportAttemptStart = CFAbsoluteTimeGetCurrent()
+                        let exportResult = bridge.exportPLYResult(path: rawArtifactURL.path)
+                        exportElapsedMs += UInt64(
+                            max(0, (CFAbsoluteTimeGetCurrent() - exportAttemptStart) * 1000.0)
+                        )
+                        lastExportStatusCode = exportResult.statusCode
+                        lastExportStatusReason = exportResult.statusReason
+                        exportFileSizeBytes = max(exportFileSizeBytes, exportResult.fileSizeBytes)
+                        if exportResult.succeeded {
+                            exported = true
+                            NSLog("[Aether3D] ✅ Background export: live capture raw PLY → %@", rawArtifactURL.path)
+                            break
+                        }
+                        NSLog(
+                            "[Aether3D] ❌ Background export: live capture export failed attempt=%d status=%d reason=%@",
+                            exportAttempts,
+                            exportResult.statusCode,
+                            exportResult.statusReason
+                        )
+                        let hostState = await currentHostState()
+                        bridge.setForegroundActive(hostState.gpuExecutionAllowed)
+                        await publishLiveCapturePhase(.export)
+                        if exportAttempts < exportAttemptLimit && (bridge.isTraining || reachedSteps > 0) {
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                        }
                     }
+                } else {
+                    NSLog(
+                        "[Aether3D] ❌ Background export: skipped export because real training never started"
+                    )
                 }
+                NSLog(
+                    exported
+                        ? "[Aether3D][ExportTerminal] live_capture result=success attempts=%d status=%d reason=%@ steps=%d file_bytes=%llu path=%@"
+                        : "[Aether3D][ExportTerminal] live_capture result=failure attempts=%d status=%d reason=%@ steps=%d file_bytes=%llu path=%@",
+                    exportAttempts,
+                    lastExportStatusCode,
+                    lastExportStatusReason,
+                    reachedSteps,
+                    exportFileSizeBytes,
+                    plyURL.path
+                )
 
                 Self.writeWorldStateIfAvailable(
                     recordId: recordId,
@@ -2818,6 +3166,22 @@ final class ScanViewModel: ObservableObject {
                 baseMetrics["native_export_file_size_bytes"] = String(exportFileSizeBytes)
                 baseMetrics["native_export_status_code"] = String(lastExportStatusCode)
                 baseMetrics["native_export_failure_reason"] = lastExportStatusReason
+                let liveCaptureFailureReason: String
+                let liveCaptureFailureBaseMessage: String
+                if trainingStartupStalled && !trainingStarted && reachedSteps == 0 {
+                    liveCaptureFailureReason = "live_capture_startup_stalled"
+                    liveCaptureFailureBaseMessage = "停拍后本地训练在启动前连续 20 秒没有原生新进展，这次已经按卡住处理。"
+                } else if trainingStarted && reachedSteps == 0 {
+                    liveCaptureFailureReason = "live_capture_refine_stalled_before_first_step"
+                    liveCaptureFailureBaseMessage = "训练器已经创建，但连续 20 秒没有新的原生训练进展；系统已经停止继续空等，并尝试导出当前快照。"
+                } else if !trainingStarted && reachedSteps == 0 {
+                    liveCaptureFailureReason = "native_training_never_started"
+                    liveCaptureFailureBaseMessage = "停拍后没有等到本地训练真正启动，这次没有拿到可用的 3DGS 结果。"
+                } else {
+                    liveCaptureFailureReason = "live_capture_export_failed"
+                    liveCaptureFailureBaseMessage = "已经沿用拍摄阶段通过的 native 关键帧继续本地训练，但这次导出仍然失败了。"
+                }
+                baseMetrics["native_failure_reason"] = liveCaptureFailureReason
                 baseMetrics = LocalPreviewMetricsArchive.appendingDirectCaptureContext(
                     to: baseMetrics,
                     sourceVideoRelativePath: sourceReference,
@@ -2829,14 +3193,41 @@ final class ScanViewModel: ObservableObject {
                     exportAttempts: exportAttempts,
                     exportFileSizeBytes: exportFileSizeBytes
                 )
+                let preFinalizeRuntimeMetrics = latestRuntimeMetrics.merging(baseMetrics) { _, new in new }
+                let preFinalizeFailureDetailMessage = augmentedNativeFailureDetailMessage(
+                    base: liveCaptureFailureBaseMessage,
+                    runtimeMetrics: preFinalizeRuntimeMetrics
+                )
+                let finalizedExportState: (exported: Bool, detailMessage: String) = await {
+                    guard exported else {
+                        return (false, preFinalizeFailureDetailMessage)
+                    }
+                    return await LocalPreviewImportRunner.finalizeLocalSubjectArtifactsIfNeeded(
+                        processingBackend: processingBackend,
+                        rawArtifactURL: rawArtifactURL,
+                        finalArtifactURL: plyURL,
+                        baseMetrics: &baseMetrics,
+                        phaseEmitter: { phase, detail in
+                            await publishLiveCapturePhase(phase, detail: detail)
+                        }
+                    )
+                }()
+                exported = finalizedExportState.exported
                 let mergedRuntimeMetrics = latestRuntimeMetrics.merging(baseMetrics) { _, new in new }
+                let liveCaptureFailureDetailMessage = augmentedNativeFailureDetailMessage(
+                    base: liveCaptureFailureBaseMessage,
+                    runtimeMetrics: mergedRuntimeMetrics
+                )
+                let finalDetailMessage = exported
+                    ? finalizedExportState.detailMessage
+                    : liveCaptureFailureDetailMessage
 
                 if exported {
                     store.updateProcessingState(
                         recordId: recordId,
                         status: .completed,
                         statusMessage: localModeResultTitle,
-                        detailMessage: "已经沿用拍摄阶段通过的 native 关键帧完成本地导出。",
+                        detailMessage: finalDetailMessage,
                         progressFraction: 1.0,
                         progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
                         remoteStageKey: localWorkflowStageKey,
@@ -2860,7 +3251,7 @@ final class ScanViewModel: ObservableObject {
                         recordId: recordId,
                         status: .failed,
                         statusMessage: localModeFailureTitle,
-                        detailMessage: "已经沿用拍摄阶段通过的 native 关键帧继续本地训练，但这次导出仍然失败了。",
+                        detailMessage: finalDetailMessage,
                         progressFraction: 0.92,
                         progressBasis: LocalPreviewWorkflowPhase.export.progressBasis,
                         remoteStageKey: localWorkflowStageKey,
@@ -2869,7 +3260,7 @@ final class ScanViewModel: ObservableObject {
                         estimatedRemainingMinutes: nil,
                         sourceVideoPath: sourceRelativePath,
                         frameSamplingProfile: selectedFrameSamplingProfile.rawValue,
-                        failureReason: "live_capture_export_failed"
+                        failureReason: liveCaptureFailureReason
                     )
                     await MainActor.run {
                         self.backgroundExportStatusMessage = "导出失败"
@@ -2925,7 +3316,7 @@ final class ScanViewModel: ObservableObject {
                     )
                 }
 
-                let importResult = LocalPreviewImportRunner.execute(
+                let importResult = await LocalPreviewImportRunner.execute(
                     sourceVideoURL: sourceVideoURL,
                     artifactURL: plyURL,
                     sourceRelativePath: sourceRelativePath,
@@ -3182,12 +3573,22 @@ final class ScanViewModel: ObservableObject {
                     }
                 } else {
                     if useLiveLocalCoordinatorHandoff, let liveBridge = bridge {
+                        NSLog(
+                            "[Aether3D][LocalPipeline] route=live_capture_handoff record=%@ source=%@",
+                            recordId.uuidString,
+                            persistedSourcePath
+                        )
                         await runNativeLocalLiveCapturePipeline(
                             bridge: liveBridge,
                             sourceRelativePath: persistedSourcePath
                         )
                         localProcessingSucceeded = store.record(id: recordId)?.status == .completed
                     } else {
+                        NSLog(
+                            "[Aether3D][LocalPipeline] route=imported_video_fallback record=%@ reason=no_live_bridge source=%@",
+                            recordId.uuidString,
+                            persistedSourcePath
+                        )
                         await runNativeLocalVideoPipeline(
                             sourceVideoURL: persistedVideo.persistedURL,
                             sourceRelativePath: persistedSourcePath,
@@ -3202,6 +3603,10 @@ final class ScanViewModel: ObservableObject {
                 }
             } else {
                 if useLiveLocalCoordinatorHandoff, let liveBridge = bridge {
+                    NSLog(
+                        "[Aether3D][LocalPipeline] route=live_capture_handoff record=%@ source=memory_only",
+                        recordId.uuidString
+                    )
                     await runNativeLocalLiveCapturePipeline(
                         bridge: liveBridge,
                         sourceRelativePath: nil
@@ -3587,13 +3992,21 @@ final class ScanViewModel: ObservableObject {
     }
 
     var subjectCaptureCompactTargetText: String {
+        if let finishAssessment = subjectFirstCaptureFinishAssessment {
+            switch finishAssessment.title {
+            case "先把关键帧补够":
+                return "继续收关键帧"
+            default:
+                return "先别结束"
+            }
+        }
         switch captureGeometryFocus {
         case .waiting:
             return "等几何图"
         case .gather:
             return "先拿到几何"
         case .expand:
-            return "补新视角"
+            return "补薄弱区域"
         case .reinforce:
             return "补红黄区域"
         case .finish:
@@ -3604,13 +4017,17 @@ final class ScanViewModel: ObservableObject {
     private var captureKeyframeBudget: CaptureKeyframeBudget {
         let engineStart = usesSubjectFirstCaptureContract ? 3 : max(debugMinFramesNeeded, 1)
         let recommended: (Int, Int, Int)
-        switch FrameSamplingProfile.currentSelection() {
-        case .full:
-            recommended = (30, 90, 150)
-        case .half:
-            recommended = (24, 72, 120)
-        case .third:
-            recommended = (20, 60, 90)
+        if usesSubjectFirstCaptureContract {
+            recommended = (18, 48, 90)
+        } else {
+            switch FrameSamplingProfile.currentSelection() {
+            case .full:
+                recommended = (18, 48, 90)
+            case .half:
+                recommended = (16, 40, 72)
+            case .third:
+                recommended = (14, 32, 60)
+            }
         }
         return CaptureKeyframeBudget(
             engineStart: engineStart,
@@ -3655,6 +4072,285 @@ final class ScanViewModel: ObservableObject {
         )
     }
 
+    var subjectFirstCaptureMinimumProgressFraction: Double {
+        let target = max(captureKeyframeRecommendedMin, 1)
+        return min(1.0, Double(debugSelectedFrames) / Double(target))
+    }
+
+    var subjectFirstCaptureMinimumProgressText: String {
+        "\(debugSelectedFrames) / \(max(captureKeyframeRecommendedMin, 1))"
+    }
+
+    var subjectFirstCaptureMinimumGuidanceText: String {
+        "合格线 \(captureKeyframeRecommendedMin)"
+    }
+
+    var subjectFirstCaptureHUDHint: String {
+        if debugSelectedFrames < captureKeyframeRecommendedMin {
+            return "先拍到 \(captureKeyframeRecommendedMin) 张有效关键帧，再点停止。"
+        }
+        return "已达到最低线；点停止时再做最终检查，不再提前占用拍摄界面。"
+    }
+
+    var subjectFirstTranslationTargetMm: Double {
+        12.0
+    }
+
+    var subjectFirstTranslationProgressFraction: Double {
+        min(1.0, max(debugImportedSelectedTranslationMeanMm, 0.0) / subjectFirstTranslationTargetMm)
+    }
+
+    var subjectFirstTranslationProgressText: String {
+        let current = Int(debugImportedSelectedTranslationMeanMm.rounded())
+        let target = Int(subjectFirstTranslationTargetMm.rounded())
+        return "\(max(current, 0)) / \(target) mm"
+    }
+
+    private func estimatedSubjectCenter(
+        for frame: RawWorldStateFrame,
+        gravityUp: SIMD3<Float>
+    ) -> SIMD3<Float>? {
+        guard !frame.tiles.isEmpty else { return nil }
+        let cameraPosition = frame.cameraPosition
+        let candidates = frame.tiles.map { tile -> (center: SIMD3<Float>, distance: Float, quality: Float, sideBias: Float) in
+            let distance = simd_distance(tile.center, cameraPosition)
+            let normalLength = simd_length(tile.normal)
+            let normalizedNormal = normalLength > 1e-6 ? (tile.normal / normalLength) : SIMD3<Float>(0, 1, 0)
+            let upAlignment = abs(simd_dot(normalizedNormal, gravityUp))
+            let sideBias: Float = upAlignment < 0.72 ? 1.0 : 0.25
+            return (tile.center, distance, tile.quality, sideBias)
+        }
+        guard let nearestDistance = candidates.map(\.distance).min() else { return nil }
+
+        let preferred = candidates
+            .filter { candidate in
+                candidate.quality >= 0.34 &&
+                candidate.distance <= nearestDistance + 0.18 &&
+                candidate.sideBias >= 1.0
+            }
+            .sorted { lhs, rhs in lhs.distance < rhs.distance }
+
+        let fallback = candidates
+            .filter { candidate in
+                candidate.quality >= 0.28 &&
+                candidate.distance <= nearestDistance + 0.22
+            }
+            .sorted { lhs, rhs in lhs.distance < rhs.distance }
+
+        let workingSet = preferred.count >= 4 ? preferred : fallback
+        guard !workingSet.isEmpty else { return nil }
+
+        let sampleCount = min(workingSet.count, max(6, min(18, workingSet.count)))
+        var weightedCenter = SIMD3<Float>(repeating: 0)
+        var weightSum: Float = 0
+        for candidate in workingSet.prefix(sampleCount) {
+            let relativeDistance = max(0.015, candidate.distance - nearestDistance + 0.015)
+            let proximityWeight = 1.0 / relativeDistance
+            let qualityWeight = max(0.25, candidate.quality)
+            let weight = proximityWeight * qualityWeight * max(0.35, candidate.sideBias)
+            weightedCenter += candidate.center * weight
+            weightSum += weight
+        }
+        guard weightSum > 1e-6 else { return nil }
+        return weightedCenter / weightSum
+    }
+
+    private var resolvedCaptureGravityUp: SIMD3<Float> {
+        guard let captureGravityUp,
+              simd_length_squared(captureGravityUp) > 1e-6 else {
+            return SIMD3<Float>(0, 1, 0)
+        }
+        return simd_normalize(captureGravityUp)
+    }
+
+    private func updateSubjectFirstDirectionCoverage(with frame: RawWorldStateFrame) {
+        guard usesSubjectFirstCaptureContract else { return }
+        let gravityUp = resolvedCaptureGravityUp
+        guard let estimatedSubjectCenter = estimatedSubjectCenter(for: frame, gravityUp: gravityUp) else {
+            return
+        }
+
+        if let stableCenter = subjectFirstOrbitStableCenter {
+            let delta = simd_distance(stableCenter, estimatedSubjectCenter)
+            if delta <= 0.28 {
+                let alpha: Float = delta <= 0.08 ? 0.22 : 0.10
+                subjectFirstOrbitStableCenter = stableCenter + (estimatedSubjectCenter - stableCenter) * alpha
+            }
+        } else {
+            subjectFirstOrbitStableCenter = estimatedSubjectCenter
+        }
+
+        let subjectCenter = subjectFirstOrbitStableCenter ?? estimatedSubjectCenter
+        let viewOffset = frame.cameraPosition - subjectCenter
+        guard simd_length_squared(viewOffset) > 1e-6 else { return }
+
+        let viewDirection = simd_normalize(viewOffset)
+        let elevationDot = Double(max(-1.0, min(1.0, simd_dot(viewDirection, gravityUp))))
+        let elevationDeg = asin(elevationDot) * 180.0 / .pi
+
+        var incrementalCoverage = SubjectFirstDirectionCoverage()
+        if elevationDeg >= 18.0 {
+            incrementalCoverage.hasHighAngle = true
+        }
+        if elevationDeg <= -12.0 {
+            incrementalCoverage.hasLowAngle = true
+        }
+
+        let horizontal = viewDirection - gravityUp * simd_dot(viewDirection, gravityUp)
+        guard simd_length_squared(horizontal) > 1e-6 else {
+            subjectFirstDirectionCoverageLatch.merge(incrementalCoverage)
+            return
+        }
+
+        let normalizedHorizontal = simd_normalize(horizontal)
+        if subjectFirstOrbitReferenceHorizontal == nil {
+            subjectFirstOrbitReferenceHorizontal = normalizedHorizontal
+            subjectFirstOrbitLastWrappedAngleDeg = 0
+            subjectFirstOrbitAccumulatedAngleDeg = 0
+            subjectFirstOrbitMinAccumulatedAngleDeg = 0
+            subjectFirstOrbitMaxAccumulatedAngleDeg = 0
+            subjectFirstDirectionCoverageLatch.merge(incrementalCoverage)
+            return
+        }
+
+        let reference = subjectFirstOrbitReferenceHorizontal ?? normalizedHorizontal
+        let angleRad = atan2(
+            Double(simd_dot(simd_cross(reference, normalizedHorizontal), gravityUp)),
+            Double(simd_dot(reference, normalizedHorizontal))
+        )
+        let angleDeg = angleRad * 180.0 / .pi
+        if let lastWrapped = subjectFirstOrbitLastWrappedAngleDeg {
+            var delta = angleDeg - lastWrapped
+            while delta > 180.0 { delta -= 360.0 }
+            while delta < -180.0 { delta += 360.0 }
+            subjectFirstOrbitAccumulatedAngleDeg += delta
+            subjectFirstOrbitMinAccumulatedAngleDeg = min(
+                subjectFirstOrbitMinAccumulatedAngleDeg,
+                subjectFirstOrbitAccumulatedAngleDeg
+            )
+            subjectFirstOrbitMaxAccumulatedAngleDeg = max(
+                subjectFirstOrbitMaxAccumulatedAngleDeg,
+                subjectFirstOrbitAccumulatedAngleDeg
+            )
+        } else {
+            subjectFirstOrbitAccumulatedAngleDeg = angleDeg
+            subjectFirstOrbitMinAccumulatedAngleDeg = angleDeg
+            subjectFirstOrbitMaxAccumulatedAngleDeg = angleDeg
+        }
+        subjectFirstOrbitLastWrappedAngleDeg = angleDeg
+
+        switch angleDeg {
+        case 25.0..<120.0:
+            incrementalCoverage.hasLeftOrbit = true
+        case -120.0..<(-25.0):
+            incrementalCoverage.hasRightOrbit = true
+        default:
+            if abs(angleDeg) >= 120.0 {
+                incrementalCoverage.hasFarOrbit = true
+            }
+        }
+
+        let orbitSweep = subjectFirstOrbitMaxAccumulatedAngleDeg - subjectFirstOrbitMinAccumulatedAngleDeg
+        if orbitSweep >= 150.0 {
+            incrementalCoverage.hasFarOrbit = true
+        }
+
+        subjectFirstDirectionCoverageLatch.merge(incrementalCoverage)
+    }
+
+    private var subjectFirstDirectionCoverage: SubjectFirstDirectionCoverage {
+        guard usesSubjectFirstCaptureContract else {
+            return SubjectFirstDirectionCoverage(
+                hasLeftOrbit: true,
+                hasRightOrbit: true,
+                hasFarOrbit: true,
+                hasHighAngle: true,
+                hasLowAngle: true
+            )
+        }
+        return subjectFirstDirectionCoverageLatch
+    }
+
+    var subjectFirstOrbitCoverageTarget: Int {
+        2
+    }
+
+    var subjectFirstOrbitCoverageProgressFraction: Double {
+        min(1.0, Double(subjectFirstDirectionCoverage.horizontalCount) / Double(subjectFirstOrbitCoverageTarget))
+    }
+
+    var subjectFirstOrbitCoverageText: String {
+        "\(subjectFirstDirectionCoverage.horizontalCount) / \(subjectFirstOrbitCoverageTarget)"
+    }
+
+    var subjectFirstOrbitCoverageGuidanceText: String {
+        subjectFirstDirectionCoverage.orbitGuidanceText
+    }
+
+    var subjectFirstVerticalCoverageTarget: Int {
+        1
+    }
+
+    var subjectFirstVerticalCoverageProgressFraction: Double {
+        min(1.0, Double(subjectFirstDirectionCoverage.verticalCount) / Double(subjectFirstVerticalCoverageTarget))
+    }
+
+    var subjectFirstVerticalCoverageText: String {
+        "\(subjectFirstDirectionCoverage.verticalCount) / \(subjectFirstVerticalCoverageTarget)"
+    }
+
+    var subjectFirstVerticalCoverageGuidanceText: String {
+        subjectFirstDirectionCoverage.verticalGuidanceText
+    }
+
+    private var subjectFirstCaptureFinishAssessment: (title: String, detail: String)? {
+        guard usesSubjectFirstCaptureContract else { return nil }
+
+        if pendingCaptureStartAfterCoordinatorReady ||
+            (isInitializingCoordinator && coordinatorBridge == nil) {
+            return (
+                title: "本地引擎还在准备",
+                detail: "本地几何和关键帧判定还没完全接管，先继续拍几秒，再结束会更稳。"
+            )
+        }
+
+        if debugSelectedFrames < captureKeyframeRecommendedMin {
+            return (
+                title: "先把关键帧补够",
+                detail: "当前还没达到本地方案的最低素材量，至少再补到 \(captureKeyframeRecommendedMin)+ 张有效关键帧。"
+            )
+        }
+
+        return nil
+    }
+
+    var subjectFirstCaptureCanFinishLocally: Bool {
+        guard usesSubjectFirstCaptureContract else { return true }
+        return subjectFirstCaptureFinishAssessment == nil
+    }
+
+    var subjectFirstCaptureFinishBlockMessage: String? {
+        subjectFirstCaptureFinishAssessment?.detail
+    }
+
+    var subjectFirstCaptureDecisionSummary: String {
+        guard let finishAssessment = subjectFirstCaptureFinishAssessment else {
+            return "已通过"
+        }
+        switch finishAssessment.title {
+        case "先把关键帧补够":
+            return "关键帧不足"
+        case "本地引擎还在准备":
+            return "准备中"
+        default:
+            return finishAssessment.title
+        }
+    }
+
+    var usesLiveLocalCoordinatorHandoffAfterStop: Bool {
+        selectedProcessingBackend == .localSubjectFirst && coordinatorBridge != nil
+    }
+
     var captureKeyframeRecommendedRangeText: String {
         "\(captureKeyframeRecommendedMin)-\(captureKeyframeRecommendedMax)"
     }
@@ -3679,19 +4375,19 @@ final class ScanViewModel: ObservableObject {
             return "放慢一点。移动过快时，很多帧会因为模糊或姿态不稳变成无效关键帧。"
         }
         if stabilityWarningActive {
-            return "先稳一下再继续。姿态稳定后，新的观察角度才更容易被记成有效关键帧。"
+            return "先稳一下再继续。姿态稳定后，新的画面内容才更容易被记成有效关键帧。"
         }
         if exposureWarningActive {
             return "先把光线拉稳。纹理不清时，关键帧即使进来了，后面的几何和训练质量也会偏差。"
         }
         if selected < captureKeyframeRecommendedMin {
             if captureKeyframeAcceptanceRatio < 0.35 && debugKeyframeGateRejects >= 6 {
-                return "当前很多帧被判成近重复视角了。别原地抖，继续绕着物体换到新角度。"
+                return "当前很多帧还没进有效关键帧。别原地抖，保持慢速移动，让画面内容真正变化。"
             }
-            return "继续补到 \(captureKeyframeRecommendedMin)+ 张有效关键帧，先把关键帧数量和视角分布拉稳。"
+            return "继续补到 \(captureKeyframeRecommendedMin)+ 张有效关键帧，先把最低素材量拉够。"
         }
         if selected < captureKeyframeRecommendedTarget {
-            return "继续补新方向，把有效关键帧推到 \(captureKeyframeRecommendedTarget) 左右会更稳。"
+            return "继续补有效关键帧，把素材量推到 \(captureKeyframeRecommendedTarget) 左右会更稳。"
         }
         if selected <= captureKeyframeRecommendedMax {
             return "关键帧已经够用。现在优先补缺口，不用为了刷数量在原地抖动。"
@@ -3700,13 +4396,16 @@ final class ScanViewModel: ObservableObject {
     }
 
     var subjectCaptureTargetTitle: String {
+        if let finishAssessment = subjectFirstCaptureFinishAssessment {
+            return finishAssessment.title
+        }
         switch captureGeometryFocus {
         case .waiting:
             return "正在准备稀疏几何图"
         case .gather:
             return "先让几何稳定成片"
         case .expand:
-            return "继续补新的观察方向"
+            return "继续补薄弱区域"
         case .reinforce:
             return "把红黄区域补成绿色"
         case .finish:
@@ -3716,7 +4415,7 @@ final class ScanViewModel: ObservableObject {
 
     var subjectCaptureTargetDetail: String {
         if motionWarningActive {
-            return "先放慢移动，别让拖影和近重复视角把几何质量拉低。"
+            return "先放慢移动，别让拖影和近重复画面把几何质量拉低。"
         }
         if exposureWarningActive {
             return "先把光线调稳，表面纹理不清会让几何图长期停在黄红色。"
@@ -3724,13 +4423,16 @@ final class ScanViewModel: ObservableObject {
         if stabilityWarningActive {
             return "先稳一下再继续，姿态不稳时补拍价值很低。"
         }
+        if let finishAssessment = subjectFirstCaptureFinishAssessment {
+            return finishAssessment.detail
+        }
         switch captureGeometryFocus {
         case .waiting:
             return "先保持主体或场景主体区域稳定入镜，几何图起来后再看红黄绿反馈。"
         case .gather:
-            return "别原地抖动，缓慢移动到新的角度，让稀疏几何先真正长出来。"
+            return "别原地抖动，缓慢移动，让稀疏几何先真正长出来。"
         case .expand:
-            return "继续绕拍或换到新的方向，优先补当前还是红色的薄弱区域。"
+            return "继续补当前还是红色的薄弱区域，不要求必须绕满一圈。"
         case .reinforce:
             return "保持慢速小步移动，把黄色区域拍成绿色，再顺手补掉少量红色缺口。"
         case .finish:
@@ -3745,7 +4447,7 @@ final class ScanViewModel: ObservableObject {
         case .gather:
             return "先让几何稳定成片"
         case .expand:
-            return "继续补新的观察方向"
+            return "继续补薄弱区域"
         case .reinforce:
             return "把黄红区域补稳"
         case .finish:
@@ -3755,7 +4457,7 @@ final class ScanViewModel: ObservableObject {
 
     var sceneCaptureTargetDetail: String {
         if motionWarningActive {
-            return "请放慢移动，先保证画面清晰和足够的新视角。"
+            return "请放慢移动，先保证画面清晰和足够的画面变化。"
         }
         if exposureWarningActive {
             return "尽量避免过暗、过曝和强烈背光，让表面纹理和几何证据更稳定。"
@@ -3767,9 +4469,9 @@ final class ScanViewModel: ObservableObject {
         case .waiting:
             return "先把主要区域稳稳拍进来，等稀疏几何图起来后再看红黄绿状态。"
         case .gather:
-            return "别原地抖动，缓慢移动到新角度，让几何证据先真正长出来。"
+            return "别原地抖动，缓慢移动，让几何证据先真正长出来。"
         case .expand:
-            return "继续补新的方向，优先覆盖目前还是红色或薄弱的区域。"
+            return "继续补目前还是红色或薄弱的区域，不要求必须绕满一圈。"
         case .reinforce:
             return "保持慢速小步移动，把黄色区域补成绿色，再顺手补掉少量红色缺口。"
         case .finish:
@@ -3782,8 +4484,11 @@ final class ScanViewModel: ObservableObject {
         if selected < captureKeyframeRecommendedMin {
             return "继续补到 \(captureKeyframeRecommendedMin)+ 张有效关键帧"
         }
+        if subjectFirstCaptureFinishAssessment != nil {
+            return "本地引擎还在准备，先继续拍几秒"
+        }
         if selected <= captureKeyframeRecommendedMax {
-            return "关键帧预算合适，优先补缺口"
+            return "关键帧预算合适，按你能拍到的范围补缺口就行"
         }
         return "关键帧偏多，除非还有缺口否则可以结束"
     }
@@ -3892,6 +4597,12 @@ final class ScanViewModel: ObservableObject {
         debugSelectedFrames = 0
         debugKeyframeGateAccepts = 0
         debugKeyframeGateRejects = 0
+        debugImportedFramesEvaluated = 0
+        debugImportedLowParallaxRejects = 0
+        debugImportedNearDuplicateRejects = 0
+        debugImportedSelectedTranslationMeanMm = 0.0
+        debugImportedSelectedRotationMeanDeg = 0.0
+        debugImportedSelectedOverlapMean = 0.0
         debugPipelineFrameCount = 0
         debugFrameCount = 0
         debugHasS6Quality = false
@@ -3902,6 +4613,13 @@ final class ScanViewModel: ObservableObject {
         captureWeakGeometryCount = 0
         captureRecoverableGeometryCount = 0
         captureStableGeometryCount = 0
+        subjectFirstDirectionCoverageLatch = SubjectFirstDirectionCoverage()
+        subjectFirstOrbitReferenceHorizontal = nil
+        subjectFirstOrbitStableCenter = nil
+        subjectFirstOrbitLastWrappedAngleDeg = nil
+        subjectFirstOrbitAccumulatedAngleDeg = 0
+        subjectFirstOrbitMinAccumulatedAngleDeg = 0
+        subjectFirstOrbitMaxAccumulatedAngleDeg = 0
         if let stabilizer = poseStabilizer {
             NativePoseStabilizerBridge.reset(stabilizer)
         }
@@ -3943,6 +4661,14 @@ final class ScanViewModel: ObservableObject {
 
 #if canImport(AVFoundation) && canImport(CoreVideo)
 private final class ARFrameVideoRecorder: @unchecked Sendable {
+    private final class PixelBufferBox: @unchecked Sendable {
+        let value: CVPixelBuffer
+
+        init(_ value: CVPixelBuffer) {
+            self.value = value
+        }
+    }
+
     private let outputURL: URL
     private let targetFPS: Double
     private let detachSourceFrames: Bool
@@ -3991,6 +4717,7 @@ private final class ARFrameVideoRecorder: @unchecked Sendable {
         } else {
             queuedPixelBuffer = pixelBuffer
         }
+        let queuedPixelBufferBox = PixelBufferBox(queuedPixelBuffer)
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -4000,7 +4727,7 @@ private final class ARFrameVideoRecorder: @unchecked Sendable {
                 self.appendStateLock.unlock()
             }
             guard !self.isFinishing else { return }
-            guard self.prepareWriterIfNeeded(from: queuedPixelBuffer) else { return }
+            guard self.prepareWriterIfNeeded(from: queuedPixelBufferBox.value) else { return }
 
             if self.startTimestamp == nil {
                 self.startTimestamp = timestamp
@@ -4023,7 +4750,7 @@ private final class ARFrameVideoRecorder: @unchecked Sendable {
             }
 
             let presentationTime = CMTime(seconds: presentationSeconds, preferredTimescale: 600)
-            if adaptor.append(queuedPixelBuffer, withPresentationTime: presentationTime) {
+            if adaptor.append(queuedPixelBufferBox.value, withPresentationTime: presentationTime) {
                 self.didAppendFrame = true
                 self.lastAppendedPresentationTime = presentationSeconds
             }
@@ -4057,7 +4784,7 @@ private final class ARFrameVideoRecorder: @unchecked Sendable {
                     guard let self else { return }
                     self.queue.async {
                         let result: URL?
-                        if writer.status == .completed {
+                        if self.writer?.status == .completed {
                             result = self.outputURL
                         } else {
                             try? FileManager.default.removeItem(at: self.outputURL)

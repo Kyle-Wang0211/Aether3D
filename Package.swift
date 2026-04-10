@@ -17,7 +17,7 @@ let package = Package(
     .package(path: ".deps/MetalSplatter"),
     .package(path: ".deps/swift-crypto"),
     .package(path: ".deps/swift-ssh-client"),
-    .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.12.0")
+    .package(path: ".deps/swift-nio-ssh")
   ],
   targets: [
     .systemLibrary(
@@ -48,6 +48,13 @@ let package = Package(
         "src/pipeline/streaming_c_api.cpp",
         "src/pipeline/local_preview_runtime.cpp",
         "src/pipeline/local_preview_seeding.cpp",
+        "src/pipeline/local_subject_first_capture_overlay.cpp",
+        "src/pipeline/local_subject_first_export_snapshot.cpp",
+        "src/pipeline/local_subject_first_fallback_seeding.cpp",
+        "src/pipeline/local_subject_first_ingest.cpp",
+        "src/pipeline/local_subject_first_refine.cpp",
+        "src/pipeline/local_subject_first_training.cpp",
+        "src/pipeline/runtime_tsdf_gaussian_augmentation.cpp",
         "src/pipeline/pipeline_coordinator.cpp",
         "src/pipeline/coordinator_c_api.cpp",
         "src/pipeline/depth_inference_coreml.mm",

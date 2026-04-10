@@ -152,6 +152,8 @@ struct ARCameraPreview: UIViewRepresentable {
         private var hasSignaledReady = false
         private var lastInterfaceOrientation: UIInterfaceOrientation = .portrait
         private var lastViewportSize: CGSize = .zero
+        private var processedFrameOrdinal: Int = 0
+        private var lastMinimalRuntimeVideoPayloadTimestamp: TimeInterval?
 #if canImport(CoreMotion)
         private let motionManager = CMMotionManager()
         private let motionQueue: OperationQueue = {
@@ -193,6 +195,8 @@ struct ARCameraPreview: UIViewRepresentable {
             firstPreviewFrameUptime = nil
             startupTraceLock.unlock()
             hasSignaledReady = false
+            processedFrameOrdinal = 0
+            lastMinimalRuntimeVideoPayloadTimestamp = nil
             NSLog("[Aether3D][Startup] scan_camera_view_created uptime=%.3f", now)
         }
 
@@ -218,6 +222,8 @@ struct ARCameraPreview: UIViewRepresentable {
             frameLock.unlock()
             hasStartedSession = false
             hasSignaledReady = false
+            processedFrameOrdinal = 0
+            lastMinimalRuntimeVideoPayloadTimestamp = nil
 #if canImport(CoreMotion)
             stopMotionUpdates()
 #endif
@@ -336,6 +342,32 @@ struct ARCameraPreview: UIViewRepresentable {
             return policy
         }
 
+        private func shouldAcquireDetachedImagePayload(
+            timestamp: TimeInterval,
+            inputPolicy: (
+                prefersMinimalRuntime: Bool,
+                shouldAcquireHeavyFrameInputs: Bool,
+                shouldRequestSceneDepth: Bool,
+                shouldProcessLiveFrames: Bool
+            )
+        ) -> Bool {
+            guard inputPolicy.shouldAcquireHeavyFrameInputs else { return false }
+            guard inputPolicy.prefersMinimalRuntime else { return true }
+
+            let needsPipelineSample = (processedFrameOrdinal % 30) == 0
+            let needsRecoveryVideoSample: Bool
+            if let lastTimestamp = lastMinimalRuntimeVideoPayloadTimestamp {
+                needsRecoveryVideoSample = (timestamp - lastTimestamp) >= 0.45
+            } else {
+                needsRecoveryVideoSample = true
+            }
+
+            if needsRecoveryVideoSample {
+                lastMinimalRuntimeVideoPayloadTimestamp = timestamp
+            }
+            return needsPipelineSample || needsRecoveryVideoSample
+        }
+
         private func recordFirstARFrameIfNeeded() {
             let now = ProcessInfo.processInfo.systemUptime
             startupTraceLock.lock()
@@ -441,6 +473,7 @@ struct ARCameraPreview: UIViewRepresentable {
                     releaseFrameProcessingLock()
                     return
                 }
+                processedFrameOrdinal += 1
                 let timestamp = frame.timestamp
                 let cameraTransform = frame.camera.transform
 #if canImport(CoreMotion)
@@ -451,10 +484,14 @@ struct ARCameraPreview: UIViewRepresentable {
                 }
 #endif
                 let lightEstimateSnapshot = makeLightEstimateSnapshot(frame.lightEstimate)
+                let shouldAcquireDetachedPayload = shouldAcquireDetachedImagePayload(
+                    timestamp: timestamp,
+                    inputPolicy: inputPolicy
+                )
                 // Snapshot sparse feature points on delegate thread so we never
                 // retain ARFrame/ARPointCloud objects across actor hops.
                 let featurePointsSnapshot: [SIMD3<Float>] = {
-                    guard inputPolicy.shouldAcquireHeavyFrameInputs else { return [] }
+                    guard shouldAcquireDetachedPayload else { return [] }
                     guard let cloud = frame.rawFeaturePoints else { return [] }
                     let maxPoints = min(cloud.points.count, 512)
                     return Array(cloud.points.prefix(maxPoints))
@@ -483,13 +520,19 @@ struct ARCameraPreview: UIViewRepresentable {
 
                 // Detach ARKit-owned pixel buffers on the delegate thread so the
                 // original ARFrame can be released before crossing actor hops.
-                guard let pixelBuffer = Self.clonePixelBuffer(frame.capturedImage) else {
-                    releaseFrameProcessingLock()
-                    return
+                let pixelBuffer: CVPixelBuffer?
+                if shouldAcquireDetachedPayload {
+                    guard let detachedPixelBuffer = Self.clonePixelBuffer(frame.capturedImage) else {
+                        releaseFrameProcessingLock()
+                        return
+                    }
+                    pixelBuffer = detachedPixelBuffer
+                } else {
+                    pixelBuffer = nil
                 }
                 let cameraIntrinsics = frame.camera.intrinsics
                 // LiDAR depth: sceneDepth on LiDAR devices, nil on non-LiDAR (pure DAv2 path)
-                let lidarDepthBuffer: CVPixelBuffer? = inputPolicy.shouldRequestSceneDepth
+                let lidarDepthBuffer: CVPixelBuffer? = (shouldAcquireDetachedPayload && inputPolicy.shouldRequestSceneDepth)
                     ? (frame.sceneDepth?.depthMap ?? frame.smoothedSceneDepth?.depthMap).flatMap(Self.clonePixelBuffer)
                     : nil
 

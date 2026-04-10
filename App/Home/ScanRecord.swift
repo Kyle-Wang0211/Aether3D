@@ -538,6 +538,26 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         artifactPath != nil || isProcessing || status == .failed || status == .cancelled
     }
 
+    public var isObjectFastPublishV1: Bool {
+        let strategy = runtimeMetricString("pipeline_strategy")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let contract = runtimeMetricString("artifact_contract_version")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if strategy == "object_fast_publish_v1" || strategy == "object_splatslam_v1" || contract == "object_publish_v1" {
+            return true
+        }
+
+        if let artifactPath {
+            let lowercased = artifactPath.lowercased()
+            return lowercased.hasSuffix(".glb") || lowercased.hasSuffix(".ply") || lowercased.hasSuffix(".splat") || lowercased.hasSuffix(".spz")
+        }
+
+        return false
+    }
+
     public var displayProgressFraction: Double {
         switch status {
         case .completed:
@@ -1237,7 +1257,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             case .failed:
                 return "本地处理失败了"
             case .cancelled:
-                return "本地处理已取消"
+                return failureReason == "stale_local_processing_frozen"
+                    ? "旧本地任务已取消"
+                    : "本地处理已取消"
             default:
                 return localPreviewPhase?.title ?? "正在生成本地结果"
             }
@@ -1678,12 +1700,35 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                     )
                 )
             }
-            if let gaussians = runtimeMetricInt("native_gaussians"), gaussians > 0 {
+            let currentGaussians = runtimeMetricInt("native_current_gaussians")
+                ?? runtimeMetricInt("native_gaussians")
+            let retainedGaussians = runtimeMetricInt("native_current_retained_export_gaussians") ?? 0
+            let peakGaussians = runtimeMetricInt("native_peak_gaussians") ?? 0
+            if status == .failed, peakGaussians > 0 {
+                let subtitle = retainedGaussians > 0
+                    ? "训练高斯峰值（保留快照 \(retainedGaussians)）"
+                    : "训练高斯峰值"
+                metrics.append(
+                    WorkflowActivityMetric(
+                        id: "native_peak_gaussians",
+                        title: "\(peakGaussians)",
+                        subtitle: subtitle
+                    )
+                )
+            } else if retainedGaussians > 0 {
+                metrics.append(
+                    WorkflowActivityMetric(
+                        id: "native_retained_export_gaussians",
+                        title: "\(retainedGaussians)",
+                        subtitle: "保留导出快照"
+                    )
+                )
+            } else if let gaussians = currentGaussians, gaussians > 0 {
                 metrics.append(
                     WorkflowActivityMetric(
                         id: "native_gaussians",
                         title: "\(gaussians)",
-                        subtitle: "当前高斯数"
+                        subtitle: status == .failed ? "导出失败时当前高斯数" : "当前高斯数"
                     )
                 )
             }
@@ -2198,7 +2243,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             case .failed:
                 return "本地处理失败了"
             case .cancelled:
-                return "本地处理已取消"
+                return failureReason == "stale_local_processing_frozen"
+                    ? "旧本地任务已取消"
+                    : "本地处理已取消"
             default:
                 return localPreviewPhase?.title ?? "正在生成本地结果"
             }

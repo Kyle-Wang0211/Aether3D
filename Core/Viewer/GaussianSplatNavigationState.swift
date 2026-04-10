@@ -116,8 +116,12 @@ public struct GaussianSplatNavigationState: Sendable {
     public mutating func applySingleFingerDrag(screenTranslation: SIMD2<Float>) {
         let delta = orbitGestureDelta(from: screenTranslation)
         activeNavigationMode = .orbit
-        // Use direct-manipulation semantics so the model follows the finger.
-        orbit.azimuth -= delta.x
+        // USER-LOCKED ORBIT SEMANTICS:
+        // - single-finger swipe left  => object rotates left
+        // - single-finger swipe right => object rotates right
+        // This sign has been explicitly user-validated. Do not flip it again
+        // unless the user explicitly re-confirms that change.
+        orbit.azimuth += delta.x
         orbit.pitch = Self.softClampedPitchRadians(orbit.pitch - delta.y)
     }
 

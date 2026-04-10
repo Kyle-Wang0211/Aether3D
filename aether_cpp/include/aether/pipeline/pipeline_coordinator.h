@@ -26,6 +26,7 @@
 #include "aether/splat/packed_splats.h"
 #include "aether/splat/splat_render_engine.h"
 #include "aether/pipeline/depth_inference_engine.h"
+#include "aether/pipeline/runtime_tsdf_gaussian_augmentation.h"
 #include "aether/pipeline/streaming_pipeline.h"
 #include "aether/thermal/thermal_predictor.h"
 #include "aether/training/gaussian_training_engine.h"
@@ -92,6 +93,14 @@ struct PointCloudVertex {
     float alpha;         // Blend alpha (fades out as 3DGS takes over)
 };
 
+/// Compact TSDF surface sample retained for export/world-state after live TSDF release.
+/// Keeps only the fields still consumed by export cleanup and metrics paths.
+struct ExportSurfaceSample {
+    float position[3]{0.0f, 0.0f, 0.0f};
+    std::uint8_t confidence{0};
+    std::uint8_t weight{0};
+};
+
 // ─── Per-Region Quality Heatmap (TSDF voxel-weight driven) ───
 
 /// Overlay vertex for quality heatmap (C++ generates, system layer renders).
@@ -145,6 +154,10 @@ struct EvidenceSnapshot {
     std::size_t training_step{0};                 // Current global training step
     std::size_t assigned_blocks{0};               // Surface blocks → Gaussians (geometry gate, separate from S6+)
     std::size_t pending_gaussian_count{0};        // Gaussians waiting in queue for engine
+    std::size_t retained_export_gaussians{0};     // Current retained export snapshot size
+    std::size_t peak_training_gaussians{0};       // Peak live trainer gaussian count
+    std::size_t peak_working_set_gaussians{0};    // Peak trainer + pending working set
+    std::size_t peak_retained_export_gaussians{0}; // Peak retained export snapshot size
 
     // ── On-device diagnostics (internal archival, cloud leaves zero) ──
     std::uint64_t preview_elapsed_ms{0};
@@ -368,6 +381,15 @@ public:
     training::TrainingProgress training_progress() const noexcept;
 
 private:
+    void maybe_compact_export_surface_snapshot() noexcept;
+    void compact_export_surface_snapshot_now() noexcept;
+    bool load_export_surface_samples(
+        std::vector<ExportSurfaceSample>& out,
+        std::size_t max_points) noexcept;
+    void maybe_release_capture_preview_budget() noexcept;
+    void release_capture_preview_budget_now() noexcept;
+    void prune_capture_preview_budget(double timestamp_seconds) noexcept;
+
     render::GPUDevice& device_;
     splat::SplatRenderEngine& renderer_;
     CoordinatorConfig config_;
@@ -454,6 +476,10 @@ private:
     // export_ply() reads them on the main thread.
     mutable std::mutex training_export_mutex_;
     std::vector<splat::GaussianParams> retained_export_splats_;
+    std::atomic<std::size_t> retained_export_gaussian_count_{0};
+    std::atomic<std::size_t> peak_training_gaussians_{0};
+    std::atomic<std::size_t> peak_working_set_gaussians_{0};
+    std::atomic<std::size_t> peak_retained_export_gaussians_{0};
     mutable std::mutex depth_cache_mutex_;
 
     // ─── DAv2 Depth Inference — Dual-Model Cross-Validation ───
@@ -557,6 +583,8 @@ private:
     // during temporary no-depth windows so we do not emit floating fallback tiles.
     std::vector<OverlayVertex> last_stable_surface_overlay_;
     std::chrono::steady_clock::time_point overlay_last_gen_time_{};
+    std::atomic<bool> capture_preview_budget_release_requested_{false};
+    std::atomic<bool> capture_preview_budget_released_{false};
 
     // ─── Monotonic tile confirmation (prevents overlay "state regression") ───
     // Once a grid cell passes the depth consistency filter, it is permanently
@@ -626,13 +654,14 @@ private:
         int width{0}, height{0};
         float fx{0}, fy{0}, cx{0}, cy{0};  // Intrinsics (scaled to depth resolution)
         float pose[16]{};               // Camera-to-world (column-major, ARKit convention)
-        // Color data for Gaussian seed initialization (fix colorHit=0% bug)
-        std::vector<unsigned char> rgba;  // Full-res BGRA color frame
+        // Color data for Gaussian seed initialization / export validation.
+        // Intentionally stored as a downsampled BGRA frame to keep capture memory bounded.
+        std::vector<unsigned char> rgba;
         int rgba_w{0}, rgba_h{0};
         float rgba_intrinsics[9]{};        // fx,0,cx,0,fy,cy,0,0,1
     };
     std::vector<DepthKeyframe> depth_keyframes_;
-    static constexpr std::size_t kMaxDepthKeyframes = 24;
+    static constexpr std::size_t kMaxDepthKeyframes = 8;
     float last_keyframe_pos_[3]{0.0f, 0.0f, 0.0f};
     float last_keyframe_fwd_[3]{0.0f, 0.0f, -1.0f};
     bool has_keyframe_{false};
@@ -646,36 +675,24 @@ private:
     bool imported_video_bootstrap_intrinsics_initialized_{false};
     float imported_video_bootstrap_intrinsics_[9]{};
 
-    // ─── 全局训练 (TSDF 直接初始化) ───
-    // S6+ TSDF blocks → Gaussian creation via add_gaussians() (no region clustering).
-    std::unordered_set<std::int64_t> assigned_blocks_; // Spatial hash of blocks already assigned Gaussians
+    // ─── Runtime TSDF→Gaussian augmentation (shared non-imported-video path) ───
+    runtime_tsdf_gaussian_augmentation::State runtime_tsdf_gaussian_augmentation_state_;
     std::unordered_set<std::int64_t> gsf_seeded_cells_; // GSFusion 5mm spatial hash for per-frame dedup
     std::mutex training_mutex_;                         // Protects pending_gaussians_ handoff
     std::vector<splat::GaussianParams> pending_gaussians_; // Thread A → Thread C (TSDF S6+ → Gaussian)
-
-    // ─── Gaussian Creation Rate Limiter (Token Bucket) ───
-    // Prevents burst creation of Gaussians when many blocks qualify simultaneously.
-    // Smooth flow: max kGaussianBucketCapacity per second, refilled continuously.
-    std::size_t gaussian_bucket_tokens_{0};
-    std::chrono::steady_clock::time_point gaussian_bucket_last_refill_{};
-    bool gaussian_bucket_initialized_{false};
-    static constexpr std::size_t kGaussianBucketCapacity = 2000000;  // 2M burst (million-seed target)
-    static constexpr std::size_t kGaussianRefillRate = 500000;       // 500K/s (fast refill for bursts)
     bool preview_dav2_seed_initialized_{false};
     std::size_t preview_last_seed_attempt_depth_frames_{0};
-
-    /// Pack block coordinates into int64 spatial hash key.
-    static std::int64_t block_hash_key(const tsdf::BlockIndex& idx) noexcept {
-        return (static_cast<std::int64_t>(idx.x) << 40) |
-               ((static_cast<std::int64_t>(idx.y) & 0xFFFFF) << 20) |
-               (static_cast<std::int64_t>(idx.z) & 0xFFFFF);
-    }
+    bool imported_video_geometry_topup_pre_engine_applied_{false};
+    bool imported_video_geometry_topup_post_engine_applied_{false};
 
     // ─── TSDF Volume (replaces accumulated point cloud + quality grid) ───
     // Provides: visualization (surface points), quality tracking (voxel weight),
     // multi-frame depth fusion. Thread A exclusive access.
     // Memory: ~200MB vs old 485MB (480MB point cloud + 5MB quality grid).
     std::unique_ptr<tsdf::TSDFVolume> tsdf_volume_;
+    mutable std::mutex export_surface_snapshot_mutex_;
+    std::vector<ExportSurfaceSample> export_surface_snapshot_;
+    std::atomic<bool> export_surface_snapshot_compacted_{false};
 
     // ─── TSDF-driven Quality Overlay ───
     QualityThresholds quality_thresholds_;

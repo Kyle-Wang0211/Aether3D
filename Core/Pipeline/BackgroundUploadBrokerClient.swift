@@ -284,18 +284,24 @@ private actor StreamFriendlyUploadPreparer {
             for: outputURL
         )
 
-        session.outputURL = outputURL
-        session.outputFileType = strategy.fileType
         session.shouldOptimizeForNetworkUse = true
         let sessionBox = UncheckedSendableBox(session)
-        let task = Task { [weak self, sessionBox] in
-            guard let self else { return }
-
-            let progressTask = Task { [weak self, sessionBox] in
-                guard let self else { return }
+        let task = Task { [sessionBox] in
+            let progressTask = Task { [sessionBox] in
                 var lastPercent = -1
-                while !Task.isCancelled {
-                    let rawProgress = max(0.0, min(1.0, Double(sessionBox.value.progress)))
+                for await state in sessionBox.value.states(updateInterval: 0.2) {
+                    guard !Task.isCancelled else { return }
+
+                    let rawProgress: Double
+                    switch state {
+                    case .pending, .waiting:
+                        rawProgress = 0.0
+                    case .exporting(let progress):
+                        rawProgress = max(0.0, min(1.0, progress.fractionCompleted))
+                    @unknown default:
+                        rawProgress = 0.0
+                    }
+
                     let percent = max(10, min(94, Int((rawProgress * 84.0).rounded()) + 10))
                     let currentBytes = ManagedPreparedUploadSourceStore.currentFileSize(for: outputURL)
                     ManagedPreparedUploadSourceStore.saveMetadata(
@@ -326,35 +332,15 @@ private actor StreamFriendlyUploadPreparer {
                             )
                         )
                     }
-                    if sessionBox.value.status != .waiting && sessionBox.value.status != .exporting {
-                        return
-                    }
-                    try? await Task.sleep(nanoseconds: 200_000_000)
                 }
             }
 
-            let result: Result<Void, Error> = await withCheckedContinuation { continuation in
-                sessionBox.value.exportAsynchronously {
-                    let exportSession = sessionBox.value
-                    switch exportSession.status {
-                    case .completed:
-                        continuation.resume(returning: .success(()))
-                    case .failed:
-                        continuation.resume(
-                            returning: .failure(
-                                exportSession.error ?? RemoteB1ClientError.uploadFailed("stream_friendly_export_failed")
-                            )
-                        )
-                    case .cancelled:
-                        continuation.resume(
-                            returning: .failure(RemoteB1ClientError.uploadFailed("stream_friendly_export_cancelled"))
-                        )
-                    default:
-                        continuation.resume(
-                            returning: .failure(RemoteB1ClientError.uploadFailed("stream_friendly_export_incomplete"))
-                        )
-                    }
-                }
+            let result: Result<Void, Error>
+            do {
+                try await sessionBox.value.export(to: outputURL, as: strategy.fileType)
+                result = .success(())
+            } catch {
+                result = .failure(error)
             }
 
             progressTask.cancel()
@@ -507,19 +493,19 @@ public struct BackgroundUploadBrokerConfiguration: Sendable {
     }
 }
 
-struct BrokerUploadRequest: Codable, Sendable {
-    let kind: String?
-    let method: String?
-    let url: String?
-    let headers: [String: String]
-    let storageKey: String
-    let uploadId: String?
-    let partSizeBytes: Int?
-    let maxConcurrency: Int?
-    let partReadyURL: String?
-    let parts: [BrokerMultipartPartRequest]?
-    let completeURL: String?
-    let abortURL: String?
+public struct BrokerUploadRequest: Codable, Sendable {
+    public let kind: String?
+    public let method: String?
+    public let url: String?
+    public let headers: [String: String]
+    public let storageKey: String
+    public let uploadId: String?
+    public let partSizeBytes: Int?
+    public let maxConcurrency: Int?
+    public let partReadyURL: String?
+    public let parts: [BrokerMultipartPartRequest]?
+    public let completeURL: String?
+    public let abortURL: String?
 
     enum CodingKeys: String, CodingKey {
         case kind
@@ -536,7 +522,7 @@ struct BrokerUploadRequest: Codable, Sendable {
         case abortURL
     }
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         kind = try container.decodeIfPresent(String.self, forKey: .kind)
         method = try container.decodeIfPresent(String.self, forKey: .method)
@@ -553,11 +539,11 @@ struct BrokerUploadRequest: Codable, Sendable {
     }
 }
 
-struct BrokerMultipartPartRequest: Codable, Sendable {
-    let partNumber: Int
-    let method: String
-    let url: String
-    let headers: [String: String]
+public struct BrokerMultipartPartRequest: Codable, Sendable {
+    public let partNumber: Int
+    public let method: String
+    public let url: String
+    public let headers: [String: String]
 
     enum CodingKeys: String, CodingKey {
         case partNumber
@@ -566,7 +552,7 @@ struct BrokerMultipartPartRequest: Codable, Sendable {
         case headers
     }
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         partNumber = try container.decode(Int.self, forKey: .partNumber)
         method = try container.decode(String.self, forKey: .method)
@@ -620,20 +606,159 @@ struct BrokerCreateJobRequest: Codable, Sendable {
     }
 }
 
-struct BrokerCreateJobResponse: Codable, Sendable {
-    let jobId: String
-    let upload: BrokerUploadRequest
-    let pollPath: String?
-    let cancelPath: String?
+public struct BrokerCreateJobResponse: Codable, Sendable {
+    public let jobId: String
+    public let upload: BrokerUploadRequest
+    public let pollPath: String?
+    public let cancelPath: String?
 }
 
 struct BrokerArtifactPayload: Codable, Sendable {
     let downloadURL: String
     let format: String
+    let storageKey: String?
 
     enum CodingKeys: String, CodingKey {
         case downloadURL = "download_url"
         case format
+        case type
+        case storageKey = "storage_key"
+    }
+
+    init(downloadURL: String, format: String, storageKey: String? = nil) {
+        self.downloadURL = downloadURL
+        self.format = format
+        self.storageKey = storageKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        downloadURL = try container.decode(String.self, forKey: .downloadURL)
+        storageKey = try container.decodeIfPresent(String.self, forKey: .storageKey)
+        if let format = try container.decodeIfPresent(String.self, forKey: .format), !format.isEmpty {
+            self.format = format
+        } else if let type = try container.decodeIfPresent(String.self, forKey: .type), !type.isEmpty {
+            self.format = type
+        } else {
+            self.format = "artifact"
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(downloadURL, forKey: .downloadURL)
+        try container.encode(format, forKey: .format)
+        try container.encodeIfPresent(storageKey, forKey: .storageKey)
+    }
+}
+
+struct BrokerArtifactManifestPayload: Codable, Sendable {
+    let primaryArtifact: BrokerArtifactPayload?
+    let viewerManifest: BrokerArtifactPayload?
+    let comparisonAsset: BrokerArtifactPayload?
+    let comparisonMetrics: BrokerArtifactPayload?
+    let hqAsset: BrokerArtifactPayload?
+
+    enum CodingKeys: String, CodingKey {
+        case primaryArtifact = "primary_artifact"
+        case viewerManifest = "viewer_manifest"
+        case comparisonAsset = "comparison_asset"
+        case comparisonMetrics = "comparison_metrics"
+        case hqAsset = "hq_asset"
+        case metrics
+    }
+
+    init(
+        primaryArtifact: BrokerArtifactPayload?,
+        viewerManifest: BrokerArtifactPayload?,
+        comparisonAsset: BrokerArtifactPayload?,
+        comparisonMetrics: BrokerArtifactPayload?,
+        hqAsset: BrokerArtifactPayload?
+    ) {
+        self.primaryArtifact = primaryArtifact
+        self.viewerManifest = viewerManifest
+        self.comparisonAsset = comparisonAsset
+        self.comparisonMetrics = comparisonMetrics
+        self.hqAsset = hqAsset
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        primaryArtifact = try container.decodeIfPresent(BrokerArtifactPayload.self, forKey: .primaryArtifact)
+        viewerManifest = try container.decodeIfPresent(BrokerArtifactPayload.self, forKey: .viewerManifest)
+        comparisonAsset = try container.decodeIfPresent(BrokerArtifactPayload.self, forKey: .comparisonAsset)
+        comparisonMetrics = try container.decodeIfPresent(BrokerArtifactPayload.self, forKey: .comparisonMetrics)
+        hqAsset = try container.decodeIfPresent(BrokerArtifactPayload.self, forKey: .hqAsset)
+            ?? container.decodeIfPresent(BrokerArtifactPayload.self, forKey: .metrics)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(primaryArtifact, forKey: .primaryArtifact)
+        try container.encodeIfPresent(viewerManifest, forKey: .viewerManifest)
+        try container.encodeIfPresent(comparisonAsset, forKey: .comparisonAsset)
+        try container.encodeIfPresent(comparisonMetrics, forKey: .comparisonMetrics)
+        try container.encodeIfPresent(hqAsset, forKey: .hqAsset)
+    }
+}
+
+private struct BrokerViewerManifestAssetPayload: Codable, Sendable {
+    let kind: String?
+    let path: String
+    let ready: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case path
+        case ready
+    }
+}
+
+private struct BrokerViewerManifestPayload: Codable, Sendable {
+    let version: String?
+    let defaultAsset: BrokerViewerManifestAssetPayload?
+    let cleanedAsset: BrokerViewerManifestAssetPayload?
+    let cleanupCompare: BrokerViewerManifestAssetPayload?
+    let hqAsset: BrokerViewerManifestAssetPayload?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case defaultAsset = "default_asset"
+        case cleanedAsset = "cleaned_asset"
+        case cleanupCompare = "cleanup_compare"
+        case hqAsset = "hq_asset"
+    }
+}
+
+public struct BrokerDownloadedPrimaryArtifactFile: Sendable {
+    public let localURL: URL
+    public let format: String
+
+    public init(localURL: URL, format: String) {
+        self.localURL = localURL
+        self.format = format
+    }
+}
+
+public struct BrokerDownloadedObjectModeViewerBundle: Sendable {
+    public let defaultArtifact: BrokerDownloadedPrimaryArtifactFile
+    public let viewerManifest: BrokerDownloadedPrimaryArtifactFile?
+    public let comparisonArtifact: BrokerDownloadedPrimaryArtifactFile?
+    public let comparisonMetrics: BrokerDownloadedPrimaryArtifactFile?
+    public let hqArtifact: BrokerDownloadedPrimaryArtifactFile?
+
+    public init(
+        defaultArtifact: BrokerDownloadedPrimaryArtifactFile,
+        viewerManifest: BrokerDownloadedPrimaryArtifactFile?,
+        comparisonArtifact: BrokerDownloadedPrimaryArtifactFile?,
+        comparisonMetrics: BrokerDownloadedPrimaryArtifactFile?,
+        hqArtifact: BrokerDownloadedPrimaryArtifactFile?
+    ) {
+        self.defaultArtifact = defaultArtifact
+        self.viewerManifest = viewerManifest
+        self.comparisonArtifact = comparisonArtifact
+        self.comparisonMetrics = comparisonMetrics
+        self.hqArtifact = hqArtifact
     }
 }
 
@@ -736,7 +861,7 @@ struct BrokerJobStatusResponse: Codable, Sendable {
     let estimatedRemainingSeconds: Int?
     let progressBasis: String?
     let metrics: BrokerRuntimeMetricMap?
-    let artifact: BrokerArtifactPayload?
+    let artifact: BrokerArtifactManifestPayload?
     let failureReason: String?
     let assignedWorkerId: String?
     let cancelAcknowledged: Bool?
@@ -2883,7 +3008,7 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         ManagedPreparedUploadSourceStore.cleanupIfManaged(sourceURL)
     }
 
-    func createJob(
+    public func createJob(
         videoURL: URL,
         clientRecordId: UUID? = nil,
         captureOrigin: String,
@@ -2927,7 +3052,7 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         )
     }
 
-    func startUpload(
+    public func startUpload(
         jobId: String,
         upload: BrokerUploadRequest,
         sourceURL: URL,
@@ -2953,7 +3078,7 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         )
     }
 
-    func createJobAndUpload(
+    public func createJobAndUpload(
         videoURL: URL,
         clientRecordId: UUID? = nil,
         captureOrigin: String,
@@ -2985,7 +3110,7 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         }
     }
 
-    func pollStatus(jobId: String) async throws -> JobStatus {
+    public func pollStatus(jobId: String) async throws -> JobStatus {
         let status = try await fetchJobStatus(jobId: jobId)
         let progress = RemoteJobProgress(
             progressFraction: normalized(status.progressFraction),
@@ -3006,7 +3131,7 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         case "reconstructing", "training", "packaging", "downloading":
             return .processing(progress)
         case "exporting":
-            if status.artifact?.downloadURL.isEmpty == false {
+            if status.artifact?.primaryArtifact?.downloadURL.isEmpty == false {
                 return .downloadReady(progress)
             }
             return .processing(progress)
@@ -3023,12 +3148,194 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         try await download(jobId: jobId, onProgress: nil)
     }
 
+    private func objectModeArtifactDownloadDirectory() -> URL {
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Aether3D", isDirectory: true)
+            .appendingPathComponent("background-artifacts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    public func downloadPrimaryArtifactFile(jobId: String) async throws -> BrokerDownloadedPrimaryArtifactFile {
+        let artifactManifest = try await fetchResolvedArtifactManifest(jobId: jobId)
+        guard let artifact = artifactManifest.primaryArtifact else {
+            throw RemoteB1ClientError.downloadFailed("missing_artifact_download_url")
+        }
+        let fallbackURL = config?.fallbackBaseURL?.appendingPathComponent("/v1/mobile-jobs/\(jobId)/artifact-download")
+        return try await downloadArtifactFile(
+            jobId: jobId,
+            artifact: artifact,
+            preferredBaseName: "default_artifact",
+            fallbackURL: fallbackURL
+        )
+    }
+
+    public func downloadObjectModeViewerBundle(jobId: String) async throws -> BrokerDownloadedObjectModeViewerBundle {
+        var artifactManifest = try await fetchResolvedArtifactManifest(jobId: jobId)
+        guard let defaultArtifactPayload = artifactManifest.primaryArtifact else {
+            throw RemoteB1ClientError.downloadFailed("missing_primary_artifact")
+        }
+        let fallbackURL = config?.fallbackBaseURL?.appendingPathComponent("/v1/mobile-jobs/\(jobId)/artifact-download")
+        let defaultArtifact = try await downloadArtifactFile(
+            jobId: jobId,
+            artifact: defaultArtifactPayload,
+            preferredBaseName: "default_artifact",
+            fallbackURL: fallbackURL
+        )
+        let viewerManifest = try await downloadOptionalArtifactFile(
+            jobId: jobId,
+            artifact: artifactManifest.viewerManifest,
+            preferredBaseName: "viewer_manifest",
+            fallbackURL: nil
+        )
+        if let viewerManifest {
+            artifactManifest = augmentArtifactManifestFromViewerManifest(
+                artifactManifest,
+                viewerManifestURL: viewerManifest.localURL
+            )
+        }
+        let comparisonArtifactFallbackURL = config?.fallbackBaseURL?.appendingPathComponent("/v1/mobile-jobs/\(jobId)/artifact-download/comparison_asset")
+        let comparisonMetricsFallbackURL = config?.fallbackBaseURL?.appendingPathComponent("/v1/mobile-jobs/\(jobId)/artifact-download/comparison_metrics")
+        let hqArtifactFallbackURL = config?.fallbackBaseURL?.appendingPathComponent("/v1/mobile-jobs/\(jobId)/artifact-download/hq_asset")
+
+        let comparisonArtifact: BrokerDownloadedPrimaryArtifactFile?
+        do {
+            comparisonArtifact = try await downloadOptionalArtifactFile(
+                jobId: jobId,
+                artifact: artifactManifest.comparisonAsset,
+                preferredBaseName: "comparison_artifact",
+                fallbackURL: comparisonArtifactFallbackURL
+            )
+        } catch {
+            print("[Aether3D][ObjectModeV2][ViewerBundle] comparison_asset download failed jobId=\(jobId) error=\(error.localizedDescription)")
+            comparisonArtifact = nil
+        }
+
+        let comparisonMetrics: BrokerDownloadedPrimaryArtifactFile?
+        do {
+            comparisonMetrics = try await downloadOptionalArtifactFile(
+                jobId: jobId,
+                artifact: artifactManifest.comparisonMetrics,
+                preferredBaseName: "comparison_metrics",
+                fallbackURL: comparisonMetricsFallbackURL
+            )
+        } catch {
+            print("[Aether3D][ObjectModeV2][ViewerBundle] comparison_metrics download failed jobId=\(jobId) error=\(error.localizedDescription)")
+            comparisonMetrics = nil
+        }
+
+        let hqArtifact: BrokerDownloadedPrimaryArtifactFile?
+        do {
+            hqArtifact = try await downloadOptionalArtifactFile(
+                jobId: jobId,
+                artifact: artifactManifest.hqAsset,
+                preferredBaseName: "hq_artifact",
+                fallbackURL: hqArtifactFallbackURL
+            )
+        } catch {
+            print("[Aether3D][ObjectModeV2][ViewerBundle] hq_asset download failed jobId=\(jobId) error=\(error.localizedDescription)")
+            hqArtifact = nil
+        }
+        return BrokerDownloadedObjectModeViewerBundle(
+            defaultArtifact: defaultArtifact,
+            viewerManifest: viewerManifest,
+            comparisonArtifact: comparisonArtifact,
+            comparisonMetrics: comparisonMetrics,
+            hqArtifact: hqArtifact
+        )
+    }
+
+    private func downloadOptionalArtifactFile(
+        jobId: String,
+        artifact: BrokerArtifactPayload?,
+        preferredBaseName: String,
+        fallbackURL: URL?
+    ) async throws -> BrokerDownloadedPrimaryArtifactFile? {
+        guard let artifact else { return nil }
+        return try await downloadArtifactFile(
+            jobId: jobId,
+            artifact: artifact,
+            preferredBaseName: preferredBaseName,
+            fallbackURL: fallbackURL
+        )
+    }
+
+    private func downloadArtifactFile(
+        jobId: String,
+        artifact: BrokerArtifactPayload,
+        preferredBaseName: String,
+        fallbackURL: URL?
+    ) async throws -> BrokerDownloadedPrimaryArtifactFile {
+        guard let downloadURL = URL(string: artifact.downloadURL) else {
+            throw RemoteB1ClientError.downloadFailed("missing_artifact_download_url")
+        }
+
+        let activePersistedURL = fallbackURL == nil ? nil : engine.persistedArtifactDownloadRequestURL(jobId: jobId)
+        let fileExtension = normalizedArtifactExtension(
+            for: artifact.format,
+            downloadURL: downloadURL
+        )
+        let stagingDirectory = objectModeArtifactDownloadDirectory()
+            .appendingPathComponent("object-mode-v2", isDirectory: true)
+            .appendingPathComponent(jobId, isDirectory: true)
+        try? FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        let destinationURL = stagingDirectory
+            .appendingPathComponent(preferredBaseName)
+            .appendingPathExtension(fileExtension)
+
+        var orderedBaseURLs: [URL] = [downloadURL]
+        if let fallbackURL,
+           fallbackURL.absoluteString != downloadURL.absoluteString {
+            if activePersistedURL?.absoluteString == downloadURL.absoluteString {
+                orderedBaseURLs = [fallbackURL, downloadURL]
+            } else if activePersistedURL?.absoluteString == fallbackURL.absoluteString {
+                orderedBaseURLs = [downloadURL, fallbackURL]
+            } else {
+                orderedBaseURLs.append(fallbackURL)
+            }
+        }
+
+        let maxAttempts = orderedBaseURLs.count > 1 ? 4 : 3
+        var candidateURLs: [URL] = []
+        candidateURLs.reserveCapacity(maxAttempts)
+        while candidateURLs.count < maxAttempts {
+            for url in orderedBaseURLs where candidateURLs.count < maxAttempts {
+                candidateURLs.append(url)
+            }
+        }
+
+        var lastError: Error?
+        for requestURL in candidateURLs {
+            var request = URLRequest(url: requestURL)
+            request.httpMethod = "GET"
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.timeoutInterval = 60 * 30
+            if requestURL == fallbackURL, let apiKey = config?.apiKey {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+
+            do {
+                let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+                try validate(response: response)
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    try? FileManager.default.removeItem(at: destinationURL)
+                }
+                try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+                return BrokerDownloadedPrimaryArtifactFile(localURL: destinationURL, format: artifact.format)
+            } catch {
+                lastError = error
+            }
+        }
+
+        throw lastError ?? RemoteB1ClientError.downloadFailed("artifact_file_download_failed")
+    }
+
     func download(
         jobId: String,
         onProgress: (@Sendable (Int64, Int64) async -> Void)?
     ) async throws -> (data: Data, format: ArtifactFormat) {
         let status = try await fetchJobStatus(jobId: jobId)
-        guard let artifact = status.artifact,
+        guard let artifact = status.artifact?.primaryArtifact,
               let downloadURL = URL(string: artifact.downloadURL) else {
             throw RemoteB1ClientError.downloadFailed("missing_artifact_download_url")
         }
@@ -3157,6 +3464,19 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         throw RemoteB1ClientError.networkError("cancel_ack_timeout")
     }
 
+    private func fetchResolvedArtifactManifest(jobId: String) async throws -> BrokerArtifactManifestPayload {
+        let mobileStatus = try await fetchJobStatus(jobId: jobId)
+        let fullStatus = try? await fetchFullJobStatus(jobId: jobId)
+        let merged = mergeArtifactManifest(
+            mobile: mobileStatus.artifact,
+            full: fullStatus?.artifact
+        )
+        guard let merged else {
+            throw RemoteB1ClientError.downloadFailed("missing_artifact_manifest")
+        }
+        return merged
+    }
+
     private func fetchJobStatus(jobId: String) async throws -> BrokerJobStatusResponse {
         guard let config else {
             throw RemoteB1ClientError.notConfigured
@@ -3186,6 +3506,181 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         }
 
         throw lastError ?? RemoteB1ClientError.invalidResponse
+    }
+
+    private func fetchFullJobStatus(jobId: String) async throws -> BrokerJobStatusResponse {
+        guard let config else {
+            throw RemoteB1ClientError.notConfigured
+        }
+        let maxAttempts = 3
+        var lastError: Error?
+
+        for attempt in 1...maxAttempts {
+            do {
+                var request = URLRequest(url: config.baseURL.appendingPathComponent("/v1/jobs/\(jobId)"))
+                request.httpMethod = "GET"
+                if let apiKey = config.apiKey {
+                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                }
+                let (data, response) = try await data(for: request, fallbackBaseURL: config.fallbackBaseURL)
+                try validate(response: response)
+                return try decoder.decode(BrokerJobStatusResponse.self, from: data)
+            } catch {
+                lastError = error
+                guard attempt < maxAttempts else {
+                    throw error
+                }
+                try? await Task.sleep(nanoseconds: UInt64(300_000_000 * attempt))
+            }
+        }
+
+        throw lastError ?? RemoteB1ClientError.invalidResponse
+    }
+
+    private func mergeArtifactManifest(
+        mobile: BrokerArtifactManifestPayload?,
+        full: BrokerArtifactManifestPayload?
+    ) -> BrokerArtifactManifestPayload? {
+        guard mobile != nil || full != nil else { return nil }
+        return BrokerArtifactManifestPayload(
+            primaryArtifact: full?.primaryArtifact ?? mobile?.primaryArtifact,
+            viewerManifest: full?.viewerManifest ?? mobile?.viewerManifest,
+            comparisonAsset: full?.comparisonAsset ?? mobile?.comparisonAsset,
+            comparisonMetrics: full?.comparisonMetrics ?? mobile?.comparisonMetrics,
+            hqAsset: full?.hqAsset ?? mobile?.hqAsset
+        )
+    }
+
+    private func augmentArtifactManifestFromViewerManifest(
+        _ artifactManifest: BrokerArtifactManifestPayload,
+        viewerManifestURL: URL
+    ) -> BrokerArtifactManifestPayload {
+        guard artifactManifest.comparisonAsset == nil
+                || artifactManifest.comparisonMetrics == nil
+                || artifactManifest.hqAsset == nil,
+              let viewerManifestArtifact = artifactManifest.viewerManifest,
+              let data = try? Data(contentsOf: viewerManifestURL),
+              let manifest = try? JSONDecoder().decode(BrokerViewerManifestPayload.self, from: data) else {
+            return artifactManifest
+        }
+
+        let derivedComparisonArtifact = artifactManifest.comparisonAsset
+            ?? derivedArtifactPayload(
+                for: manifest.cleanedAsset,
+                referenceArtifact: viewerManifestArtifact
+            )
+        let derivedComparisonMetrics = artifactManifest.comparisonMetrics
+            ?? derivedArtifactPayload(
+                for: manifest.cleanupCompare,
+                referenceArtifact: viewerManifestArtifact
+            )
+        let derivedHQAsset = artifactManifest.hqAsset
+            ?? derivedArtifactPayload(
+                for: manifest.hqAsset,
+                referenceArtifact: viewerManifestArtifact
+            )
+
+        return BrokerArtifactManifestPayload(
+            primaryArtifact: artifactManifest.primaryArtifact,
+            viewerManifest: artifactManifest.viewerManifest,
+            comparisonAsset: derivedComparisonArtifact,
+            comparisonMetrics: derivedComparisonMetrics,
+            hqAsset: derivedHQAsset
+        )
+    }
+
+    private func derivedArtifactPayload(
+        for manifestAsset: BrokerViewerManifestAssetPayload?,
+        referenceArtifact: BrokerArtifactPayload
+    ) -> BrokerArtifactPayload? {
+        guard let manifestAsset,
+              manifestAsset.ready != false,
+              !manifestAsset.path.isEmpty,
+              let derivedURL = derivedArtifactURL(
+                relativePath: manifestAsset.path,
+                referenceArtifact: referenceArtifact
+              ) else {
+            return nil
+        }
+        return BrokerArtifactPayload(
+            downloadURL: derivedURL.absoluteString,
+            format: manifestAsset.kind ?? inferredArtifactFormat(from: manifestAsset.path),
+            storageKey: derivedStorageKey(
+                relativePath: manifestAsset.path,
+                referenceStorageKey: referenceArtifact.storageKey
+            )
+        )
+    }
+
+    private func derivedArtifactURL(
+        relativePath: String,
+        referenceArtifact: BrokerArtifactPayload
+    ) -> URL? {
+        guard let referenceURL = URL(string: referenceArtifact.downloadURL) else { return nil }
+        let normalizedRelativePath = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !normalizedRelativePath.isEmpty else { return nil }
+
+        if let referenceStorageKey = referenceArtifact.storageKey,
+           let baseURL = objectStoragePublicBaseURL(
+                for: referenceURL,
+                storageKey: referenceStorageKey
+           ) {
+            let derivedStorageKey = derivedStorageKey(
+                relativePath: normalizedRelativePath,
+                referenceStorageKey: referenceStorageKey
+            ) ?? normalizedRelativePath
+            return baseURL.appendingPathComponent(derivedStorageKey)
+        }
+
+        return referenceURL.deletingLastPathComponent().appendingPathComponent(normalizedRelativePath)
+    }
+
+    private func derivedStorageKey(
+        relativePath: String,
+        referenceStorageKey: String?
+    ) -> String? {
+        guard let referenceStorageKey else { return nil }
+        let referenceComponents = referenceStorageKey.split(separator: "/")
+        guard referenceComponents.count >= 2 else { return nil }
+        let rootPrefix = referenceComponents.dropLast(2).joined(separator: "/")
+        if rootPrefix.isEmpty {
+            return relativePath
+        }
+        return rootPrefix + "/" + relativePath
+    }
+
+    private func objectStoragePublicBaseURL(
+        for signedURL: URL,
+        storageKey: String
+    ) -> URL? {
+        let decodedPath = signedURL.path.removingPercentEncoding ?? signedURL.path
+        guard let range = decodedPath.range(of: "/" + storageKey) else { return nil }
+        let prefix = String(decodedPath[..<range.lowerBound]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard var components = URLComponents(url: signedURL, resolvingAgainstBaseURL: false) else { return nil }
+        components.query = nil
+        components.fragment = nil
+        components.path = prefix.isEmpty ? "/" : "/" + prefix
+        return components.url
+    }
+
+    private func inferredArtifactFormat(from path: String) -> String {
+        let lowercasedPath = path.lowercased()
+        if lowercasedPath.hasSuffix(".json") {
+            return "json"
+        }
+        if lowercasedPath.hasSuffix(".ply") {
+            return "ply"
+        }
+        if lowercasedPath.hasSuffix(".splat") {
+            return "splat"
+        }
+        if lowercasedPath.hasSuffix(".glb") {
+            return "glb"
+        }
+        if lowercasedPath.hasSuffix(".png") {
+            return "png"
+        }
+        return URL(fileURLWithPath: path).pathExtension.lowercased()
     }
 
     private func createJobResponse(
@@ -3398,6 +3893,18 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         }
     }
 
+    private func normalizedArtifactExtension(for value: String, downloadURL: URL) -> String {
+        let lowercased = value.lowercased()
+        if ["glb", "spz", "splat", "ply"].contains(lowercased) {
+            return lowercased
+        }
+        let pathExtension = downloadURL.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pathExtension.isEmpty {
+            return pathExtension.lowercased()
+        }
+        return "bin"
+    }
+
     private func normalized(_ value: Double?) -> Double? {
         guard let value else { return nil }
         return max(0.0, min(1.0, value))
@@ -3434,33 +3941,33 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
 
 #else
 
-struct BrokerMultipartPartRequest: Sendable {
-    let partNumber: Int
-    let method: String
-    let url: String
-    let headers: [String: String]
+public struct BrokerMultipartPartRequest: Sendable {
+    public let partNumber: Int
+    public let method: String
+    public let url: String
+    public let headers: [String: String]
 }
 
-struct BrokerUploadRequest: Sendable {
-    let kind: String?
-    let method: String?
-    let url: String?
-    let headers: [String: String]
-    let storageKey: String
-    let uploadId: String?
-    let partSizeBytes: Int?
-    let maxConcurrency: Int?
-    let partReadyURL: String?
-    let parts: [BrokerMultipartPartRequest]?
-    let completeURL: String?
-    let abortURL: String?
+public struct BrokerUploadRequest: Sendable {
+    public let kind: String?
+    public let method: String?
+    public let url: String?
+    public let headers: [String: String]
+    public let storageKey: String
+    public let uploadId: String?
+    public let partSizeBytes: Int?
+    public let maxConcurrency: Int?
+    public let partReadyURL: String?
+    public let parts: [BrokerMultipartPartRequest]?
+    public let completeURL: String?
+    public let abortURL: String?
 }
 
-struct BrokerCreateJobResponse: Sendable {
-    let jobId: String
-    let upload: BrokerUploadRequest
-    let pollPath: String?
-    let cancelPath: String?
+public struct BrokerCreateJobResponse: Sendable {
+    public let jobId: String
+    public let upload: BrokerUploadRequest
+    public let pollPath: String?
+    public let cancelPath: String?
 }
 
 public struct BackgroundUploadBrokerConfiguration: Sendable {
@@ -3491,7 +3998,7 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         timeout: TimeInterval = 60 * 60
     ) async throws -> Date? { nil }
     func cleanupPreparedUploadSourceIfNeeded(_ sourceURL: URL) {}
-    func createJob(
+    public func createJob(
         videoURL: URL,
         clientRecordId: UUID? = nil,
         captureOrigin: String,
@@ -3499,7 +4006,7 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
     ) async throws -> BrokerCreateJobResponse {
         throw RemoteB1ClientError.notConfigured
     }
-    func startUpload(
+    public func startUpload(
         jobId: String,
         upload: BrokerUploadRequest,
         sourceURL: URL,

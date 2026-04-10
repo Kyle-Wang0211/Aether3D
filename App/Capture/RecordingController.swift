@@ -498,7 +498,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
                 var budgetSkipped = false
 
                 // AVAsset async checks (iOS 16+ async load API)
-                let asset = AVAsset(url: outputFileURL)
+                let asset = AVURLAsset(url: outputFileURL)
                 let d = ((try? await asset.load(.duration)) ?? .zero).seconds
                 if d.isFinite && d > 0 {
                     assetDuration = d
