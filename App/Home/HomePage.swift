@@ -1082,10 +1082,14 @@ private struct ObjectFastPublishRecordViewer: View {
             return max(fraction, 0.68)
         case "matcha_mesh_extract":
             return max(fraction, 0.82)
+        case "optimize_default_mesh":
+            return max(fraction, 0.88)
+        case "bake_default_texture":
+            return max(fraction, 0.94)
         case "publish_default_mesh":
-            return max(fraction, 0.90)
+            return max(fraction, 0.97)
         case "artifact_upload":
-            return max(fraction, 0.96)
+            return max(fraction, 0.99)
         default:
             return max(fraction, 0.12)
         }

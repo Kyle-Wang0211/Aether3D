@@ -836,10 +836,14 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.68, 0.68)))
         case "matcha_mesh_extract":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.82, 0.82)))
+        case "optimize_default_mesh":
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.88, 0.88)))
+        case "bake_default_texture":
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.94, 0.94)))
         case "publish_default_mesh":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.90, 0.90)))
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.97, 0.97)))
         case "artifact_upload":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.96, 0.96)))
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.99, 0.99)))
             updateStage(.hq, state: .idle)
         default:
             updateStage(.defaultStage, state: .processing(fraction ?? 0.42))
@@ -990,7 +994,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             status = .queued
         case "curate", "slam3r_reconstruct", "slam3r_scene_contract", "sparse2dgs_surface":
             status = .reconstructing
-        case "matcha_mesh_extract", "publish_default_mesh", "artifact_upload":
+        case "matcha_mesh_extract", "optimize_default_mesh", "bake_default_texture", "publish_default_mesh", "artifact_upload":
             status = .packaging
         default:
             status = defaultReady ? .packaging : .reconstructing

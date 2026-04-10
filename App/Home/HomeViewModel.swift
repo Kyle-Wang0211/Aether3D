@@ -1100,7 +1100,7 @@ final class HomeViewModel: ObservableObject {
             return .queued
         case "curate", "slam3r_reconstruct", "slam3r_scene_contract", "sparse2dgs_surface":
             return .reconstructing
-        case "matcha_mesh_extract", "publish_default_mesh", "artifact_upload":
+        case "matcha_mesh_extract", "optimize_default_mesh", "bake_default_texture", "publish_default_mesh", "artifact_upload":
             return .packaging
         case "downloading":
             return .downloading
