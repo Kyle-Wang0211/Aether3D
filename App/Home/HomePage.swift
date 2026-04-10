@@ -787,7 +787,7 @@ private struct ObjectFastPublishRecordViewer: View {
                 .font(.system(size: 24, weight: .bold))
                 .foregroundColor(.white)
 
-            Text(currentRecord.detailMessage ?? "新远端对象模式会先生成默认 surface 成品。")
+            Text(currentRecord.detailMessage ?? "新远端对象模式会先生成默认 mesh 成品。")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.white.opacity(0.70))
         }
@@ -831,11 +831,11 @@ private struct ObjectFastPublishRecordViewer: View {
 
     private func artifactReadyCard(artifactURL: URL) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("默认 surface 已就绪")
+            Text("默认 mesh 已就绪")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(.white)
 
-            Text("你可以先打开默认 surface 结果继续看。")
+            Text("你可以先打开默认 mesh 结果继续看。")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.68))
 
@@ -1022,7 +1022,7 @@ private struct ObjectFastPublishRecordViewer: View {
         if currentRecord.status == .failed {
             return currentRecord.failureReason ?? "远端任务失败。"
         }
-        return "系统会先生成默认 surface 成品；下载完成后即可打开。"
+        return "系统会先生成默认 mesh 成品；下载完成后即可打开。"
     }
 
     private var processingStageCards: [ObjectModeV2StageCard] {
@@ -1080,10 +1080,12 @@ private struct ObjectFastPublishRecordViewer: View {
             return max(fraction, 0.58)
         case "sparse2dgs_surface":
             return max(fraction, 0.68)
-        case "publish_default_surface":
+        case "matcha_mesh_extract":
             return max(fraction, 0.82)
-        case "artifact_upload":
+        case "publish_default_mesh":
             return max(fraction, 0.90)
+        case "artifact_upload":
+            return max(fraction, 0.96)
         default:
             return max(fraction, 0.12)
         }

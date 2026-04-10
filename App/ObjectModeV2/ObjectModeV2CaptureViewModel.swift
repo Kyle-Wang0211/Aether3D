@@ -283,7 +283,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             previewSession = recorder.previewSession
             isPreparingCamera = false
             cameraError = nil
-            statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 surface 成品。"
+            statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 mesh 成品。"
         } catch {
             if Task.isCancelled { return }
             cameraError = error.localizedDescription
@@ -514,16 +514,16 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                             recordId: recordContext.recordId
                         )
                         defaultDownloaded = true
-                        statusText = "默认 surface 成品已下载，可先 Open 查看。"
+                        statusText = "默认 mesh 成品已下载，可先 Open 查看。"
                         persistRecordState(
                             recordId: recordContext.recordId,
                             status: .packaging,
-                            statusMessage: progress.title ?? "默认 surface 成品已就绪",
-                            detailMessage: "默认 surface 成品已下载，可先 Open 查看。",
+                            statusMessage: progress.title ?? "默认 mesh 成品已就绪",
+                            detailMessage: "默认 mesh 成品已下载，可先 Open 查看。",
                             progressFraction: max(progress.progressFraction ?? currentProcessingProgress, 0.82),
                             remoteJobId: jobId,
                             runtimeMetrics: objectFastPublishRuntimeMetrics(
-                                stageKey: progress.stageKey ?? "publish_default_surface",
+                                stageKey: progress.stageKey ?? "publish_default_mesh",
                                 detail: progress.detail ?? "default_bundle_downloaded",
                                 remoteJobId: jobId,
                                 remoteProgress: progress,
@@ -765,7 +765,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "strategy": "object_slam3r_surface_v1",
             "capture_mode": "guided_object",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "sparse2dgs_surface",
+            "first_result_kind": "matcha_mesh_glb",
             "hq_refine": "disabled",
             "optional_mesh_export": "disabled",
             "target_zone_mode": ObjectModeV2TargetZoneMode.subject.rawValue,
@@ -823,7 +823,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             if let detail = progress.detail, !detail.isEmpty {
                 statusText = detail
             } else {
-                statusText = "正在准备默认 surface 成品，下载完成后会出现 Open。"
+                statusText = "正在准备默认 mesh 成品，下载完成后会出现 Open。"
             }
             return
         case "curate":
@@ -834,10 +834,12 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.58, 0.58)))
         case "sparse2dgs_surface":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.68, 0.68)))
-        case "publish_default_surface":
+        case "matcha_mesh_extract":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.82, 0.82)))
-        case "artifact_upload":
+        case "publish_default_mesh":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.90, 0.90)))
+        case "artifact_upload":
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.96, 0.96)))
             updateStage(.hq, state: .idle)
         default:
             updateStage(.defaultStage, state: .processing(fraction ?? 0.42))
@@ -988,15 +990,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             status = .queued
         case "curate", "slam3r_reconstruct", "slam3r_scene_contract", "sparse2dgs_surface":
             status = .reconstructing
-        case "publish_default_surface", "artifact_upload":
+        case "matcha_mesh_extract", "publish_default_mesh", "artifact_upload":
             status = .packaging
         default:
             status = defaultReady ? .packaging : .reconstructing
         }
 
         let detail = progress.detail ?? progress.title ?? (defaultReady
-            ? "默认 surface 成品已就绪，可直接打开。"
-            : "新远端对象模式正在生成默认 surface 成品。")
+            ? "默认 mesh 成品已就绪，可直接打开。"
+            : "新远端对象模式正在生成默认 mesh 成品。")
         persistRecordState(
             recordId: recordId,
             status: status,
@@ -1030,7 +1032,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         var metrics: [String: String] = [
             "pipeline_strategy": "object_slam3r_surface_v1",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "sparse2dgs_surface",
+            "first_result_kind": "matcha_mesh_glb",
             "hq_refine": "disabled",
             "optional_mesh_export": "disabled",
             "target_zone_mode": "subject",
@@ -1258,7 +1260,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             case "curate_frames_insufficient_client_selected_frames":
                 return "端上选中的有效关键帧命中不足，远端没法继续生成默认成品。"
             case "object_surface_failed":
-                return "新远端在 surface 默认成品阶段失败了。"
+                return "新远端在默认 mesh 成品阶段失败了。"
             default:
                 return reason
             }

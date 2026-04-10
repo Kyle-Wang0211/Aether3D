@@ -1042,7 +1042,7 @@ final class HomeViewModel: ObservableObject {
             "strategy": "object_slam3r_surface_v1",
             "capture_mode": "guided_object",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "sparse2dgs_surface",
+            "first_result_kind": "matcha_mesh_glb",
             "hq_refine": "disabled",
             "optional_mesh_export": "disabled",
             "target_zone_mode": "subject",
@@ -1063,7 +1063,7 @@ final class HomeViewModel: ObservableObject {
         var metrics = remoteMetrics
         metrics["pipeline_strategy"] = "object_slam3r_surface_v1"
         metrics["artifact_contract_version"] = "object_publish_v1"
-        metrics["first_result_kind"] = "sparse2dgs_surface"
+        metrics["first_result_kind"] = "matcha_mesh_glb"
         metrics["hq_refine"] = "disabled"
         metrics["optional_mesh_export"] = "disabled"
         metrics["default_artifact_ready"] = defaultArtifactReady ? "true" : "false"
@@ -1100,7 +1100,7 @@ final class HomeViewModel: ObservableObject {
             return .queued
         case "curate", "slam3r_reconstruct", "slam3r_scene_contract", "sparse2dgs_surface":
             return .reconstructing
-        case "publish_default_surface", "artifact_upload":
+        case "matcha_mesh_extract", "publish_default_mesh", "artifact_upload":
             return .packaging
         case "downloading":
             return .downloading
@@ -1117,7 +1117,7 @@ final class HomeViewModel: ObservableObject {
     ) {
         let existingMetrics = store.record(id: recordId)?.runtimeMetrics
         let status = objectFastPublishStatus(for: progress, defaultArtifactReady: defaultArtifactReady)
-        let detailSuffix = defaultArtifactReady ? "默认 surface 成品已可打开。" : nil
+        let detailSuffix = defaultArtifactReady ? "默认 mesh 成品已可打开。" : nil
         let detail: String? = {
             let base = progress.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let base, !base.isEmpty, let detailSuffix {
@@ -1169,8 +1169,8 @@ final class HomeViewModel: ObservableObject {
         record.artifactPath = artifactPath
         record.remoteJobId = remoteJobId
         record.status = .packaging
-        record.statusMessage = progress.title ?? "默认 surface 成品已就绪"
-        record.detailMessage = "默认 surface 成品已下载，可从首页打开。"
+        record.statusMessage = progress.title ?? "默认 mesh 成品已就绪"
+        record.detailMessage = "默认 mesh 成品已下载，可从首页打开。"
         record.progressFraction = max(progress.progressFraction ?? 0.92, 0.92)
         record.progressBasis = progress.progressBasis
         record.remoteStageKey = progress.stageKey
