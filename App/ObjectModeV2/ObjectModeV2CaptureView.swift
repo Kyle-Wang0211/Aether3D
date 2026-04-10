@@ -2120,13 +2120,17 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
     let url: URL
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(assetURL: url)
     }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.setURLSchemeHandler(
+            context.coordinator.schemeHandler,
+            forURLScheme: ObjectModeV2MeshPreviewSchemeHandler.scheme
+        )
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
@@ -2143,15 +2147,8 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
     }
 
     private func load(url: URL, in webView: WKWebView, coordinator: Coordinator) {
-        let directoryURL = url.deletingLastPathComponent()
-        let htmlURL = directoryURL.appendingPathComponent(".aether-mesh-viewer-\(UUID().uuidString).html")
-        let runtimeScripts: [(resource: String, ext: String, fileName: String)] = [
-            ("babylon", "js", "babylon.js"),
-            ("babylonjs.loaders.min", "js", "babylonjs.loaders.min.js"),
-        ]
-        guard runtimeScripts.allSatisfy({ Bundle.main.url(forResource: $0.resource, withExtension: $0.ext) != nil }) else {
+        guard ObjectModeV2MeshPreviewSchemeHandler.hasRequiredResources else {
             coordinator.loadedURL = url
-            coordinator.htmlURL = nil
             webView.loadHTMLString(
                 """
                 <html><body style="margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font:600 15px -apple-system,sans-serif;">默认 mesh viewer 资源缺失。</body></html>
@@ -2160,14 +2157,148 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             )
             return
         }
-        let html = """
+        coordinator.loadedURL = url
+        coordinator.schemeHandler.updateAssetURL(url)
+        webView.load(URLRequest(url: ObjectModeV2MeshPreviewSchemeHandler.viewerURL))
+    }
+
+    final class Coordinator {
+        var loadedURL: URL?
+        let schemeHandler: ObjectModeV2MeshPreviewSchemeHandler
+
+        init(assetURL: URL) {
+            self.schemeHandler = ObjectModeV2MeshPreviewSchemeHandler(assetURL: assetURL)
+        }
+    }
+}
+
+private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeHandler {
+    static let scheme = "aethermesh"
+    static let host = "local"
+    static let viewerURL = URL(string: "\(scheme)://\(host)/viewer.html")!
+
+    static var hasRequiredResources: Bool {
+        Bundle.main.url(forResource: "babylon", withExtension: "js") != nil &&
+        Bundle.main.url(forResource: "babylonjs.loaders.min", withExtension: "js") != nil
+    }
+
+    private let lock = NSLock()
+    private var assetURL: URL
+
+    init(assetURL: URL) {
+        self.assetURL = assetURL
+    }
+
+    func updateAssetURL(_ url: URL) {
+        lock.lock()
+        assetURL = url
+        lock.unlock()
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(NSError(domain: "Aether3DMeshViewer", code: -1))
+            return
+        }
+        do {
+            let payload = try payload(for: url)
+            let response = URLResponse(
+                url: url,
+                mimeType: payload.mimeType,
+                expectedContentLength: payload.data.count,
+                textEncodingName: payload.textEncoding
+            )
+            urlSchemeTask.didReceive(response)
+            urlSchemeTask.didReceive(payload.data)
+            urlSchemeTask.didFinish()
+        } catch {
+            urlSchemeTask.didFailWithError(error)
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {}
+
+    private func payload(for url: URL) throws -> (data: Data, mimeType: String, textEncoding: String?) {
+        switch url.path {
+        case "/viewer.html":
+            return (
+                data: Data(viewerHTML().utf8),
+                mimeType: "text/html",
+                textEncoding: "utf-8"
+            )
+        case "/babylon.js":
+            return try bundledResourcePayload(resource: "babylon", ext: "js", mimeType: "application/javascript")
+        case "/babylonjs.loaders.min.js":
+            return try bundledResourcePayload(resource: "babylonjs.loaders.min", ext: "js", mimeType: "application/javascript")
+        default:
+            if url.path.hasPrefix("/files/") {
+                return try assetPayload(path: url.path)
+            }
+            throw NSError(domain: "Aether3DMeshViewer", code: 404)
+        }
+    }
+
+    private func bundledResourcePayload(resource: String, ext: String, mimeType: String) throws -> (data: Data, mimeType: String, textEncoding: String?) {
+        guard let fileURL = Bundle.main.url(forResource: resource, withExtension: ext) else {
+            throw NSError(domain: "Aether3DMeshViewer", code: 404)
+        }
+        return (try Data(contentsOf: fileURL), mimeType, "utf-8")
+    }
+
+    private func assetPayload(path: String) throws -> (data: Data, mimeType: String, textEncoding: String?) {
+        let requestedName = String(path.dropFirst("/files/".count)).removingPercentEncoding ?? ""
+        let currentAssetURL = lockedAssetURL()
+        let assetDirectory = currentAssetURL.deletingLastPathComponent()
+        let resolvedURL = assetDirectory.appendingPathComponent(requestedName)
+        let standardizedDirectory = assetDirectory.standardizedFileURL.path
+        let standardizedResolved = resolvedURL.standardizedFileURL.path
+        guard standardizedResolved.hasPrefix(standardizedDirectory) else {
+            throw NSError(domain: "Aether3DMeshViewer", code: 403)
+        }
+        guard FileManager.default.fileExists(atPath: standardizedResolved) else {
+            throw NSError(domain: "Aether3DMeshViewer", code: 404)
+        }
+        return (
+            data: try Data(contentsOf: resolvedURL),
+            mimeType: mimeType(for: resolvedURL.pathExtension),
+            textEncoding: nil
+        )
+    }
+
+    private func lockedAssetURL() -> URL {
+        lock.lock()
+        defer { lock.unlock() }
+        return assetURL
+    }
+
+    private func mimeType(for fileExtension: String) -> String {
+        switch fileExtension.lowercased() {
+        case "glb":
+            return "model/gltf-binary"
+        case "gltf":
+            return "model/gltf+json"
+        case "png":
+            return "image/png"
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "bin":
+            return "application/octet-stream"
+        default:
+            return "application/octet-stream"
+        }
+    }
+
+    private func viewerHTML() -> String {
+        let assetName = lockedAssetURL().lastPathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? lockedAssetURL().lastPathComponent
+        let assetURL = "\(Self.scheme)://\(Self.host)/files/\(assetName)"
+        return """
         <!doctype html>
         <html>
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-          <script src="babylon.js"></script>
-          <script src="babylonjs.loaders.min.js"></script>
+          <script src="\(Self.scheme)://\(Self.host)/babylon.js"></script>
+          <script src="\(Self.scheme)://\(Self.host)/babylonjs.loaders.min.js"></script>
           <style>
             html, body {
               margin: 0;
@@ -2205,6 +2336,8 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             }
             .fallback-label {
               line-height: 1.35;
+              max-width: min(320px, 80vw);
+              word-break: break-word;
             }
             .fallback-bar {
               width: min(240px, 58vw);
@@ -2230,7 +2363,7 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             <div class="fallback-bar"><div class="fallback-bar-fill"></div></div>
           </div>
           <script>
-            const assetName = "\(url.lastPathComponent)";
+            const assetURL = "\(assetURL)";
             const canvas = document.getElementById('mesh-canvas');
             const fallback = document.querySelector('.fallback');
             const percentLabel = document.querySelector('.fallback-percent');
@@ -2291,6 +2424,13 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
                 }
               }, 450);
             };
+            const shortError = (error) => {
+              const raw = String(error && (error.message || error) || '未知错误');
+              return raw.length > 120 ? `${raw.slice(0, 117)}...` : raw;
+            };
+            window.addEventListener('error', (event) => {
+              console.error(event.error || event.message);
+            });
             const fitCameraToScene = (camera, scene) => {
               const meshes = scene.meshes.filter(mesh => mesh && mesh.getTotalVertices && mesh.getTotalVertices() > 0);
               if (!meshes.length) {
@@ -2382,28 +2522,14 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
               window.addEventListener('resize', () => engine.resize());
               const load = async () => {
                 try {
-                  animateProgress(6);
+                  animateProgress(10);
                   show('正在读取默认 mesh 文件...');
-                  startPulse(18);
-                  const response = await fetch(assetName, { cache: 'no-store' });
-                  if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
-                  }
-                  const buffer = await response.arrayBuffer();
-                  animateProgress(24);
-                  show('正在解析 glTF / GLB 结构...');
-                  startPulse(44);
-                  const blob = new Blob([buffer], { type: 'model/gltf-binary' });
-                  const blobURL = URL.createObjectURL(blob);
-                  try {
-                    await BABYLON.SceneLoader.AppendAsync('', blobURL, scene, undefined, '.glb');
-                  } finally {
-                    URL.revokeObjectURL(blobURL);
-                  }
-                  animateProgress(72);
+                  startPulse(22);
+                  await BABYLON.SceneLoader.AppendAsync('', assetURL, scene, undefined, '.glb');
+                  animateProgress(76);
                   show('正在拟合默认视角...');
                   fitCameraToScene(camera, scene);
-                  animateProgress(88);
+                  animateProgress(90);
                   show('正在完成 mesh 初始化...');
                   finalizeScene(scene);
                   viewerReady = true;
@@ -2414,7 +2540,7 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
                   }
                 } catch (error) {
                   console.error(error);
-                  fail('默认 mesh 打开失败，请稍后重试。');
+                  fail(`默认 mesh 打开失败：${shortError(error)}`);
                 }
               };
               load();
@@ -2425,44 +2551,6 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
         </body>
         </html>
         """
-
-        do {
-            if let previousHTMLURL = coordinator.htmlURL,
-               FileManager.default.fileExists(atPath: previousHTMLURL.path) {
-                try? FileManager.default.removeItem(at: previousHTMLURL)
-            }
-            for script in runtimeScripts {
-                guard let bundledURL = Bundle.main.url(forResource: script.resource, withExtension: script.ext) else { continue }
-                let localScriptURL = directoryURL.appendingPathComponent(script.fileName)
-                if FileManager.default.fileExists(atPath: localScriptURL.path) == false {
-                    try FileManager.default.copyItem(at: bundledURL, to: localScriptURL)
-                }
-            }
-            try html.write(to: htmlURL, atomically: true, encoding: .utf8)
-            coordinator.loadedURL = url
-            coordinator.htmlURL = htmlURL
-            webView.loadFileURL(htmlURL, allowingReadAccessTo: directoryURL)
-        } catch {
-            coordinator.loadedURL = url
-            coordinator.htmlURL = nil
-            webView.loadHTMLString(
-                """
-                <html><body style="margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font:600 15px -apple-system,sans-serif;">默认 mesh 已下载，但预览页生成失败。</body></html>
-                """,
-                baseURL: nil
-            )
-        }
-    }
-
-    final class Coordinator {
-        var loadedURL: URL?
-        var htmlURL: URL?
-
-        deinit {
-            if let htmlURL {
-                try? FileManager.default.removeItem(at: htmlURL)
-            }
-        }
     }
 }
 #endif
