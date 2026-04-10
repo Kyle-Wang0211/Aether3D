@@ -2184,12 +2184,39 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
               position: absolute;
               inset: 0;
               display: flex;
+              flex-direction: column;
               align-items: center;
               justify-content: center;
               color: rgba(255,255,255,0.72);
               font: 600 15px -apple-system, BlinkMacSystemFont, sans-serif;
               letter-spacing: 0.01em;
               pointer-events: none;
+              gap: 10px;
+              text-align: center;
+              padding: 0 24px;
+            }
+            .fallback-percent {
+              font-size: 28px;
+              font-weight: 700;
+              color: rgba(255,255,255,0.94);
+              letter-spacing: -0.03em;
+            }
+            .fallback-label {
+              line-height: 1.35;
+            }
+            .fallback-bar {
+              width: min(240px, 58vw);
+              height: 5px;
+              border-radius: 999px;
+              background: rgba(255,255,255,0.14);
+              overflow: hidden;
+            }
+            .fallback-bar-fill {
+              width: 0%;
+              height: 100%;
+              border-radius: inherit;
+              background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.68));
+              transition: width 160ms ease;
             }
           </style>
         </head>
@@ -2208,17 +2235,54 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             loading="eager"
             reveal="auto">
           </model-viewer>
-          <div class="fallback">正在打开默认 mesh 成品...</div>
+          <div class="fallback">
+            <div class="fallback-percent">0%</div>
+            <div class="fallback-label">正在打开默认 mesh 成品...</div>
+            <div class="fallback-bar"><div class="fallback-bar-fill"></div></div>
+          </div>
           <script>
             const viewer = document.querySelector('model-viewer');
             const fallback = document.querySelector('.fallback');
-            const show = (text) => { if (fallback) { fallback.style.display = 'flex'; fallback.textContent = text; } };
+            const percentLabel = document.querySelector('.fallback-percent');
+            const textLabel = document.querySelector('.fallback-label');
+            const barFill = document.querySelector('.fallback-bar-fill');
+            const setProgress = (value) => {
+              const clamped = Math.max(0, Math.min(100, value));
+              if (percentLabel) {
+                percentLabel.textContent = `${clamped}%`;
+              }
+              if (barFill) {
+                barFill.style.width = `${clamped}%`;
+              }
+            };
+            const show = (text) => {
+              if (fallback) {
+                fallback.style.display = 'flex';
+              }
+              if (textLabel) {
+                textLabel.textContent = text;
+              }
+            };
             const hide = () => { if (fallback) { fallback.style.display = 'none'; } };
             if (viewer) {
+              setProgress(0);
+              show('正在打开默认 mesh 成品...');
+              viewer.addEventListener('progress', (event) => {
+                const total = event?.detail?.totalProgress;
+                if (typeof total === 'number' && Number.isFinite(total)) {
+                  const progress = Math.max(1, Math.min(99, Math.round(total * 100)));
+                  setProgress(progress);
+                  show(progress >= 95 ? '正在完成 mesh 初始化...' : '正在打开默认 mesh 成品...');
+                }
+              });
               viewer.addEventListener('load', hide, { once: false });
-              viewer.addEventListener('error', () => show('默认 mesh 打开失败，请稍后重试。'));
+              viewer.addEventListener('error', () => {
+                setProgress(100);
+                show('默认 mesh 打开失败，请稍后重试。');
+              });
               window.setTimeout(() => {
                 if (fallback && fallback.style.display !== 'none') {
+                  setProgress(Math.max(8, parseInt(percentLabel?.textContent || '0', 10) || 0));
                   show('默认 mesh 较大，正在继续加载...');
                 }
               }, 1500);
