@@ -7,6 +7,9 @@ import UIKit
 #if canImport(QuickLook)
 import QuickLook
 #endif
+#if canImport(WebKit)
+import WebKit
+#endif
 #endif
 
 struct ObjectModeV2CaptureView: View {
@@ -1943,6 +1946,11 @@ struct ObjectModeV2DefaultArtifactViewer: View {
         return suffix == "ply" || suffix == "splat" || suffix == "spz"
     }
 
+    private var isMeshArtifact: Bool {
+        let suffix = activeArtifactURL.pathExtension.lowercased()
+        return suffix == "glb" || suffix == "gltf"
+    }
+
     private var parsedManifest: ObjectModeV2ViewerManifestFile? {
         guard let manifestURL,
               let data = try? Data(contentsOf: manifestURL) else { return nil }
@@ -2030,6 +2038,10 @@ struct ObjectModeV2DefaultArtifactViewer: View {
                 SplatViewerRepresentable(artifactURL: activeArtifactURL)
                     .id(activeArtifactURL.path)
                     .ignoresSafeArea()
+            } else if isMeshArtifact {
+                ObjectModeV2GLBWebPreview(url: activeArtifactURL)
+                    .id(activeArtifactURL.path)
+                    .ignoresSafeArea()
             } else if QLPreviewController.canPreview(activeArtifactURL as NSURL) {
                 ObjectModeV2QuickLookPreview(url: activeArtifactURL)
                     .ignoresSafeArea()
@@ -2102,6 +2114,126 @@ struct ObjectModeV2DefaultArtifactViewer: View {
         }
     }
 }
+
+#if canImport(WebKit)
+private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        webView.scrollView.backgroundColor = .black
+        webView.scrollView.isScrollEnabled = false
+        load(url: url, in: webView, coordinator: context.coordinator)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.loadedURL?.standardizedFileURL != url.standardizedFileURL else { return }
+        load(url: url, in: webView, coordinator: context.coordinator)
+    }
+
+    private func load(url: URL, in webView: WKWebView, coordinator: Coordinator) {
+        let directoryURL = url.deletingLastPathComponent()
+        let htmlURL = directoryURL.appendingPathComponent(".aether-mesh-viewer-\(UUID().uuidString).html")
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+          <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+          <script nomodule src="https://unpkg.com/@google/model-viewer/dist/model-viewer-legacy.js"></script>
+          <style>
+            html, body {
+              margin: 0;
+              width: 100%;
+              height: 100%;
+              overflow: hidden;
+              background: #000;
+            }
+            model-viewer {
+              width: 100%;
+              height: 100%;
+              background: radial-gradient(circle at top, #171717 0%, #050505 55%, #000000 100%);
+              --progress-bar-color: rgba(255, 255, 255, 0.92);
+              --poster-color: transparent;
+            }
+            .fallback {
+              position: absolute;
+              inset: 0;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              color: rgba(255,255,255,0.72);
+              font: 600 15px -apple-system, BlinkMacSystemFont, sans-serif;
+              letter-spacing: 0.01em;
+              pointer-events: none;
+            }
+          </style>
+        </head>
+        <body>
+          <model-viewer
+            src="\(url.lastPathComponent)"
+            camera-controls
+            touch-action="pan-y"
+            interpolation-decay="120"
+            shadow-intensity="1.0"
+            environment-image="neutral"
+            exposure="1.0"
+            tone-mapping="neutral"
+            interaction-prompt="none"
+            disable-pan
+            loading="eager"
+            reveal="auto">
+          </model-viewer>
+          <div class="fallback">正在打开默认 mesh 成品...</div>
+        </body>
+        </html>
+        """
+
+        do {
+            if let previousHTMLURL = coordinator.htmlURL,
+               FileManager.default.fileExists(atPath: previousHTMLURL.path) {
+                try? FileManager.default.removeItem(at: previousHTMLURL)
+            }
+            try html.write(to: htmlURL, atomically: true, encoding: .utf8)
+            coordinator.loadedURL = url
+            coordinator.htmlURL = htmlURL
+            webView.loadFileURL(htmlURL, allowingReadAccessTo: directoryURL)
+        } catch {
+            coordinator.loadedURL = url
+            coordinator.htmlURL = nil
+            webView.loadHTMLString(
+                """
+                <html><body style="margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font:600 15px -apple-system,sans-serif;">默认 mesh 已下载，但预览页生成失败。</body></html>
+                """,
+                baseURL: nil
+            )
+        }
+    }
+
+    final class Coordinator {
+        var loadedURL: URL?
+        var htmlURL: URL?
+
+        deinit {
+            if let htmlURL {
+                try? FileManager.default.removeItem(at: htmlURL)
+            }
+        }
+    }
+}
+#endif
 
 private struct ObjectModeV2QuickLookPreview: UIViewControllerRepresentable {
     let url: URL
