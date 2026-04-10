@@ -283,7 +283,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             previewSession = recorder.previewSession
             isPreparingCamera = false
             cameraError = nil
-            statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认成品，再继续增强 HQ。"
+            statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 surface 成品。"
         } catch {
             if Task.isCancelled { return }
             cameraError = error.localizedDescription
@@ -514,16 +514,16 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                             recordId: recordContext.recordId
                         )
                         defaultDownloaded = true
-                        statusText = "默认成品已下载，可先 Open 查看；HQ 会继续增强。"
+                        statusText = "默认 surface 成品已下载，可先 Open 查看。"
                         persistRecordState(
                             recordId: recordContext.recordId,
                             status: .packaging,
-                            statusMessage: progress.title ?? "默认成品已就绪",
-                            detailMessage: "Raw / Cleanup 对比资产已下载，可先 Open 查看；HQ 会继续增强。",
+                            statusMessage: progress.title ?? "默认 surface 成品已就绪",
+                            detailMessage: "默认 surface 成品已下载，可先 Open 查看。",
                             progressFraction: max(progress.progressFraction ?? currentProcessingProgress, 0.82),
                             remoteJobId: jobId,
                             runtimeMetrics: objectFastPublishRuntimeMetrics(
-                                stageKey: progress.stageKey ?? "publish_default_splat",
+                                stageKey: progress.stageKey ?? "publish_default_surface",
                                 detail: progress.detail ?? "default_bundle_downloaded",
                                 remoteJobId: jobId,
                                 remoteProgress: progress,
@@ -762,12 +762,12 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             .map { String(Int(($0 * 1000).rounded())) }
             .joined(separator: ",")
         return [
-            "strategy": "object_splatslam_v1",
+            "strategy": "object_slam3r_surface_v1",
             "capture_mode": "guided_object",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "canonicalized_object_splat",
-            "hq_refine": "optional_graphdeco_3dgs",
-            "optional_mesh_export": "enabled",
+            "first_result_kind": "sparse2dgs_surface",
+            "hq_refine": "disabled",
+            "optional_mesh_export": "disabled",
             "target_zone_mode": ObjectModeV2TargetZoneMode.subject.rawValue,
             "client_live_accepted_frames": "\(acceptedFrames)",
             "client_live_accepted_timestamps_ms": acceptedTimestampsMs,
@@ -823,58 +823,24 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             if let detail = progress.detail, !detail.isEmpty {
                 statusText = detail
             } else {
-                statusText = "正在准备默认成品，下载完成后会出现 Open。"
+                statusText = "正在准备默认 surface 成品，下载完成后会出现 Open。"
             }
             return
         case "curate":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.22, 0.22)))
-        case "object_mask":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.34, 0.34)))
-        case "splatslam_prepare":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.46, 0.46)))
-        case "splatslam_bootstrap":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.52, 0.52)))
-        case "splatslam_tracking":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.56, 0.56)))
-        case "splatslam", "splatslam_mapping":
+        case "slam3r_reconstruct":
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.48, 0.48)))
+        case "slam3r_scene_contract":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.58, 0.58)))
-        case "splatslam_finalize":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.74, 0.74)))
-        case "publish_default_splat":
+        case "sparse2dgs_surface":
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.68, 0.68)))
+        case "publish_default_surface":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.82, 0.82)))
         case "artifact_upload":
-            if defaultReady {
-                updateStage(.defaultStage, state: .ready)
-                updateStage(.hq, state: .processing(max(fraction ?? 0.99, 0.99)))
-            } else {
-                updateStage(.defaultStage, state: .processing(max(fraction ?? 0.88, 0.88)))
-            }
-        case "support_plane":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.72, 0.72)))
-        case "splat_cleanup":
-            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.82, 0.82)))
-        case "optional_mesh_export":
-            updateStage(.defaultStage, state: .ready)
-            if !defaultReady {
-                updateStage(.hq, state: .processing(0.16))
-            }
-        case "publish_default", "export":
-            updateStage(.defaultStage, state: .ready)
-            if !defaultReady {
-                updateStage(.hq, state: .processing(0.12))
-            }
-        case "hq_refine", "refine_3dgs":
-            updateStage(.defaultStage, state: .ready)
-            updateStage(.hq, state: .processing(max(fraction ?? 0.45, 0.45)))
-        case "publish_hq":
-            updateStage(.defaultStage, state: .ready)
-            updateStage(.hq, state: .processing(max(fraction ?? 0.92, 0.92)))
+            updateStage(.defaultStage, state: .processing(max(fraction ?? 0.90, 0.90)))
+            updateStage(.hq, state: .idle)
         default:
-            if defaultReady {
-                updateStage(.hq, state: .processing(fraction ?? 0.32))
-            } else {
-                updateStage(.defaultStage, state: .processing(fraction ?? 0.42))
-            }
+            updateStage(.defaultStage, state: .processing(fraction ?? 0.42))
         }
 
         if let detail = progress.detail, !detail.isEmpty {
@@ -1020,21 +986,17 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         switch stageKey {
         case "queued":
             status = .queued
-        case "curate", "object_mask", "splatslam_prepare", "splatslam_bootstrap", "splatslam_tracking", "splatslam", "splatslam_mapping", "splatslam_finalize", "support_plane", "splat_cleanup":
+        case "curate", "slam3r_reconstruct", "slam3r_scene_contract", "sparse2dgs_surface":
             status = .reconstructing
-        case "optional_mesh_export", "publish_default_splat", "publish_default", "export", "artifact_upload":
-            status = .packaging
-        case "hq_refine", "refine_3dgs":
-            status = .training
-        case "publish_hq":
+        case "publish_default_surface", "artifact_upload":
             status = .packaging
         default:
-            status = defaultReady ? .training : .reconstructing
+            status = defaultReady ? .packaging : .reconstructing
         }
 
         let detail = progress.detail ?? progress.title ?? (defaultReady
-            ? "默认成品已就绪，HQ 会继续增强。"
-            : "新远端对象模式正在生成默认成品。")
+            ? "默认 surface 成品已就绪，可直接打开。"
+            : "新远端对象模式正在生成默认 surface 成品。")
         persistRecordState(
             recordId: recordId,
             status: status,
@@ -1066,11 +1028,11 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         let resolvedLocalComparisonMetricsPath = localComparisonMetricsPath ?? self.localComparisonMetricsRelativePath
         let resolvedLocalHQArtifactPath = localHQArtifactPath ?? self.localHQArtifactRelativePath
         var metrics: [String: String] = [
-            "pipeline_strategy": "object_splatslam_v1",
+            "pipeline_strategy": "object_slam3r_surface_v1",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "canonicalized_object_splat",
-            "hq_refine": "optional_graphdeco_3dgs",
-            "optional_mesh_export": "enabled",
+            "first_result_kind": "sparse2dgs_surface",
+            "hq_refine": "disabled",
+            "optional_mesh_export": "disabled",
             "target_zone_mode": "subject",
             "accepted_live_frames": "\(acceptedFrames)",
             "orbit_completion_percent": "\(Int((orbitCompletion * 100).rounded()))",
@@ -1295,8 +1257,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             switch reason {
             case "curate_frames_insufficient_client_selected_frames":
                 return "端上选中的有效关键帧命中不足，远端没法继续生成默认成品。"
-            case "object_splatslam_failed":
-                return "新远端在 Splat-SLAM 默认成品阶段失败了。"
+            case "object_surface_failed":
+                return "新远端在 surface 默认成品阶段失败了。"
             default:
                 return reason
             }
@@ -1308,7 +1270,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         if case RemoteB1ClientError.jobFailed(let reason) = error {
             return reason
         }
-        return "object_splatslam_failed"
+        return "object_surface_failed"
     }
 }
 

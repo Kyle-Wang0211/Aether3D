@@ -546,7 +546,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 
-        if strategy == "object_fast_publish_v1" || strategy == "object_splatslam_v1" || contract == "object_publish_v1" {
+        if strategy == "object_fast_publish_v1" || strategy == "object_splatslam_v1" || strategy == "object_slam3r_surface_v1" || contract == "object_publish_v1" {
             return true
         }
 

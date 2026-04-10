@@ -238,7 +238,7 @@ final class HomeViewModel: ObservableObject {
             detailMessage: backend.usesLocalPreviewPipeline
                 ? "这次会重新走手机本地处理链路。"
                 : (isObjectFastPublish
-                    ? "这次会重新走新远端 Splat-SLAM 对象链路。"
+                    ? "这次会重新走新远端 SLAM3R + Sparse2DGS 对象链路。"
                     : "这次会重新走后台上传与远端调度流程。"),
             progressFraction: 0.01,
             estimatedRemainingMinutes: nil,
@@ -1039,12 +1039,12 @@ final class HomeViewModel: ObservableObject {
 
     private func objectFastPublishPipelineProfile() -> [String: String] {
         [
-            "strategy": "object_splatslam_v1",
+            "strategy": "object_slam3r_surface_v1",
             "capture_mode": "guided_object",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "canonicalized_object_splat",
-            "hq_refine": "optional_graphdeco_3dgs",
-            "optional_mesh_export": "enabled",
+            "first_result_kind": "sparse2dgs_surface",
+            "hq_refine": "disabled",
+            "optional_mesh_export": "disabled",
             "target_zone_mode": "subject",
         ]
     }
@@ -1061,11 +1061,11 @@ final class HomeViewModel: ObservableObject {
         localHQArtifactPath: String? = nil
     ) -> [String: String] {
         var metrics = remoteMetrics
-        metrics["pipeline_strategy"] = "object_splatslam_v1"
+        metrics["pipeline_strategy"] = "object_slam3r_surface_v1"
         metrics["artifact_contract_version"] = "object_publish_v1"
-        metrics["first_result_kind"] = "canonicalized_object_splat"
-        metrics["hq_refine"] = "optional_graphdeco_3dgs"
-        metrics["optional_mesh_export"] = "enabled"
+        metrics["first_result_kind"] = "sparse2dgs_surface"
+        metrics["hq_refine"] = "disabled"
+        metrics["optional_mesh_export"] = "disabled"
         metrics["default_artifact_ready"] = defaultArtifactReady ? "true" : "false"
         if let stageKey, !stageKey.isEmpty {
             metrics["remote_stage_key"] = stageKey
@@ -1098,11 +1098,9 @@ final class HomeViewModel: ObservableObject {
             return .uploading
         case "queued":
             return .queued
-        case "curate", "object_mask", "splatslam_prepare", "splatslam_bootstrap", "splatslam_tracking", "splatslam", "splatslam_mapping", "splatslam_finalize", "support_plane", "splat_cleanup":
+        case "curate", "slam3r_reconstruct", "slam3r_scene_contract", "sparse2dgs_surface":
             return .reconstructing
-        case "hq_refine", "refine_3dgs":
-            return .training
-        case "publish_default_splat", "publish_default", "publish_hq", "optional_mesh_export", "artifact_upload":
+        case "publish_default_surface", "artifact_upload":
             return .packaging
         case "downloading":
             return .downloading
@@ -1119,7 +1117,7 @@ final class HomeViewModel: ObservableObject {
     ) {
         let existingMetrics = store.record(id: recordId)?.runtimeMetrics
         let status = objectFastPublishStatus(for: progress, defaultArtifactReady: defaultArtifactReady)
-        let detailSuffix = defaultArtifactReady ? "默认成品已可打开，HQ 会继续增强。" : nil
+        let detailSuffix = defaultArtifactReady ? "默认 surface 成品已可打开。" : nil
         let detail: String? = {
             let base = progress.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let base, !base.isEmpty, let detailSuffix {
@@ -1171,8 +1169,8 @@ final class HomeViewModel: ObservableObject {
         record.artifactPath = artifactPath
         record.remoteJobId = remoteJobId
         record.status = .packaging
-        record.statusMessage = progress.title ?? "默认成品已就绪"
-        record.detailMessage = "默认成品已下载，可从首页打开；HQ 会继续增强。"
+        record.statusMessage = progress.title ?? "默认 surface 成品已就绪"
+        record.detailMessage = "默认 surface 成品已下载，可从首页打开。"
         record.progressFraction = max(progress.progressFraction ?? 0.92, 0.92)
         record.progressBasis = progress.progressBasis
         record.remoteStageKey = progress.stageKey

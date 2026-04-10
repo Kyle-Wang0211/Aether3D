@@ -655,8 +655,10 @@ public final class ScanRecordStore {
         let isObjectFastPublishIdentity =
             existingStrategy == "object_fast_publish_v1" ||
             existingStrategy == "object_splatslam_v1" ||
+            existingStrategy == "object_slam3r_surface_v1" ||
             incomingStrategy == "object_fast_publish_v1" ||
             incomingStrategy == "object_splatslam_v1" ||
+            incomingStrategy == "object_slam3r_surface_v1" ||
             existingContract == "object_publish_v1" ||
             incomingContract == "object_publish_v1"
 

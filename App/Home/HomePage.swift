@@ -787,7 +787,7 @@ private struct ObjectFastPublishRecordViewer: View {
                 .font(.system(size: 24, weight: .bold))
                 .foregroundColor(.white)
 
-            Text(currentRecord.detailMessage ?? "新远端对象模式会先生成默认成品，再继续增强 HQ。")
+            Text(currentRecord.detailMessage ?? "新远端对象模式会先生成默认 surface 成品。")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.white.opacity(0.70))
         }
@@ -831,11 +831,11 @@ private struct ObjectFastPublishRecordViewer: View {
 
     private func artifactReadyCard(artifactURL: URL) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("默认成品已就绪")
+            Text("默认 surface 已就绪")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(.white)
 
-            Text("你可以先打开默认成品继续看；如果 HQ 还在跑，系统会继续增强。")
+            Text("你可以先打开默认 surface 结果继续看。")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.68))
 
@@ -1022,7 +1022,7 @@ private struct ObjectFastPublishRecordViewer: View {
         if currentRecord.status == .failed {
             return currentRecord.failureReason ?? "远端任务失败。"
         }
-        return "系统会先生成默认成品；下载完成后即可打开，HQ 会继续增强。"
+        return "系统会先生成默认 surface 成品；下载完成后即可打开。"
     }
 
     private var processingStageCards: [ObjectModeV2StageCard] {
@@ -1062,14 +1062,8 @@ private struct ObjectFastPublishRecordViewer: View {
 
         let stageKey = normalizedStageKey
         switch stageKey {
-        case "hq_refine", "refine_3dgs":
-            return .processing(max(currentRecord.displayProgressFraction, 0.45))
-        case "artifact_upload" where artifactURL != nil:
-            return .processing(max(currentRecord.displayProgressFraction, 0.99))
-        case "publish_hq":
-            return .processing(max(currentRecord.displayProgressFraction, 0.92))
         default:
-            return artifactURL != nil ? .processing(0.12) : .idle
+            return .idle
         }
     }
 
@@ -1080,30 +1074,16 @@ private struct ObjectFastPublishRecordViewer: View {
             return max(fraction, 0.18)
         case "curate":
             return max(fraction, 0.22)
-        case "object_mask":
-            return max(fraction, 0.34)
-        case "splatslam_prepare":
-            return max(fraction, 0.46)
-        case "splatslam_bootstrap":
-            return max(fraction, 0.52)
-        case "splatslam_tracking":
-            return max(fraction, 0.56)
-        case "splatslam", "splatslam_mapping":
+        case "slam3r_reconstruct":
+            return max(fraction, 0.48)
+        case "slam3r_scene_contract":
             return max(fraction, 0.58)
-        case "splatslam_finalize":
-            return max(fraction, 0.74)
-        case "publish_default_splat":
+        case "sparse2dgs_surface":
+            return max(fraction, 0.68)
+        case "publish_default_surface":
             return max(fraction, 0.82)
         case "artifact_upload":
-            return max(fraction, 0.88)
-        case "support_plane":
-            return max(fraction, 0.72)
-        case "splat_cleanup":
-            return max(fraction, 0.82)
-        case "optional_mesh_export":
-            return max(fraction, 0.88)
-        case "publish_default", "export":
-            return max(fraction, 0.94)
+            return max(fraction, 0.90)
         default:
             return max(fraction, 0.12)
         }

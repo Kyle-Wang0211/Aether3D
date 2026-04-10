@@ -448,7 +448,7 @@ struct ObjectModeV2CaptureView: View {
                     .frame(width: 210, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-                    Text("正在生成默认成品 / HQ")
+                    Text("正在生成默认 surface")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
@@ -1380,7 +1380,7 @@ struct ObjectModeV2CaptureView: View {
         if let failureReason = viewModel.processingFailureReason, !failureReason.isEmpty {
             return failureReason
         }
-        return "系统会先生成默认成品；下载完成后即可打开，HQ 会继续增强。"
+        return "系统会先生成默认 surface 成品；下载完成后即可打开。"
     }
 
     private var stabilityLabel: String {
@@ -2318,7 +2318,7 @@ struct ObjectModeV2ProcessingSurface: View {
                     .frame(width: 210, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-                    Text(snapshot.canOpenArtifact ? "默认成品已就绪 / HQ" : "正在生成默认成品 / HQ")
+                    Text(snapshot.canOpenArtifact ? "默认 surface 已就绪" : "正在生成默认 surface")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
