@@ -31,6 +31,8 @@
 		71A72F1821F2DA70ACE90897 /* CameraConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 187C43DC9422CE4956EA6E8D /* CameraConfig.swift */; };
 		74EC72F94CA47BD22391EF2F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 45CBCA499F89466593691E9F /* Assets.xcassets */; };
 		A0B200000000000000000031 /* model-viewer.min.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000032 /* model-viewer.min.js */; };
+		A0B200000000000000000041 /* babylon.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000043 /* babylon.js */; };
+		A0B200000000000000000042 /* babylonjs.loaders.min.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000044 /* babylonjs.loaders.min.js */; };
 		76B81AA6B24166965066AA15 /* ScanCompletionBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CABC53CFB1C86C083D5E792 /* ScanCompletionBridge.swift */; };
 		868738ED8472F4B93A6FBDE4 /* Aether3DApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46357E7EDB2D5D315F71F4E3 /* Aether3DApp.swift */; };
 		9EB4B45511FEB68A40C0F253 /* CameraCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84947607474B82E0F00D980F /* CameraCapabilities.swift */; };
@@ -105,6 +107,8 @@
 		A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2GuidanceEngine.swift; sourceTree = "<group>"; };
 		A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2CameraPreview.swift; sourceTree = "<group>"; };
 		A0B200000000000000000032 /* model-viewer.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/model-viewer.min.js; sourceTree = "<group>"; };
+		A0B200000000000000000043 /* babylon.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/babylon.js; sourceTree = "<group>"; };
+		A0B200000000000000000044 /* babylonjs.loaders.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/babylonjs.loaders.min.js; sourceTree = "<group>"; };
 
 		E8D5AF12C09854B38C432DC3 /* ScanViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanViewModel.swift; sourceTree = "<group>"; };
 		PCOI000100010001BFA00011 /* PointCloudOIRPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudOIRPipeline.swift; sourceTree = "<group>"; };
@@ -224,6 +228,8 @@
 				A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */,
 				A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */,
 				A0B200000000000000000032 /* model-viewer.min.js */,
+				A0B200000000000000000043 /* babylon.js */,
+				A0B200000000000000000044 /* babylonjs.loaders.min.js */,
 			);
 			path = ObjectModeV2;
 			sourceTree = "<group>";
@@ -354,6 +360,8 @@
 			files = (
 				74EC72F94CA47BD22391EF2F /* Assets.xcassets in Resources */,
 				A0B200000000000000000031 /* model-viewer.min.js in Resources */,
+				A0B200000000000000000041 /* babylon.js in Resources */,
+				A0B200000000000000000042 /* babylonjs.loaders.min.js in Resources */,
 				DAV2000100010001BFA00001 /* DepthAnythingV2Small.mlmodelc in Resources */,
 				DAV2000100010001BFA00002 /* DepthAnythingV2Large.mlmodelc in Resources */,
 			);

@@ -2145,8 +2145,11 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
     private func load(url: URL, in webView: WKWebView, coordinator: Coordinator) {
         let directoryURL = url.deletingLastPathComponent()
         let htmlURL = directoryURL.appendingPathComponent(".aether-mesh-viewer-\(UUID().uuidString).html")
-        let scriptFileName = "model-viewer.min.js"
-        guard let bundledScriptURL = Bundle.main.url(forResource: "model-viewer.min", withExtension: "js") else {
+        let runtimeScripts: [(resource: String, ext: String, fileName: String)] = [
+            ("babylon", "js", "babylon.js"),
+            ("babylonjs.loaders.min", "js", "babylonjs.loaders.min.js"),
+        ]
+        guard runtimeScripts.allSatisfy({ Bundle.main.url(forResource: $0.resource, withExtension: $0.ext) != nil }) else {
             coordinator.loadedURL = url
             coordinator.htmlURL = nil
             webView.loadHTMLString(
@@ -2157,14 +2160,14 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             )
             return
         }
-        let localScriptURL = directoryURL.appendingPathComponent(scriptFileName)
         let html = """
         <!doctype html>
         <html>
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-          <script type="module" src="\(scriptFileName)"></script>
+          <script src="babylon.js"></script>
+          <script src="babylonjs.loaders.min.js"></script>
           <style>
             html, body {
               margin: 0;
@@ -2173,12 +2176,11 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
               overflow: hidden;
               background: #000;
             }
-            model-viewer {
+            canvas {
               width: 100%;
               height: 100%;
               background: radial-gradient(circle at top, #171717 0%, #050505 55%, #000000 100%);
-              --progress-bar-color: rgba(255, 255, 255, 0.92);
-              --poster-color: transparent;
+              touch-action: none;
             }
             .fallback {
               position: absolute;
@@ -2221,39 +2223,38 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
           </style>
         </head>
         <body>
-          <model-viewer
-            src="\(url.lastPathComponent)"
-            camera-controls
-            touch-action="pan-y"
-            interpolation-decay="120"
-            shadow-intensity="1.0"
-            environment-image="neutral"
-            exposure="1.0"
-            tone-mapping="neutral"
-            interaction-prompt="none"
-            disable-pan
-            loading="eager"
-            reveal="auto">
-          </model-viewer>
+          <canvas id="mesh-canvas"></canvas>
           <div class="fallback">
             <div class="fallback-percent">0%</div>
             <div class="fallback-label">正在打开默认 mesh 成品...</div>
             <div class="fallback-bar"><div class="fallback-bar-fill"></div></div>
           </div>
           <script>
-            const viewer = document.querySelector('model-viewer');
+            const assetName = "\(url.lastPathComponent)";
+            const canvas = document.getElementById('mesh-canvas');
             const fallback = document.querySelector('.fallback');
             const percentLabel = document.querySelector('.fallback-percent');
             const textLabel = document.querySelector('.fallback-label');
             const barFill = document.querySelector('.fallback-bar-fill');
+            let currentProgress = 0;
+            let targetProgress = 0;
+            let viewerReady = false;
+            let stagePulse = null;
+            let stallTimeout = null;
+            let firstFrameShown = false;
             const setProgress = (value) => {
               const clamped = Math.max(0, Math.min(100, value));
+              currentProgress = clamped;
+              targetProgress = clamped;
               if (percentLabel) {
                 percentLabel.textContent = `${clamped}%`;
               }
               if (barFill) {
                 barFill.style.width = `${clamped}%`;
               }
+            };
+            const animateProgress = (value) => {
+              targetProgress = Math.max(currentProgress, Math.min(99, value));
             };
             const show = (text) => {
               if (fallback) {
@@ -2263,29 +2264,162 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
                 textLabel.textContent = text;
               }
             };
-            const hide = () => { if (fallback) { fallback.style.display = 'none'; } };
-            if (viewer) {
+            const hide = () => {
+              if (fallback) {
+                fallback.style.display = 'none';
+              }
+            };
+            const fail = (message) => {
+              window.clearTimeout(stallTimeout);
+              if (stagePulse) {
+                window.clearInterval(stagePulse);
+                stagePulse = null;
+              }
+              setProgress(100);
+              show(message);
+            };
+            const startPulse = (cap) => {
+              if (stagePulse) {
+                window.clearInterval(stagePulse);
+              }
+              stagePulse = window.setInterval(() => {
+                if (viewerReady) {
+                  return;
+                }
+                if (targetProgress < cap) {
+                  targetProgress = Math.min(cap, targetProgress + 1);
+                }
+              }, 450);
+            };
+            const fitCameraToScene = (camera, scene) => {
+              const meshes = scene.meshes.filter(mesh => mesh && mesh.getTotalVertices && mesh.getTotalVertices() > 0);
+              if (!meshes.length) {
+                return;
+              }
+              let min = new BABYLON.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+              let max = new BABYLON.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+              for (const mesh of meshes) {
+                mesh.computeWorldMatrix(true);
+                const bounds = mesh.getHierarchyBoundingVectors(true);
+                min = BABYLON.Vector3.Minimize(min, bounds.min);
+                max = BABYLON.Vector3.Maximize(max, bounds.max);
+              }
+              const center = min.add(max).scale(0.5);
+              const extent = max.subtract(min);
+              const radius = Math.max(extent.x, extent.y, extent.z) * 1.45 || 1.0;
+              camera.setTarget(center);
+              camera.alpha = -Math.PI / 2.1;
+              camera.beta = Math.PI / 2.5;
+              camera.radius = radius;
+              camera.lowerRadiusLimit = radius * 0.35;
+              camera.upperRadiusLimit = radius * 6.0;
+              camera.minZ = Math.max(radius / 500, 0.01);
+              camera.maxZ = Math.max(radius * 40, 200);
+            };
+            const finalizeScene = (scene) => {
+              for (const material of scene.materials || []) {
+                if (material && typeof material.freeze === 'function') {
+                  try { material.freeze(); } catch (_) {}
+                }
+              }
+              for (const mesh of scene.meshes || []) {
+                if (mesh && typeof mesh.freezeWorldMatrix === 'function') {
+                  try { mesh.freezeWorldMatrix(); } catch (_) {}
+                }
+              }
+              try { scene.freezeActiveMeshes(true); } catch (_) {}
+            };
+            const tickProgress = () => {
+              if (currentProgress >= targetProgress) {
+                window.requestAnimationFrame(tickProgress);
+                return;
+              }
+              currentProgress = Math.min(targetProgress, currentProgress + Math.max(1, Math.ceil((targetProgress - currentProgress) * 0.12)));
+              if (percentLabel) {
+                percentLabel.textContent = `${currentProgress}%`;
+              }
+              if (barFill) {
+                barFill.style.width = `${currentProgress}%`;
+              }
+              window.requestAnimationFrame(tickProgress);
+            };
+            tickProgress();
+            if (canvas && window.BABYLON) {
               setProgress(0);
-              show('正在打开默认 mesh 成品...');
-              viewer.addEventListener('progress', (event) => {
-                const total = event?.detail?.totalProgress;
-                if (typeof total === 'number' && Number.isFinite(total)) {
-                  const progress = Math.max(1, Math.min(99, Math.round(total * 100)));
-                  setProgress(progress);
-                  show(progress >= 95 ? '正在完成 mesh 初始化...' : '正在打开默认 mesh 成品...');
+              show('正在准备 mesh 查看器...');
+              stallTimeout = window.setTimeout(() => {
+                if (!viewerReady) {
+                  fail('默认 mesh 打开超时，请稍后重试。');
+                }
+              }, 45000);
+              const engine = new BABYLON.Engine(canvas, true, {
+                preserveDrawingBuffer: false,
+                stencil: false,
+                antialias: true,
+                powerPreference: 'high-performance',
+              });
+              engine.setHardwareScalingLevel(window.devicePixelRatio > 2 ? 2 : 1.5);
+              const scene = new BABYLON.Scene(engine);
+              scene.clearColor = new BABYLON.Color4(0, 0, 0, 1);
+              scene.skipPointerMovePicking = true;
+              const camera = new BABYLON.ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.4, 4, BABYLON.Vector3.Zero(), scene);
+              camera.attachControl(canvas, true);
+              camera.wheelDeltaPercentage = 0.01;
+              camera.pinchDeltaPercentage = 0.01;
+              camera.useNaturalPinchZoom = true;
+              const hemi = new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0.1, 1, 0.15), scene);
+              hemi.intensity = 1.25;
+              const fill = new BABYLON.DirectionalLight('fill', new BABYLON.Vector3(-0.35, -1, 0.2), scene);
+              fill.intensity = 0.6;
+              engine.runRenderLoop(() => {
+                scene.render();
+                if (viewerReady && !firstFrameShown) {
+                  firstFrameShown = true;
+                  setProgress(100);
+                  hide();
                 }
               });
-              viewer.addEventListener('load', hide, { once: false });
-              viewer.addEventListener('error', () => {
-                setProgress(100);
-                show('默认 mesh 打开失败，请稍后重试。');
-              });
-              window.setTimeout(() => {
-                if (fallback && fallback.style.display !== 'none') {
-                  setProgress(Math.max(8, parseInt(percentLabel?.textContent || '0', 10) || 0));
-                  show('默认 mesh 较大，正在继续加载...');
+              window.addEventListener('resize', () => engine.resize());
+              const load = async () => {
+                try {
+                  animateProgress(6);
+                  show('正在读取默认 mesh 文件...');
+                  startPulse(18);
+                  const response = await fetch(assetName, { cache: 'no-store' });
+                  if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                  }
+                  const buffer = await response.arrayBuffer();
+                  animateProgress(24);
+                  show('正在解析 glTF / GLB 结构...');
+                  startPulse(44);
+                  const blob = new Blob([buffer], { type: 'model/gltf-binary' });
+                  const blobURL = URL.createObjectURL(blob);
+                  try {
+                    await BABYLON.SceneLoader.AppendAsync('', blobURL, scene, undefined, '.glb');
+                  } finally {
+                    URL.revokeObjectURL(blobURL);
+                  }
+                  animateProgress(72);
+                  show('正在拟合默认视角...');
+                  fitCameraToScene(camera, scene);
+                  animateProgress(88);
+                  show('正在完成 mesh 初始化...');
+                  finalizeScene(scene);
+                  viewerReady = true;
+                  window.clearTimeout(stallTimeout);
+                  if (stagePulse) {
+                    window.clearInterval(stagePulse);
+                    stagePulse = null;
+                  }
+                } catch (error) {
+                  console.error(error);
+                  fail('默认 mesh 打开失败，请稍后重试。');
                 }
-              }, 1500);
+              };
+              load();
+            } else {
+              fail('默认 mesh viewer 初始化失败。');
             }
           </script>
         </body>
@@ -2297,8 +2431,12 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
                FileManager.default.fileExists(atPath: previousHTMLURL.path) {
                 try? FileManager.default.removeItem(at: previousHTMLURL)
             }
-            if FileManager.default.fileExists(atPath: localScriptURL.path) == false {
-                try FileManager.default.copyItem(at: bundledScriptURL, to: localScriptURL)
+            for script in runtimeScripts {
+                guard let bundledURL = Bundle.main.url(forResource: script.resource, withExtension: script.ext) else { continue }
+                let localScriptURL = directoryURL.appendingPathComponent(script.fileName)
+                if FileManager.default.fileExists(atPath: localScriptURL.path) == false {
+                    try FileManager.default.copyItem(at: bundledURL, to: localScriptURL)
+                }
             }
             try html.write(to: htmlURL, atomically: true, encoding: .utf8)
             coordinator.loadedURL = url
