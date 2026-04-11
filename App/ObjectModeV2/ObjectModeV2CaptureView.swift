@@ -23,7 +23,6 @@ struct ObjectModeV2CaptureView: View {
     @State private var showRecordingCarryover = false
     @State private var showAcceptedFrameFlash = false
 
-    private let minFrames = 20
     private let maxFrames = 150
 
     var body: some View {
@@ -161,9 +160,6 @@ struct ObjectModeV2CaptureView: View {
     private var topBar: some View {
         ZStack {
             HStack {
-                if isPreCaptureUI {
-                    guidedTopPill
-                }
                 Spacer()
                 Button(action: {
                     viewModel.prepareForDismiss()
@@ -233,8 +229,6 @@ struct ObjectModeV2CaptureView: View {
                 preCaptureBottomHud
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
-                hintPill
-
                 HStack(alignment: .bottom, spacing: 26) {
                     leftAnchor
                     captureButton
@@ -625,33 +619,6 @@ struct ObjectModeV2CaptureView: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
-    private var hintPill: some View {
-        VStack(spacing: 8) {
-            if viewModel.isTargetLocked {
-                HStack(spacing: 8) {
-                    Image(systemName: "scope")
-                        .font(.system(size: 11, weight: .bold))
-                    Text("TRACKING OBJECT")
-                        .font(.system(size: 11, weight: .bold))
-                }
-                .foregroundColor(.black)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(targetZoneAccentColor)
-                .clipShape(Capsule())
-            }
-
-            Text(hintText)
-                .font(.system(size: 13, weight: .semibold))
-                .multilineTextAlignment(.center)
-                .foregroundColor(.black.opacity(0.88))
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(Color.white.opacity(0.94))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
     private var captureBudgetDock: some View {
         VStack(spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
@@ -763,25 +730,12 @@ struct ObjectModeV2CaptureView: View {
 
     private var preCaptureBottomHud: some View {
         VStack(spacing: 16) {
-            preCaptureInstruction
-
             HStack(alignment: .center, spacing: 18) {
                 Spacer(minLength: 0)
                 captureButton
                 Spacer(minLength: 0)
             }
         }
-    }
-
-    private var preCaptureInstruction: some View {
-        Text(preCaptureInstructionText)
-            .font(.system(size: 13, weight: .semibold))
-            .multilineTextAlignment(.center)
-            .foregroundColor(.black.opacity(0.88))
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
-            .background(Color.white.opacity(0.96))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var targetModeSelector: some View {
@@ -894,10 +848,6 @@ struct ObjectModeV2CaptureView: View {
 
     private var trailingDock: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            Text(viewModel.manifestURL != nil ? "READY" : "FRAMES")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(.white.opacity(0.68))
-
             if viewModel.manifestURL != nil {
                 Button(action: {
                     viewModel.openRecord()
@@ -917,69 +867,29 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var acceptedFramesBadge: some View {
-        VStack(spacing: 6) {
-            Text("有效帧")
+        VStack(spacing: 8) {
+            Text("有效关键帧")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.white.opacity(0.62))
             Text("\(viewModel.acceptedFrames)")
-                .font(.system(size: 26, weight: .bold))
+                .font(.system(size: 30, weight: .bold))
                 .foregroundColor(.white)
-
-            Text(acceptedFramesStatusTitle)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.black)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(acceptedFramesStatusAccent)
-                .clipShape(Capsule())
-
-            Text(acceptedFramesStatusSubtitle)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(.white.opacity(0.54))
-                .multilineTextAlignment(.center)
         }
         .frame(width: 82)
         .padding(.vertical, 10)
         .background(Color.black.opacity(0.34))
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(acceptedFramesBadgeStrokeColor, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private var acceptedFramesStatusTitle: String {
-        if !viewModel.isRecording {
-            return "待开始"
+    private var acceptedFramesBadgeStrokeColor: Color {
+        if viewModel.isRecording && viewModel.acceptedFrames >= viewModel.minimumAcceptedFrames {
+            return Color(red: 0.54, green: 0.96, blue: 0.62).opacity(0.62)
         }
-        if viewModel.acceptedFrames >= minFrames {
-            return "可生成"
-        }
-        if viewModel.acceptedFrames == 0 {
-            return "找角度"
-        }
-        return "继续拍"
-    }
-
-    private var acceptedFramesStatusSubtitle: String {
-        if !viewModel.isRecording {
-            return "开始录制后自动挑帧"
-        }
-        if viewModel.acceptedFrames >= minFrames {
-            return "已经达到最小数量"
-        }
-        let remaining = max(minFrames - viewModel.acceptedFrames, 0)
-        return "还差 \(remaining) 帧"
-    }
-
-    private var acceptedFramesStatusAccent: Color {
-        if !viewModel.isRecording {
-            return Color.white
-        }
-        if viewModel.acceptedFrames >= minFrames {
-            return Color(red: 0.54, green: 0.96, blue: 0.62)
-        }
-        return Color(red: 0.95, green: 0.79, blue: 0.12)
+        return Color.white.opacity(0.12)
     }
 
     @ViewBuilder
@@ -993,13 +903,6 @@ struct ObjectModeV2CaptureView: View {
             thumbnails: viewModel.acceptedFrameThumbnails
         )
         .frame(width: 234, height: 286)
-        .overlay(alignment: .top) {
-            if viewModel.isTargetLocked {
-                recordingLockHeader
-                    .padding(.top, 18)
-                    .padding(.horizontal, 8)
-            }
-        }
         .overlay {
             if showRecordingCarryover && viewModel.isTargetLocked {
                 recordingTargetCarryover
@@ -1014,13 +917,6 @@ struct ObjectModeV2CaptureView: View {
             highlightFlash: showAcceptedFrameFlash
         )
         .frame(width: 234, height: 286)
-        .overlay(alignment: .top) {
-            if viewModel.isTargetLocked {
-                recordingLockHeader
-                    .padding(.top, 18)
-                    .padding(.horizontal, 8)
-            }
-        }
         .overlay {
             if showRecordingCarryover && viewModel.isTargetLocked {
                 recordingTargetCarryover
@@ -1047,7 +943,7 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var captureReadinessLabel: String {
-        if viewModel.acceptedFrames < minFrames {
+        if viewModel.acceptedFrames < viewModel.minimumAcceptedFrames {
             return "MORE"
         }
         if viewModel.acceptedFrames < 60 {
@@ -1057,23 +953,13 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var captureReadinessColor: Color {
-        if viewModel.acceptedFrames < minFrames {
+        if viewModel.acceptedFrames < viewModel.minimumAcceptedFrames {
             return Color(red: 0.98, green: 0.76, blue: 0.24)
         }
         if viewModel.acceptedFrames < 60 {
             return Color(red: 0.67, green: 0.95, blue: 0.58)
         }
         return Color(red: 0.50, green: 0.84, blue: 1.0)
-    }
-
-    private var hintText: String {
-        if viewModel.isPreparingCamera {
-            return "Preparing camera"
-        }
-        if viewModel.isRunning {
-            return "Building default and HQ assets"
-        }
-        return viewModel.guidanceText
     }
 
     private var processingStatusSummary: String {
@@ -1251,30 +1137,6 @@ struct ObjectModeV2CaptureView: View {
             .foregroundColor(selected ? Color(red: 0.93, green: 0.84, blue: 0.46) : .white.opacity(0.62))
     }
 
-    private var guidedTopPill: some View {
-        HStack(spacing: 8) {
-            Image(systemName: viewModel.isTargetLocked ? "scope" : "viewfinder")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(targetZoneAccentColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Guided")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.white)
-                Text(viewModel.isTargetLocked ? "Object Locked" : "Object Mode")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.white.opacity(0.64))
-            }
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 40)
-        .background(Color.black.opacity(0.30))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Color.white.opacity(0.18), lineWidth: 1)
-        )
-        .clipShape(Capsule())
-    }
-
     private var preCaptureReticle: some View {
         GeometryReader { proxy in
             let size = proxy.size
@@ -1349,13 +1211,6 @@ struct ObjectModeV2CaptureView: View {
                         )
                         .position(x: anchor.x + zoneSize.width * 0.5 - 8, y: anchor.y - zoneSize.height * 0.5 + 8)
                 }
-
-                VStack {
-                    Spacer()
-                    Text(viewModel.isTargetLocked ? lockedTargetText : "Tap to lock your object")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.62))
-                }
             }
         }
     }
@@ -1402,28 +1257,6 @@ struct ObjectModeV2CaptureView: View {
         return "GOOD"
     }
 
-    private var preCaptureInstructionText: String {
-        if viewModel.isTargetLocked {
-            return "Object locked. Keep it inside the target zone,\nthen tap record to begin."
-        }
-        return "Point your camera at the object,\nthen tap the target area to lock it."
-    }
-
-    private var recordingLockHeader: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "scope")
-                .font(.system(size: 11, weight: .bold))
-            Text("OBJECT LOCK ACTIVE")
-                .font(.system(size: 11, weight: .bold))
-        }
-        .foregroundColor(.black)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(targetZoneAccentColor)
-        .clipShape(Capsule())
-        .shadow(color: Color.black.opacity(0.12), radius: 6, y: 2)
-    }
-
     private var recordingTargetCarryover: some View {
         let size = CGSize(width: 92, height: 92)
 
@@ -1434,15 +1267,7 @@ struct ObjectModeV2CaptureView: View {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .stroke(targetZoneAccentColor.opacity(0.24), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
                 .frame(width: size.width + 16, height: size.height + 16)
-            Text("Locked Object")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(targetZoneAccentColor)
-                .padding(.top, size.height + 28)
         }
-    }
-
-    private var lockedTargetText: String {
-        "Object locked"
     }
 
     private func targetZoneSize(in size: CGSize) -> CGSize {

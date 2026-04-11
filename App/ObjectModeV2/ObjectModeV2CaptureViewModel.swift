@@ -90,6 +90,7 @@ struct ObjectModeV2AcceptedFrameThumbnail: Identifiable, Equatable {
 @MainActor
 final class ObjectModeV2CaptureViewModel: ObservableObject {
     private let guidanceEnabled = true
+    private let minimumAcceptedFrameCount = 20
     private let store = ScanRecordStore()
     @Published var previewSession: AVCaptureSession?
     @Published var isPreparingCamera = true
@@ -185,11 +186,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     var canStopCapture: Bool {
-        isRecording
+        isRecording && acceptedFrameCountForGeneration >= minimumAcceptedFrameCount
     }
 
     var canStartCapture: Bool {
         !isPreparingCamera && cameraError == nil && !isRecording && !shouldShowProcessingOverlay
+    }
+
+    var minimumAcceptedFrames: Int {
+        minimumAcceptedFrameCount
     }
 
     var shouldShowProcessingOverlay: Bool {
@@ -250,6 +255,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     func toggleCapture() {
         if isRecording {
+            guard canStopCapture else { return }
             stopCaptureAndGenerate()
         } else {
             startCapture()
@@ -368,7 +374,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     private func stopCaptureAndGenerate() {
-        guard isRecording else { return }
+        guard isRecording, acceptedFrameCountForGeneration >= minimumAcceptedFrameCount else { return }
         debugLog("stopCaptureAndGenerate acceptedFrames=\(acceptedFrames) acceptedTimestamps=\(acceptedFrameTimestampsSec.count)")
         isRecording = false
         isProcessingOverlayPresented = true
@@ -400,9 +406,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         downloadedArtifactFormat = nil
         let broker = BackgroundUploadBrokerClient.shared
         debugLog("runPipeline start file=\(clip.fileURL.lastPathComponent) duration=\(clip.duration)")
-        statusText = acceptedFrames < 20
-            ? "素材偏少，仍会继续尝试生成默认成品。"
-            : "素材已锁定，正在启动新版对象模式管线…"
+        statusText = "素材已锁定，正在启动新版对象模式管线…"
         stageCards = stageCards.map { .init(id: $0.id, title: $0.title, subtitle: $0.subtitle, state: .idle) }
 
         do {
@@ -851,6 +855,10 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             targetZoneMode: targetZoneMode
         ).forEach { profile[$0.key] = $0.value }
         return profile
+    }
+
+    private var acceptedFrameCountForGeneration: Int {
+        max(acceptedFrames, acceptedFrameTimestampsSec.count)
     }
 
     private func applyUploadProgress(_ progress: RemoteUploadProgress) {
