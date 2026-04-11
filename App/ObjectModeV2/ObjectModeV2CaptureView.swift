@@ -1903,12 +1903,28 @@ private struct ObjectModeV2ViewerManifestFile: Decodable {
     let cleanedAsset: ObjectModeV2ViewerAssetDescriptor?
     let cleanupCompare: ObjectModeV2ViewerAssetDescriptor?
     let hqAsset: ObjectModeV2ViewerAssetDescriptor?
+    let cameraPreset: ObjectModeV2ViewerCameraPreset?
 
     enum CodingKeys: String, CodingKey {
         case defaultAsset = "default_asset"
         case cleanedAsset = "cleaned_asset"
         case cleanupCompare = "cleanup_compare"
         case hqAsset = "hq_asset"
+        case cameraPreset = "camera_preset"
+    }
+}
+
+private struct ObjectModeV2ViewerCameraPreset: Decodable {
+    let pitchDegrees: Double?
+    let yawDegrees: Double?
+    let distanceScale: Double?
+    let up: [Double]?
+
+    enum CodingKeys: String, CodingKey {
+        case pitchDegrees = "pitch_degrees"
+        case yawDegrees = "yaw_degrees"
+        case distanceScale = "distance_scale"
+        case up
     }
 }
 
@@ -2052,7 +2068,7 @@ struct ObjectModeV2DefaultArtifactViewer: View {
                     .id(activeArtifactURL.path)
                     .ignoresSafeArea()
             } else if isMeshArtifact {
-                ObjectModeV2GLBWebPreview(url: activeArtifactURL)
+                ObjectModeV2GLBWebPreview(url: activeArtifactURL, cameraPreset: parsedManifest?.cameraPreset)
                     .id(activeArtifactURL.path)
                     .ignoresSafeArea()
             } else if QLPreviewController.canPreview(activeArtifactURL as NSURL) {
@@ -2140,9 +2156,10 @@ struct ObjectModeV2DefaultArtifactViewer: View {
 #if canImport(WebKit)
 private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
     let url: URL
+    let cameraPreset: ObjectModeV2ViewerCameraPreset?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(assetURL: url)
+        Coordinator(assetURL: url, cameraPreset: cameraPreset)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -2180,7 +2197,7 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             return
         }
         coordinator.loadedURL = url
-        coordinator.schemeHandler.updateAssetURL(url)
+        coordinator.schemeHandler.update(assetURL: url, cameraPreset: cameraPreset)
         webView.load(URLRequest(url: ObjectModeV2MeshPreviewSchemeHandler.viewerURL))
     }
 
@@ -2188,8 +2205,8 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
         var loadedURL: URL?
         let schemeHandler: ObjectModeV2MeshPreviewSchemeHandler
 
-        init(assetURL: URL) {
-            self.schemeHandler = ObjectModeV2MeshPreviewSchemeHandler(assetURL: assetURL)
+        init(assetURL: URL, cameraPreset: ObjectModeV2ViewerCameraPreset?) {
+            self.schemeHandler = ObjectModeV2MeshPreviewSchemeHandler(assetURL: assetURL, cameraPreset: cameraPreset)
         }
     }
 }
@@ -2206,14 +2223,17 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
 
     private let lock = NSLock()
     private var assetURL: URL
+    private var cameraPreset: ObjectModeV2ViewerCameraPreset?
 
-    init(assetURL: URL) {
+    init(assetURL: URL, cameraPreset: ObjectModeV2ViewerCameraPreset?) {
         self.assetURL = assetURL
+        self.cameraPreset = cameraPreset
     }
 
-    func updateAssetURL(_ url: URL) {
+    func update(assetURL url: URL, cameraPreset: ObjectModeV2ViewerCameraPreset?) {
         lock.lock()
         assetURL = url
+        self.cameraPreset = cameraPreset
         lock.unlock()
     }
 
@@ -2303,6 +2323,12 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
         return assetURL
     }
 
+    private func lockedCameraPreset() -> ObjectModeV2ViewerCameraPreset? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cameraPreset
+    }
+
     private func mimeType(for fileExtension: String) -> String {
         switch fileExtension.lowercased() {
         case "glb":
@@ -2320,9 +2346,35 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
         }
     }
 
+    private func encodeCameraPresetJSON(_ preset: ObjectModeV2ViewerCameraPreset?) -> String {
+        guard let preset else {
+            return "null"
+        }
+        var payload: [String: Any] = [:]
+        if let pitch = preset.pitchDegrees {
+            payload["pitchDegrees"] = pitch
+        }
+        if let yaw = preset.yawDegrees {
+            payload["yawDegrees"] = yaw
+        }
+        if let distanceScale = preset.distanceScale {
+            payload["distanceScale"] = distanceScale
+        }
+        if let up = preset.up {
+            payload["up"] = up
+        }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+              let string = String(data: data, encoding: .utf8) else {
+            return "null"
+        }
+        return string
+    }
+
     private func viewerHTML() -> String {
         let assetName = lockedAssetURL().lastPathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? lockedAssetURL().lastPathComponent
         let assetURL = "\(Self.scheme)://\(Self.host)/files/\(assetName)"
+        let cameraPresetJSON = encodeCameraPresetJSON(lockedCameraPreset())
         return """
         <!doctype html>
         <html>
@@ -2385,6 +2437,36 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.68));
               transition: width 160ms ease;
             }
+            .orientation-hud {
+              position: absolute;
+              left: 16px;
+              bottom: 18px;
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+              padding: 10px 12px;
+              border-radius: 14px;
+              background: rgba(6, 6, 6, 0.52);
+              border: 1px solid rgba(255,255,255,0.1);
+              font: 600 11px -apple-system, BlinkMacSystemFont, sans-serif;
+              color: rgba(255,255,255,0.82);
+              letter-spacing: 0.01em;
+              pointer-events: none;
+              backdrop-filter: blur(12px);
+            }
+            .orientation-row {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+            }
+            .orientation-dot {
+              width: 8px;
+              height: 8px;
+              border-radius: 999px;
+            }
+            .orientation-x { background: #ff6b6b; }
+            .orientation-y { background: #78ff91; }
+            .orientation-z { background: #6ea8ff; }
           </style>
         </head>
         <body>
@@ -2394,8 +2476,14 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
             <div class="fallback-label">正在打开默认 mesh 成品...</div>
             <div class="fallback-bar"><div class="fallback-bar-fill"></div></div>
           </div>
+          <div class="orientation-hud">
+            <div class="orientation-row"><span class="orientation-dot orientation-y"></span><span>Y+ 上 / Up</span></div>
+            <div class="orientation-row"><span class="orientation-dot orientation-x"></span><span>X+ 右 / Right</span></div>
+            <div class="orientation-row"><span class="orientation-dot orientation-z"></span><span>Z+ 前 / Front</span></div>
+          </div>
           <script>
             const assetURL = "\(assetURL)";
+            const cameraPreset = \(cameraPresetJSON);
             const canvas = document.getElementById('mesh-canvas');
             const fallback = document.querySelector('.fallback');
             const percentLabel = document.querySelector('.fallback-percent');
@@ -2463,7 +2551,13 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
             window.addEventListener('error', (event) => {
               console.error(event.error || event.message);
             });
-              const fitCameraToScene = (camera, scene) => {
+            const presetYaw = (cameraPreset && typeof cameraPreset.yawDegrees === 'number') ? (cameraPreset.yawDegrees * Math.PI / 180.0) : (-Math.PI / 2.1);
+            const presetPitch = (cameraPreset && typeof cameraPreset.pitchDegrees === 'number') ? (Math.PI / 2 - (cameraPreset.pitchDegrees * Math.PI / 180.0)) : (Math.PI / 2.5);
+            const presetDistanceScale = (cameraPreset && typeof cameraPreset.distanceScale === 'number') ? Math.max(0.75, cameraPreset.distanceScale) : 2.4;
+            const presetUp = (cameraPreset && Array.isArray(cameraPreset.up) && cameraPreset.up.length === 3)
+              ? new BABYLON.Vector3(cameraPreset.up[0], cameraPreset.up[1], cameraPreset.up[2]).normalize()
+              : new BABYLON.Vector3(0, 1, 0);
+            const fitCameraToScene = (camera, scene) => {
               const meshes = scene.meshes.filter(mesh => mesh && mesh.getTotalVertices && mesh.getTotalVertices() > 0);
               if (!meshes.length) {
                 return;
@@ -2478,15 +2572,30 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               }
               const center = min.add(max).scale(0.5);
               const extent = max.subtract(min);
-              const radius = Math.max(extent.x, extent.y, extent.z) * 1.45 || 1.0;
+              const radius = Math.max(extent.x, extent.y, extent.z) * presetDistanceScale || 1.0;
               camera.setTarget(center);
-              camera.alpha = -Math.PI / 2.1;
-              camera.beta = Math.PI / 2.5;
+              camera.alpha = presetYaw;
+              camera.beta = presetPitch;
               camera.radius = radius;
-              camera.lowerRadiusLimit = radius * 0.35;
-              camera.upperRadiusLimit = radius * 6.0;
+              camera.lowerRadiusLimit = radius * 0.18;
+              camera.upperRadiusLimit = radius * 8.0;
               camera.minZ = Math.max(radius / 500, 0.01);
               camera.maxZ = Math.max(radius * 40, 200);
+            };
+            const addOrientationAxes = (scene) => {
+              const axisLength = 0.35;
+              const makeAxis = (name, vector, color) => {
+                const line = BABYLON.MeshBuilder.CreateLines(name, {
+                  points: [BABYLON.Vector3.Zero(), vector.scale(axisLength)]
+                }, scene);
+                line.isPickable = false;
+                line.color = color;
+                line.alpha = 0.95;
+                return line;
+              };
+              makeAxis('axis-x', new BABYLON.Vector3(1, 0, 0), new BABYLON.Color3(1.0, 0.42, 0.42));
+              makeAxis('axis-y', new BABYLON.Vector3(0, 1, 0), new BABYLON.Color3(0.47, 1.0, 0.57));
+              makeAxis('axis-z', new BABYLON.Vector3(0, 0, 1), new BABYLON.Color3(0.45, 0.66, 1.0));
             };
               const finalizeScene = (scene) => {
                 for (const material of scene.materials || []) {
@@ -2537,21 +2646,23 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               scene.imageProcessingConfiguration.contrast = 1.15;
               scene.imageProcessingConfiguration.exposure = 1.1;
               const camera = new BABYLON.ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.4, 4, BABYLON.Vector3.Zero(), scene);
+              camera.upVector = presetUp;
               camera.attachControl(canvas, true);
-              camera.wheelDeltaPercentage = 0.01;
-              camera.pinchDeltaPercentage = 0.01;
+              camera.wheelDeltaPercentage = 0.015;
+              camera.pinchDeltaPercentage = 0.015;
               camera.useNaturalPinchZoom = true;
-              camera.lowerBetaLimit = 0.03;
-              camera.upperBetaLimit = Math.PI - 0.03;
-              camera.panningSensibility = 110;
-              camera.inertia = 0.72;
-              camera.panningInertia = 0.82;
+              camera.lowerBetaLimit = 0.001;
+              camera.upperBetaLimit = Math.PI - 0.001;
+              camera.panningSensibility = 55;
+              camera.inertia = 0.58;
+              camera.panningInertia = 0.68;
               camera.allowUpsideDown = false;
               camera.panningAxis = new BABYLON.Vector3(1, 1, 1);
+              camera.useAutoRotationBehavior = false;
               if (camera.inputs && camera.inputs.attached && camera.inputs.attached.pointers) {
                 camera.inputs.attached.pointers.multiTouchPanning = true;
                 camera.inputs.attached.pointers.multiTouchPanAndZoom = true;
-                camera.inputs.attached.pointers.panningSensibility = 110;
+                camera.inputs.attached.pointers.panningSensibility = 55;
               }
               const hemi = new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0.1, 1, 0.15), scene);
               hemi.intensity = 1.8;
@@ -2559,6 +2670,7 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               fill.intensity = 0.9;
               const rim = new BABYLON.DirectionalLight('rim', new BABYLON.Vector3(0.45, -0.4, -0.25), scene);
               rim.intensity = 0.45;
+              addOrientationAxes(scene);
               engine.runRenderLoop(() => {
                 scene.render();
                 if (viewerReady && !firstFrameShown) {
