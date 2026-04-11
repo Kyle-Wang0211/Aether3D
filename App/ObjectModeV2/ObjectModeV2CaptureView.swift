@@ -86,15 +86,15 @@ struct ObjectModeV2CaptureView: View {
                 lockBadgePulse = false
             }
         }
-        .onChange(of: viewModel.isRecording) { _, isRecording in
-            if isRecording && viewModel.isTargetLocked {
+        .onChange(of: captureHUDActive) { _, isActive in
+            if isActive && viewModel.isTargetLocked {
                 showRecordingCarryover = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
                     withAnimation(.easeOut(duration: 0.28)) {
                         showRecordingCarryover = false
                     }
                 }
-            } else if !isRecording {
+            } else if !isActive {
                 showRecordingCarryover = false
             }
         }
@@ -724,7 +724,7 @@ struct ObjectModeV2CaptureView: View {
 
     private var leftAnchor: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(viewModel.isRecording ? "REC" : "OBJECT")
+            Text(captureHUDActive ? "REC" : "OBJECT")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(.white.opacity(0.72))
             Text(String(format: "%02d:%02d", viewModel.recordingSeconds / 60, viewModel.recordingSeconds % 60))
@@ -830,7 +830,7 @@ struct ObjectModeV2CaptureView: View {
                 if viewModel.isRunning {
                     ProgressView()
                         .tint(.white)
-                } else if viewModel.isRecording {
+                } else if captureHUDActive {
                     HStack(spacing: 8) {
                         RoundedRectangle(cornerRadius: 2, style: .continuous)
                             .fill(Color.white)
@@ -847,7 +847,7 @@ struct ObjectModeV2CaptureView: View {
             }
         }
         .disabled(!(viewModel.canStartCapture || viewModel.canStopCapture))
-        .accessibilityLabel(viewModel.isRecording ? "结束采集并生成" : "开始对象采集")
+        .accessibilityLabel(captureHUDActive ? "正在开始对象采集" : "开始对象采集")
     }
 
     private var trailingDock: some View {
@@ -890,7 +890,7 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var acceptedFramesBadgeStrokeColor: Color {
-        if viewModel.isRecording && viewModel.acceptedFrames >= viewModel.minimumAcceptedFrames {
+        if captureHUDActive && viewModel.acceptedFrames >= viewModel.minimumAcceptedFrames {
             return Color(red: 0.54, green: 0.96, blue: 0.62).opacity(0.62)
         }
         return Color.white.opacity(0.12)
@@ -902,7 +902,7 @@ struct ObjectModeV2CaptureView: View {
         DraftObjectPreview(
             acceptedFrames: viewModel.acceptedFrames,
             orbitCompletion: viewModel.orbitCompletion,
-            isRecording: viewModel.isRecording,
+            isRecording: captureHUDActive,
             highlightFlash: showAcceptedFrameFlash,
             thumbnails: viewModel.acceptedFrameThumbnails
         )
@@ -917,7 +917,7 @@ struct ObjectModeV2CaptureView: View {
         DraftObjectPreview(
             acceptedFrames: viewModel.acceptedFrames,
             orbitCompletion: viewModel.orbitCompletion,
-            isRecording: viewModel.isRecording,
+            isRecording: captureHUDActive,
             highlightFlash: showAcceptedFrameFlash
         )
         .frame(width: 234, height: 286)
@@ -1220,7 +1220,11 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var isPreCaptureUI: Bool {
-        !viewModel.isRecording && !viewModel.shouldShowProcessingOverlay && viewModel.manifestURL == nil && viewModel.acceptedFrames == 0
+        !captureHUDActive && !viewModel.shouldShowProcessingOverlay && viewModel.manifestURL == nil && viewModel.acceptedFrames == 0
+    }
+
+    private var captureHUDActive: Bool {
+        viewModel.isCaptureStarting || viewModel.isRecording
     }
 
     private var processingCardTitle: String {
