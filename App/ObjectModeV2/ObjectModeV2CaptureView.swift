@@ -2202,7 +2202,17 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
         }
         do {
             let payload = try payload(for: url)
-            let response = URLResponse(
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Type": payload.mimeType,
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*",
+                    "Content-Length": "\(payload.data.count)",
+                ]
+            ) ?? URLResponse(
                 url: url,
                 mimeType: payload.mimeType,
                 expectedContentLength: payload.data.count,
@@ -2524,8 +2534,22 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
                 try {
                   animateProgress(10);
                   show('正在读取默认 mesh 文件...');
-                  startPulse(22);
-                  await BABYLON.SceneLoader.AppendAsync('', assetURL, scene, undefined, '.glb');
+                  startPulse(24);
+                  const response = await fetch(assetURL, { cache: 'no-store' });
+                  if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                  }
+                  const buffer = await response.arrayBuffer();
+                  animateProgress(34);
+                  show('正在解析 glTF / GLB 结构...');
+                  startPulse(62);
+                  const blob = new Blob([buffer], { type: 'model/gltf-binary' });
+                  const blobURL = URL.createObjectURL(blob);
+                  try {
+                    await BABYLON.SceneLoader.AppendAsync('', blobURL, scene, undefined, '.glb');
+                  } finally {
+                    URL.revokeObjectURL(blobURL);
+                  }
                   animateProgress(76);
                   show('正在拟合默认视角...');
                   fitCameraToScene(camera, scene);
