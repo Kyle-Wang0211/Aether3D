@@ -2437,36 +2437,27 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.68));
               transition: width 160ms ease;
             }
-            .orientation-hud {
+            .gravity-badge {
               position: absolute;
               left: 16px;
               bottom: 18px;
-              display: flex;
-              flex-direction: column;
-              gap: 6px;
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
               padding: 10px 12px;
-              border-radius: 14px;
+              border-radius: 999px;
               background: rgba(6, 6, 6, 0.52);
               border: 1px solid rgba(255,255,255,0.1);
-              font: 600 11px -apple-system, BlinkMacSystemFont, sans-serif;
+              font: 700 11px -apple-system, BlinkMacSystemFont, sans-serif;
               color: rgba(255,255,255,0.82);
               letter-spacing: 0.01em;
               pointer-events: none;
               backdrop-filter: blur(12px);
             }
-            .orientation-row {
-              display: flex;
-              align-items: center;
-              gap: 8px;
+            .gravity-arrow {
+              font-size: 14px;
+              color: rgba(120,255,145,0.96);
             }
-            .orientation-dot {
-              width: 8px;
-              height: 8px;
-              border-radius: 999px;
-            }
-            .orientation-x { background: #ff6b6b; }
-            .orientation-y { background: #78ff91; }
-            .orientation-z { background: #6ea8ff; }
           </style>
         </head>
         <body>
@@ -2476,10 +2467,9 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
             <div class="fallback-label">正在打开默认 mesh 成品...</div>
             <div class="fallback-bar"><div class="fallback-bar-fill"></div></div>
           </div>
-          <div class="orientation-hud">
-            <div class="orientation-row"><span class="orientation-dot orientation-y"></span><span>Y+ 上 / Up</span></div>
-            <div class="orientation-row"><span class="orientation-dot orientation-x"></span><span>X+ 右 / Right</span></div>
-            <div class="orientation-row"><span class="orientation-dot orientation-z"></span><span>Z+ 前 / Front</span></div>
+          <div class="gravity-badge">
+            <span class="gravity-arrow">↑</span>
+            <span>Up</span>
           </div>
           <script>
             const assetURL = "\(assetURL)";
@@ -2582,20 +2572,161 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               camera.minZ = Math.max(radius / 500, 0.01);
               camera.maxZ = Math.max(radius * 40, 200);
             };
-            const addOrientationAxes = (scene) => {
-              const axisLength = 0.35;
-              const makeAxis = (name, vector, color) => {
-                const line = BABYLON.MeshBuilder.CreateLines(name, {
-                  points: [BABYLON.Vector3.Zero(), vector.scale(axisLength)]
-                }, scene);
-                line.isPickable = false;
-                line.color = color;
-                line.alpha = 0.95;
-                return line;
+            const configureTouchViewerControls = (canvas, camera) => {
+              const activePointers = new Map();
+              let singleGesture = null;
+              let multiGesture = null;
+              const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+              const normalizeAngleDelta = (angle) => {
+                while (angle > Math.PI) angle -= Math.PI * 2;
+                while (angle < -Math.PI) angle += Math.PI * 2;
+                return angle;
               };
-              makeAxis('axis-x', new BABYLON.Vector3(1, 0, 0), new BABYLON.Color3(1.0, 0.42, 0.42));
-              makeAxis('axis-y', new BABYLON.Vector3(0, 1, 0), new BABYLON.Color3(0.47, 1.0, 0.57));
-              makeAxis('axis-z', new BABYLON.Vector3(0, 0, 1), new BABYLON.Color3(0.45, 0.66, 1.0));
+              const forwardVector = () => {
+                const forward = camera.target.subtract(camera.position);
+                if (forward.lengthSquared() < 1e-8) {
+                  return new BABYLON.Vector3(0, 0, -1);
+                }
+                return forward.normalize();
+              };
+              const orbitRight = () => {
+                let right = BABYLON.Vector3.Cross(forwardVector(), camera.upVector);
+                if (right.lengthSquared() < 1e-8) {
+                  right = new BABYLON.Vector3(1, 0, 0);
+                }
+                return right.normalize();
+              };
+              const orbitUp = () => {
+                let up = BABYLON.Vector3.Cross(orbitRight(), forwardVector());
+                if (up.lengthSquared() < 1e-8) {
+                  up = new BABYLON.Vector3(0, 1, 0);
+                }
+                return up.normalize();
+              };
+              const panTarget = (deltaX, deltaY) => {
+                const panScale = Math.max(camera.radius, 0.5) * 0.0016;
+                const right = orbitRight();
+                const up = orbitUp();
+                camera.target = camera.target
+                  .subtract(right.scale(deltaX * panScale))
+                  .add(up.scale(deltaY * panScale));
+              };
+              const updateSingleGesture = (pointer) => {
+                if (!singleGesture) {
+                  return;
+                }
+                const deltaX = pointer.x - singleGesture.lastX;
+                const deltaY = pointer.y - singleGesture.lastY;
+                singleGesture.lastX = pointer.x;
+                singleGesture.lastY = pointer.y;
+                camera.alpha += deltaX * 0.0085;
+                camera.beta = clamp(camera.beta - deltaY * 0.0085, 0.045, Math.PI - 0.045);
+              };
+              const measureMultiPointer = () => {
+                const pointers = Array.from(activePointers.values()).slice(0, 2);
+                const first = pointers[0];
+                const second = pointers[1];
+                const center = {
+                  x: (first.x + second.x) * 0.5,
+                  y: (first.y + second.y) * 0.5,
+                };
+                const dx = second.x - first.x;
+                const dy = second.y - first.y;
+                return {
+                  center,
+                  distance: Math.max(Math.hypot(dx, dy), 1),
+                  angle: Math.atan2(dy, dx),
+                };
+              };
+              const beginMultiGesture = () => {
+                const measurement = measureMultiPointer();
+                multiGesture = {
+                  lastCenter: measurement.center,
+                  lastDistance: measurement.distance,
+                  lastAngle: measurement.angle,
+                };
+                singleGesture = null;
+              };
+              const updateMultiGesture = () => {
+                if (activePointers.size < 2) {
+                  multiGesture = null;
+                  return;
+                }
+                if (!multiGesture) {
+                  beginMultiGesture();
+                  return;
+                }
+                const measurement = measureMultiPointer();
+                const centerDeltaX = measurement.center.x - multiGesture.lastCenter.x;
+                const centerDeltaY = measurement.center.y - multiGesture.lastCenter.y;
+                const zoomRatio = measurement.distance / Math.max(multiGesture.lastDistance, 1);
+                const twistDelta = normalizeAngleDelta(measurement.angle - multiGesture.lastAngle);
+
+                if (Math.abs(centerDeltaX) > 0.1 || Math.abs(centerDeltaY) > 0.1) {
+                  panTarget(centerDeltaX, centerDeltaY);
+                }
+                if (Math.abs(zoomRatio - 1.0) > 0.001) {
+                  camera.radius = clamp(
+                    camera.radius / zoomRatio,
+                    camera.lowerRadiusLimit,
+                    camera.upperRadiusLimit
+                  );
+                }
+                if (Math.abs(twistDelta) > 0.0005) {
+                  camera.alpha += twistDelta;
+                }
+
+                multiGesture.lastCenter = measurement.center;
+                multiGesture.lastDistance = measurement.distance;
+                multiGesture.lastAngle = measurement.angle;
+              };
+
+              canvas.addEventListener('pointerdown', (event) => {
+                canvas.setPointerCapture(event.pointerId);
+                activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+                if (activePointers.size === 1) {
+                  singleGesture = { lastX: event.clientX, lastY: event.clientY };
+                  multiGesture = null;
+                } else if (activePointers.size >= 2) {
+                  beginMultiGesture();
+                }
+              });
+
+              canvas.addEventListener('pointermove', (event) => {
+                if (!activePointers.has(event.pointerId)) {
+                  return;
+                }
+                activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+                if (activePointers.size >= 2) {
+                  updateMultiGesture();
+                } else if (activePointers.size === 1) {
+                  updateSingleGesture({ x: event.clientX, y: event.clientY });
+                }
+              });
+
+              const endPointer = (pointerId) => {
+                activePointers.delete(pointerId);
+                if (activePointers.size === 1) {
+                  const remaining = Array.from(activePointers.values())[0];
+                  singleGesture = { lastX: remaining.x, lastY: remaining.y };
+                  multiGesture = null;
+                } else if (activePointers.size === 0) {
+                  singleGesture = null;
+                  multiGesture = null;
+                }
+              };
+              canvas.addEventListener('pointerup', (event) => endPointer(event.pointerId));
+              canvas.addEventListener('pointercancel', (event) => endPointer(event.pointerId));
+              canvas.addEventListener('pointerout', (event) => endPointer(event.pointerId));
+              canvas.addEventListener('wheel', (event) => {
+                event.preventDefault();
+                const zoomScale = event.deltaY > 0 ? 1.08 : 0.92;
+                camera.radius = clamp(
+                  camera.radius * zoomScale,
+                  camera.lowerRadiusLimit,
+                  camera.upperRadiusLimit
+                );
+              }, { passive: false });
             };
               const finalizeScene = (scene) => {
                 for (const material of scene.materials || []) {
@@ -2647,30 +2778,20 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               scene.imageProcessingConfiguration.exposure = 1.1;
               const camera = new BABYLON.ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.4, 4, BABYLON.Vector3.Zero(), scene);
               camera.upVector = presetUp;
-              camera.attachControl(canvas, true);
-              camera.wheelDeltaPercentage = 0.015;
-              camera.pinchDeltaPercentage = 0.015;
-              camera.useNaturalPinchZoom = true;
-              camera.lowerBetaLimit = 0.001;
-              camera.upperBetaLimit = Math.PI - 0.001;
-              camera.panningSensibility = 55;
-              camera.inertia = 0.58;
-              camera.panningInertia = 0.68;
+              camera.lowerBetaLimit = 0.045;
+              camera.upperBetaLimit = Math.PI - 0.045;
+              camera.inertia = 0.42;
+              camera.panningInertia = 0.55;
               camera.allowUpsideDown = false;
-              camera.panningAxis = new BABYLON.Vector3(1, 1, 1);
               camera.useAutoRotationBehavior = false;
-              if (camera.inputs && camera.inputs.attached && camera.inputs.attached.pointers) {
-                camera.inputs.attached.pointers.multiTouchPanning = true;
-                camera.inputs.attached.pointers.multiTouchPanAndZoom = true;
-                camera.inputs.attached.pointers.panningSensibility = 55;
-              }
+              camera.inputs.clear();
+              configureTouchViewerControls(canvas, camera);
               const hemi = new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0.1, 1, 0.15), scene);
               hemi.intensity = 1.8;
               const fill = new BABYLON.DirectionalLight('fill', new BABYLON.Vector3(-0.35, -1, 0.2), scene);
               fill.intensity = 0.9;
               const rim = new BABYLON.DirectionalLight('rim', new BABYLON.Vector3(0.45, -0.4, -0.25), scene);
               rim.intensity = 0.45;
-              addOrientationAxes(scene);
               engine.runRenderLoop(() => {
                 scene.render();
                 if (viewerReady && !firstFrameShown) {
