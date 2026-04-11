@@ -364,6 +364,17 @@ struct HomePage: View {
                         }
                     }
 
+                    if viewModel.canReimportObjectFastPublishResult(record) {
+                        Button {
+                            viewModel.reimportObjectFastPublishResultAsNewRecord(record)
+                        } label: {
+                            Label(
+                                t("重新导入远端结果（新卡片）", "Reimport Remote Result as New Card"),
+                                systemImage: "square.on.square"
+                            )
+                        }
+                    }
+
                     Button(role: .destructive) {
                         viewModel.deleteRecord(record)
                     } label: {
@@ -896,6 +907,22 @@ private struct ObjectFastPublishRecordViewer: View {
                 Text(detail)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.white.opacity(0.72))
+            }
+
+            if homeViewModel.canReimportObjectFastPublishResult(currentRecord) {
+                Button {
+                    homeViewModel.reimportObjectFastPublishResultAsNewRecord(currentRecord)
+                    onDismiss()
+                } label: {
+                    Text("重新导入为新对比卡片")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.white)
+                        .clipShape(Capsule())
+                }
+                .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

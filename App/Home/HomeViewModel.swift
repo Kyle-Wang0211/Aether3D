@@ -264,6 +264,18 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
+    func canReimportObjectFastPublishResult(_ record: ScanRecord) -> Bool {
+        record.status == .completed
+            && isObjectFastPublishRecord(record)
+            && resolvedObjectFastPublishRemoteJobId(for: record) != nil
+    }
+
+    func reimportObjectFastPublishResultAsNewRecord(_ sourceRecord: ScanRecord) {
+        Task { @MainActor [weak self] in
+            await self?.performObjectFastPublishReimport(sourceRecord)
+        }
+    }
+
     #if canImport(AVFoundation)
     private func runLocalPreviewImport(
         for recordId: UUID,
@@ -1286,6 +1298,125 @@ final class HomeViewModel: ObservableObject {
         loadRecords(scheduleRemoteResume: false)
     }
 
+    private func performObjectFastPublishReimport(_ sourceRecord: ScanRecord) async {
+        let latestSource = store.record(id: sourceRecord.id) ?? sourceRecord
+        guard canReimportObjectFastPublishResult(latestSource) else {
+            errorMessage = "这条作品暂时没有可重新导入的远端结果。"
+            return
+        }
+        guard let remoteJobId = resolvedObjectFastPublishRemoteJobId(for: latestSource) else {
+            errorMessage = "找不到这条作品的远端任务号，暂时无法重新导入。"
+            return
+        }
+
+        isImportingVideo = true
+        busyMessage = "正在从远端重新导入对比结果..."
+        errorMessage = nil
+
+        do {
+            let bundle = try await BackgroundUploadBrokerClient.shared.downloadObjectModeViewerBundle(jobId: remoteJobId)
+            let newRecordId = UUID()
+            let persistedBundle = try persistObjectFastPublishViewerBundle(bundle, recordId: newRecordId)
+            let duplicatedThumbnailPath = duplicateThumbnail(
+                relativePath: latestSource.thumbnailPath,
+                for: newRecordId
+            )
+            persistImportedObjectFastPublishComparison(
+                sourceRecord: latestSource,
+                newRecordId: newRecordId,
+                remoteJobId: remoteJobId,
+                artifactPath: persistedBundle.defaultArtifactRelativePath,
+                viewerManifestPath: persistedBundle.localManifestRelativePath,
+                comparisonAssetPath: persistedBundle.localComparisonAssetPath,
+                comparisonMetricsPath: persistedBundle.localComparisonMetricsPath,
+                hqAssetPath: persistedBundle.localHQArtifactPath,
+                thumbnailPath: duplicatedThumbnailPath
+            )
+            busyMessage = nil
+            isImportingVideo = false
+        } catch {
+            busyMessage = nil
+            isImportingVideo = false
+            errorMessage = "远端结果重新导入失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func persistImportedObjectFastPublishComparison(
+        sourceRecord: ScanRecord,
+        newRecordId: UUID,
+        remoteJobId: String,
+        artifactPath: String,
+        viewerManifestPath: String?,
+        comparisonAssetPath: String?,
+        comparisonMetricsPath: String?,
+        hqAssetPath: String?,
+        thumbnailPath: String?
+    ) {
+        let now = Date()
+        let startedAt = sourceRecord.processingStartedAt ?? sourceRecord.createdAt
+        let completedAt = sourceRecord.processingCompletedAt ?? now
+        let elapsed = sourceRecord.processingElapsedSeconds
+            ?? max(0, completedAt.timeIntervalSince(startedAt))
+
+        var remoteMetrics = sanitizedRuntimeMetricsForImportedObjectFastPublishComparison(
+            sourceRecord.runtimeMetrics
+        )
+        remoteMetrics["reimport_source_record_id"] = sourceRecord.id.uuidString
+        remoteMetrics["reimport_kind"] = "remote_comparison_copy"
+
+        let runtimeMetrics = objectFastPublishRuntimeMetrics(
+            stageKey: sourceRecord.remoteStageKey,
+            detail: "remote_comparison_copy",
+            remoteJobId: remoteJobId,
+            defaultArtifactReady: true,
+            remoteMetrics: remoteMetrics,
+            localViewerManifestPath: viewerManifestPath,
+            localComparisonAssetPath: comparisonAssetPath,
+            localComparisonMetricsPath: comparisonMetricsPath,
+            localHQArtifactPath: hqAssetPath
+        )
+
+        let importedRecord = ScanRecord(
+            id: newRecordId,
+            name: importedComparisonRecordName(from: sourceRecord.name),
+            createdAt: now,
+            updatedAt: now,
+            thumbnailPath: thumbnailPath,
+            artifactPath: artifactPath,
+            sourceVideoPath: nil,
+            remoteJobId: nil,
+            frameSamplingProfile: sourceRecord.frameSamplingProfile,
+            captureIntent: sourceRecord.captureIntent,
+            processingBackend: sourceRecord.processingBackend,
+            coveragePercentage: sourceRecord.coveragePercentage,
+            triangleCount: sourceRecord.triangleCount,
+            durationSeconds: sourceRecord.durationSeconds,
+            processingStartedAt: startedAt,
+            processingCompletedAt: completedAt,
+            processingElapsedSeconds: elapsed,
+            status: .completed,
+            statusMessage: "远端对比卡片已导入",
+            detailMessage: "这是从远端重新导入的对比副本，可和原作品对照查看。",
+            progressFraction: 1.0,
+            progressBasis: sourceRecord.progressBasis,
+            remoteStageKey: sourceRecord.remoteStageKey,
+            remotePhaseName: sourceRecord.remotePhaseName,
+            currentTier: sourceRecord.currentTier,
+            runtimeMetrics: runtimeMetrics,
+            estimatedRemainingMinutes: 0,
+            failureReason: nil,
+            viewerInitialPose: sourceRecord.viewerInitialPose,
+            captureGravityUpX: sourceRecord.captureGravityUpX,
+            captureGravityUpY: sourceRecord.captureGravityUpY,
+            captureGravityUpZ: sourceRecord.captureGravityUpZ,
+            captureGravitySource: sourceRecord.captureGravitySource,
+            captureGravityConfidence: sourceRecord.captureGravityConfidence
+        )
+
+        store.saveRecord(importedRecord)
+        loadRecords(scheduleRemoteResume: false)
+    }
+
     private func persistObjectFastPublishArtifactFile(_ artifactURL: URL, recordId: UUID) throws -> String {
         let exportsDirectory = store.baseDirectoryURL().appendingPathComponent("exports", isDirectory: true)
         try FileManager.default.createDirectory(at: exportsDirectory, withIntermediateDirectories: true)
@@ -1431,6 +1562,58 @@ final class HomeViewModel: ObservableObject {
         case .jobTimeout, .invalidResponse, .unknownError:
             return "远端返回了异常结果，请稍后重试。"
         }
+    }
+
+    private func resolvedObjectFastPublishRemoteJobId(for record: ScanRecord) -> String? {
+        let candidates = [
+            record.remoteJobId,
+            record.runtimeMetrics?["remote_job_id"]
+        ]
+        for candidate in candidates {
+            let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    private func importedComparisonRecordName(from sourceName: String) -> String {
+        let trimmed = sourceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "远端对比副本" }
+        if trimmed.contains("对比") {
+            return "\(trimmed) 副本"
+        }
+        return "\(trimmed) 对比"
+    }
+
+    private func duplicateThumbnail(relativePath: String?, for recordId: UUID) -> String? {
+        guard let relativePath,
+              !relativePath.isEmpty else {
+            return nil
+        }
+        let sourceURL = store.baseDirectoryURL().appendingPathComponent(relativePath)
+        guard let imageData = try? Data(contentsOf: sourceURL) else {
+            return nil
+        }
+        return store.saveThumbnail(imageData, for: recordId)
+    }
+
+    private func sanitizedRuntimeMetricsForImportedObjectFastPublishComparison(
+        _ runtimeMetrics: [String: String]?
+    ) -> [String: String] {
+        var cleaned = runtimeMetrics ?? [:]
+        let localOnlyKeys = [
+            "local_viewer_manifest_path",
+            "local_comparison_asset_path",
+            "local_comparison_metrics_path",
+            "local_hq_asset_path",
+            "default_artifact_ready",
+        ]
+        for key in localOnlyKeys {
+            cleaned.removeValue(forKey: key)
+        }
+        return cleaned
     }
 
     private func selectedFrameSamplingProfile(for recordId: UUID) -> FrameSamplingProfile {
