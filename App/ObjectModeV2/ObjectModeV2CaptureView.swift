@@ -15,15 +15,21 @@ import WebKit
 struct ObjectModeV2CaptureView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var viewModel = ObjectModeV2CaptureViewModel()
+    @StateObject private var viewModel: ObjectModeV2CaptureViewModel
     @State private var reticlePulse = false
     @State private var showLockFlash = false
     @State private var showLockBadge = false
     @State private var lockBadgePulse = false
     @State private var showRecordingCarryover = false
     @State private var showAcceptedFrameFlash = false
+    private let onClose: (() -> Void)?
 
     private let maxFrames = 150
+
+    init(onClose: (() -> Void)? = nil) {
+        _viewModel = StateObject(wrappedValue: ObjectModeV2CaptureViewModel())
+        self.onClose = onClose
+    }
 
     var body: some View {
         ZStack {
@@ -102,7 +108,6 @@ struct ObjectModeV2CaptureView: View {
                 }
             }
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.88), value: isPreCaptureUI)
         .animation(.easeInOut(duration: 0.24), value: viewModel.shouldShowProcessingOverlay)
     }
 
@@ -137,10 +142,15 @@ struct ObjectModeV2CaptureView: View {
             snapshot: processingSnapshot,
             onOpen: viewModel.downloadedArtifactURL != nil ? { viewModel.openRecord() } : nil,
             onClose: {
-                viewModel.prepareForDismiss()
-                dismiss()
+                closeToHome()
             }
         )
+    }
+
+    private func closeToHome() {
+        viewModel.prepareForDismiss()
+        onClose?()
+        dismiss()
     }
 
     @ViewBuilder
@@ -162,8 +172,7 @@ struct ObjectModeV2CaptureView: View {
             HStack {
                 Spacer()
                 Button(action: {
-                    viewModel.prepareForDismiss()
-                    dismiss()
+                    closeToHome()
                 }) {
                     Circle()
                         .fill(Color.black.opacity(0.35))
@@ -227,14 +236,12 @@ struct ObjectModeV2CaptureView: View {
 
             if isPreCaptureUI {
                 preCaptureBottomHud
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
                 HStack(alignment: .bottom, spacing: 26) {
                     leftAnchor
                     captureButton
                     trailingDock
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 18)
@@ -346,8 +353,7 @@ struct ObjectModeV2CaptureView: View {
                 HStack {
                     Spacer()
                     Button(action: {
-                        viewModel.prepareForDismiss()
-                        dismiss()
+                        closeToHome()
                     }) {
                         Circle()
                             .fill(Color.black.opacity(0.35))
@@ -810,9 +816,7 @@ struct ObjectModeV2CaptureView: View {
 
     private var captureButton: some View {
         Button(action: {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.88)) {
-                viewModel.toggleCapture()
-            }
+            viewModel.toggleCapture()
         }) {
             ZStack {
                 Circle()

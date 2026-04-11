@@ -187,7 +187,11 @@ struct HomePage: View {
                 viewModel.loadRecords()
             }
         ) {
-            ObjectModeV2CaptureView()
+            ObjectModeV2CaptureView(
+                onClose: {
+                    navigateToObjectModeV2 = false
+                }
+            )
         }
         #endif
         #if canImport(UIKit) && canImport(Metal)
