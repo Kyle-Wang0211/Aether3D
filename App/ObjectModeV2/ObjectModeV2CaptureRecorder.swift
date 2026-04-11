@@ -74,7 +74,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
 
     func prepare() async throws {
         if isPrepared {
-            try await ensurePreviewRunning()
             return
         }
 
@@ -98,18 +97,45 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
         }
 
         try await configureIfNeeded()
-        try await ensurePreviewRunning()
         isPrepared = true
     }
 
-    func startRecording() throws {
+    func startPreviewIfNeeded() async throws {
         guard isPrepared else {
             throw ObjectModeV2CaptureRecorderError.notPrepared
         }
-        guard !isRecording else {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            captureQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: ObjectModeV2CaptureRecorderError.recordingFailed("录制器已释放。"))
+                    return
+                }
+
+                if !self.previewCaptureSession.isRunning {
+                    self.previewCaptureSession.startRunning()
+                }
+                self.didStartPreview = true
+                continuation.resume(returning: ())
+            }
+        }
+    }
+
+    func startRecording() throws {
+        let readiness = captureQueue.sync { () -> (prepared: Bool, recording: Bool, running: Bool, previewStarted: Bool) in
+            (
+                prepared: isPrepared,
+                recording: isRecording,
+                running: previewCaptureSession.isRunning,
+                previewStarted: didStartPreview
+            )
+        }
+        guard readiness.prepared else {
+            throw ObjectModeV2CaptureRecorderError.notPrepared
+        }
+        guard !readiness.recording else {
             throw ObjectModeV2CaptureRecorderError.alreadyRecording
         }
-        guard previewSession.isRunning else {
+        guard readiness.previewStarted, readiness.running else {
             throw ObjectModeV2CaptureRecorderError.recordingFailed("相机仍在启动，请稍候再试。")
         }
 
@@ -204,23 +230,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
                 } catch {
                     continuation.resume(throwing: error)
                 }
-            }
-        }
-    }
-
-    private func ensurePreviewRunning() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            captureQueue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(throwing: ObjectModeV2CaptureRecorderError.recordingFailed("录制器已释放。"))
-                    return
-                }
-
-                if !self.previewCaptureSession.isRunning {
-                    self.previewCaptureSession.startRunning()
-                }
-                self.didStartPreview = true
-                continuation.resume(returning: ())
             }
         }
     }
