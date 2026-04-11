@@ -20,6 +20,20 @@ struct ObjectModeV2GuidanceSnapshot: Sendable, Equatable {
     )
 }
 
+struct ObjectModeV2GuidanceAuditSummary: Sendable, Equatable {
+    var totalSamples = 0
+    var hardRejectBlurCount = 0
+    var hardRejectDarkCount = 0
+    var hardRejectBrightCount = 0
+    var hardRejectOccupancyCount = 0
+    var softDowngradeRedundantCount = 0
+    var softDowngradeLowTextureCount = 0
+    var softDowngradeWeakQualityCount = 0
+    var guidanceRecenterCount = 0
+    var guidanceNewAngleCount = 0
+    var guidanceCoverageCount = 0
+}
+
 struct ObjectModeV2VisualFrameSample: Sendable, Equatable {
     let timestamp: TimeInterval
     let signatureWidth: Int
@@ -33,6 +47,8 @@ struct ObjectModeV2VisualFrameSample: Sendable, Equatable {
 @MainActor
 final class ObjectModeV2GuidanceEngine {
     private let maxAcceptedFrames = 150
+    private let hardRejectTargetSignalThreshold = 0.10
+    private let softWarnTargetSignalThreshold = 0.16
     var onUpdate: ((ObjectModeV2GuidanceSnapshot) -> Void)?
 
     private var snapshot = ObjectModeV2GuidanceSnapshot.idle
@@ -41,6 +57,7 @@ final class ObjectModeV2GuidanceEngine {
     private var lastAcceptedSignature = Data()
     private var coverageCredits = 0.0
     private var smoothedQuality = 0.0
+    private var auditSummary = ObjectModeV2GuidanceAuditSummary()
 
     func startMonitoring() {
         publish(snapshot)
@@ -54,6 +71,7 @@ final class ObjectModeV2GuidanceEngine {
         lastAcceptedSignature = Data()
         coverageCredits = 0
         smoothedQuality = 0
+        auditSummary = ObjectModeV2GuidanceAuditSummary()
         publish(.init(
             acceptedFrames: 0,
             orbitCompletion: 0,
@@ -66,6 +84,33 @@ final class ObjectModeV2GuidanceEngine {
     func endRecording() {
         recordingStartedAt = nil
         publish(snapshot)
+    }
+
+    func pipelineAuditFields(
+        targetZoneAnchor: CGPoint,
+        targetZoneMode: ObjectModeV2TargetZoneMode
+    ) -> [String: String] {
+        [
+            "visual_policy_version": "v2_unified_capture_audit",
+            "visual_min_target_signal": String(format: "%.4f", hardRejectTargetSignalThreshold),
+            "visual_warn_target_signal": String(format: "%.4f", softWarnTargetSignalThreshold),
+            "visual_min_orb_features": "\(FrameQualityConstants.MIN_ORB_FEATURES_FOR_SFM)",
+            "visual_warn_orb_features": "\(FrameQualityConstants.WARN_ORB_FEATURES_FOR_SFM)",
+            "target_zone_anchor_x": String(format: "%.4f", targetZoneAnchor.x),
+            "target_zone_anchor_y": String(format: "%.4f", targetZoneAnchor.y),
+            "target_zone_mode_runtime": targetZoneMode.rawValue,
+            "client_live_total_samples": "\(auditSummary.totalSamples)",
+            "client_live_hard_reject_blur_count": "\(auditSummary.hardRejectBlurCount)",
+            "client_live_hard_reject_dark_count": "\(auditSummary.hardRejectDarkCount)",
+            "client_live_hard_reject_bright_count": "\(auditSummary.hardRejectBrightCount)",
+            "client_live_hard_reject_occupancy_count": "\(auditSummary.hardRejectOccupancyCount)",
+            "client_live_soft_redundant_count": "\(auditSummary.softDowngradeRedundantCount)",
+            "client_live_soft_low_texture_count": "\(auditSummary.softDowngradeLowTextureCount)",
+            "client_live_soft_weak_quality_count": "\(auditSummary.softDowngradeWeakQualityCount)",
+            "client_live_guidance_recenter_count": "\(auditSummary.guidanceRecenterCount)",
+            "client_live_guidance_new_angle_count": "\(auditSummary.guidanceNewAngleCount)",
+            "client_live_guidance_coverage_count": "\(auditSummary.guidanceCoverageCount)"
+        ]
     }
 
     func processVisualSample(
@@ -97,6 +142,7 @@ final class ObjectModeV2GuidanceEngine {
             previous: lastAcceptedSignature
         )
         let similarityScore = max(0, min(1 - noveltyScore, 1))
+        let targetSignal = targetMetrics.textureScore * 0.55 + targetMetrics.contrastScore * 0.45
         let qualityScore = min(
             max(sharpnessScore * 0.58 + brightnessScore * 0.18 + occupancyScore * 0.24, 0),
             1
@@ -110,9 +156,40 @@ final class ObjectModeV2GuidanceEngine {
         let enoughTimePassed = lastAcceptedAt.map { now - $0 > 0.28 } ?? true
         let qualityThreshold = acceptanceThreshold(for: snapshot.acceptedFrames)
         let maxSimilarity = maximumSimilarity(for: targetZoneMode)
+        let lowTexture = sample.globalVariance < FrameQualityConstants.MIN_LOCAL_VARIANCE_FOR_TEXTURE
 
         var acceptedFrames = snapshot.acceptedFrames
         var acceptedNewFrame = false
+        auditSummary.totalSamples += 1
+
+        if sample.laplacianVariance < FrameQualityConstants.blurThresholdLaplacian {
+            auditSummary.hardRejectBlurCount += 1
+        }
+        if sample.meanBrightness < FrameQualityConstants.darkThresholdBrightness {
+            auditSummary.hardRejectDarkCount += 1
+        }
+        if sample.meanBrightness > FrameQualityConstants.brightThresholdBrightness {
+            auditSummary.hardRejectBrightCount += 1
+        }
+        if targetSignal < hardRejectTargetSignalThreshold {
+            auditSummary.hardRejectOccupancyCount += 1
+        }
+        if similarityScore > maxSimilarity {
+            auditSummary.softDowngradeRedundantCount += 1
+            auditSummary.guidanceNewAngleCount += 1
+        }
+        if lowTexture {
+            auditSummary.softDowngradeLowTextureCount += 1
+        }
+        if qualityScore < qualityThreshold {
+            auditSummary.softDowngradeWeakQualityCount += 1
+        }
+        if targetSignal < softWarnTargetSignalThreshold {
+            auditSummary.guidanceRecenterCount += 1
+        }
+        if orbitCompletionHint(acceptedFrames: acceptedFrames, coverageCredits: coverageCredits) < 0.70 {
+            auditSummary.guidanceCoverageCount += 1
+        }
 
         if acceptedFrames == 0 {
             if recordingAge > 0.35,
@@ -142,9 +219,9 @@ final class ObjectModeV2GuidanceEngine {
             )
         }
 
-        let orbitCompletion = max(
-            coverageCredits,
-            min(Double(acceptedFrames) / 20.0, 1)
+        let orbitCompletion = orbitCompletionHint(
+            acceptedFrames: acceptedFrames,
+            coverageCredits: coverageCredits
         )
 
         let hintText: String
@@ -198,6 +275,13 @@ final class ObjectModeV2GuidanceEngine {
         case .group:
             return max(FrameQualityConstants.minFrameSimilarity, FrameQualityConstants.maxFrameSimilarity - 0.04)
         }
+    }
+
+    private func orbitCompletionHint(acceptedFrames: Int, coverageCredits: Double) -> Double {
+        max(
+            coverageCredits,
+            min(Double(acceptedFrames) / 20.0, 1)
+        )
     }
 
     private func normalizedBrightnessScore(_ brightness: Double) -> Double {

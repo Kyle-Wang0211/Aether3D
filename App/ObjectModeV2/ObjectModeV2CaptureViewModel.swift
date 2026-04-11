@@ -827,7 +827,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         let acceptedTimestampsMs = acceptedFrameTimestampsSec
             .map { String(Int(($0 * 1000).rounded())) }
             .joined(separator: ",")
-        return [
+        var profile = [
             "strategy": "object_slam3r_surface_v1",
             "capture_mode": "guided_object",
             "artifact_contract_version": "object_publish_v1",
@@ -846,6 +846,11 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "visual_max_frame_similarity": String(format: "%.4f", maxSimilarity),
             "visual_min_accept_interval_sec": "0.28"
         ]
+        guidanceEngine.pipelineAuditFields(
+            targetZoneAnchor: targetZoneAnchor,
+            targetZoneMode: targetZoneMode
+        ).forEach { profile[$0.key] = $0.value }
+        return profile
     }
 
     private func applyUploadProgress(_ progress: RemoteUploadProgress) {
