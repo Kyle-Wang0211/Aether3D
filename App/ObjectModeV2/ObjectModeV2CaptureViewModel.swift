@@ -1,5 +1,6 @@
 import Foundation
 import simd
+import QuartzCore
 
 #if canImport(SwiftUI)
 import SwiftUI
@@ -89,6 +90,120 @@ struct ObjectModeV2AcceptedFrameThumbnail: Identifiable, Equatable {
         lhs.id == rhs.id
     }
 }
+
+private enum ObjectModeV2VisualSampleBuilder {
+    static let signatureWidth = 32
+    static let signatureHeight = 32
+
+    static func makeSample(from image: UIImage, timestamp: TimeInterval) -> ObjectModeV2VisualFrameSample? {
+        let width = signatureWidth
+        let height = signatureHeight
+        let bytesPerRow = width * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .low
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        if let cgImage = image.cgImage {
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        } else {
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = 1
+            format.opaque = true
+            let rendered = UIGraphicsImageRenderer(
+                size: CGSize(width: width, height: height),
+                format: format
+            ).image { _ in
+                image.draw(in: CGRect(x: 0, y: 0, width: width, height: height))
+            }
+            guard let cgImage = rendered.cgImage else { return nil }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+
+        guard let data = context.data?.assumingMemoryBound(to: UInt8.self) else {
+            return nil
+        }
+
+        var signature = [UInt8](repeating: 0, count: width * height)
+        var luminanceSum = 0.0
+
+        for row in 0..<height {
+            for column in 0..<width {
+                let offset = row * bytesPerRow + column * 4
+                let red = Double(data[offset])
+                let green = Double(data[offset + 1])
+                let blue = Double(data[offset + 2])
+                let luminance = min(
+                    max(Int(round(red * 0.299 + green * 0.587 + blue * 0.114)), 0),
+                    255
+                )
+                signature[row * width + column] = UInt8(luminance)
+                luminanceSum += Double(luminance)
+            }
+        }
+
+        let pixelCount = Double(signature.count)
+        guard pixelCount > 0 else { return nil }
+        let meanBrightness = luminanceSum / pixelCount
+
+        var varianceAccumulator = 0.0
+        for value in signature {
+            let delta = Double(value) - meanBrightness
+            varianceAccumulator += delta * delta
+        }
+        let globalVariance = varianceAccumulator / pixelCount
+
+        var laplacianMean = 0.0
+        var laplacianSquaredMean = 0.0
+        var laplacianCount = 0.0
+        if width > 2, height > 2 {
+            for row in 1..<(height - 1) {
+                for column in 1..<(width - 1) {
+                    let center = Double(signature[row * width + column])
+                    let left = Double(signature[row * width + (column - 1)])
+                    let right = Double(signature[row * width + (column + 1)])
+                    let up = Double(signature[(row - 1) * width + column])
+                    let down = Double(signature[(row + 1) * width + column])
+                    let laplacian = left + right + up + down - 4.0 * center
+                    laplacianMean += laplacian
+                    laplacianSquaredMean += laplacian * laplacian
+                    laplacianCount += 1
+                }
+            }
+        }
+
+        let laplacianVariance: Double
+        if laplacianCount > 0 {
+            let mean = laplacianMean / laplacianCount
+            laplacianVariance = max(0, laplacianSquaredMean / laplacianCount - mean * mean)
+        } else {
+            laplacianVariance = 0
+        }
+
+        return ObjectModeV2VisualFrameSample(
+            timestamp: timestamp,
+            signatureWidth: width,
+            signatureHeight: height,
+            signature: Data(signature),
+            laplacianVariance: laplacianVariance,
+            meanBrightness: meanBrightness,
+            globalVariance: globalVariance
+        )
+    }
+}
 #endif
 
 @MainActor
@@ -156,6 +271,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private var prepareTask: Task<Void, Never>?
     private var previewStartTask: Task<Void, Never>?
     private var durationTask: Task<Void, Never>?
+    private var visualSamplingTask: Task<Void, Never>?
     private var activeRecordId: UUID?
     private var lastRemoteJobId: String?
     private var acceptedFrameTimestampsSec: [TimeInterval] = []
@@ -192,14 +308,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             }
             #endif
         }
-        recorder.onVisualFrameSample = { [weak self] sample in
-            guard let self else { return }
-            self.guidanceEngine.processVisualSample(
-                sample,
-                targetZoneAnchor: self.targetZoneAnchor,
-                targetZoneMode: self.targetZoneMode
-            )
-        }
         recorder.onPreviewFirstFrame = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -231,6 +339,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     self.guidanceEngine.startMonitoring()
                     self.guidanceEngine.beginRecording()
                 }
+                self.startVisualSamplingLoop()
                 self.statusText = self.guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
             }
         }
@@ -295,6 +404,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         previewStartTask?.cancel()
         previewStartTask = nil
         durationTask?.cancel()
+        visualSamplingTask?.cancel()
+        visualSamplingTask = nil
         stopCaptureGravityMonitoring()
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
@@ -310,6 +421,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
         }
+        visualSamplingTask?.cancel()
+        visualSamplingTask = nil
         stopCaptureGravityMonitoring()
         recorder.shutdown()
         isPreparingCamera = false
@@ -481,6 +594,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             guidanceEngine.stopMonitoring()
         }
         durationTask?.cancel()
+        visualSamplingTask?.cancel()
+        visualSamplingTask = nil
 
         Task {
             do {
@@ -820,6 +935,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
         }
+        visualSamplingTask?.cancel()
+        visualSamplingTask = nil
         recorder.suspendPreview()
         isPreparingCamera = false
         isPreviewLive = false
@@ -841,7 +958,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     #if canImport(UIKit)
     private func captureAcceptedFrameThumbnail() {
         guard isRecording else { return }
-        guard let image = recorder.captureSnapshotImage() else { return }
+        guard let image = previewBridge.captureSnapshotImage() else { return }
         let thumbnail = ObjectModeV2AcceptedFrameThumbnail(id: UUID(), image: image)
         acceptedFrameThumbnails.append(thumbnail)
         if acceptedFrameThumbnails.count > 8 {
@@ -888,6 +1005,27 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         batteryPercentageText = "\(max(1, Int(round(level * 100))))%"
     }
     #endif
+
+    private func startVisualSamplingLoop() {
+        visualSamplingTask?.cancel()
+        let recordingReferenceTime = CACurrentMediaTime()
+        visualSamplingTask = Task { [weak self] in
+            while let self, !Task.isCancelled, self.isRecording {
+                if let snapshot = self.previewBridge.captureSnapshotImage(),
+                   let sample = ObjectModeV2VisualSampleBuilder.makeSample(
+                        from: snapshot,
+                        timestamp: max(0, CACurrentMediaTime() - recordingReferenceTime)
+                   ) {
+                    self.guidanceEngine.processVisualSample(
+                        sample,
+                        targetZoneAnchor: self.targetZoneAnchor,
+                        targetZoneMode: self.targetZoneMode
+                    )
+                }
+                try? await Task.sleep(nanoseconds: 180_000_000)
+            }
+        }
+    }
 
     private func resolvedGuidanceText(for snapshot: ObjectModeV2GuidanceSnapshot) -> String {
         guard isTargetLocked else { return snapshot.hintText }
@@ -1141,7 +1279,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     #if canImport(UIKit)
     private func persistLatestThumbnail(for recordId: UUID) -> String? {
-        guard let image = acceptedFrameThumbnails.last?.image ?? recorder.captureSnapshotImage(),
+        guard let image = acceptedFrameThumbnails.last?.image ?? previewBridge.captureSnapshotImage(),
               let data = image.jpegData(compressionQuality: 0.82) else {
             return nil
         }
