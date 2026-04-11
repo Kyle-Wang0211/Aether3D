@@ -217,6 +217,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     @Published var isPreparingCamera = true
     @Published var isPreviewLive = false
     @Published var isCapturePrimed = false
+    @Published var isCaptureStarting = false
     @Published var cameraError: String?
     @Published var isRecording = false
     @Published var acceptedFrames = 0
@@ -272,6 +273,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private var previewStartTask: Task<Void, Never>?
     private var durationTask: Task<Void, Never>?
     private var visualSamplingTask: Task<Void, Never>?
+    private var captureActivationTask: Task<Void, Never>?
     private var activeRecordId: UUID?
     private var lastRemoteJobId: String?
     private var acceptedFrameTimestampsSec: [TimeInterval] = []
@@ -331,16 +333,32 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         recorder.onRecordingFirstFrame = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                guard self.isRecording else { return }
-                guard !self.hasStartedCaptureAuxiliaryPipelines else { return }
-                self.hasStartedCaptureAuxiliaryPipelines = true
-                self.startCaptureGravityMonitoring()
-                if self.guidanceEnabled {
-                    self.guidanceEngine.startMonitoring()
-                    self.guidanceEngine.beginRecording()
+                self.captureActivationTask?.cancel()
+                self.captureActivationTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard self.isCaptureStarting || self.isRecording else { return }
+
+                    self.isCaptureStarting = false
+                    if !self.isRecording {
+                        self.isRecording = true
+                        self.startDurationTicker()
+                        self.debugLog("recording didStart confirmed")
+                    }
+
+                    try? await Task.sleep(nanoseconds: 450_000_000)
+                    guard !Task.isCancelled else { return }
+                    guard self.isRecording else { return }
+                    guard !self.hasStartedCaptureAuxiliaryPipelines else { return }
+
+                    self.hasStartedCaptureAuxiliaryPipelines = true
+                    self.startCaptureGravityMonitoring()
+                    if self.guidanceEnabled {
+                        self.guidanceEngine.startMonitoring()
+                        self.guidanceEngine.beginRecording()
+                    }
+                    self.startVisualSamplingLoop()
+                    self.statusText = self.guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
                 }
-                self.startVisualSamplingLoop()
-                self.statusText = self.guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
             }
         }
         #if canImport(UIKit)
@@ -364,7 +382,13 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     var canStartCapture: Bool {
-        !isPreparingCamera && isPreviewLive && isCapturePrimed && cameraError == nil && !isRecording && !shouldShowProcessingOverlay
+        !isPreparingCamera
+        && isPreviewLive
+        && isCapturePrimed
+        && cameraError == nil
+        && !isCaptureStarting
+        && !isRecording
+        && !shouldShowProcessingOverlay
     }
 
     var minimumAcceptedFrames: Int {
@@ -403,6 +427,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         prepareTask = nil
         previewStartTask?.cancel()
         previewStartTask = nil
+        captureActivationTask?.cancel()
+        captureActivationTask = nil
         durationTask?.cancel()
         visualSamplingTask?.cancel()
         visualSamplingTask = nil
@@ -423,11 +449,14 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
         visualSamplingTask?.cancel()
         visualSamplingTask = nil
+        captureActivationTask?.cancel()
+        captureActivationTask = nil
         stopCaptureGravityMonitoring()
         recorder.shutdown()
         isPreparingCamera = false
         isPreviewLive = false
         isCapturePrimed = false
+        isCaptureStarting = false
         isProcessingOverlayPresented = false
         processingFailureReason = nil
     }
@@ -555,6 +584,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         localHQArtifactRelativePath = nil
         recordingSeconds = 0
         isPreviewLive = true
+        isCaptureStarting = true
+        isRecording = false
         acceptedFrames = 0
         orbitCompletion = 0
         stabilityScore = 1
@@ -571,11 +602,10 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
         do {
             try recorder.startRecording()
-            isRecording = true
             statusText = "正在启动录制…"
-            startDurationTicker()
             debugLog("startCapture succeeded")
         } catch {
+            isCaptureStarting = false
             stopCaptureGravityMonitoring()
             cameraError = error.localizedDescription
             statusText = "开始录制失败"
@@ -586,6 +616,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private func stopCaptureAndGenerate() {
         guard isRecording, acceptedFrameCountForGeneration >= minimumAcceptedFrameCount else { return }
         debugLog("stopCaptureAndGenerate acceptedFrames=\(acceptedFrames) acceptedTimestamps=\(acceptedFrameTimestampsSec.count)")
+        isCaptureStarting = false
         isRecording = false
         isProcessingOverlayPresented = true
         stopCaptureGravityMonitoring()
@@ -596,6 +627,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         durationTask?.cancel()
         visualSamplingTask?.cancel()
         visualSamplingTask = nil
+        captureActivationTask?.cancel()
+        captureActivationTask = nil
 
         Task {
             do {
