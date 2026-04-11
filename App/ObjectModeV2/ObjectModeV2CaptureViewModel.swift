@@ -101,6 +101,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     @Published var previewSession: AVCaptureSession?
     @Published var isPreparingCamera = true
     @Published var isPreviewLive = false
+    @Published var isCapturePrimed = false
     @Published var cameraError: String?
     @Published var isRecording = false
     @Published var acceptedFrames = 0
@@ -165,6 +166,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private var captureGravityUp: SIMD3<Float>?
     private var captureGravitySampleCount = 0
     private var captureGravityConfidence: Float = 0.0
+    private var hasStartedCaptureAuxiliaryPipelines = false
     private let maxTransientPollFailures = 30
 
     init() {
@@ -202,9 +204,34 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.isPreviewLive = true
+                self.isCapturePrimed = false
+                self.isPreparingCamera = true
+                self.cameraError = nil
+                self.statusText = "相机画面已连通，正在稳定预览…"
+            }
+        }
+        recorder.onPreviewReadyForCapture = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isPreviewLive = true
+                self.isCapturePrimed = true
                 self.isPreparingCamera = false
                 self.cameraError = nil
                 self.statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 mesh 成品。"
+            }
+        }
+        recorder.onRecordingFirstFrame = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.isRecording else { return }
+                guard !self.hasStartedCaptureAuxiliaryPipelines else { return }
+                self.hasStartedCaptureAuxiliaryPipelines = true
+                self.startCaptureGravityMonitoring()
+                if self.guidanceEnabled {
+                    self.guidanceEngine.startMonitoring()
+                    self.guidanceEngine.beginRecording()
+                }
+                self.statusText = self.guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
             }
         }
         #if canImport(UIKit)
@@ -228,7 +255,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     var canStartCapture: Bool {
-        !isPreparingCamera && isPreviewLive && cameraError == nil && !isRecording && !shouldShowProcessingOverlay
+        !isPreparingCamera && isPreviewLive && isCapturePrimed && cameraError == nil && !isRecording && !shouldShowProcessingOverlay
     }
 
     var minimumAcceptedFrames: Int {
@@ -287,6 +314,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         recorder.shutdown()
         isPreparingCamera = false
         isPreviewLive = false
+        isCapturePrimed = false
         isProcessingOverlayPresented = false
         processingFailureReason = nil
     }
@@ -343,6 +371,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             try await recorder.prepare()
             if Task.isCancelled { return }
             isPreviewLive = false
+            isCapturePrimed = false
             cameraError = nil
             statusText = "正在连接相机预览…"
             schedulePreviewStartIfNeeded()
@@ -379,6 +408,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 if Task.isCancelled { return }
                 await MainActor.run {
                     self.isPreviewLive = false
+                    self.isCapturePrimed = false
                     self.cameraError = nil
                     self.statusText = "相机预热中…"
                     self.previewStartTask = nil
@@ -417,6 +447,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         stabilityScore = 1
         acceptedFrameTimestampsSec = []
         resetCaptureGravityTracking()
+        hasStartedCaptureAuxiliaryPipelines = false
         guidanceText = isTargetLocked
             ? "对象已锁定，开始后围绕这个目标缓慢移动。"
             : "将物体放在画面中央，开始后沿着对象缓慢绕一圈。"
@@ -427,17 +458,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
         do {
             try recorder.startRecording()
-            startCaptureGravityMonitoring()
             isRecording = true
-            if guidanceEnabled {
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 350_000_000)
-                    guard let self, self.isRecording else { return }
-                    self.guidanceEngine.startMonitoring()
-                    self.guidanceEngine.beginRecording()
-                }
-            }
-            statusText = guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
+            statusText = "正在启动录制…"
             startDurationTicker()
             debugLog("startCapture succeeded")
         } catch {
@@ -801,6 +823,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         recorder.suspendPreview()
         isPreparingCamera = false
         isPreviewLive = false
+        isCapturePrimed = false
     }
 
     private func startDurationTicker() {

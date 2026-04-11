@@ -35,6 +35,8 @@ struct ObjectModeV2RecordedClip: Sendable {
 }
 
 final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
+    private let previewReadyMinimumFrames = 6
+    private let previewReadyMinimumDuration: CFTimeInterval = 0.35
     private let captureQueue = DispatchQueue(label: "com.aether3d.objectmodev2.capture")
     private let previewCaptureSession = AVCaptureSession()
     private let videoDataOutput = AVCaptureVideoDataOutput()
@@ -58,11 +60,17 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
     private var lastThumbnailCaptureAt: CFAbsoluteTime = 0
     private var lastVisualSampleAt: CFAbsoluteTime = 0
     private var hasDeliveredPreviewFrame = false
+    private var hasDeliveredRecordingFrame = false
+    private var hasSignaledPreviewReady = false
+    private var previewFrameCount = 0
+    private var previewFirstFrameAt: CFAbsoluteTime?
 
     private(set) var isPrepared = false
     private(set) var isRecording = false
     var onVisualFrameSample: ((ObjectModeV2VisualFrameSample) -> Void)?
     var onPreviewFirstFrame: (() -> Void)?
+    var onPreviewReadyForCapture: (() -> Void)?
+    var onRecordingFirstFrame: (() -> Void)?
 
     var previewSession: AVCaptureSession {
         previewCaptureSession
@@ -151,6 +159,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             writerInput = nil
             stopContinuation = nil
             isFinishing = false
+            hasDeliveredRecordingFrame = false
             isRecording = true
         }
     }
@@ -195,6 +204,10 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             self.lastThumbnailCaptureAt = 0
             self.lastVisualSampleAt = 0
             self.hasDeliveredPreviewFrame = false
+            self.hasDeliveredRecordingFrame = false
+            self.hasSignaledPreviewReady = false
+            self.previewFrameCount = 0
+            self.previewFirstFrameAt = nil
             self.didStartPreview = false
             if self.previewCaptureSession.isRunning {
                 self.previewCaptureSession.stopRunning()
@@ -207,6 +220,10 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             guard let self else { return }
             self.didStartPreview = false
             self.hasDeliveredPreviewFrame = false
+            self.hasDeliveredRecordingFrame = false
+            self.hasSignaledPreviewReady = false
+            self.previewFrameCount = 0
+            self.previewFirstFrameAt = nil
             if self.previewCaptureSession.isRunning {
                 self.previewCaptureSession.stopRunning()
             }
@@ -511,11 +528,34 @@ extension ObjectModeV2CaptureRecorder: AVCaptureVideoDataOutputSampleBufferDeleg
         from connection: AVCaptureConnection
     ) {
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        let now = CFAbsoluteTimeGetCurrent()
         if !hasDeliveredPreviewFrame {
             hasDeliveredPreviewFrame = true
+            previewFrameCount = 1
+            previewFirstFrameAt = now
             if let onPreviewFirstFrame {
                 DispatchQueue.main.async {
                     onPreviewFirstFrame()
+                }
+            }
+        } else if !hasSignaledPreviewReady {
+            previewFrameCount += 1
+            if let previewFirstFrameAt,
+               previewFrameCount >= previewReadyMinimumFrames,
+               now - previewFirstFrameAt >= previewReadyMinimumDuration {
+                hasSignaledPreviewReady = true
+                if let onPreviewReadyForCapture {
+                    DispatchQueue.main.async {
+                        onPreviewReadyForCapture()
+                    }
+                }
+            }
+        }
+        if isRecording, !hasDeliveredRecordingFrame {
+            hasDeliveredRecordingFrame = true
+            if let onRecordingFirstFrame {
+                DispatchQueue.main.async {
+                    onRecordingFirstFrame()
                 }
             }
         }
