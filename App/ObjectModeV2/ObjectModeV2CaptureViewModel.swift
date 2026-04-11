@@ -167,6 +167,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private let maxTransientPollFailures = 30
 
     init() {
+        previewSession = recorder.previewSession
         guidanceEngine.onUpdate = { [weak self] snapshot in
             guard let self else { return }
             let previousAcceptedFrames = self.acceptedFrames
@@ -274,8 +275,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
         stopCaptureGravityMonitoring()
         recorder.shutdown()
-        previewSession = nil
-        hasPreviewSessionBound = false
         isPreparingCamera = false
         isProcessingOverlayPresented = false
         processingFailureReason = nil
@@ -325,15 +324,13 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     private func prepareCameraIfNeeded() async {
-        if previewSession != nil || !isPreparingCamera || !hasPreviewAttached {
+        if !isPreparingCamera || !hasPreviewAttached {
             return
         }
 
         do {
             try await recorder.prepare()
             if Task.isCancelled { return }
-            previewSession = recorder.previewSession
-            hasPreviewSessionBound = false
             cameraError = nil
             statusText = "正在连接相机预览…"
             schedulePreviewStartIfNeeded()
@@ -789,7 +786,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             guidanceEngine.stopMonitoring()
         }
         recorder.suspendPreview()
-        previewSession = nil
         isPreparingCamera = false
     }
 
