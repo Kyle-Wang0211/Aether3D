@@ -9,9 +9,7 @@ import UIKit
 final class ObjectModeV2PreviewBridge: ObservableObject {
     weak var previewView: PreviewView?
     var onPreviewAttached: (() -> Void)?
-    var onSessionBound: (() -> Void)?
     private var hasNotifiedPreviewAttachment = false
-    private var hasNotifiedSessionBinding = false
 
     func attach(_ previewView: PreviewView) {
         self.previewView = previewView
@@ -26,13 +24,6 @@ final class ObjectModeV2PreviewBridge: ObservableObject {
         hasNotifiedPreviewAttachment = true
         onPreviewAttached?()
     }
-
-    func notifySessionBound(session: AVCaptureSession?) {
-        guard session != nil else { return }
-        guard !hasNotifiedSessionBinding else { return }
-        hasNotifiedSessionBinding = true
-        onSessionBound?()
-    }
 }
 
 struct ObjectModeV2CameraPreview: UIViewRepresentable {
@@ -43,7 +34,6 @@ struct ObjectModeV2CameraPreview: UIViewRepresentable {
         let view = PreviewView()
         view.previewLayer.videoGravity = .resizeAspectFill
         view.previewLayer.session = session
-        bridge.notifySessionBound(session: session)
         view.onAttachedToWindow = { [weak bridge] in
             bridge?.notifyPreviewAttached()
         }
@@ -54,7 +44,6 @@ struct ObjectModeV2CameraPreview: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewView, context: Context) {
         if uiView.previewLayer.session !== session {
             uiView.previewLayer.session = session
-            bridge.notifySessionBound(session: session)
         }
         uiView.onAttachedToWindow = { [weak bridge] in
             bridge?.notifyPreviewAttached()

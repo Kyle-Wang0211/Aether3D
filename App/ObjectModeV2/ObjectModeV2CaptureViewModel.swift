@@ -270,9 +270,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     #endif
 
     private var hasPreviewAttached = false
-    private var hasPreviewSessionBound = false
     private var prepareTask: Task<Void, Never>?
-    private var previewStartTask: Task<Void, Never>?
     private var durationTask: Task<Void, Never>?
     private var visualSamplingTask: Task<Void, Never>?
     private var captureActivationTask: Task<Void, Never>?
@@ -374,12 +372,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 self?.schedulePrepareIfNeeded()
             }
         }
-        previewBridge.onSessionBound = { [weak self] in
-            Task { @MainActor in
-                self?.hasPreviewSessionBound = true
-                self?.schedulePreviewStartIfNeeded()
-            }
-        }
         #endif
     }
 
@@ -431,8 +423,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         debugLog("onDisappear isRunning=\(isRunning) overlay=\(isProcessingOverlayPresented) jobId=\(lastRemoteJobId ?? "nil")")
         prepareTask?.cancel()
         prepareTask = nil
-        previewStartTask?.cancel()
-        previewStartTask = nil
         captureActivationTask?.cancel()
         captureActivationTask = nil
         acceptedFrameFallbackTask?.cancel()
@@ -522,11 +512,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         do {
             try await recorder.prepare()
             if Task.isCancelled { return }
-            isPreviewLive = false
-            isCapturePrimed = false
             cameraError = nil
-            statusText = "正在连接相机预览…"
-            schedulePreviewStartIfNeeded()
+            statusText = "相机预热中…"
         } catch {
             if Task.isCancelled { return }
             cameraError = error.localizedDescription
@@ -543,36 +530,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             await self.prepareCameraIfNeeded()
             await MainActor.run {
                 self.prepareTask = nil
-            }
-        }
-    }
-
-    private func schedulePreviewStartIfNeeded() {
-        guard hasPreviewAttached else { return }
-        guard hasPreviewSessionBound else { return }
-        guard previewSession != nil else { return }
-        guard previewStartTask == nil else { return }
-        guard isPreparingCamera else { return }
-        previewStartTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.recorder.startPreviewIfNeeded()
-                if Task.isCancelled { return }
-                await MainActor.run {
-                    self.isPreviewLive = false
-                    self.isCapturePrimed = false
-                    self.cameraError = nil
-                    self.statusText = "相机预热中…"
-                    self.previewStartTask = nil
-                }
-            } catch {
-                if Task.isCancelled { return }
-                await MainActor.run {
-                    self.cameraError = error.localizedDescription
-                    self.isPreparingCamera = false
-                    self.statusText = "相机预览启动失败"
-                    self.previewStartTask = nil
-                }
             }
         }
     }
