@@ -100,6 +100,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private let store = ScanRecordStore()
     @Published var previewSession: AVCaptureSession?
     @Published var isPreparingCamera = true
+    @Published var isPreviewLive = false
     @Published var cameraError: String?
     @Published var isRecording = false
     @Published var acceptedFrames = 0
@@ -197,6 +198,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 targetZoneMode: self.targetZoneMode
             )
         }
+        recorder.onPreviewFirstFrame = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isPreviewLive = true
+                self.isPreparingCamera = false
+                self.cameraError = nil
+                self.statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 mesh 成品。"
+            }
+        }
         #if canImport(UIKit)
         previewBridge.onPreviewAttached = { [weak self] in
             Task { @MainActor in
@@ -218,7 +228,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     var canStartCapture: Bool {
-        !isPreparingCamera && cameraError == nil && !isRecording && !shouldShowProcessingOverlay
+        !isPreparingCamera && isPreviewLive && cameraError == nil && !isRecording && !shouldShowProcessingOverlay
     }
 
     var minimumAcceptedFrames: Int {
@@ -276,6 +286,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         stopCaptureGravityMonitoring()
         recorder.shutdown()
         isPreparingCamera = false
+        isPreviewLive = false
         isProcessingOverlayPresented = false
         processingFailureReason = nil
     }
@@ -331,6 +342,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         do {
             try await recorder.prepare()
             if Task.isCancelled { return }
+            isPreviewLive = false
             cameraError = nil
             statusText = "正在连接相机预览…"
             schedulePreviewStartIfNeeded()
@@ -366,9 +378,9 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 try await self.recorder.startPreviewIfNeeded()
                 if Task.isCancelled { return }
                 await MainActor.run {
-                    self.isPreparingCamera = false
+                    self.isPreviewLive = false
                     self.cameraError = nil
-                    self.statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 mesh 成品。"
+                    self.statusText = "相机预热中…"
                     self.previewStartTask = nil
                 }
             } catch {
@@ -399,6 +411,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         localComparisonMetricsRelativePath = nil
         localHQArtifactRelativePath = nil
         recordingSeconds = 0
+        isPreviewLive = true
         acceptedFrames = 0
         orbitCompletion = 0
         stabilityScore = 1
@@ -787,6 +800,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
         recorder.suspendPreview()
         isPreparingCamera = false
+        isPreviewLive = false
     }
 
     private func startDurationTicker() {

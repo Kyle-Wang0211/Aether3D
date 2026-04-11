@@ -57,10 +57,12 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
     private var latestThumbnailImage: UIImage?
     private var lastThumbnailCaptureAt: CFAbsoluteTime = 0
     private var lastVisualSampleAt: CFAbsoluteTime = 0
+    private var hasDeliveredPreviewFrame = false
 
     private(set) var isPrepared = false
     private(set) var isRecording = false
     var onVisualFrameSample: ((ObjectModeV2VisualFrameSample) -> Void)?
+    var onPreviewFirstFrame: (() -> Void)?
 
     var previewSession: AVCaptureSession {
         previewCaptureSession
@@ -192,6 +194,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             self.latestThumbnailImage = nil
             self.lastThumbnailCaptureAt = 0
             self.lastVisualSampleAt = 0
+            self.hasDeliveredPreviewFrame = false
             self.didStartPreview = false
             if self.previewCaptureSession.isRunning {
                 self.previewCaptureSession.stopRunning()
@@ -203,6 +206,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
         captureQueue.async { [weak self] in
             guard let self else { return }
             self.didStartPreview = false
+            self.hasDeliveredPreviewFrame = false
             if self.previewCaptureSession.isRunning {
                 self.previewCaptureSession.stopRunning()
             }
@@ -507,6 +511,14 @@ extension ObjectModeV2CaptureRecorder: AVCaptureVideoDataOutputSampleBufferDeleg
         from connection: AVCaptureConnection
     ) {
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        if !hasDeliveredPreviewFrame {
+            hasDeliveredPreviewFrame = true
+            if let onPreviewFirstFrame {
+                DispatchQueue.main.async {
+                    onPreviewFirstFrame()
+                }
+            }
+        }
         refreshLatestThumbnail(from: sampleBuffer)
         emitVisualFrameSample(from: sampleBuffer)
         guard isRecording || stopContinuation != nil else { return }
