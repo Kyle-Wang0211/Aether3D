@@ -58,6 +58,11 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         case objectModeRecording
     }
 
+    private enum RecordingStartMode {
+        case gated
+        case ungated
+    }
+
     private struct CachedFormatSelection {
         let width: Int32
         let height: Int32
@@ -67,6 +72,8 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
 
     private static let formatCacheQueue = DispatchQueue(label: "com.aether3d.camera.format-cache")
     nonisolated(unsafe) private static var cachedFormatSelectionByDeviceID: [String: CachedFormatSelection] = [:]
+    private let recordingStartRetryDelay: TimeInterval = 0.08
+    private let recordingStartRetryAttempts = 18
 
     let captureSession: AVCaptureSession
     private(set) var selectedConfig: SelectedCaptureConfig?
@@ -143,15 +150,14 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
             try rebuildSessionGraph(for: device)
         }
 
-        if captureSession.canSetSessionPreset(.inputPriority) {
-            captureSession.sessionPreset = .inputPriority
-        }
-
         switch profile {
         case .defaultRecording:
+            if captureSession.canSetSessionPreset(.inputPriority) {
+                captureSession.sessionPreset = .inputPriority
+            }
             try applyFullQualityFormatSelection(to: device)
         case .objectModeRecording:
-            try applyObjectModeRecordingCompatibleSelection(to: device)
+            try applyObjectModeRecordingStablePreset(to: device)
         }
 
         // Verify no audio input
@@ -198,35 +204,44 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         )
     }
 
-    private func applyObjectModeRecordingCompatibleSelection(to device: AVCaptureDevice) throws {
-        let selectedFormat = try selectObjectModeRecordingFormat(device: device)
+    private func applyObjectModeRecordingStablePreset(to device: AVCaptureDevice) throws {
+        let preset: AVCaptureSession.Preset
+        let dimensions: CMVideoDimensions
+        let tier: ResolutionTier
 
-        try device.lockForConfiguration()
-        defer { device.unlockForConfiguration() }
+        if captureSession.canSetSessionPreset(.hd1920x1080) {
+            preset = .hd1920x1080
+            dimensions = CMVideoDimensions(width: 1920, height: 1080)
+            tier = .t1080p
+        } else if captureSession.canSetSessionPreset(.high) {
+            preset = .high
+            let fallbackDims = device.activeFormat.formatDescription.dimensions
+            dimensions = fallbackDims.width > 0 && fallbackDims.height > 0
+                ? fallbackDims
+                : CMVideoDimensions(width: 1280, height: 720)
+            tier = determineTier(width: Int(dimensions.width), height: Int(dimensions.height))
+        } else {
+            throw RecordingError.configurationFailed(.formatSelectionFailed)
+        }
 
-        device.activeFormat = selectedFormat.format
-        device.activeVideoMinFrameDuration = selectedFormat.frameDuration
+        captureSession.sessionPreset = preset
 
-        let codec: VideoCodec = selectedFormat.format.isVideoCodecSupported(.hevc) ? .hevc : .h264
-        let dimensions = selectedFormat.format.formatDescription.dimensions
-        let tier = determineTier(width: Int(dimensions.width), height: Int(dimensions.height))
-
+        let codec: VideoCodec = device.activeFormat.isVideoCodecSupported(.hevc) ? .hevc : .h264
         selectedConfig = SelectedCaptureConfig(
             dimensions: VideoDimensions(width: Int(dimensions.width), height: Int(dimensions.height)),
             tier: tier,
-            frameRate: selectedFormat.targetFps,
-            hdrCapable: selectedFormat.format.isVideoHDRSupported,
+            frameRate: 30.0,
+            hdrCapable: false,
             isVirtualDevice: device.isVirtualDevice,
-            formatScore: selectedFormat.score,
+            formatScore: Int64(max(dimensions.width, dimensions.height)),
             codec: codec
         )
 
         os_log(
-            "[ObjectModeV2] recording_safe_format width=%d height=%d fps=%.2f hdr=%{public}@",
+            "[ObjectModeV2] recording_safe_preset preset=%{public}@ width=%d height=%d fps=30.00 hdr=false",
+            preset.rawValue,
             dimensions.width,
-            dimensions.height,
-            selectedFormat.targetFps,
-            selectedFormat.format.isVideoHDRSupported ? "true" : "false"
+            dimensions.height
         )
     }
 
@@ -373,55 +388,6 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         throw RecordingError.configurationFailed(.formatSelectionFailed)
     }
 
-    private func selectObjectModeRecordingFormat(device: AVCaptureDevice) throws -> FormatCandidate {
-        let preferredFpsOrder: [Double] = [30, 29.97, 24, 25, 60, 59.94]
-        var candidates: [FormatCandidate] = []
-
-        for format in device.formats {
-            let dimensions = format.formatDescription.dimensions
-            let width = Int(dimensions.width)
-            let height = Int(dimensions.height)
-            let maxDim = max(width, height)
-
-            guard maxDim >= 1920 else { continue }
-            guard maxDim <= 3840 else { continue }
-            guard !format.videoSupportedFrameRateRanges.isEmpty else { continue }
-
-            for fps in preferredFpsOrder {
-                let supportsFps = format.videoSupportedFrameRateRanges.contains { range in
-                    fps >= range.minFrameRate && fps <= range.maxFrameRate
-                }
-                guard supportsFps else { continue }
-
-                let frameDuration = CMTime(value: 1, timescale: Int32(round(fps)))
-                var score = Int64(maxDim)
-                score -= Int64(abs(maxDim - 3840)) * 8
-                score -= Int64(abs(fps - 30.0) * 100)
-                if !format.isVideoHDRSupported {
-                    score += 50_000
-                }
-
-                candidates.append(
-                    FormatCandidate(
-                        format: format,
-                        frameDuration: frameDuration,
-                        targetFps: fps,
-                        score: score
-                    )
-                )
-            }
-        }
-
-        candidates.sort { $0.score > $1.score }
-
-        for candidate in candidates {
-            if validateFormat(device: device, candidate: candidate) {
-                return candidate
-            }
-        }
-
-        return try selectFormat(device: device)
-    }
     
     private func validateFormat(device: AVCaptureDevice, candidate: FormatCandidate) -> Bool {
         do {
@@ -567,44 +533,23 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
     
     func startRecording(to url: URL, delegate: AVCaptureFileOutputRecordingDelegate) {
         sessionQueue.async { [weak self] in
-            guard let self = self, let output = self.movieOutput else { return }
-            
-            // Set gates IMMEDIATELY before recording - this is the SINGLE SOURCE OF TRUTH
-            output.maxRecordedDuration = cmTime(seconds: CaptureRecordingConstants.maxDurationSeconds)
-            output.maxRecordedFileSize = CaptureRecordingConstants.maxBytes
-            
-            // Verify gates are set (CI-safe validation + production log)
-            // CI-HARDENED: No assert() - use log + validation instead
-            let durationMatches = abs(output.maxRecordedDuration.seconds - CaptureRecordingConstants.maxDurationSeconds) < 0.001
-            let sizeMatches = output.maxRecordedFileSize == CaptureRecordingConstants.maxBytes
-            
-            if !durationMatches {
-                os_log("[PR4] gate_misconfiguration: duration expected=%f actual=%f",
-                       CaptureRecordingConstants.maxDurationSeconds,
-                       output.maxRecordedDuration.seconds)
-            }
-            if !sizeMatches {
-                os_log("[PR4] gate_misconfiguration: size expected=%lld actual=%lld",
-                       CaptureRecordingConstants.maxBytes,
-                       output.maxRecordedFileSize)
-            }
-            
-            os_log("[PR4] gates_configured duration=%f size=%lld",
-                   output.maxRecordedDuration.seconds,
-                   output.maxRecordedFileSize)
-            
-            output.startRecording(to: url, recordingDelegate: delegate)
+            self?.startRecordingWhenReady(
+                to: url,
+                delegate: delegate,
+                mode: .gated,
+                remainingAttempts: self?.recordingStartRetryAttempts ?? 0
+            )
         }
     }
 
     func startRecordingWithoutGates(to url: URL, delegate: AVCaptureFileOutputRecordingDelegate) {
         sessionQueue.async { [weak self] in
-            guard let self = self, let output = self.movieOutput else { return }
-
-            output.maxRecordedDuration = .invalid
-            output.maxRecordedFileSize = 0
-            os_log("[PR4] object_mode_recording_without_gates")
-            output.startRecording(to: url, recordingDelegate: delegate)
+            self?.startRecordingWhenReady(
+                to: url,
+                delegate: delegate,
+                mode: .ungated,
+                remainingAttempts: self?.recordingStartRetryAttempts ?? 0
+            )
         }
     }
     
@@ -651,6 +596,93 @@ final class CameraSession: CameraSessionProtocol, @unchecked Sendable {
         if connection.isVideoRotationAngleSupported(angle) {
             connection.videoRotationAngle = angle
         }
+    }
+
+    private func startRecordingWhenReady(
+        to url: URL,
+        delegate: AVCaptureFileOutputRecordingDelegate,
+        mode: RecordingStartMode,
+        remainingAttempts: Int
+    ) {
+        guard let output = movieOutput else { return }
+
+        let readiness = recordingReadiness(for: output)
+        guard readiness.ready else {
+            if remainingAttempts > 0 {
+                os_log(
+                    "[ObjectModeV2] recording_not_ready running=%{public}@ connection=%{public}@ enabled=%{public}@ active=%{public}@ attempts_left=%d",
+                    readiness.isRunning.description,
+                    readiness.hasConnection.description,
+                    readiness.isEnabled.description,
+                    readiness.isActive.description,
+                    remainingAttempts
+                )
+                sessionQueue.asyncAfter(deadline: .now() + recordingStartRetryDelay) { [weak self] in
+                    self?.startRecordingWhenReady(
+                        to: url,
+                        delegate: delegate,
+                        mode: mode,
+                        remainingAttempts: remainingAttempts - 1
+                    )
+                }
+            } else {
+                os_log(
+                    "[ObjectModeV2] recording_force_start running=%{public}@ connection=%{public}@ enabled=%{public}@ active=%{public}@",
+                    readiness.isRunning.description,
+                    readiness.hasConnection.description,
+                    readiness.isEnabled.description,
+                    readiness.isActive.description
+                )
+                configureRecordingGates(output: output, mode: mode)
+                output.startRecording(to: url, recordingDelegate: delegate)
+            }
+            return
+        }
+
+        configureRecordingGates(output: output, mode: mode)
+        output.startRecording(to: url, recordingDelegate: delegate)
+    }
+
+    private func configureRecordingGates(output: AVCaptureMovieFileOutput, mode: RecordingStartMode) {
+        switch mode {
+        case .gated:
+            output.maxRecordedDuration = cmTime(seconds: CaptureRecordingConstants.maxDurationSeconds)
+            output.maxRecordedFileSize = CaptureRecordingConstants.maxBytes
+
+            let durationMatches = abs(output.maxRecordedDuration.seconds - CaptureRecordingConstants.maxDurationSeconds) < 0.001
+            let sizeMatches = output.maxRecordedFileSize == CaptureRecordingConstants.maxBytes
+
+            if !durationMatches {
+                os_log("[PR4] gate_misconfiguration: duration expected=%f actual=%f",
+                       CaptureRecordingConstants.maxDurationSeconds,
+                       output.maxRecordedDuration.seconds)
+            }
+            if !sizeMatches {
+                os_log("[PR4] gate_misconfiguration: size expected=%lld actual=%lld",
+                       CaptureRecordingConstants.maxBytes,
+                       output.maxRecordedFileSize)
+            }
+
+            os_log("[PR4] gates_configured duration=%f size=%lld",
+                   output.maxRecordedDuration.seconds,
+                   output.maxRecordedFileSize)
+        case .ungated:
+            output.maxRecordedDuration = .invalid
+            output.maxRecordedFileSize = 0
+            os_log("[PR4] object_mode_recording_without_gates")
+        }
+    }
+
+    private func recordingReadiness(for output: AVCaptureMovieFileOutput) -> (ready: Bool, isRunning: Bool, hasConnection: Bool, isEnabled: Bool, isActive: Bool) {
+        let isRunning = captureSession.isRunning
+        guard let connection = output.connection(with: .video) else {
+            return (false, isRunning, false, false, false)
+        }
+
+        let isEnabled = connection.isEnabled
+        let isActive = connection.isActive
+        let ready = isRunning && isEnabled && isActive
+        return (ready, isRunning, true, isEnabled, isActive)
     }
 
     private func rotationAngle(for orientation: UIInterfaceOrientation) -> Double {
