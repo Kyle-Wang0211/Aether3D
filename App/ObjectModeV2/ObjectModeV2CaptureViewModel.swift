@@ -210,6 +210,7 @@ private enum ObjectModeV2VisualSampleBuilder {
 final class ObjectModeV2CaptureViewModel: ObservableObject {
     private static let captureGravitySmoothing: Float = 0.15
     private static let captureGravityConfidenceSamples: Int = 30
+    private static let captureActivationDelayNs: UInt64 = 900_000_000
     private let guidanceEnabled = true
     private let usesPreviewSnapshotAnalysis = false
     private let minimumAcceptedFrameCount = 20
@@ -335,6 +336,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         recorder.onRecordingFirstFrame = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
+                guard self.usesPreviewSnapshotAnalysis else { return }
                 self.captureActivationTask?.cancel()
                 self.captureActivationTask = Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -611,6 +613,26 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         do {
             try recorder.startRecording()
             statusText = "正在启动录制…"
+            if !usesPreviewSnapshotAnalysis {
+                captureActivationTask?.cancel()
+                captureActivationTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    try? await Task.sleep(nanoseconds: Self.captureActivationDelayNs)
+                    guard !Task.isCancelled else { return }
+                    guard self.isCaptureStarting else { return }
+
+                    self.isCaptureStarting = false
+                    self.isRecording = true
+                    self.startDurationTicker()
+                    self.debugLog("recording activation confirmed (fallback timing)")
+
+                    guard !self.hasStartedCaptureAuxiliaryPipelines else { return }
+                    self.hasStartedCaptureAuxiliaryPipelines = true
+                    self.startCaptureGravityMonitoring()
+                    self.startAcceptedFrameFallbackLoop()
+                    self.statusText = "正在采集对象素材…"
+                }
+            }
             debugLog("startCapture succeeded")
         } catch {
             isCaptureStarting = false
