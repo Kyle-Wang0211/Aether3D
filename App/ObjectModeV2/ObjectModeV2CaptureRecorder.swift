@@ -36,11 +36,11 @@ struct ObjectModeV2RecordedClip: Sendable {
 final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
     private let previewReadyMinimumDuration: CFTimeInterval = 0.45
     private let captureQueue = DispatchQueue(label: "com.aether3d.objectmodev2.capture")
-    private let cameraSession: CameraSessionProtocol = CameraSession()
+    private let cameraSession: CameraSessionProtocol
+    private let interruptionHandler: InterruptionHandler
+    private let recordingController: RecordingController
 
     private var didStartPreview = false
-    private var recordingOutputURL: URL?
-    private var recordingStartedAt: Date?
     private var stopContinuation: CheckedContinuation<ObjectModeV2RecordedClip, Error>?
     private var pendingFinishResult: Result<ObjectModeV2RecordedClip, Error>?
     private var hasDeliveredPreviewFrame = false
@@ -55,6 +55,17 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
     var onRecordingFirstFrame: (() -> Void)?
 
     override init() {
+        let cameraSession = CameraSession()
+        self.cameraSession = cameraSession
+        self.interruptionHandler = InterruptionHandler(
+            session: cameraSession.captureSession,
+            onInterruptionBegan: { _ in },
+            onInterruptionEnded: {}
+        )
+        self.recordingController = RecordingController.make(
+            cameraSession: cameraSession,
+            interruptionHandler: interruptionHandler
+        )
         super.init()
         didStartRunningObserver = NotificationCenter.default.addObserver(
             forName: AVCaptureSession.didStartRunningNotification,
@@ -62,6 +73,19 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             queue: nil
         ) { [weak self] _ in
             self?.handleSessionDidStartRunning()
+        }
+        recordingController.onRecordingDidStart = { [weak self] in
+            self?.captureQueue.async { [weak self] in
+                guard let self else { return }
+                if let onRecordingFirstFrame {
+                    DispatchQueue.main.async {
+                        onRecordingFirstFrame()
+                    }
+                }
+            }
+        }
+        recordingController.onFinish = { [weak self] result in
+            self?.handleRecordingControllerFinish(result)
         }
     }
 
@@ -72,7 +96,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
     }
 
     var previewSession: AVCaptureSession {
-        cameraSession.captureSession
+        recordingController.captureSession
     }
 
     func prepare() async throws {
@@ -101,6 +125,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
 
         try await configureIfNeeded()
         isPrepared = true
+        interruptionHandler.startObserving()
     }
 
     func startPreviewIfNeeded() async throws {
@@ -144,16 +169,21 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             throw ObjectModeV2CaptureRecorderError.recordingFailed("相机仍在启动，请稍候再试。")
         }
 
-        let outputURL = try makeOutputURL()
         captureQueue.sync {
-            recordingOutputURL = outputURL
-            recordingStartedAt = Date()
             stopContinuation = nil
             pendingFinishResult = nil
             isRecording = true
         }
 
-        cameraSession.startRecording(to: outputURL, delegate: self)
+        if let error = recordingController.startRecording(
+            orientation: .portrait,
+            sessionStartMode: .useExistingRunningSession
+        ) {
+            captureQueue.sync {
+                isRecording = false
+            }
+            throw mapRecordingError(error)
+        }
     }
 
     func stopRecording() async throws -> ObjectModeV2RecordedClip {
@@ -185,7 +215,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
                 }
                 self.stopContinuation = continuation
                 self.isRecording = false
-                self.cameraSession.stopRecording()
+                self.recordingController.requestStop(reason: .userStopped)
             }
         }
     }
@@ -196,8 +226,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             self.isPrepared = false
             self.isRecording = false
             self.didStartPreview = false
-            self.recordingOutputURL = nil
-            self.recordingStartedAt = nil
             self.pendingFinishResult = nil
             self.previewReadyWorkItem?.cancel()
             self.previewReadyWorkItem = nil
@@ -207,6 +235,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             }
             self.hasDeliveredPreviewFrame = false
             self.hasSignaledPreviewReady = false
+            self.interruptionHandler.stopObserving()
             self.cameraSession.stopRunning()
         }
     }
@@ -250,24 +279,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
         }
     }
 
-    private func makeRecordedClip(from outputFileURL: URL) -> Result<ObjectModeV2RecordedClip, Error> {
-        let end = Date()
-        let duration = recordingStartedAt.map { end.timeIntervalSince($0) } ?? 0
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[.size] as? NSNumber)?.int64Value ?? 0
-
-        guard FileManager.default.fileExists(atPath: outputFileURL.path), fileSize > 0 else {
-            return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("录制文件未成功写出。"))
-        }
-
-        return .success(
-            ObjectModeV2RecordedClip(
-                fileURL: outputFileURL,
-                duration: duration,
-                fileSize: fileSize
-            )
-        )
-    }
-
     private func handleSessionDidStartRunning() {
         captureQueue.async { [weak self] in
             guard let self else { return }
@@ -298,59 +309,69 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             DispatchQueue.main.asyncAfter(deadline: .now() + self.previewReadyMinimumDuration, execute: workItem)
         }
     }
-}
 
-extension ObjectModeV2CaptureRecorder: AVCaptureFileOutputRecordingDelegate {
-    func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didStartRecordingTo fileURL: URL,
-        from connections: [AVCaptureConnection]
-    ) {
+    private func handleRecordingControllerFinish(_ result: Result<CaptureMetadata, RecordingError>) {
         captureQueue.async { [weak self] in
             guard let self else { return }
-            if self.recordingStartedAt == nil {
-                self.recordingStartedAt = Date()
-            }
-            if let onRecordingFirstFrame {
-                DispatchQueue.main.async {
-                    onRecordingFirstFrame()
-                }
-            }
-        }
-    }
-
-    func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didFinishRecordingTo outputFileURL: URL,
-        from connections: [AVCaptureConnection],
-        error: Error?
-    ) {
-        captureQueue.async { [weak self] in
-            guard let self else { return }
-
-            let result: Result<ObjectModeV2RecordedClip, Error>
-            if let error {
-                result = .failure(
-                    ObjectModeV2CaptureRecorderError.recordingFailed(error.localizedDescription)
-                )
-            } else {
-                result = self.makeRecordedClip(from: outputFileURL)
-            }
-
-            self.recordingOutputURL = nil
-            self.recordingStartedAt = nil
-
+            let mappedResult = self.mapRecordingFinish(result)
             if let continuation = self.stopContinuation {
                 self.stopContinuation = nil
-                switch result {
+                switch mappedResult {
                 case .success(let clip):
                     continuation.resume(returning: clip)
                 case .failure(let error):
                     continuation.resume(throwing: error)
                 }
             } else {
-                self.pendingFinishResult = result
+                self.pendingFinishResult = mappedResult
             }
+        }
+    }
+
+    private func mapRecordingFinish(_ result: Result<CaptureMetadata, RecordingError>) -> Result<ObjectModeV2RecordedClip, Error> {
+        switch result {
+        case .success(let metadata):
+            guard let fileURL = metadata.fileURL else {
+                return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("录制文件未成功写出。"))
+            }
+            let fileSize = metadata.fileSizeBytes ?? 0
+            guard FileManager.default.fileExists(atPath: fileURL.path), fileSize > 0 else {
+                return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("录制文件未成功写出。"))
+            }
+            return .success(
+                ObjectModeV2RecordedClip(
+                    fileURL: fileURL,
+                    duration: metadata.durationSeconds ?? metadata.rawDurationSeconds ?? 0,
+                    fileSize: fileSize
+                )
+            )
+        case .failure(let error):
+            return .failure(mapRecordingError(error))
+        }
+    }
+
+    private func mapRecordingError(_ error: RecordingError) -> ObjectModeV2CaptureRecorderError {
+        switch error {
+        case .permissionDenied:
+            return .permissionDenied
+        case .alreadyRecording:
+            return .alreadyRecording
+        case .tooShort(_, let actual):
+            return .recordingFailed("录制时间过短（\(String(format: "%.1f", actual)) 秒）。")
+        case .interrupted:
+            return .recordingFailed("录制被系统中断，请重试。")
+        case .configurationFailed(let code):
+            return .recordingFailed("相机配置失败：\(code.rawValue)")
+        case .finalizeFailed(let code):
+            return .recordingFailed("录制收尾失败：\(code.rawValue)")
+        case .unknownFailure(let code):
+            return .recordingFailed("录制失败：\(code.rawValue)")
+        case .fileTooLarge(_, _):
+            return .recordingFailed("录制文件过大。")
+        case .thermalNotAllowed:
+            return .recordingFailed("设备温度过高，暂时无法录制。")
+        case .insufficientStorage(_, _):
+            return .recordingFailed("存储空间不足。")
         }
     }
 }

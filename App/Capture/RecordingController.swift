@@ -107,6 +107,11 @@ enum RecordingState: Equatable {
     case failed(RecordingError)
 }
 
+enum RecordingSessionStartMode {
+    case configureAndStart
+    case useExistingRunningSession
+}
+
 final class RecordingController: NSObject, @unchecked Sendable {
     private let cameraSession: CameraSessionProtocol
     private let interruptionHandler: InterruptionHandler
@@ -131,6 +136,8 @@ final class RecordingController: NSObject, @unchecked Sendable {
     
     var onFinish: ((Result<CaptureMetadata, RecordingError>) -> Void)?
     var onStateChange: ((String) -> Void)?
+    var onRecordingDidStart: (() -> Void)?
+    var captureSession: AVCaptureSession { cameraSession.captureSession }
     
     fileprivate init(cameraSession: CameraSessionProtocol,
          interruptionHandler: InterruptionHandler,
@@ -173,8 +180,21 @@ final class RecordingController: NSObject, @unchecked Sendable {
             buildVersion: bundleInfo.buildVersion
         )
     }
+
+    static func make(
+        cameraSession: CameraSessionProtocol,
+        interruptionHandler: InterruptionHandler
+    ) -> RecordingController {
+        RecordingController(
+            cameraSession: cameraSession,
+            interruptionHandler: interruptionHandler
+        )
+    }
     
-    func startRecording(orientation: UIInterfaceOrientation = .portrait) -> RecordingError? {
+    func startRecording(
+        orientation: UIInterfaceOrientation = .portrait,
+        sessionStartMode: RecordingSessionStartMode = .configureAndStart
+    ) -> RecordingError? {
         guard case .idle = state else {
             return .alreadyRecording
         }
@@ -200,31 +220,36 @@ final class RecordingController: NSObject, @unchecked Sendable {
         // Add diagnostic
         addDiag(.startRequested, note: nil)
         
-        // Configure session
-        do {
-            try cameraSession.configure(orientation: orientation)
-            addDiag(.sessionConfigured, note: nil)
-            
-            // Add format selected diagnostic
-            if let config = cameraSession.selectedConfig {
-                addDiag(.formatSelected, note: .tierFpsCodec(
-                    tier: config.tier,
-                    fps: Int(round(config.frameRate)),
-                    codec: config.codec
-                ))
+        switch sessionStartMode {
+        case .configureAndStart:
+            do {
+                try cameraSession.configure(orientation: orientation)
+                addDiag(.sessionConfigured, note: nil)
+
+                if let config = cameraSession.selectedConfig {
+                    addDiag(.formatSelected, note: .tierFpsCodec(
+                        tier: config.tier,
+                        fps: Int(round(config.frameRate)),
+                        codec: config.codec
+                    ))
+                }
+            } catch {
+                if let recError = error as? RecordingError {
+                    state = .failed(recError)
+                    return recError
+                }
+                state = .failed(.configurationFailed(.formatSelectionFailed))
+                return .configurationFailed(.formatSelectionFailed)
             }
-        } catch {
-            if let recError = error as? RecordingError {
-                state = .failed(recError)
-                return recError
+
+            cameraSession.startRunning()
+        case .useExistingRunningSession:
+            guard cameraSession.selectedConfig != nil else {
+                state = .failed(.configurationFailed(.formatSelectionFailed))
+                return .configurationFailed(.formatSelectionFailed)
             }
-            state = .failed(.configurationFailed(.formatSelectionFailed))
-            return .configurationFailed(.formatSelectionFailed)
         }
-        
-        // Start session running
-        cameraSession.startRunning()
-        
+
         // Generate tmp file URL
         let tmpDir = FileManager.default.temporaryDirectory
         let recordingIdStr = newRecordingId.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
@@ -355,6 +380,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
             
             // Transition to recording
             self.state = .recording
+            self.onRecordingDidStart?()
             
             // Start file size polling
             if let tmpURL = self.currentTmpFileURL {
