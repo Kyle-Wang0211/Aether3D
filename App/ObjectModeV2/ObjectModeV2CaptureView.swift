@@ -1224,7 +1224,7 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var captureHUDActive: Bool {
-        viewModel.isCaptureStarting || viewModel.isRecording
+        viewModel.isRecording
     }
 
     private var processingCardTitle: String {

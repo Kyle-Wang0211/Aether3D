@@ -210,16 +210,11 @@ private enum ObjectModeV2VisualSampleBuilder {
 final class ObjectModeV2CaptureViewModel: ObservableObject {
     private static let captureGravitySmoothing: Float = 0.15
     private static let captureGravityConfidenceSamples: Int = 30
-    private static let captureActivationDelayNs: UInt64 = 900_000_000
     private let guidanceEnabled = true
-    private let usesPreviewSnapshotAnalysis = false
     private let minimumAcceptedFrameCount = 20
     private let store = ScanRecordStore()
     @Published var previewSession: AVCaptureSession?
     @Published var isPreparingCamera = true
-    @Published var isPreviewLive = false
-    @Published var isCapturePrimed = false
-    @Published var isCaptureStarting = false
     @Published var cameraError: String?
     @Published var isRecording = false
     @Published var acceptedFrames = 0
@@ -272,9 +267,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private var hasPreviewAttached = false
     private var prepareTask: Task<Void, Never>?
     private var durationTask: Task<Void, Never>?
-    private var visualSamplingTask: Task<Void, Never>?
-    private var captureActivationTask: Task<Void, Never>?
-    private var acceptedFrameFallbackTask: Task<Void, Never>?
     private var activeRecordId: UUID?
     private var lastRemoteJobId: String?
     private var acceptedFrameTimestampsSec: [TimeInterval] = []
@@ -285,11 +277,9 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private var captureGravityUp: SIMD3<Float>?
     private var captureGravitySampleCount = 0
     private var captureGravityConfidence: Float = 0.0
-    private var hasStartedCaptureAuxiliaryPipelines = false
     private let maxTransientPollFailures = 30
 
     init() {
-        previewSession = recorder.previewSession
         guidanceEngine.onUpdate = { [weak self] snapshot in
             guard let self else { return }
             let previousAcceptedFrames = self.acceptedFrames
@@ -311,59 +301,13 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             }
             #endif
         }
-        recorder.onPreviewFirstFrame = { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                self.isPreviewLive = true
-                self.isCapturePrimed = false
-                self.isPreparingCamera = true
-                self.cameraError = nil
-                self.statusText = "相机画面已连通，正在稳定预览…"
-            }
-        }
-        recorder.onPreviewReadyForCapture = { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                self.isPreviewLive = true
-                self.isCapturePrimed = true
-                self.isPreparingCamera = false
-                self.cameraError = nil
-                self.statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 mesh 成品。"
-            }
-        }
-        recorder.onRecordingFirstFrame = { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.usesPreviewSnapshotAnalysis else { return }
-                self.captureActivationTask?.cancel()
-                self.captureActivationTask = Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    guard self.isCaptureStarting || self.isRecording else { return }
-
-                    self.isCaptureStarting = false
-                    if !self.isRecording {
-                        self.isRecording = true
-                        self.startDurationTicker()
-                        self.debugLog("recording didStart confirmed")
-                    }
-
-                    try? await Task.sleep(nanoseconds: 450_000_000)
-                    guard !Task.isCancelled else { return }
-                    guard self.isRecording else { return }
-                    guard !self.hasStartedCaptureAuxiliaryPipelines else { return }
-
-                    self.hasStartedCaptureAuxiliaryPipelines = true
-                    self.startCaptureGravityMonitoring()
-                    if self.guidanceEnabled && self.usesPreviewSnapshotAnalysis {
-                        self.guidanceEngine.startMonitoring()
-                        self.guidanceEngine.beginRecording()
-                        self.startVisualSamplingLoop()
-                    } else {
-                        self.startAcceptedFrameFallbackLoop()
-                    }
-                    self.statusText = "正在采集对象素材…"
-                }
-            }
+        recorder.onVisualFrameSample = { [weak self] sample in
+            guard let self else { return }
+            self.guidanceEngine.processVisualSample(
+                sample,
+                targetZoneAnchor: self.targetZoneAnchor,
+                targetZoneMode: self.targetZoneMode
+            )
         }
         #if canImport(UIKit)
         previewBridge.onPreviewAttached = { [weak self] in
@@ -381,10 +325,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     var canStartCapture: Bool {
         !isPreparingCamera
-        && isPreviewLive
-        && isCapturePrimed
         && cameraError == nil
-        && !isCaptureStarting
         && !isRecording
         && !shouldShowProcessingOverlay
     }
@@ -423,13 +364,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         debugLog("onDisappear isRunning=\(isRunning) overlay=\(isProcessingOverlayPresented) jobId=\(lastRemoteJobId ?? "nil")")
         prepareTask?.cancel()
         prepareTask = nil
-        captureActivationTask?.cancel()
-        captureActivationTask = nil
-        acceptedFrameFallbackTask?.cancel()
-        acceptedFrameFallbackTask = nil
         durationTask?.cancel()
-        visualSamplingTask?.cancel()
-        visualSamplingTask = nil
         stopCaptureGravityMonitoring()
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
@@ -445,18 +380,10 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
         }
-        visualSamplingTask?.cancel()
-        visualSamplingTask = nil
-        captureActivationTask?.cancel()
-        captureActivationTask = nil
-        acceptedFrameFallbackTask?.cancel()
-        acceptedFrameFallbackTask = nil
         stopCaptureGravityMonitoring()
         recorder.shutdown()
+        previewSession = nil
         isPreparingCamera = false
-        isPreviewLive = false
-        isCapturePrimed = false
-        isCaptureStarting = false
         isProcessingOverlayPresented = false
         processingFailureReason = nil
     }
@@ -505,15 +432,17 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     private func prepareCameraIfNeeded() async {
-        if !isPreparingCamera || !hasPreviewAttached {
+        if previewSession != nil || !isPreparingCamera || !hasPreviewAttached {
             return
         }
 
         do {
             try await recorder.prepare()
             if Task.isCancelled { return }
+            previewSession = recorder.previewSession
+            isPreparingCamera = false
             cameraError = nil
-            statusText = "相机预热中…"
+            statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 mesh 成品。"
         } catch {
             if Task.isCancelled { return }
             cameraError = error.localizedDescription
@@ -550,15 +479,11 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         localComparisonMetricsRelativePath = nil
         localHQArtifactRelativePath = nil
         recordingSeconds = 0
-        isPreviewLive = true
-        isCaptureStarting = true
-        isRecording = false
         acceptedFrames = 0
         orbitCompletion = 0
         stabilityScore = 1
         acceptedFrameTimestampsSec = []
         resetCaptureGravityTracking()
-        hasStartedCaptureAuxiliaryPipelines = false
         guidanceText = isTargetLocked
             ? "对象已锁定，开始后围绕这个目标缓慢移动。"
             : "将物体放在画面中央，开始后沿着对象缓慢绕一圈。"
@@ -569,30 +494,22 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
         do {
             try recorder.startRecording()
-            statusText = "正在启动录制…"
-            if !usesPreviewSnapshotAnalysis {
-                captureActivationTask?.cancel()
-                captureActivationTask = Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    try? await Task.sleep(nanoseconds: Self.captureActivationDelayNs)
-                    guard !Task.isCancelled else { return }
-                    guard self.isCaptureStarting else { return }
-
-                    self.isCaptureStarting = false
-                    self.isRecording = true
-                    self.startDurationTicker()
-                    self.debugLog("recording activation confirmed (fallback timing)")
-
-                    guard !self.hasStartedCaptureAuxiliaryPipelines else { return }
-                    self.hasStartedCaptureAuxiliaryPipelines = true
+            isRecording = true
+            if guidanceEnabled {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    guard let self, self.isRecording else { return }
                     self.startCaptureGravityMonitoring()
-                    self.startAcceptedFrameFallbackLoop()
-                    self.statusText = "正在采集对象素材…"
+                    self.guidanceEngine.startMonitoring()
+                    self.guidanceEngine.beginRecording()
                 }
+            } else {
+                startCaptureGravityMonitoring()
             }
+            statusText = guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
+            startDurationTicker()
             debugLog("startCapture succeeded")
         } catch {
-            isCaptureStarting = false
             stopCaptureGravityMonitoring()
             cameraError = error.localizedDescription
             statusText = "开始录制失败"
@@ -603,7 +520,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private func stopCaptureAndGenerate() {
         guard isRecording, acceptedFrameCountForGeneration >= minimumAcceptedFrameCount else { return }
         debugLog("stopCaptureAndGenerate acceptedFrames=\(acceptedFrames) acceptedTimestamps=\(acceptedFrameTimestampsSec.count)")
-        isCaptureStarting = false
         isRecording = false
         isProcessingOverlayPresented = true
         stopCaptureGravityMonitoring()
@@ -612,12 +528,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             guidanceEngine.stopMonitoring()
         }
         durationTask?.cancel()
-        visualSamplingTask?.cancel()
-        visualSamplingTask = nil
-        captureActivationTask?.cancel()
-        captureActivationTask = nil
-        acceptedFrameFallbackTask?.cancel()
-        acceptedFrameFallbackTask = nil
 
         Task {
             do {
@@ -957,14 +867,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
         }
-        visualSamplingTask?.cancel()
-        visualSamplingTask = nil
-        acceptedFrameFallbackTask?.cancel()
-        acceptedFrameFallbackTask = nil
         recorder.suspendPreview()
         isPreparingCamera = false
-        isPreviewLive = false
-        isCapturePrimed = false
     }
 
     private func startDurationTicker() {
@@ -981,9 +885,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     #if canImport(UIKit)
     private func captureAcceptedFrameThumbnail() {
-        guard usesPreviewSnapshotAnalysis else { return }
         guard isRecording else { return }
-        guard let image = previewBridge.captureSnapshotImage() else { return }
+        guard let image = recorder.captureSnapshotImage() else { return }
         let thumbnail = ObjectModeV2AcceptedFrameThumbnail(id: UUID(), image: image)
         acceptedFrameThumbnails.append(thumbnail)
         if acceptedFrameThumbnails.count > 8 {
@@ -1030,58 +933,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         batteryPercentageText = "\(max(1, Int(round(level * 100))))%"
     }
     #endif
-
-    private func startVisualSamplingLoop() {
-        guard usesPreviewSnapshotAnalysis else { return }
-        visualSamplingTask?.cancel()
-        let recordingReferenceTime = CACurrentMediaTime()
-        visualSamplingTask = Task { [weak self] in
-            while let self, !Task.isCancelled, self.isRecording {
-                if let snapshot = self.previewBridge.captureSnapshotImage(),
-                   let sample = ObjectModeV2VisualSampleBuilder.makeSample(
-                        from: snapshot,
-                        timestamp: max(0, CACurrentMediaTime() - recordingReferenceTime)
-                   ) {
-                    self.guidanceEngine.processVisualSample(
-                        sample,
-                        targetZoneAnchor: self.targetZoneAnchor,
-                        targetZoneMode: self.targetZoneMode
-                    )
-                }
-                try? await Task.sleep(nanoseconds: 180_000_000)
-            }
-        }
-    }
-
-    private func startAcceptedFrameFallbackLoop() {
-        acceptedFrameFallbackTask?.cancel()
-        let recordingReferenceTime = CACurrentMediaTime()
-        acceptedFrameFallbackTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled, self.isRecording {
-                try? await Task.sleep(nanoseconds: 380_000_000)
-                guard !Task.isCancelled else { return }
-                guard self.isRecording else { return }
-
-                let nextAcceptedFrames = min(self.acceptedFrames + 1, 150)
-                guard nextAcceptedFrames > self.acceptedFrames else { continue }
-
-                self.acceptedFrames = nextAcceptedFrames
-                self.orbitCompletion = max(self.orbitCompletion, min(Double(nextAcceptedFrames) / 24.0, 1.0))
-                self.stabilityScore = max(self.stabilityScore, 0.85)
-                self.acceptedFrameTimestampsSec.append(max(0, CACurrentMediaTime() - recordingReferenceTime))
-                if self.acceptedFrameTimestampsSec.count > 150 {
-                    self.acceptedFrameTimestampsSec.removeFirst(self.acceptedFrameTimestampsSec.count - 150)
-                }
-
-                if nextAcceptedFrames < self.minimumAcceptedFrameCount {
-                    self.guidanceText = "正在稳定采集素材，请继续保持录制。"
-                } else {
-                    self.guidanceText = "素材已足够生成默认成品，可以结束，也可以继续补拍。"
-                }
-            }
-        }
-    }
 
     private func resolvedGuidanceText(for snapshot: ObjectModeV2GuidanceSnapshot) -> String {
         guard isTargetLocked else { return snapshot.hintText }
@@ -1134,7 +985,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "target_zone_mode": ObjectModeV2TargetZoneMode.subject.rawValue,
             "client_live_accepted_frames": "\(acceptedFrames)",
             "client_live_accepted_timestamps_ms": acceptedTimestampsMs,
-            "client_live_selection_source": usesPreviewSnapshotAnalysis ? "visual_realtime" : "time_fallback",
+            "client_live_selection_source": "visual_realtime",
             "client_live_orbit_completion": String(format: "%.4f", orbitCompletion),
             "visual_gate_version": "v1_visual_curated",
             "visual_blur_threshold_laplacian": String(format: "%.1f", FrameQualityConstants.blurThresholdLaplacian),

@@ -35,11 +35,12 @@ struct ObjectModeV2RecordedClip: Sendable {
 }
 
 final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
-    private let previewReadyMinimumDuration: CFTimeInterval = 0.45
     private let captureQueue = DispatchQueue(label: "com.aether3d.objectmodev2.capture")
     private let previewCaptureSession = AVCaptureSession()
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let thumbnailContext = CIContext(options: nil)
+    private let visualSignatureWidth = 32
+    private let visualSignatureHeight = 32
 
     private var videoInput: AVCaptureDeviceInput?
     private var isConfigured = false
@@ -56,21 +57,21 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
 
     private var latestThumbnailImage: UIImage?
     private var lastThumbnailCaptureAt: CFAbsoluteTime = 0
-
-    private var hasDeliveredPreviewFrame = false
-    private var hasSignaledPreviewReady = false
-    private var hasDeliveredRecordingFrame = false
-    private var previewReadyWorkItem: DispatchWorkItem?
+    private var lastVisualSampleAt: CFAbsoluteTime = 0
 
     private(set) var isPrepared = false
     private(set) var isRecording = false
 
-    var onPreviewFirstFrame: (() -> Void)?
-    var onPreviewReadyForCapture: (() -> Void)?
-    var onRecordingFirstFrame: (() -> Void)?
+    var onVisualFrameSample: ((ObjectModeV2VisualFrameSample) -> Void)?
 
     var previewSession: AVCaptureSession {
         previewCaptureSession
+    }
+
+    func captureSnapshotImage() -> UIImage? {
+        captureQueue.sync {
+            latestThumbnailImage
+        }
     }
 
     func prepare() async throws {
@@ -103,32 +104,14 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
         isPrepared = true
     }
 
-    func startPreviewIfNeeded() async throws {
+    func startRecording() throws {
         guard isPrepared else {
             throw ObjectModeV2CaptureRecorderError.notPrepared
         }
-
-        try await ensurePreviewRunning()
-    }
-
-    func startRecording() throws {
-        let readiness = captureQueue.sync { () -> (prepared: Bool, recording: Bool, previewStarted: Bool, previewReady: Bool, previewRunning: Bool) in
-            (
-                prepared: isPrepared,
-                recording: isRecording,
-                previewStarted: didStartPreview,
-                previewReady: hasSignaledPreviewReady,
-                previewRunning: previewCaptureSession.isRunning
-            )
-        }
-
-        guard readiness.prepared else {
-            throw ObjectModeV2CaptureRecorderError.notPrepared
-        }
-        guard !readiness.recording else {
+        guard !isRecording else {
             throw ObjectModeV2CaptureRecorderError.alreadyRecording
         }
-        guard readiness.previewStarted, readiness.previewReady, readiness.previewRunning else {
+        guard previewSession.isRunning else {
             throw ObjectModeV2CaptureRecorderError.recordingFailed("相机仍在启动，请稍候再试。")
         }
 
@@ -149,7 +132,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
             stopContinuation = nil
             isFinishing = false
             isRecording = true
-            hasDeliveredRecordingFrame = false
         }
     }
 
@@ -191,12 +173,8 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
             }
             self.latestThumbnailImage = nil
             self.lastThumbnailCaptureAt = 0
-            self.hasDeliveredPreviewFrame = false
-            self.hasSignaledPreviewReady = false
-            self.hasDeliveredRecordingFrame = false
+            self.lastVisualSampleAt = 0
             self.didStartPreview = false
-            self.previewReadyWorkItem?.cancel()
-            self.previewReadyWorkItem = nil
             if self.previewCaptureSession.isRunning {
                 self.previewCaptureSession.stopRunning()
             }
@@ -207,11 +185,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
         captureQueue.async { [weak self] in
             guard let self else { return }
             self.didStartPreview = false
-            self.hasDeliveredPreviewFrame = false
-            self.hasSignaledPreviewReady = false
-            self.hasDeliveredRecordingFrame = false
-            self.previewReadyWorkItem?.cancel()
-            self.previewReadyWorkItem = nil
             if self.previewCaptureSession.isRunning {
                 self.previewCaptureSession.stopRunning()
             }
@@ -252,11 +225,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
                     continuation.resume(throwing: ObjectModeV2CaptureRecorderError.recordingFailed("录制器已释放。"))
                     return
                 }
-
-                self.previewReadyWorkItem?.cancel()
-                self.previewReadyWorkItem = nil
-                self.hasDeliveredPreviewFrame = false
-                self.hasSignaledPreviewReady = false
 
                 if !self.previewCaptureSession.isRunning {
                     self.previewCaptureSession.startRunning()
@@ -305,46 +273,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
         Self.applyPortraitRotation(to: videoDataOutput.connection(with: .video))
 
         isConfigured = true
-    }
-
-    private func handleFirstPreviewFrameIfNeeded() {
-        guard didStartPreview else { return }
-        guard !hasDeliveredPreviewFrame else { return }
-
-        hasDeliveredPreviewFrame = true
-        if let onPreviewFirstFrame {
-            DispatchQueue.main.async {
-                onPreviewFirstFrame()
-            }
-        }
-
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.captureQueue.async { [weak self] in
-                guard let self else { return }
-                guard self.didStartPreview, self.hasDeliveredPreviewFrame, !self.hasSignaledPreviewReady else { return }
-                self.hasSignaledPreviewReady = true
-                if let onPreviewReadyForCapture {
-                    DispatchQueue.main.async {
-                        onPreviewReadyForCapture()
-                    }
-                }
-            }
-        }
-
-        previewReadyWorkItem?.cancel()
-        previewReadyWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + previewReadyMinimumDuration, execute: workItem)
-    }
-
-    private func handleFirstRecordingFrameIfNeeded() {
-        guard isRecording else { return }
-        guard !hasDeliveredRecordingFrame else { return }
-        hasDeliveredRecordingFrame = true
-        if let onRecordingFirstFrame {
-            DispatchQueue.main.async {
-                onRecordingFirstFrame()
-            }
-        }
     }
 
     private func configureWriterIfNeeded(from sampleBuffer: CMSampleBuffer) {
@@ -439,7 +367,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
         recordingStartSampleTimestamp = nil
         finishErrorMessage = nil
         isFinishing = false
-        hasDeliveredRecordingFrame = false
     }
 
     private static func applyPortraitRotation(to connection: AVCaptureConnection?) {
@@ -463,6 +390,116 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
         }
     }
 
+    private func emitVisualFrameSample(from sampleBuffer: CMSampleBuffer) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastVisualSampleAt >= 0.16 else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let presentationTimestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        let relativeTimestamp: TimeInterval
+        if recordingStartedAt != nil {
+            if let startTimestamp = recordingStartSampleTimestamp {
+                relativeTimestamp = max(0, presentationTimestamp - startTimestamp)
+            } else {
+                recordingStartSampleTimestamp = presentationTimestamp
+                relativeTimestamp = 0
+            }
+        } else {
+            relativeTimestamp = presentationTimestamp
+        }
+        guard let sample = makeVisualFrameSample(from: pixelBuffer, timestamp: relativeTimestamp) else { return }
+        lastVisualSampleAt = now
+
+        guard let onVisualFrameSample else { return }
+        DispatchQueue.main.async {
+            onVisualFrameSample(sample)
+        }
+    }
+
+    private func makeVisualFrameSample(
+        from pixelBuffer: CVPixelBuffer,
+        timestamp: TimeInterval
+    ) -> ObjectModeV2VisualFrameSample? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA,
+              let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            return nil
+        }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+
+        let signatureWidth = visualSignatureWidth
+        let signatureHeight = visualSignatureHeight
+        var signature = [UInt8](repeating: 0, count: signatureWidth * signatureHeight)
+        var luminanceSum = 0.0
+
+        for row in 0..<signatureHeight {
+            let sourceY = min((row * height) / signatureHeight, max(height - 1, 0))
+            for column in 0..<signatureWidth {
+                let sourceX = min((column * width) / signatureWidth, max(width - 1, 0))
+                let pixelOffset = sourceY * bytesPerRow + sourceX * 4
+                let blue = Double(buffer[pixelOffset])
+                let green = Double(buffer[pixelOffset + 1])
+                let red = Double(buffer[pixelOffset + 2])
+                let luminance = min(max(Int(round(red * 0.299 + green * 0.587 + blue * 0.114)), 0), 255)
+                signature[row * signatureWidth + column] = UInt8(luminance)
+                luminanceSum += Double(luminance)
+            }
+        }
+
+        let pixelCount = Double(signature.count)
+        guard pixelCount > 0 else { return nil }
+        let meanBrightness = luminanceSum / pixelCount
+
+        var varianceAccumulator = 0.0
+        for value in signature {
+            let delta = Double(value) - meanBrightness
+            varianceAccumulator += delta * delta
+        }
+        let globalVariance = varianceAccumulator / pixelCount
+
+        var laplacianMean = 0.0
+        var laplacianSquaredMean = 0.0
+        var laplacianCount = 0.0
+        if signatureWidth > 2, signatureHeight > 2 {
+            for row in 1..<(signatureHeight - 1) {
+                for column in 1..<(signatureWidth - 1) {
+                    let center = Double(signature[row * signatureWidth + column])
+                    let left = Double(signature[row * signatureWidth + (column - 1)])
+                    let right = Double(signature[row * signatureWidth + (column + 1)])
+                    let up = Double(signature[(row - 1) * signatureWidth + column])
+                    let down = Double(signature[(row + 1) * signatureWidth + column])
+                    let laplacian = left + right + up + down - 4.0 * center
+                    laplacianMean += laplacian
+                    laplacianSquaredMean += laplacian * laplacian
+                    laplacianCount += 1
+                }
+            }
+        }
+
+        let laplacianVariance: Double
+        if laplacianCount > 0 {
+            let mean = laplacianMean / laplacianCount
+            laplacianVariance = max(0, laplacianSquaredMean / laplacianCount - mean * mean)
+        } else {
+            laplacianVariance = 0
+        }
+
+        return ObjectModeV2VisualFrameSample(
+            timestamp: timestamp,
+            signatureWidth: signatureWidth,
+            signatureHeight: signatureHeight,
+            signature: Data(signature),
+            laplacianVariance: laplacianVariance,
+            meanBrightness: meanBrightness,
+            globalVariance: globalVariance
+        )
+    }
+
     func captureOutput(
         _ output: AVCaptureOutput,
         didOutput sampleBuffer: CMSampleBuffer,
@@ -471,12 +508,11 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
 
         refreshLatestThumbnail(from: sampleBuffer)
-        handleFirstPreviewFrameIfNeeded()
+        emitVisualFrameSample(from: sampleBuffer)
 
         guard isRecording || stopContinuation != nil else { return }
 
         if isRecording {
-            handleFirstRecordingFrameIfNeeded()
             configureWriterIfNeeded(from: sampleBuffer)
             guard finishErrorMessage == nil else {
                 isRecording = false
