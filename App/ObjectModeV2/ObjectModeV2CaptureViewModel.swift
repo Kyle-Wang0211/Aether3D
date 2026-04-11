@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 #if canImport(SwiftUI)
 import SwiftUI
@@ -8,6 +9,9 @@ import UIKit
 #endif
 #if canImport(AVFoundation)
 import AVFoundation
+#endif
+#if canImport(CoreMotion)
+import CoreMotion
 #endif
 
 enum ObjectModeV2StageUIState: Equatable {
@@ -89,6 +93,8 @@ struct ObjectModeV2AcceptedFrameThumbnail: Identifiable, Equatable {
 
 @MainActor
 final class ObjectModeV2CaptureViewModel: ObservableObject {
+    private static let captureGravitySmoothing: Float = 0.15
+    private static let captureGravityConfidenceSamples: Int = 30
     private let guidanceEnabled = true
     private let minimumAcceptedFrameCount = 20
     private let store = ScanRecordStore()
@@ -128,6 +134,16 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     private let recorder = ObjectModeV2CaptureRecorder()
     private let guidanceEngine = ObjectModeV2GuidanceEngine()
+    #if canImport(CoreMotion)
+    private let motionManager = CMMotionManager()
+    private let motionQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "com.aether3d.objectmodev2.gravity"
+        queue.qualityOfService = .utility
+        queue.maxConcurrentOperationCount = 1
+        return queue
+    }()
+    #endif
     #if canImport(UIKit)
     let previewBridge = ObjectModeV2PreviewBridge()
     private var batteryObserver: NSObjectProtocol?
@@ -143,6 +159,9 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private var localComparisonArtifactRelativePath: String?
     private var localComparisonMetricsRelativePath: String?
     private var localHQArtifactRelativePath: String?
+    private var captureGravityUp: SIMD3<Float>?
+    private var captureGravitySampleCount = 0
+    private var captureGravityConfidence: Float = 0.0
     private let maxTransientPollFailures = 30
 
     init() {
@@ -228,6 +247,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         prepareTask?.cancel()
         prepareTask = nil
         durationTask?.cancel()
+        stopCaptureGravityMonitoring()
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
         }
@@ -242,6 +262,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         if guidanceEnabled {
             guidanceEngine.stopMonitoring()
         }
+        stopCaptureGravityMonitoring()
         recorder.shutdown()
         previewSession = nil
         isPreparingCamera = false
@@ -344,6 +365,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         orbitCompletion = 0
         stabilityScore = 1
         acceptedFrameTimestampsSec = []
+        resetCaptureGravityTracking()
         guidanceText = isTargetLocked
             ? "对象已锁定，开始后围绕这个目标缓慢移动。"
             : "将物体放在画面中央，开始后沿着对象缓慢绕一圈。"
@@ -354,6 +376,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
         do {
             try recorder.startRecording()
+            startCaptureGravityMonitoring()
             isRecording = true
             if guidanceEnabled {
                 Task { @MainActor [weak self] in
@@ -367,6 +390,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             startDurationTicker()
             debugLog("startCapture succeeded")
         } catch {
+            stopCaptureGravityMonitoring()
             cameraError = error.localizedDescription
             statusText = "开始录制失败"
             debugLog("startCapture failed error=\(error.localizedDescription)")
@@ -378,6 +402,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         debugLog("stopCaptureAndGenerate acceptedFrames=\(acceptedFrames) acceptedTimestamps=\(acceptedFrameTimestampsSec.count)")
         isRecording = false
         isProcessingOverlayPresented = true
+        stopCaptureGravityMonitoring()
         if guidanceEnabled {
             guidanceEngine.endRecording()
             guidanceEngine.stopMonitoring()
@@ -854,6 +879,13 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             targetZoneAnchor: targetZoneAnchor,
             targetZoneMode: targetZoneMode
         ).forEach { profile[$0.key] = $0.value }
+        if let captureGravity = captureGravityMetadata() {
+            profile["capture_gravity_up_x"] = String(format: "%.6f", captureGravity.up.x)
+            profile["capture_gravity_up_y"] = String(format: "%.6f", captureGravity.up.y)
+            profile["capture_gravity_up_z"] = String(format: "%.6f", captureGravity.up.z)
+            profile["capture_gravity_source"] = captureGravity.source
+            profile["capture_gravity_confidence"] = String(format: "%.4f", captureGravity.confidence)
+        }
         return profile
     }
 
@@ -967,6 +999,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
         let relativeSourcePath = "imports/\(persistedSourceURL.lastPathComponent)"
 
+        let captureGravity = captureGravityMetadata()
+
         if store.record(id: recordId) == nil {
             let thumbnailPath = persistLatestThumbnail(for: recordId)
             let record = ScanRecord(
@@ -989,7 +1023,12 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     stageKey: "preparing",
                     detail: "capture_saved",
                     remoteJobId: nil
-                )
+                ),
+                captureGravityUpX: captureGravity?.up.x,
+                captureGravityUpY: captureGravity?.up.y,
+                captureGravityUpZ: captureGravity?.up.z,
+                captureGravitySource: captureGravity?.source,
+                captureGravityConfidence: captureGravity?.confidence
             )
             store.saveRecord(record)
         } else {
@@ -1012,6 +1051,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 store.updateThumbnailPath(recordId: recordId, thumbnailPath: thumbnailPath)
             }
             #endif
+        }
+
+        if var existingRecord = store.record(id: recordId) {
+            existingRecord.captureGravityUpX = captureGravity?.up.x
+            existingRecord.captureGravityUpY = captureGravity?.up.y
+            existingRecord.captureGravityUpZ = captureGravity?.up.z
+            existingRecord.captureGravitySource = captureGravity?.source
+            existingRecord.captureGravityConfidence = captureGravity?.confidence
+            store.saveRecord(existingRecord)
         }
 
         return (recordId, persistedSourceURL, relativeSourcePath)
@@ -1281,8 +1329,14 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 "ready": true,
             ]
         }
-        if let cameraPreset = remoteManifestPayload["camera_preset"] {
-            localManifestPayload["camera_preset"] = cameraPreset
+        var localCameraPreset = remoteManifestPayload["camera_preset"] as? [String: Any] ?? [:]
+        if let captureGravity = captureGravityMetadata(for: recordId) {
+            localCameraPreset["up"] = [captureGravity.up.x, captureGravity.up.y, captureGravity.up.z]
+            localCameraPreset["up_source"] = captureGravity.source
+            localCameraPreset["up_confidence"] = captureGravity.confidence
+        }
+        if !localCameraPreset.isEmpty {
+            localManifestPayload["camera_preset"] = localCameraPreset
         }
         if let supportPatchBounds = remoteManifestPayload["support_patch_bounds"] {
             localManifestPayload["support_patch_bounds"] = supportPatchBounds
@@ -1356,6 +1410,82 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             return reason
         }
         return "object_surface_failed"
+    }
+
+    private func resetCaptureGravityTracking() {
+        captureGravityUp = nil
+        captureGravitySampleCount = 0
+        captureGravityConfidence = 0.0
+    }
+
+    private func startCaptureGravityMonitoring() {
+        #if canImport(CoreMotion)
+        guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
+        motionManager.deviceMotionUpdateInterval = 1.0 / 20.0
+        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, _ in
+            guard let self, let gravity = motion?.gravity else { return }
+            let worldUp = SIMD3<Float>(
+                Float(-gravity.x),
+                Float(-gravity.y),
+                Float(-gravity.z)
+            )
+            Task { @MainActor in
+                self.ingestCaptureGravity(worldUp: worldUp)
+            }
+        }
+        #endif
+    }
+
+    private func stopCaptureGravityMonitoring() {
+        #if canImport(CoreMotion)
+        if motionManager.isDeviceMotionActive {
+            motionManager.stopDeviceMotionUpdates()
+        }
+        #endif
+    }
+
+    private func ingestCaptureGravity(worldUp: SIMD3<Float>) {
+        let normalized = normalizedOrFallback(worldUp, fallback: SIMD3<Float>(0, 1, 0))
+        if let existing = captureGravityUp {
+            let blended = simd_normalize(
+                existing * (1.0 - Self.captureGravitySmoothing)
+                + normalized * Self.captureGravitySmoothing
+            )
+            captureGravityUp = blended
+        } else {
+            captureGravityUp = normalized
+        }
+        captureGravitySampleCount += 1
+        captureGravityConfidence = min(
+            1.0,
+            Float(captureGravitySampleCount) / Float(Self.captureGravityConfidenceSamples)
+        )
+    }
+
+    private func captureGravityMetadata() -> (up: SIMD3<Float>, confidence: Float, source: String)? {
+        guard let captureGravityUp, captureGravitySampleCount > 0 else { return nil }
+        return (captureGravityUp, captureGravityConfidence, "imu_gravity")
+    }
+
+    private func captureGravityMetadata(for recordId: UUID) -> (up: SIMD3<Float>, confidence: Float, source: String)? {
+        guard let record = store.record(id: recordId),
+              let x = record.captureGravityUpX,
+              let y = record.captureGravityUpY,
+              let z = record.captureGravityUpZ else {
+            return nil
+        }
+        let up = normalizedOrFallback(SIMD3<Float>(x, y, z), fallback: SIMD3<Float>(0, 1, 0))
+        return (
+            up,
+            record.captureGravityConfidence ?? 0.0,
+            record.captureGravitySource ?? "imu_gravity"
+        )
+    }
+
+    private func normalizedOrFallback(_ vector: SIMD3<Float>, fallback: SIMD3<Float>) -> SIMD3<Float> {
+        let length = simd_length(vector)
+        guard length > 1e-5 else { return fallback }
+        return vector / length
     }
 }
 
