@@ -2441,7 +2441,7 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
             window.addEventListener('error', (event) => {
               console.error(event.error || event.message);
             });
-            const fitCameraToScene = (camera, scene) => {
+              const fitCameraToScene = (camera, scene) => {
               const meshes = scene.meshes.filter(mesh => mesh && mesh.getTotalVertices && mesh.getTotalVertices() > 0);
               if (!meshes.length) {
                 return;
@@ -2466,11 +2466,11 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               camera.minZ = Math.max(radius / 500, 0.01);
               camera.maxZ = Math.max(radius * 40, 200);
             };
-            const finalizeScene = (scene) => {
-              for (const material of scene.materials || []) {
-                if (material && typeof material.freeze === 'function') {
-                  try { material.freeze(); } catch (_) {}
-                }
+              const finalizeScene = (scene) => {
+                for (const material of scene.materials || []) {
+                  if (material && typeof material.freeze === 'function') {
+                    try { material.freeze(); } catch (_) {}
+                  }
               }
               for (const mesh of scene.meshes || []) {
                 if (mesh && typeof mesh.freezeWorldMatrix === 'function') {
@@ -2512,15 +2512,31 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               const scene = new BABYLON.Scene(engine);
               scene.clearColor = new BABYLON.Color4(0, 0, 0, 1);
               scene.skipPointerMovePicking = true;
+              scene.imageProcessingConfiguration.contrast = 1.15;
+              scene.imageProcessingConfiguration.exposure = 1.1;
               const camera = new BABYLON.ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.4, 4, BABYLON.Vector3.Zero(), scene);
               camera.attachControl(canvas, true);
               camera.wheelDeltaPercentage = 0.01;
               camera.pinchDeltaPercentage = 0.01;
               camera.useNaturalPinchZoom = true;
+              camera.lowerBetaLimit = 0.03;
+              camera.upperBetaLimit = Math.PI - 0.03;
+              camera.panningSensibility = 110;
+              camera.inertia = 0.72;
+              camera.panningInertia = 0.82;
+              camera.allowUpsideDown = false;
+              camera.panningAxis = new BABYLON.Vector3(1, 1, 1);
+              if (camera.inputs && camera.inputs.attached && camera.inputs.attached.pointers) {
+                camera.inputs.attached.pointers.multiTouchPanning = true;
+                camera.inputs.attached.pointers.multiTouchPanAndZoom = true;
+                camera.inputs.attached.pointers.panningSensibility = 110;
+              }
               const hemi = new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0.1, 1, 0.15), scene);
-              hemi.intensity = 1.25;
+              hemi.intensity = 1.8;
               const fill = new BABYLON.DirectionalLight('fill', new BABYLON.Vector3(-0.35, -1, 0.2), scene);
-              fill.intensity = 0.6;
+              fill.intensity = 0.9;
+              const rim = new BABYLON.DirectionalLight('rim', new BABYLON.Vector3(0.45, -0.4, -0.25), scene);
+              rim.intensity = 0.45;
               engine.runRenderLoop(() => {
                 scene.render();
                 if (viewerReady && !firstFrameShown) {
