@@ -166,7 +166,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureFileOutputRecordingD
             activeOutputURL = outputURL
         }
 
-        cameraSession.startRecording(to: outputURL, delegate: self)
+        cameraSession.startRecordingWithoutGates(to: outputURL, delegate: self)
     }
 
     func stopRecording() async throws -> ObjectModeV2RecordedClip {
@@ -254,7 +254,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureFileOutputRecordingD
                 }
 
                 do {
-                    try self.cameraSession.configure(orientation: .portrait)
+                    try self.cameraSession.configureObjectMode(orientation: .portrait)
                     continuation.resume(returning: ())
                 } catch let error as ObjectModeV2CaptureRecorderError {
                     continuation.resume(throwing: error)
