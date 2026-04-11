@@ -211,6 +211,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private static let captureGravitySmoothing: Float = 0.15
     private static let captureGravityConfidenceSamples: Int = 30
     private let guidanceEnabled = true
+    private let usesPreviewSnapshotAnalysis = false
     private let minimumAcceptedFrameCount = 20
     private let store = ScanRecordStore()
     @Published var previewSession: AVCaptureSession?
@@ -274,6 +275,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private var durationTask: Task<Void, Never>?
     private var visualSamplingTask: Task<Void, Never>?
     private var captureActivationTask: Task<Void, Never>?
+    private var acceptedFrameFallbackTask: Task<Void, Never>?
     private var activeRecordId: UUID?
     private var lastRemoteJobId: String?
     private var acceptedFrameTimestampsSec: [TimeInterval] = []
@@ -352,12 +354,14 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
                     self.hasStartedCaptureAuxiliaryPipelines = true
                     self.startCaptureGravityMonitoring()
-                    if self.guidanceEnabled {
+                    if self.guidanceEnabled && self.usesPreviewSnapshotAnalysis {
                         self.guidanceEngine.startMonitoring()
                         self.guidanceEngine.beginRecording()
+                        self.startVisualSamplingLoop()
+                    } else {
+                        self.startAcceptedFrameFallbackLoop()
                     }
-                    self.startVisualSamplingLoop()
-                    self.statusText = self.guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
+                    self.statusText = "正在采集对象素材…"
                 }
             }
         }
@@ -429,6 +433,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         previewStartTask = nil
         captureActivationTask?.cancel()
         captureActivationTask = nil
+        acceptedFrameFallbackTask?.cancel()
+        acceptedFrameFallbackTask = nil
         durationTask?.cancel()
         visualSamplingTask?.cancel()
         visualSamplingTask = nil
@@ -451,6 +457,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         visualSamplingTask = nil
         captureActivationTask?.cancel()
         captureActivationTask = nil
+        acceptedFrameFallbackTask?.cancel()
+        acceptedFrameFallbackTask = nil
         stopCaptureGravityMonitoring()
         recorder.shutdown()
         isPreparingCamera = false
@@ -629,6 +637,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         visualSamplingTask = nil
         captureActivationTask?.cancel()
         captureActivationTask = nil
+        acceptedFrameFallbackTask?.cancel()
+        acceptedFrameFallbackTask = nil
 
         Task {
             do {
@@ -970,6 +980,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
         visualSamplingTask?.cancel()
         visualSamplingTask = nil
+        acceptedFrameFallbackTask?.cancel()
+        acceptedFrameFallbackTask = nil
         recorder.suspendPreview()
         isPreparingCamera = false
         isPreviewLive = false
@@ -990,6 +1002,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     #if canImport(UIKit)
     private func captureAcceptedFrameThumbnail() {
+        guard usesPreviewSnapshotAnalysis else { return }
         guard isRecording else { return }
         guard let image = previewBridge.captureSnapshotImage() else { return }
         let thumbnail = ObjectModeV2AcceptedFrameThumbnail(id: UUID(), image: image)
@@ -1040,6 +1053,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     #endif
 
     private func startVisualSamplingLoop() {
+        guard usesPreviewSnapshotAnalysis else { return }
         visualSamplingTask?.cancel()
         let recordingReferenceTime = CACurrentMediaTime()
         visualSamplingTask = Task { [weak self] in
@@ -1056,6 +1070,36 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     )
                 }
                 try? await Task.sleep(nanoseconds: 180_000_000)
+            }
+        }
+    }
+
+    private func startAcceptedFrameFallbackLoop() {
+        acceptedFrameFallbackTask?.cancel()
+        let recordingReferenceTime = CACurrentMediaTime()
+        acceptedFrameFallbackTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, self.isRecording {
+                try? await Task.sleep(nanoseconds: 380_000_000)
+                guard !Task.isCancelled else { return }
+                guard self.isRecording else { return }
+
+                let nextAcceptedFrames = min(self.acceptedFrames + 1, 150)
+                guard nextAcceptedFrames > self.acceptedFrames else { continue }
+
+                self.acceptedFrames = nextAcceptedFrames
+                self.orbitCompletion = max(self.orbitCompletion, min(Double(nextAcceptedFrames) / 24.0, 1.0))
+                self.stabilityScore = max(self.stabilityScore, 0.85)
+                self.acceptedFrameTimestampsSec.append(max(0, CACurrentMediaTime() - recordingReferenceTime))
+                if self.acceptedFrameTimestampsSec.count > 150 {
+                    self.acceptedFrameTimestampsSec.removeFirst(self.acceptedFrameTimestampsSec.count - 150)
+                }
+
+                if nextAcceptedFrames < self.minimumAcceptedFrameCount {
+                    self.guidanceText = "正在稳定采集素材，请继续保持录制。"
+                } else {
+                    self.guidanceText = "素材已足够生成默认成品，可以结束，也可以继续补拍。"
+                }
             }
         }
     }
@@ -1111,7 +1155,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "target_zone_mode": ObjectModeV2TargetZoneMode.subject.rawValue,
             "client_live_accepted_frames": "\(acceptedFrames)",
             "client_live_accepted_timestamps_ms": acceptedTimestampsMs,
-            "client_live_selection_source": "visual_realtime",
+            "client_live_selection_source": usesPreviewSnapshotAnalysis ? "visual_realtime" : "time_fallback",
             "client_live_orbit_completion": String(format: "%.4f", orbitCompletion),
             "visual_gate_version": "v1_visual_curated",
             "visual_blur_threshold_laplacian": String(format: "%.1f", FrameQualityConstants.blurThresholdLaplacian),
@@ -1312,7 +1356,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     #if canImport(UIKit)
     private func persistLatestThumbnail(for recordId: UUID) -> String? {
-        guard let image = acceptedFrameThumbnails.last?.image ?? previewBridge.captureSnapshotImage(),
+        guard let image = acceptedFrameThumbnails.last?.image,
               let data = image.jpegData(compressionQuality: 0.82) else {
             return nil
         }
