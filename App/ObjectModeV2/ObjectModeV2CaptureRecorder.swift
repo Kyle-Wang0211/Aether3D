@@ -33,12 +33,11 @@ struct ObjectModeV2RecordedClip: Sendable {
     let fileSize: Int64
 }
 
-final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
+final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unchecked Sendable {
     private let previewReadyMinimumDuration: CFTimeInterval = 0.45
     private let captureQueue = DispatchQueue(label: "com.aether3d.objectmodev2.capture")
     private let cameraSession: CameraSessionProtocol
     private let interruptionHandler: InterruptionHandler
-    private let recordingController: RecordingController
 
     private var didStartPreview = false
     private var stopContinuation: CheckedContinuation<ObjectModeV2RecordedClip, Error>?
@@ -47,6 +46,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
     private var hasSignaledPreviewReady = false
     private var previewReadyWorkItem: DispatchWorkItem?
     private var didStartRunningObserver: NSObjectProtocol?
+    private var activeOutputURL: URL?
 
     private(set) var isPrepared = false
     private(set) var isRecording = false
@@ -62,10 +62,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             onInterruptionBegan: { _ in },
             onInterruptionEnded: {}
         )
-        self.recordingController = RecordingController.make(
-            cameraSession: cameraSession,
-            interruptionHandler: interruptionHandler
-        )
         super.init()
         didStartRunningObserver = NotificationCenter.default.addObserver(
             forName: AVCaptureSession.didStartRunningNotification,
@@ -73,19 +69,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             queue: nil
         ) { [weak self] _ in
             self?.handleSessionDidStartRunning()
-        }
-        recordingController.onRecordingDidStart = { [weak self] in
-            self?.captureQueue.async { [weak self] in
-                guard let self else { return }
-                if let onRecordingFirstFrame {
-                    DispatchQueue.main.async {
-                        onRecordingFirstFrame()
-                    }
-                }
-            }
-        }
-        recordingController.onFinish = { [weak self] result in
-            self?.handleRecordingControllerFinish(result)
         }
     }
 
@@ -96,7 +79,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
     }
 
     var previewSession: AVCaptureSession {
-        recordingController.captureSession
+        cameraSession.captureSession
     }
 
     func prepare() async throws {
@@ -169,21 +152,21 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             throw ObjectModeV2CaptureRecorderError.recordingFailed("相机仍在启动，请稍候再试。")
         }
 
+        let outputURL: URL
+        do {
+            outputURL = try makeOutputURL()
+        } catch {
+            throw ObjectModeV2CaptureRecorderError.recordingFailed("无法创建录制文件。")
+        }
+
         captureQueue.sync {
             stopContinuation = nil
             pendingFinishResult = nil
             isRecording = true
+            activeOutputURL = outputURL
         }
 
-        if let error = recordingController.startRecording(
-            orientation: .portrait,
-            sessionStartMode: .useExistingRunningSession
-        ) {
-            captureQueue.sync {
-                isRecording = false
-            }
-            throw mapRecordingError(error)
-        }
+        cameraSession.startRecording(to: outputURL, delegate: self)
     }
 
     func stopRecording() async throws -> ObjectModeV2RecordedClip {
@@ -215,7 +198,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
                 }
                 self.stopContinuation = continuation
                 self.isRecording = false
-                self.recordingController.requestStop(reason: .userStopped)
+                self.cameraSession.stopRecording()
             }
         }
     }
@@ -227,6 +210,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             self.isRecording = false
             self.didStartPreview = false
             self.pendingFinishResult = nil
+            self.activeOutputURL = nil
             self.previewReadyWorkItem?.cancel()
             self.previewReadyWorkItem = nil
             if let continuation = self.stopContinuation {
@@ -236,6 +220,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             self.hasDeliveredPreviewFrame = false
             self.hasSignaledPreviewReady = false
             self.interruptionHandler.stopObserving()
+            self.cameraSession.stopRecording()
             self.cameraSession.stopRunning()
         }
     }
@@ -248,6 +233,7 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
             self.previewReadyWorkItem = nil
             self.hasDeliveredPreviewFrame = false
             self.hasSignaledPreviewReady = false
+            self.cameraSession.stopRecording()
             self.cameraSession.stopRunning()
         }
     }
@@ -310,69 +296,77 @@ final class ObjectModeV2CaptureRecorder: NSObject, @unchecked Sendable {
         }
     }
 
-    private func handleRecordingControllerFinish(_ result: Result<CaptureMetadata, RecordingError>) {
+    func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         captureQueue.async { [weak self] in
             guard let self else { return }
-            let mappedResult = self.mapRecordingFinish(result)
+            guard self.activeOutputURL == fileURL else { return }
+            if let onRecordingFirstFrame {
+                DispatchQueue.main.async {
+                    onRecordingFirstFrame()
+                }
+            }
+        }
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            let result = self.mapRecordingFinish(outputFileURL: outputFileURL, error: error)
+            self.activeOutputURL = nil
+
             if let continuation = self.stopContinuation {
                 self.stopContinuation = nil
-                switch mappedResult {
+                switch result {
                 case .success(let clip):
                     continuation.resume(returning: clip)
-                case .failure(let error):
-                    continuation.resume(throwing: error)
+                case .failure(let finishError):
+                    continuation.resume(throwing: finishError)
                 }
             } else {
-                self.pendingFinishResult = mappedResult
+                self.pendingFinishResult = result
             }
         }
     }
 
-    private func mapRecordingFinish(_ result: Result<CaptureMetadata, RecordingError>) -> Result<ObjectModeV2RecordedClip, Error> {
-        switch result {
-        case .success(let metadata):
-            guard let fileURL = metadata.fileURL else {
-                return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("录制文件未成功写出。"))
-            }
-            let fileSize = metadata.fileSizeBytes ?? 0
-            guard FileManager.default.fileExists(atPath: fileURL.path), fileSize > 0 else {
-                return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("录制文件未成功写出。"))
-            }
-            return .success(
-                ObjectModeV2RecordedClip(
-                    fileURL: fileURL,
-                    duration: metadata.durationSeconds ?? metadata.rawDurationSeconds ?? 0,
-                    fileSize: fileSize
+    private func mapRecordingFinish(outputFileURL: URL, error: Error?) -> Result<ObjectModeV2RecordedClip, Error> {
+        if let nsError = error as NSError? {
+            let finishedSuccessfully = (nsError.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) ?? false
+            if !finishedSuccessfully {
+                return .failure(
+                    ObjectModeV2CaptureRecorderError.recordingFailed(
+                        nsError.localizedDescription.isEmpty ? "录制失败。" : nsError.localizedDescription
+                    )
                 )
-            )
-        case .failure(let error):
-            return .failure(mapRecordingError(error))
+            }
         }
-    }
 
-    private func mapRecordingError(_ error: RecordingError) -> ObjectModeV2CaptureRecorderError {
-        switch error {
-        case .permissionDenied:
-            return .permissionDenied
-        case .alreadyRecording:
-            return .alreadyRecording
-        case .tooShort(_, let actual):
-            return .recordingFailed("录制时间过短（\(String(format: "%.1f", actual)) 秒）。")
-        case .interrupted:
-            return .recordingFailed("录制被系统中断，请重试。")
-        case .configurationFailed(let code):
-            return .recordingFailed("相机配置失败：\(code.rawValue)")
-        case .finalizeFailed(let code):
-            return .recordingFailed("录制收尾失败：\(code.rawValue)")
-        case .unknownFailure(let code):
-            return .recordingFailed("录制失败：\(code.rawValue)")
-        case .fileTooLarge(_, _):
-            return .recordingFailed("录制文件过大。")
-        case .thermalNotAllowed:
-            return .recordingFailed("设备温度过高，暂时无法录制。")
-        case .insufficientStorage(_, _):
-            return .recordingFailed("存储空间不足。")
+        guard FileManager.default.fileExists(atPath: outputFileURL.path) else {
+            return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("录制文件未成功写出。"))
         }
+
+        let fileSize: Int64
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: outputFileURL.path)
+            fileSize = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        } catch {
+            return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("无法读取录制文件。"))
+        }
+
+        guard fileSize > 0 else {
+            return .failure(ObjectModeV2CaptureRecorderError.recordingFailed("录制文件为空。"))
+        }
+
+        let asset = AVURLAsset(url: outputFileURL)
+        let rawDuration = CMTimeGetSeconds(asset.duration)
+        let duration = rawDuration.isFinite ? rawDuration : 0
+
+        return .success(
+            ObjectModeV2RecordedClip(
+                fileURL: outputFileURL,
+                duration: duration,
+                fileSize: fileSize
+            )
+        )
     }
 }
 
