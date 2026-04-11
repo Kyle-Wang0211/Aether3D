@@ -196,6 +196,20 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         isProcessingOverlayPresented || isRunning
     }
 
+    var processingDurationLabelText: String? {
+        guard let activeRecordId else { return nil }
+        return store.record(id: activeRecordId)?.galleryProcessingDurationLabelText
+    }
+
+    var processingDurationShortText: String {
+        if let processingDurationLabelText,
+           let value = processingDurationLabelText.split(separator: " ").last,
+           !value.isEmpty {
+            return String(value)
+        }
+        return "--:--"
+    }
+
     func onAppear() {
         debugLog("onAppear hasPreviewAttached=\(hasPreviewAttached) isRunning=\(isRunning) overlay=\(isProcessingOverlayPresented)")
         #if canImport(UIKit)

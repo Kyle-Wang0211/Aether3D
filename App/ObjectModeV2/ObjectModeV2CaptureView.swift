@@ -39,7 +39,11 @@ struct ObjectModeV2CaptureView: View {
         .statusBarHidden(false)
         .fullScreenCover(isPresented: $viewModel.isArtifactViewerPresented) {
             if let artifactURL = viewModel.downloadedArtifactURL {
-                ObjectModeV2DefaultArtifactViewer(url: artifactURL, manifestURL: viewModel.manifestURL) {
+                ObjectModeV2DefaultArtifactViewer(
+                    url: artifactURL,
+                    manifestURL: viewModel.manifestURL,
+                    processingDurationLabel: viewModel.processingDurationLabelText
+                ) {
                     viewModel.isArtifactViewerPresented = false
                 }
             } else {
@@ -389,7 +393,8 @@ struct ObjectModeV2CaptureView: View {
             stats: [
                 .init(title: "Frames", value: "\(min(viewModel.acceptedFrames, maxFrames))"),
                 .init(title: "Orbit", value: "\(Int(viewModel.orbitCompletion * 100))%"),
-                .init(title: "Status", value: processingStatusSummary)
+                .init(title: "Status", value: processingStatusSummary),
+                .init(title: "Elapsed", value: viewModel.processingDurationShortText)
             ],
             footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
         )
@@ -407,7 +412,8 @@ struct ObjectModeV2CaptureView: View {
             stats: [
                 .init(title: "Frames", value: "\(min(viewModel.acceptedFrames, maxFrames))"),
                 .init(title: "Orbit", value: "\(Int(viewModel.orbitCompletion * 100))%"),
-                .init(title: "Status", value: processingStatusSummary)
+                .init(title: "Status", value: processingStatusSummary),
+                .init(title: "Elapsed", value: viewModel.processingDurationShortText)
             ],
             footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
         )
@@ -1925,6 +1931,7 @@ private struct ObjectModeV2CleanupCompareSummary: Decodable {
 struct ObjectModeV2DefaultArtifactViewer: View {
     let url: URL
     let manifestURL: URL?
+    let processingDurationLabel: String?
     let onDismiss: () -> Void
 
     @State private var displayMode: ViewerMode = .defaultStage
@@ -1935,9 +1942,15 @@ struct ObjectModeV2DefaultArtifactViewer: View {
         case hq = "HQ"
     }
 
-    init(url: URL, manifestURL: URL? = nil, onDismiss: @escaping () -> Void) {
+    init(
+        url: URL,
+        manifestURL: URL? = nil,
+        processingDurationLabel: String? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
         self.url = url
         self.manifestURL = manifestURL
+        self.processingDurationLabel = processingDurationLabel
         self.onDismiss = onDismiss
     }
 
@@ -2087,6 +2100,15 @@ struct ObjectModeV2DefaultArtifactViewer: View {
                             }
                         }
                     }
+                }
+                if let processingDurationLabel, !processingDurationLabel.isEmpty {
+                    Label(processingDurationLabel, systemImage: "stopwatch")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.88))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.34))
+                        .clipShape(Capsule())
                 }
                 if let compareSummaryText {
                     Text(compareSummaryText)

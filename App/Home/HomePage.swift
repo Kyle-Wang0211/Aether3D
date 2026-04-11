@@ -731,6 +731,7 @@ private struct ObjectFastPublishRecordViewer: View {
                 ObjectModeV2DefaultArtifactViewer(
                     url: artifactURL,
                     manifestURL: viewerManifestURL,
+                    processingDurationLabel: currentRecord.galleryProcessingDurationLabelText,
                     onDismiss: onDismiss
                 )
             } else {
@@ -745,7 +746,11 @@ private struct ObjectFastPublishRecordViewer: View {
         }
         .fullScreenCover(isPresented: $showDefaultArtifact) {
             if let artifactURL {
-                ObjectModeV2DefaultArtifactViewer(url: artifactURL, manifestURL: viewerManifestURL) {
+                ObjectModeV2DefaultArtifactViewer(
+                    url: artifactURL,
+                    manifestURL: viewerManifestURL,
+                    processingDurationLabel: currentRecord.galleryProcessingDurationLabelText
+                ) {
                     showDefaultArtifact = false
                 }
             } else {
@@ -799,6 +804,7 @@ private struct ObjectFastPublishRecordViewer: View {
             HStack(spacing: 12) {
                 statusChip(title: "状态", value: currentRecord.status.rawValue.capitalized, tint: statusTint)
                 statusChip(title: "进度", value: currentRecord.progressPercentText ?? "--", tint: .white.opacity(0.14))
+                statusChip(title: "用时", value: processingDurationCompactText, tint: .white.opacity(0.10))
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -947,7 +953,8 @@ private struct ObjectFastPublishRecordViewer: View {
             stats: [
                 .init(title: "Frames", value: acceptedFramesText),
                 .init(title: "Orbit", value: orbitText),
-                .init(title: "Status", value: processingStatusSummary)
+                .init(title: "Status", value: processingStatusSummary),
+                .init(title: "Elapsed", value: processingDurationCompactText)
             ],
             footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
         )
@@ -965,11 +972,21 @@ private struct ObjectFastPublishRecordViewer: View {
             stats: [
                 .init(title: "Frames", value: acceptedFramesText),
                 .init(title: "Orbit", value: orbitText),
-                .init(title: "Status", value: processingStatusSummary)
+                .init(title: "Status", value: processingStatusSummary),
+                .init(title: "Elapsed", value: processingDurationCompactText)
             ],
             footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
         )
         #endif
+    }
+
+    private var processingDurationCompactText: String {
+        if let label = currentRecord.galleryProcessingDurationLabelText,
+           let value = label.split(separator: " ").last,
+           !value.isEmpty {
+            return String(value)
+        }
+        return "--:--"
     }
 
     #if canImport(UIKit)
