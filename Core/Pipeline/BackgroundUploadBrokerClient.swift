@@ -595,6 +595,11 @@ struct BrokerCreateJobRequest: Codable, Sendable {
     let captureOrigin: String
     let clientRecordId: String?
     let pipelineProfile: [String: String]?
+    /// 本次 job 除主视频外附加的 sidecar 文件声明(curated.json 等)。
+    /// 服务器会为每个 aux 生成一个独立的 pre-signed upload URL,通过
+    /// BrokerCreateJobResponse.auxiliaryUploads 以 name 为 key 返回给客户端。
+    /// nil 或空数组 = 无 aux,行为和旧版本完全一致(后向兼容)。
+    let auxiliaryFiles: [BrokerAuxiliaryFileDeclaration]?
 
     enum CodingKeys: String, CodingKey {
         case fileName
@@ -603,6 +608,32 @@ struct BrokerCreateJobRequest: Codable, Sendable {
         case captureOrigin
         case clientRecordId
         case pipelineProfile = "pipeline_profile"
+        case auxiliaryFiles = "auxiliary_files"
+    }
+}
+
+/// C 架构 sidecar 文件声明 —— createJob 时连同主视频一起告诉服务器,
+/// 服务器按 `role` 决定怎么处理这个文件:
+///   "client_curation"  → 管线 Stage 1 按这个文件的 frame 列表抽帧,跳过 az×el。
+///   其他 role 可扩展(sharpness heatmap 可视化、logs、depth map …)。
+public struct BrokerAuxiliaryFileDeclaration: Codable, Sendable {
+    public let name: String           // "curated.json"
+    public let fileSizeBytes: Int64
+    public let contentType: String    // "application/json"
+    public let role: String           // "client_curation"
+
+    public init(name: String, fileSizeBytes: Int64, contentType: String, role: String) {
+        self.name = name
+        self.fileSizeBytes = fileSizeBytes
+        self.contentType = contentType
+        self.role = role
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case fileSizeBytes = "file_size_bytes"
+        case contentType = "content_type"
+        case role
     }
 }
 
@@ -611,6 +642,16 @@ public struct BrokerCreateJobResponse: Codable, Sendable {
     public let upload: BrokerUploadRequest
     public let pollPath: String?
     public let cancelPath: String?
+    /// 服务器为 request 中声明的每个 sidecar 返回一个 BrokerUploadRequest。
+    /// 键 = BrokerAuxiliaryFileDeclaration.name,值 = 对应的 pre-signed URL。
+    /// 客户端主视频上传成功后,按此逐个调用 startUpload() 上传 sidecar。
+    /// nil = 服务器不支持或此 job 未声明 aux(后向兼容)。
+    public let auxiliaryUploads: [String: BrokerUploadRequest]?
+
+    enum CodingKeys: String, CodingKey {
+        case jobId, upload, pollPath, cancelPath
+        case auxiliaryUploads = "auxiliary_uploads"
+    }
 }
 
 struct BrokerArtifactPayload: Codable, Sendable {
@@ -3012,7 +3053,8 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         videoURL: URL,
         clientRecordId: UUID? = nil,
         captureOrigin: String,
-        pipelineProfile: [String: String]? = nil
+        pipelineProfile: [String: String]? = nil,
+        auxiliaryFiles: [BrokerAuxiliaryFileDeclaration] = []
     ) async throws -> BrokerCreateJobResponse {
         guard let config else {
             throw RemoteB1ClientError.notConfigured
@@ -3035,7 +3077,8 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
             contentType: contentType(for: videoURL),
             captureOrigin: captureOrigin,
             clientRecordId: clientRecordId?.uuidString,
-            pipelineProfile: pipelineProfile
+            pipelineProfile: pipelineProfile,
+            auxiliaryFiles: auxiliaryFiles.isEmpty ? nil : auxiliaryFiles
         )
 
         var request = URLRequest(url: config.baseURL.appendingPathComponent("/v1/mobile-jobs"))
@@ -3106,6 +3149,61 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
             }
         } catch {
             cleanupPreparedUploadSourceIfNeeded(preparedSourceURL)
+            throw error
+        }
+    }
+
+    public func findLatestJobId(
+        clientRecordId: UUID,
+        captureOrigin: String
+    ) async throws -> String? {
+        guard let config else {
+            throw RemoteB1ClientError.notConfigured
+        }
+
+        let clientRecordIDString = clientRecordId.uuidString
+        guard !clientRecordIDString.isEmpty else { return nil }
+
+        var components = URLComponents(
+            url: config.baseURL.appendingPathComponent("/v1/mobile-jobs/by-client-record/\(clientRecordIDString)"),
+            resolvingAgainstBaseURL: false
+        )
+        let normalizedCaptureOrigin = captureOrigin.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedCaptureOrigin.isEmpty {
+            components?.queryItems = [
+                URLQueryItem(name: "capture_origin", value: normalizedCaptureOrigin)
+            ]
+        }
+        guard let url = components?.url else {
+            throw RemoteB1ClientError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if let apiKey = config.apiKey {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (data, response) = try await data(for: request, fallbackBaseURL: config.fallbackBaseURL)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw RemoteB1ClientError.invalidResponse
+            }
+            if httpResponse.statusCode == 404 {
+                return nil
+            }
+            try validate(response: response)
+            let status = try decoder.decode(BrokerJobStatusResponse.self, from: data)
+            let resolvedJobID = status.jobId.trimmingCharacters(in: .whitespacesAndNewlines)
+            return resolvedJobID.isEmpty ? nil : resolvedJobID
+        } catch {
+            if let urlError = error as? URLError, urlError.code == .fileDoesNotExist {
+                return nil
+            }
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorFileDoesNotExist {
+                return nil
+            }
             throw error
         }
     }
@@ -3963,11 +4061,26 @@ public struct BrokerUploadRequest: Sendable {
     public let abortURL: String?
 }
 
+public struct BrokerAuxiliaryFileDeclaration: Sendable {
+    public let name: String
+    public let fileSizeBytes: Int64
+    public let contentType: String
+    public let role: String
+
+    public init(name: String, fileSizeBytes: Int64, contentType: String, role: String) {
+        self.name = name
+        self.fileSizeBytes = fileSizeBytes
+        self.contentType = contentType
+        self.role = role
+    }
+}
+
 public struct BrokerCreateJobResponse: Sendable {
     public let jobId: String
     public let upload: BrokerUploadRequest
     public let pollPath: String?
     public let cancelPath: String?
+    public let auxiliaryUploads: [String: BrokerUploadRequest]?
 }
 
 public struct BackgroundUploadBrokerConfiguration: Sendable {
@@ -4002,7 +4115,8 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
         videoURL: URL,
         clientRecordId: UUID? = nil,
         captureOrigin: String,
-        pipelineProfile: [String: String]? = nil
+        pipelineProfile: [String: String]? = nil,
+        auxiliaryFiles: [BrokerAuxiliaryFileDeclaration] = []
     ) async throws -> BrokerCreateJobResponse {
         throw RemoteB1ClientError.notConfigured
     }
@@ -4023,6 +4137,10 @@ public final class BackgroundUploadBrokerClient: @unchecked Sendable {
     ) async throws -> String {
         throw RemoteB1ClientError.notConfigured
     }
+    public func findLatestJobId(
+        clientRecordId: UUID,
+        captureOrigin: String
+    ) async throws -> String? { nil }
     func pollStatus(jobId: String) async throws -> JobStatus { throw RemoteB1ClientError.notConfigured }
     func download(jobId: String) async throws -> (data: Data, format: ArtifactFormat) { throw RemoteB1ClientError.notConfigured }
     func cancel(jobId: String) async throws { throw RemoteB1ClientError.notConfigured }

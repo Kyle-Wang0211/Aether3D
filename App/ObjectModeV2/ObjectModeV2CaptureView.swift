@@ -159,8 +159,17 @@ struct ObjectModeV2CaptureView: View {
         if viewModel.shouldShowProcessingOverlay {
             Color.black.ignoresSafeArea()
         } else {
+            #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd)
+            // AR 路径:画面来自 ARSession(跟 dome 的 6DoF 共享同一个相机)
+            ObjectModeV2ARKitPreview(
+                session: viewModel.domeCoordinator.session,
+                bridge: viewModel.previewBridge
+            )
+            .ignoresSafeArea()
+            #else
             ObjectModeV2CameraPreview(session: viewModel.previewSession, bridge: viewModel.previewBridge)
                 .ignoresSafeArea()
+            #endif
         }
         #else
         Color.black.ignoresSafeArea()
@@ -239,7 +248,7 @@ struct ObjectModeV2CaptureView: View {
             } else {
                 HStack(alignment: .bottom, spacing: 26) {
                     leftAnchor
-                    captureButton
+                    captureButtonOrDome
                     trailingDock
                 }
             }
@@ -386,6 +395,7 @@ struct ObjectModeV2CaptureView: View {
             heroImage: viewModel.acceptedFrameThumbnails.last?.image,
             canOpenArtifact: viewModel.downloadedArtifactURL != nil,
             isFailed: viewModel.processingFailureReason != nil,
+            isInspectionOnlyCandidate: viewModel.isInspectionOnlyCandidate,
             modeValue: "Guided",
             lockValue: viewModel.isTargetLocked ? "Confirmed" : "Open",
             lockAccent: lockAccent,
@@ -396,7 +406,8 @@ struct ObjectModeV2CaptureView: View {
                 .init(title: "Status", value: processingStatusSummary),
                 .init(title: "Elapsed", value: viewModel.processingDurationShortText)
             ],
-            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
+            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。",
+            failedCardsSummary: nil
         )
         #else
         return ObjectModeV2ProcessingSnapshot(
@@ -405,6 +416,7 @@ struct ObjectModeV2CaptureView: View {
             heroSubtitle: processingHeroSubtitle,
             canOpenArtifact: viewModel.downloadedArtifactURL != nil,
             isFailed: viewModel.processingFailureReason != nil,
+            isInspectionOnlyCandidate: viewModel.isInspectionOnlyCandidate,
             modeValue: "Guided",
             lockValue: viewModel.isTargetLocked ? "Confirmed" : "Open",
             lockAccent: lockAccent,
@@ -415,7 +427,8 @@ struct ObjectModeV2CaptureView: View {
                 .init(title: "Status", value: processingStatusSummary),
                 .init(title: "Elapsed", value: viewModel.processingDurationShortText)
             ],
-            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。"
+            footerText: "你可以留在这里等待，也可以稍后在作品列表里继续查看。",
+            failedCardsSummary: nil
         )
         #endif
     }
@@ -457,7 +470,7 @@ struct ObjectModeV2CaptureView: View {
                     .frame(width: 210, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-                    Text("正在生成默认 mesh")
+                    Text("正在生成 HQ 成品")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
@@ -722,16 +735,22 @@ struct ObjectModeV2CaptureView: View {
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
+    @ViewBuilder
     private var leftAnchor: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(captureHUDActive ? "REC" : "OBJECT")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(.white.opacity(0.72))
-            Text(String(format: "%02d:%02d", viewModel.recordingSeconds / 60, viewModel.recordingSeconds % 60))
-                .font(.system(size: 20, weight: .bold))
-                .foregroundColor(.white)
+        // 录制中弱化时间概念 —— 只留一个 72pt 占位保持 HStack 对齐。
+        if viewModel.isRecording {
+            Color.clear.frame(width: 72, height: 1)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("OBJECT")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white.opacity(0.72))
+                Text(String(format: "%02d:%02d", viewModel.recordingSeconds / 60, viewModel.recordingSeconds % 60))
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            .frame(width: 72, alignment: .leading)
         }
-        .frame(width: 72, alignment: .leading)
     }
 
     private var preCaptureBottomHud: some View {
@@ -814,6 +833,44 @@ struct ObjectModeV2CaptureView: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
+    /// 录制中显示 60-cell 球形 coverage dome,点击 = 结束拍摄;
+    /// 未录制/处理中保持原白环快门。
+    @ViewBuilder
+    private var captureButtonOrDome: some View {
+        #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+        if viewModel.isRecording {
+            // 关键:dome + 白环 两层都 allowsHitTesting(false),顶层一个透明 Color
+            // 用 onTapGesture 捕获点击 —— 最稳可靠,不依赖 Button/UIView hit chain。
+            ZStack {
+                ObjectModeV2DomeContainerView(
+                    coordinator: viewModel.domeCoordinator,
+                    onTap: { }
+                )
+                .frame(width: 120, height: 120)
+                .allowsHitTesting(false)
+
+                Circle()
+                    .stroke(Color.white, lineWidth: 4)
+                    .frame(width: 120, height: 120)
+                    .allowsHitTesting(false)
+
+                Color.black.opacity(0.001)     // 几乎透明但能接收 tap
+                    .frame(width: 140, height: 140)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        viewModel.toggleCapture()
+                    }
+            }
+            .frame(width: 140, height: 140)
+            .accessibilityLabel("结束采集并生成")
+        } else {
+            captureButton
+        }
+        #else
+        captureButton
+        #endif
+    }
+
     private var captureButton: some View {
         Button(action: {
             viewModel.toggleCapture()
@@ -821,11 +878,11 @@ struct ObjectModeV2CaptureView: View {
             ZStack {
                 Circle()
                     .stroke(Color.white, lineWidth: 4)
-                    .frame(width: 78, height: 78)
+                    .frame(width: 110, height: 110)
 
                 Circle()
                     .fill(Color.black.opacity(0.75))
-                    .frame(width: 66, height: 66)
+                    .frame(width: 94, height: 94)
 
                 if viewModel.isRunning {
                     ProgressView()
@@ -863,7 +920,8 @@ struct ObjectModeV2CaptureView: View {
                         .background(Color.white.opacity(0.14))
                         .clipShape(Capsule())
                 }
-            } else {
+            } else if !viewModel.isRecording {
+                // 录制中隐藏 —— 取代它的统计在球顶 HUD ("N 帧 · M 深绿")。
                 acceptedFramesBadge
             }
         }
@@ -967,6 +1025,9 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var processingStatusSummary: String {
+        if viewModel.isInspectionOnlyCandidate {
+            return "Needs QA"
+        }
         if viewModel.processingFailureReason != nil {
             return "Failed"
         }
@@ -1228,16 +1289,22 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var processingCardTitle: String {
+        if viewModel.isInspectionOnlyCandidate {
+            return "候选结果待质检"
+        }
         if viewModel.processingFailureReason != nil {
             return "生成失败"
         }
         if viewModel.downloadedArtifactURL != nil || viewModel.visibleStageCards.allSatisfy({ if case .ready = $0.state { return true } else { return false } }) {
             return "生成完成"
         }
-        return "正在生成对象成品"
+        return "正在生成 HQ 成品"
     }
 
     private var processingCardBadgeTitle: String {
+        if viewModel.isInspectionOnlyCandidate {
+            return "未达 HQ"
+        }
         if viewModel.processingFailureReason != nil {
             return "失败"
         }
@@ -1245,14 +1312,20 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var processingHeroTitle: String {
-        viewModel.processingFailureReason == nil ? "正在生成对象成品" : "对象成品生成失败"
+        if viewModel.isInspectionOnlyCandidate {
+            return "候选结果已生成"
+        }
+        return viewModel.processingFailureReason == nil ? "正在生成 HQ 成品" : "HQ 成品生成失败"
     }
 
     private var processingHeroSubtitle: String {
+        if viewModel.isInspectionOnlyCandidate {
+            return viewModel.statusText.isEmpty ? "未达 HQ，仅供质检。你可以先打开候选结果做人工判断。" : viewModel.statusText
+        }
         if let failureReason = viewModel.processingFailureReason, !failureReason.isEmpty {
             return failureReason
         }
-        return "系统会先生成默认 mesh 成品；下载完成后即可打开。"
+        return "系统会生成唯一的 HQ 3D 成品；下载完成后即可打开。"
     }
 
     private var stabilityLabel: String {
@@ -1737,6 +1810,11 @@ private struct ObjectModeV2ViewerManifestFile: Decodable {
     let cleanupCompare: ObjectModeV2ViewerAssetDescriptor?
     let hqAsset: ObjectModeV2ViewerAssetDescriptor?
     let cameraPreset: ObjectModeV2ViewerCameraPreset?
+    let productMode: String?
+    let primaryProduct: String?
+    let inspectionOnly: Bool?
+    let hqPassed: Bool?
+    let failedCards: [String]?
 
     enum CodingKeys: String, CodingKey {
         case defaultAsset = "default_asset"
@@ -1744,6 +1822,11 @@ private struct ObjectModeV2ViewerManifestFile: Decodable {
         case cleanupCompare = "cleanup_compare"
         case hqAsset = "hq_asset"
         case cameraPreset = "camera_preset"
+        case productMode = "product_mode"
+        case primaryProduct = "primary_product"
+        case inspectionOnly = "inspection_only"
+        case hqPassed = "hq_passed"
+        case failedCards = "failed_cards"
     }
 }
 
@@ -1783,12 +1866,11 @@ struct ObjectModeV2DefaultArtifactViewer: View {
     let processingDurationLabel: String?
     let onDismiss: () -> Void
 
-    @State private var displayMode: ViewerMode = .defaultStage
+    @State private var displayMode: ViewerMode = .hq
 
     private enum ViewerMode: String {
-        case defaultStage = "Default"
-        case cleanup = "Cleanup"
         case hq = "HQ"
+        case cleanup = "Cleanup"
     }
 
     init(
@@ -1831,19 +1913,20 @@ struct ObjectModeV2DefaultArtifactViewer: View {
         return resolvedURL(for: asset)
     }
 
-    private var hqArtifactURL: URL? {
-        guard let asset = parsedManifest?.hqAsset,
-              asset.ready != false else { return nil }
-        return resolvedURL(for: asset)
+    private var isInspectionOnlyCandidate: Bool {
+        parsedManifest?.inspectionOnly ?? false
+    }
+
+    private var failedCardsSummaryText: String? {
+        let labels = (parsedManifest?.failedCards ?? []).map(Self.hqFailedCardLabel)
+        guard !labels.isEmpty else { return nil }
+        return labels.joined(separator: "、")
     }
 
     private var availableModes: [ViewerMode] {
-        var modes: [ViewerMode] = [.defaultStage]
+        var modes: [ViewerMode] = [.hq]
         if cleanedArtifactURL != nil {
             modes.append(.cleanup)
-        }
-        if hqArtifactURL != nil {
-            modes.append(.hq)
         }
         return modes
     }
@@ -1855,10 +1938,6 @@ struct ObjectModeV2DefaultArtifactViewer: View {
                 return cleanedArtifactURL
             }
         case .hq:
-            if let hqArtifactURL {
-                return hqArtifactURL
-            }
-        case .defaultStage:
             break
         }
         if let defaultAsset = parsedManifest?.defaultAsset,
@@ -1950,6 +2029,20 @@ struct ObjectModeV2DefaultArtifactViewer: View {
                         }
                     }
                 }
+                if isInspectionOnlyCandidate {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("未达 HQ")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.black)
+                        Text(failedCardsSummaryText ?? "仅供质检")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.black.opacity(0.72))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(red: 0.96, green: 0.76, blue: 0.28))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
                 if let processingDurationLabel, !processingDurationLabel.isEmpty {
                     Label(processingDurationLabel, systemImage: "stopwatch")
                         .font(.system(size: 12, weight: .semibold))
@@ -1982,6 +2075,23 @@ struct ObjectModeV2DefaultArtifactViewer: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
+        }
+    }
+
+    private static func hqFailedCardLabel(_ rawCard: String) -> String {
+        switch rawCard.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "geometry_hq":
+            return "几何"
+        case "texture_hq":
+            return "贴图"
+        case "open_surface_hq":
+            return "开放表面"
+        case "hole_fill_hq":
+            return "补洞克制"
+        case "mesh_fidelity_hq":
+            return "网格保真"
+        default:
+            return rawCard
         }
     }
 }
@@ -2023,7 +2133,7 @@ private struct ObjectModeV2GLBWebPreview: UIViewRepresentable {
             coordinator.loadedURL = url
             webView.loadHTMLString(
                 """
-                <html><body style="margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font:600 15px -apple-system,sans-serif;">默认 mesh viewer 资源缺失。</body></html>
+                <html><body style="margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font:600 15px -apple-system,sans-serif;">HQ viewer 资源缺失。</body></html>
                 """,
                 baseURL: nil
             )
@@ -2297,7 +2407,7 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
           <canvas id="mesh-canvas"></canvas>
           <div class="fallback">
             <div class="fallback-percent">0%</div>
-            <div class="fallback-label">正在打开默认 mesh 成品...</div>
+            <div class="fallback-label">正在打开 HQ 成品...</div>
             <div class="fallback-bar"><div class="fallback-bar-fill"></div></div>
           </div>
           <div class="gravity-badge">
@@ -2563,6 +2673,23 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
             };
               const finalizeScene = (scene) => {
                 for (const material of scene.materials || []) {
+                  if (material) {
+                    // 强制 non-metallic —— glTF 里 metallicFactor 未写时默认 1.0(金属),
+                    // 导致平视视角反射环境光变银灰。这里按产品语义(真实物体,非金属)兜底。
+                    if ('metallic' in material) {
+                      try { material.metallic = 0.0; } catch (_) {}
+                    }
+                    if ('metallicF0Factor' in material) {
+                      try { material.metallicF0Factor = 0.0; } catch (_) {}
+                    }
+                    if ('roughness' in material && (material.roughness == null || material.roughness < 0.6)) {
+                      try { material.roughness = 0.85; } catch (_) {}
+                    }
+                    const tex = material.albedoTexture || material.diffuseTexture || material.baseTexture;
+                    if (tex && 'anisotropicFilteringLevel' in tex) {
+                      try { tex.anisotropicFilteringLevel = 16; } catch (_) {}
+                    }
+                  }
                   if (material && typeof material.freeze === 'function') {
                     try { material.freeze(); } catch (_) {}
                   }
@@ -2594,7 +2721,7 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               show('正在准备 mesh 查看器...');
               stallTimeout = window.setTimeout(() => {
                 if (!viewerReady) {
-                  fail('默认 mesh 打开超时，请稍后重试。');
+                  fail('HQ 成品打开超时，请稍后重试。');
                 }
               }, 45000);
               const engine = new BABYLON.Engine(canvas, true, {
@@ -2603,7 +2730,7 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
                 antialias: true,
                 powerPreference: 'high-performance',
               });
-              engine.setHardwareScalingLevel(window.devicePixelRatio > 2 ? 2 : 1.5);
+              engine.setHardwareScalingLevel(1.0);
               const scene = new BABYLON.Scene(engine);
               scene.clearColor = new BABYLON.Color4(0, 0, 0, 1);
               scene.skipPointerMovePicking = true;
@@ -2637,7 +2764,7 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
               const load = async () => {
                 try {
                   animateProgress(10);
-                  show('正在读取默认 mesh 文件...');
+                  show('正在读取 HQ 文件...');
                   startPulse(24);
                   const response = await fetch(assetURL, { cache: 'no-store' });
                   if (!response.ok) {
@@ -2668,12 +2795,12 @@ private final class ObjectModeV2MeshPreviewSchemeHandler: NSObject, WKURLSchemeH
                   }
                 } catch (error) {
                   console.error(error);
-                  fail(`默认 mesh 打开失败：${shortError(error)}`);
+                  fail(`HQ 成品打开失败：${shortError(error)}`);
                 }
               };
               load();
             } else {
-              fail('默认 mesh viewer 初始化失败。');
+              fail('HQ viewer 初始化失败。');
             }
           </script>
         </body>
@@ -2729,12 +2856,14 @@ struct ObjectModeV2ProcessingSnapshot {
     #endif
     let canOpenArtifact: Bool
     let isFailed: Bool
+    let isInspectionOnlyCandidate: Bool
     let modeValue: String
     let lockValue: String
     let lockAccent: Color
     let stageCards: [ObjectModeV2StageCard]
     let stats: [ObjectModeV2ProcessingStat]
     let footerText: String
+    let failedCardsSummary: String?
 }
 
 struct ObjectModeV2ProcessingSurface: View {
@@ -2783,17 +2912,35 @@ struct ObjectModeV2ProcessingSurface: View {
                                     .clipShape(Capsule())
                             }
                         } else if snapshot.isFailed {
-                            Text("失败")
+                            Text(snapshot.isInspectionOnlyCandidate ? "质检" : "失败")
                                 .font(.system(size: 12, weight: .bold))
                                 .foregroundColor(.black)
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
-                                .background(Color(red: 1.0, green: 0.58, blue: 0.58))
+                                .background(
+                                    snapshot.isInspectionOnlyCandidate
+                                        ? Color(red: 0.96, green: 0.76, blue: 0.28)
+                                        : Color(red: 1.0, green: 0.58, blue: 0.58)
+                                )
                                 .clipShape(Capsule())
                         } else {
                             ProgressView()
                                 .tint(.white)
                         }
+                    }
+
+                    if snapshot.isInspectionOnlyCandidate {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 11, weight: .bold))
+                            Text(snapshot.failedCardsSummary.map { "未通过：\($0)" } ?? "未达 HQ，仅供质检")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color(red: 0.96, green: 0.76, blue: 0.28))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
 
                     processingContextCard
@@ -2898,7 +3045,7 @@ struct ObjectModeV2ProcessingSurface: View {
                     .frame(width: 210, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-                    Text(snapshot.canOpenArtifact ? "默认 mesh 已就绪" : "正在生成默认 mesh")
+                    Text(snapshot.canOpenArtifact ? "HQ 成品已就绪" : "正在生成 HQ 成品")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)

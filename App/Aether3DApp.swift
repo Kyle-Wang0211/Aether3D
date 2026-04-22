@@ -511,7 +511,20 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
         }
     }
 
+    private func shouldAcceptRemoteResumeUpdate(recordId: UUID, remoteJobId: String) -> Bool {
+        let normalizedRemoteJobId = remoteJobId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRemoteJobId.isEmpty else { return false }
+        let currentRemoteJobId = store.record(id: recordId)?
+            .remoteJobId?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !currentRemoteJobId.isEmpty else { return false }
+        return currentRemoteJobId == normalizedRemoteJobId
+    }
+
     private func updateRecordFromProgress(recordId: UUID, snapshot: GenerateProgressSnapshot, remoteJobId: String) {
+        guard shouldAcceptRemoteResumeUpdate(recordId: recordId, remoteJobId: remoteJobId) else {
+            return
+        }
         store.updateProcessingState(
             recordId: recordId,
             status: status(for: snapshot.stage),
@@ -531,7 +544,10 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
         )
     }
 
-    private func completeRecord(recordId: UUID, artifact: ArtifactRef) {
+    private func completeRecord(recordId: UUID, remoteJobId: String, artifact: ArtifactRef) {
+        guard shouldAcceptRemoteResumeUpdate(recordId: recordId, remoteJobId: remoteJobId) else {
+            return
+        }
         let finalExtension: String = {
             switch artifact.format {
             case .splat:
@@ -560,6 +576,9 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
             let artifactPath = "exports/\(finalURL.lastPathComponent)"
             store.updateArtifactPath(recordId: recordId, artifactPath: artifactPath)
         } catch {
+            guard shouldAcceptRemoteResumeUpdate(recordId: recordId, remoteJobId: remoteJobId) else {
+                return
+            }
             store.updateProcessingState(
                 recordId: recordId,
                 status: .failed,
@@ -572,7 +591,10 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
         }
     }
 
-    private func failRecord(recordId: UUID, reason: FailReason) {
+    private func failRecord(recordId: UUID, remoteJobId: String, reason: FailReason) {
+        guard shouldAcceptRemoteResumeUpdate(recordId: recordId, remoteJobId: remoteJobId) else {
+            return
+        }
         store.updateProcessingState(
             recordId: recordId,
             status: .failed,
@@ -593,9 +615,9 @@ private final class BackgroundRemoteResumeCoordinator: @unchecked Sendable {
 
         switch result {
         case .success(let artifact, _):
-            completeRecord(recordId: record.id, artifact: artifact)
+            completeRecord(recordId: record.id, remoteJobId: remoteJobId, artifact: artifact)
         case .fail(let reason, _):
-            failRecord(recordId: record.id, reason: reason)
+            failRecord(recordId: record.id, remoteJobId: remoteJobId, reason: reason)
         }
     }
 }
@@ -871,25 +893,38 @@ final class Aether3DAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil
     ) -> Bool {
+        // BGTaskScheduler.register / BackgroundRemoteResumeCoordinator.register 必须在
+        // didFinishLaunching 同步调,否则系统不接受 BGTask 注册。这两步本身极快(< 5ms)。
         #if canImport(BackgroundTasks)
         if #available(iOS 26.0, *) {
             LocalProcessingContinuedTaskCoordinator.shared.register()
         }
         BackgroundRemoteResumeCoordinator.shared.register()
-        BackgroundRemoteResumeCoordinator.shared.scheduleIfNeeded(reason: "launch")
-        #endif
-        #if canImport(AVFoundation)
-        BackgroundLocalRecoveryCoordinator.shared.kickoffImmediateRecovery(reason: "cold_launch")
-        #else
-        let interruptedLocalJobs = ScanRecordStore().failOrphanedLocalProcessingRecordsOnColdLaunch()
-        if interruptedLocalJobs > 0 {
-            NSLog(
-                "[Aether3D][LaunchRecovery] marked %ld orphaned local processing record(s) as interrupted",
-                interruptedLocalJobs
-            )
+        // scheduleIfNeeded 不是注册,可以异步(只是排个调度,延迟一两秒无影响)
+        Task.detached(priority: .background) {
+            BackgroundRemoteResumeCoordinator.shared.scheduleIfNeeded(reason: "launch")
         }
         #endif
-        return true
+
+        // LocalRecovery 是冷启动时扫历史录制找孤儿任务标 failed —— 重活,但**不影响首屏渲染**,
+        // 完全可以扔后台。代价:用户在首屏看到的"还在处理中"状态可能 1-2s 后变 "interrupted",
+        // 99% 冷启动没孤儿任务,所以视觉上感觉不到。
+        #if canImport(AVFoundation)
+        Task.detached(priority: .background) {
+            BackgroundLocalRecoveryCoordinator.shared.kickoffImmediateRecovery(reason: "cold_launch")
+        }
+        #else
+        Task.detached(priority: .background) {
+            let interruptedLocalJobs = ScanRecordStore().failOrphanedLocalProcessingRecordsOnColdLaunch()
+            if interruptedLocalJobs > 0 {
+                NSLog(
+                    "[Aether3D][LaunchRecovery] marked %ld orphaned local processing record(s) as interrupted",
+                    interruptedLocalJobs
+                )
+            }
+        }
+        #endif
+        return true   // 立刻返回,SwiftUI 可以马上开始渲染 HomePage
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
@@ -925,7 +960,6 @@ struct Aether3DApp: App {
             NavigationStack {
                 HomePage()
             }
-            .preferredColorScheme(.dark)
         }
     }
 }

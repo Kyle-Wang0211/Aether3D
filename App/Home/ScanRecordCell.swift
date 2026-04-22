@@ -2,7 +2,7 @@
 // ScanRecordCell.swift
 // Aether3D
 //
-// PR#7 Scan Guidance UI — Gallery Cell
+// Figma-aligned gallery card for the light home shell
 // Apple-platform only (SwiftUI)
 //
 
@@ -57,99 +57,68 @@ struct ScanRecordCell: View {
     let record: ScanRecord
     let relativeTime: String
     let useEnglish: Bool
+    let imageHeight: CGFloat
+    let compactLayout: Bool
+
+    init(
+        record: ScanRecord,
+        relativeTime: String,
+        useEnglish: Bool,
+        imageHeight: CGFloat = 256,
+        compactLayout: Bool = false
+    ) {
+        self.record = record
+        self.relativeTime = relativeTime
+        self.useEnglish = useEnglish
+        self.imageHeight = imageHeight
+        self.compactLayout = compactLayout
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.black)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        VStack(alignment: .leading, spacing: compactLayout ? 10 : 12) {
+            thumbnailCard
 
-                thumbnailContent
-            }
-            .overlay(alignment: .topLeading) {
-                statusBadge
-                    .padding(10)
-            }
-            .overlay(alignment: .topTrailing) {
-                processingBackendBadge
-                    .padding(10)
-            }
-
-            Text(record.name)
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .truncationMode(.tail)
-
-            Text(localizedStatusMessage)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(statusColor.opacity(0.92))
-                .lineLimit(2)
-
-            if let detailMessage = record.detailMessage, !detailMessage.isEmpty {
-                Text(detailMessage)
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.45))
-                    .lineLimit(2)
-            }
-
-            if let metaLine = metaLineText {
-                metaCapsule(text: metaLine, tint: statusColor)
-            }
-
-            if record.isProcessing {
-                ProgressView(value: record.displayProgressFraction)
-                    .tint(statusColor)
-            }
-
-            if let videoDurationLabelText = record.galleryVideoDurationLabelText {
-                Text(videoDurationLabelText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white.opacity(0.50))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(record.name)
+                    .font(.system(size: compactLayout ? 15 : 16, weight: .semibold))
+                    .foregroundColor(textPrimaryColor)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.86)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("You · \(relativeTime)")
+                    .font(.system(size: compactLayout ? 11 : 12))
+                    .foregroundColor(textSecondaryColor)
             }
-
-            if let samplingProfileLabelText = record.gallerySamplingProfileLabelText {
-                Text(samplingProfileLabelText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white.opacity(0.50))
-                    .lineLimit(1)
-            }
-
-            HStack {
-                Text(relativeTime)
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-
-                Spacer()
-
-                if let processingDurationLabelText = record.galleryProcessingDurationLabelText {
-                    Text(processingDurationLabelText)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.42))
-                } else if let etaSummary = record.estimatedRemainingSummaryText, record.status != .completed {
-                    Text(useEnglish ? "About \(etaSummary)" : "约 \(etaSummary)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.42))
-                } else {
-                    Text(useEnglish ? "Waiting for stats" : "等待统计")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.32))
-                }
-            }
+            .padding(.horizontal, compactLayout ? 2 : 4)
+            .padding(.bottom, 2)
         }
-        .padding(12)
+        .padding(compactLayout ? 10 : 12)
         .background(
-            RoundedRectangle(cornerRadius: 18)
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
                 .fill(cardBackgroundColor)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 18)
+                    RoundedRectangle(cornerRadius: 32, style: .continuous)
                         .stroke(cardBorderColor, lineWidth: 1)
                 )
         )
+        .shadow(color: Color.black.opacity(0.05), radius: 12, y: 6)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(record.name)，\(localizedStatusMessage)，\(relativeTime)")
+    }
+
+    private var thumbnailCard: some View {
+        thumbnailContent
+            .frame(maxWidth: .infinity)
+            .frame(height: imageHeight)
+            .background(thumbnailBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay(alignment: .topTrailing) {
+                if showsStatusBadge {
+                    statusBadge
+                        .padding(compactLayout ? 10 : 12)
+                }
+            }
     }
 
     @ViewBuilder
@@ -159,14 +128,12 @@ struct ScanRecordCell: View {
             if let image = persistedThumbnailImage(for: thumbnailPath) {
                 Image(uiImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(maxWidth: .infinity)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .scaledToFill()
             } else if let sourceVideoPath = record.sourceVideoPath {
                 SourceVideoThumbnailView(
                     recordId: record.id,
                     sourceVideoPath: sourceVideoPath,
+                    height: imageHeight,
                     placeholder: thumbnailPlaceholder
                 )
             } else {
@@ -178,18 +145,16 @@ struct ScanRecordCell: View {
             AsyncImage(url: url) { image in
                 image
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
+                    .scaledToFill()
             } placeholder: {
                 thumbnailPlaceholder
             }
-            .frame(maxWidth: .infinity)
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
             #endif
         } else if let sourceVideoPath = record.sourceVideoPath {
             SourceVideoThumbnailView(
                 recordId: record.id,
                 sourceVideoPath: sourceVideoPath,
+                height: imageHeight,
                 placeholder: thumbnailPlaceholder
             )
         } else {
@@ -205,17 +170,30 @@ struct ScanRecordCell: View {
     }
     #endif
 
+    private var thumbnailBackground: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.72, green: 0.83, blue: 0.95),
+                Color(red: 0.33, green: 0.58, blue: 0.85)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
     private var thumbnailPlaceholder: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.04))
+            thumbnailBackground
             Image(systemName: placeholderSymbolName)
-                .font(.system(size: 28))
-                .foregroundColor(.gray)
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(.white.opacity(0.86))
         }
     }
 
     private var placeholderSymbolName: String {
+        if record.isInspectionOnlyCandidate {
+            return "eye.fill"
+        }
         switch record.status {
         case .completed:
             return "cube.transparent"
@@ -229,32 +207,34 @@ struct ScanRecordCell: View {
     }
 
     private var statusBadge: some View {
-        HStack(spacing: 5) {
-            Image(systemName: statusSymbolName)
-                .font(.system(size: 10, weight: .bold))
+        HStack(spacing: 0) {
             Text(statusTitle)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: compactLayout ? 10 : 11, weight: .semibold))
         }
         .foregroundColor(.white)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, compactLayout ? 8 : 10)
+        .padding(.vertical, compactLayout ? 6 : 7)
         .background(statusColor)
-        .cornerRadius(999)
+        .clipShape(Capsule())
     }
 
     private var processingBackendBadge: some View {
         Text(processingBackendBadgeTitle)
-            .font(.system(size: 11, weight: .bold))
-            .foregroundColor(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .font(.system(size: compactLayout ? 10 : 11, weight: .semibold))
+            .foregroundColor(textPrimaryColor)
+            .padding(.horizontal, compactLayout ? 8 : 10)
+            .padding(.vertical, compactLayout ? 6 : 7)
             .background(processingBackendBadgeColor)
-            .cornerRadius(999)
+            .clipShape(Capsule())
     }
 
     private var statusTitle: String {
+        if record.isInspectionOnlyCandidate {
+            return useEnglish ? "Needs QA" : "未达HQ"
+        }
+        let workflowStatus = record.displayWorkflowStatus
         if useEnglish {
-            switch record.status {
+            switch workflowStatus {
             case .completed:
                 return "Done"
             case .cancelled:
@@ -272,20 +252,20 @@ struct ScanRecordCell: View {
             case .training:
                 return "Training"
             case .packaging:
-                return "Exporting"
+                return "Processing"
             case .downloading:
                 return "Downloading"
             case .preparing:
                 return "Preparing"
             }
         }
-        switch record.status {
+        switch workflowStatus {
         case .completed:
             return "已完成"
         case .cancelled:
             return "已取消"
         case .failed:
-            return "失败"
+            return record.isObjectFastPublishV1 ? "训练失败" : "失败"
         case .localFallback:
             return "本地处理"
         case .uploading:
@@ -297,7 +277,7 @@ struct ScanRecordCell: View {
         case .training:
             return "训练中"
         case .packaging:
-            return "导出中"
+            return "处理中"
         case .downloading:
             return "回传中"
         case .preparing:
@@ -308,9 +288,9 @@ struct ScanRecordCell: View {
     private var localizedStatusMessage: String {
         guard useEnglish else { return record.displayStatusMessage }
         let message = record.displayStatusMessage
-        let fallback = ScanRecord.defaultStatusMessage(for: record.status)
+        let fallback = ScanRecord.defaultStatusMessage(for: record.displayWorkflowStatus)
         if message == fallback {
-            return englishDefaultStatusMessage(for: record.status)
+            return englishDefaultStatusMessage(for: record.displayWorkflowStatus)
         }
         return message
     }
@@ -328,7 +308,7 @@ struct ScanRecordCell: View {
         case .training:
             return "Remote training is building the 3D model"
         case .packaging:
-            return "Exporting and packaging the 3DGS"
+            return "Processing the HQ 3D result"
         case .downloading:
             return "Returning the 3DGS to your phone"
         case .localFallback:
@@ -343,22 +323,28 @@ struct ScanRecordCell: View {
     }
 
     private var statusColor: Color {
-        switch record.status {
+        if record.isInspectionOnlyCandidate {
+            return Color(red: 0.73, green: 0.53, blue: 0.16)
+        }
+        switch record.displayWorkflowStatus {
         case .completed:
-            return .green
+            return Color(red: 0.12, green: 0.23, blue: 0.18)
         case .cancelled:
-            return .orange
+            return Color(red: 0.77, green: 0.57, blue: 0.18)
         case .failed:
-            return .red
+            return Color(red: 0.79, green: 0.29, blue: 0.23)
         case .localFallback:
-            return .orange
+            return Color(red: 0.77, green: 0.57, blue: 0.18)
         case .uploading, .queued, .reconstructing, .training, .packaging, .downloading, .preparing:
-            return .cyan
+            return Color(red: 0.12, green: 0.23, blue: 0.18)
         }
     }
 
     private var statusSymbolName: String {
-        switch record.status {
+        if record.isInspectionOnlyCandidate {
+            return "eye.fill"
+        }
+        switch record.displayWorkflowStatus {
         case .completed:
             return "checkmark.circle.fill"
         case .cancelled:
@@ -400,53 +386,51 @@ struct ScanRecordCell: View {
 
     private var processingBackendBadgeColor: Color {
         if record.isObjectFastPublishV1 {
-            return Color.orange.opacity(0.92)
+            return Color(red: 0.99, green: 0.87, blue: 0.71)
         }
         return record.resolvedProcessingBackend == .cloud
-            ? Color.cyan.opacity(0.92)
-            : Color.green.opacity(0.85)
+            ? Color(red: 0.90, green: 0.93, blue: 0.90)
+            : Color(red: 0.84, green: 0.90, blue: 0.94)
     }
 
-    private var cardBackgroundColor: Color {
-        switch record.status {
-        case .cancelled:
-            return Color.orange.opacity(0.10)
-        case .failed:
-            return Color.red.opacity(0.08)
-        default:
-            return Color.white.opacity(0.04)
-        }
-    }
+    private var cardBackgroundColor: Color { .white }
 
     private var cardBorderColor: Color {
+        if record.isInspectionOnlyCandidate {
+            return Color(red: 0.93, green: 0.86, blue: 0.71)
+        }
         switch record.status {
-        case .cancelled:
-            return Color.orange.opacity(0.24)
         case .failed:
-            return Color.red.opacity(0.18)
+            return statusColor.opacity(0.22)
+        case .cancelled:
+            return statusColor.opacity(0.18)
         default:
-            return Color.white.opacity(0.06)
+            return .clear
         }
     }
 
     private func metaCapsule(text: String, tint: Color) -> some View {
         HStack(spacing: 6) {
             Image(systemName: metaLineIconName)
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: compactLayout ? 9 : 10, weight: .bold))
             Text(text)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: compactLayout ? 10 : 11, weight: .semibold))
+                .lineLimit(2)
         }
         .foregroundColor(tint)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, compactLayout ? 8 : 10)
+        .padding(.vertical, compactLayout ? 6 : 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(tint.opacity(0.10))
         )
     }
 
     private var metaLineIconName: String {
+        if record.isInspectionOnlyCandidate {
+            return "doc.text.magnifyingglass"
+        }
         switch record.status {
         case .cancelled:
             return "arrow.clockwise.circle.fill"
@@ -456,12 +440,55 @@ struct ScanRecordCell: View {
             return "checkmark.seal.fill"
         }
     }
+
+    private var showsStatusBadge: Bool {
+        record.status != .completed || record.isInspectionOnlyCandidate
+    }
+
+    private var progressValue: Double? {
+        guard record.isProcessing else { return nil }
+        return min(max(record.displayProgressFraction, 0.02), 0.99)
+    }
+
+    private var footerLeadingText: String? {
+        if let samplingProfileLabelText = record.gallerySamplingProfileLabelText,
+           !samplingProfileLabelText.isEmpty {
+            return samplingProfileLabelText
+        }
+        if let videoDurationLabelText = record.galleryVideoDurationLabelText,
+           !videoDurationLabelText.isEmpty {
+            return videoDurationLabelText
+        }
+        return processingBackendBadgeTitle
+    }
+
+    private var footerTrailingText: String? {
+        if let processingDurationLabelText = record.galleryProcessingDurationLabelText,
+           !processingDurationLabelText.isEmpty {
+            return processingDurationLabelText
+        }
+        if let etaSummary = record.estimatedRemainingSummaryText,
+           record.status != .completed,
+           !etaSummary.isEmpty {
+            return useEnglish ? "About \(etaSummary)" : "约 \(etaSummary)"
+        }
+        return nil
+    }
+
+    private var textPrimaryColor: Color {
+        Color(red: 0.16, green: 0.17, blue: 0.15)
+    }
+
+    private var textSecondaryColor: Color {
+        Color(red: 0.47, green: 0.49, blue: 0.46)
+    }
 }
 
 #if canImport(UIKit) && canImport(AVFoundation)
 private struct SourceVideoThumbnailView<Placeholder: View>: View {
     let recordId: UUID
     let sourceVideoPath: String
+    let height: CGFloat
     let placeholder: Placeholder
 
     @State private var thumbnailImage: UIImage?
@@ -472,14 +499,14 @@ private struct SourceVideoThumbnailView<Placeholder: View>: View {
             if let thumbnailImage {
                 Image(uiImage: thumbnailImage)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
+                    .scaledToFill()
             } else {
                 placeholder
             }
         }
         .frame(maxWidth: .infinity)
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(height: height)
+        .clipped()
         .onAppear {
             loadThumbnailIfNeeded()
         }

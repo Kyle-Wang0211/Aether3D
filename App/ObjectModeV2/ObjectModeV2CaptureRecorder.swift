@@ -58,7 +58,6 @@ final class ObjectModeV2CaptureRecorder: NSObject, AVCaptureVideoDataOutputSampl
     private var latestThumbnailImage: UIImage?
     private var lastThumbnailCaptureAt: CFAbsoluteTime = 0
     private var lastVisualSampleAt: CFAbsoluteTime = 0
-
     private(set) var isPrepared = false
     private(set) var isRecording = false
 

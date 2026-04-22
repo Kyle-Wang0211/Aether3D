@@ -24,6 +24,9 @@ private struct HomePersistedObjectModeViewerBundle {
     let localComparisonAssetPath: String?
     let localComparisonMetricsPath: String?
     let localHQArtifactPath: String?
+    let inspectionOnly: Bool
+    let hqPassed: Bool
+    let failedCards: [String]
 }
 
 @MainActor
@@ -97,11 +100,13 @@ final class HomeViewModel: ObservableObject {
                 for record in self.scanRecords where
                     record.isProcessing
                     || self.shouldForceImmediateRemoteResume(record)
+                    || self.shouldCheckLatestObjectFastPublishJob(record)
                     || self.shouldResumeFailedRemoteRecord(record)
                     || self.shouldResumeCompletedRemoteRecord(record) {
                     self.scheduleRemoteResumeIfNeeded(
                         record,
                         force: self.shouldForceImmediateRemoteResume(record)
+                            || self.shouldCheckLatestObjectFastPublishJob(record)
                             || self.shouldResumeFailedRemoteRecord(record)
                             || self.shouldResumeCompletedRemoteRecord(record)
                     )
@@ -602,17 +607,21 @@ final class HomeViewModel: ObservableObject {
         let awaitingCancelConfirmation = record.status == .cancelled && record.failureReason == "cancel_requested_unconfirmed"
         let resumableFailedRemoteRecord = shouldResumeFailedRemoteRecord(record)
         let resumableCompletedRemoteRecord = shouldResumeCompletedRemoteRecord(record)
+        let shouldCheckLatestObjectFastPublishJob = shouldCheckLatestObjectFastPublishJob(record)
         let allowProcessingArtifactResume = isObjectFastPublishRecord(record) && record.isProcessing
+        let currentRemoteJobId = record.remoteJobId?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (record.artifactPath == nil || allowProcessingArtifactResume),
-              (record.isProcessing || awaitingCancelConfirmation || resumableFailedRemoteRecord || resumableCompletedRemoteRecord),
-              let remoteJobId = record.remoteJobId,
-              !remoteJobId.isEmpty else {
+              (record.isProcessing
+                || awaitingCancelConfirmation
+                || resumableFailedRemoteRecord
+                || resumableCompletedRemoteRecord
+                || shouldCheckLatestObjectFastPublishJob) else {
             return
         }
 
         let shouldForceResume = force || shouldForceImmediateRemoteResume(record) || resumableCompletedRemoteRecord
         let isStale = Date().timeIntervalSince(record.updatedAt) > 15
-        guard shouldForceResume || isStale else { return }
+        guard shouldForceResume || isStale || shouldCheckLatestObjectFastPublishJob else { return }
         guard !activeRecoveryRecordIDs.contains(record.id) else { return }
 
         let now = Date()
@@ -627,6 +636,9 @@ final class HomeViewModel: ObservableObject {
             if resumableCompletedRemoteRecord {
                 return "远端已经完成，正在把 3DGS 结果继续回传到手机并写入本地记录。"
             }
+            if shouldCheckLatestObjectFastPublishJob {
+                return "正在检查这条扫描是否已经切换到新的远端任务，并尝试接续最新进度。"
+            }
             if shouldForceResume {
                 return "已经重新连上后台任务状态服务，正在立刻确认这条任务是不是已经被后端接单并开始处理。"
             }
@@ -640,15 +652,32 @@ final class HomeViewModel: ObservableObject {
             progressFraction: max(record.displayProgressFraction, 0.12),
             estimatedRemainingMinutes: record.estimatedRemainingMinutes,
             sourceVideoPath: record.sourceVideoPath,
-            remoteJobId: remoteJobId
+            remoteJobId: currentRemoteJobId
         )
         _ = refreshRecord(id: record.id)
 
         Task {
+            let effectiveRemoteJobId: String?
             if self.isObjectFastPublishRecord(record) {
-                await self.resumeObjectFastPublishBuild(for: record.id, jobId: remoteJobId)
+                effectiveRemoteJobId = await self.rebindObjectFastPublishRemoteJobIfNeeded(
+                    recordId: record.id,
+                    currentRemoteJobId: currentRemoteJobId
+                ) ?? currentRemoteJobId
             } else {
-                await self.resumeRemoteBuild(for: record.id, jobId: remoteJobId)
+                effectiveRemoteJobId = currentRemoteJobId
+            }
+
+            guard let effectiveRemoteJobId, !effectiveRemoteJobId.isEmpty else {
+                _ = await MainActor.run {
+                    self.activeRecoveryRecordIDs.remove(record.id)
+                }
+                return
+            }
+
+            if self.isObjectFastPublishRecord(record) {
+                await self.resumeObjectFastPublishBuild(for: record.id, jobId: effectiveRemoteJobId)
+            } else {
+                await self.resumeRemoteBuild(for: record.id, jobId: effectiveRemoteJobId)
             }
             _ = await MainActor.run {
                 self.activeRecoveryRecordIDs.remove(record.id)
@@ -686,6 +715,18 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
+    private func shouldCheckLatestObjectFastPublishJob(_ record: ScanRecord) -> Bool {
+        guard isObjectFastPublishRecord(record), record.artifactPath == nil else {
+            return false
+        }
+        switch record.status {
+        case .failed, .cancelled, .completed:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func shouldResumeFailedRemoteRecord(_ record: ScanRecord) -> Bool {
         guard record.status == .failed,
               record.artifactPath == nil,
@@ -716,6 +757,49 @@ final class HomeViewModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func rebindObjectFastPublishRemoteJobIfNeeded(
+        recordId: UUID,
+        currentRemoteJobId: String?
+    ) async -> String? {
+        let normalizedCurrentRemoteJobId = currentRemoteJobId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let latestRemoteJobId = try await BackgroundUploadBrokerClient.shared.findLatestJobId(
+                clientRecordId: recordId,
+                captureOrigin: "object_mode_v2"
+            )?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard let latestRemoteJobId, !latestRemoteJobId.isEmpty else {
+                return normalizedCurrentRemoteJobId
+            }
+            guard latestRemoteJobId != normalizedCurrentRemoteJobId else {
+                return latestRemoteJobId
+            }
+
+            let existingRecord = store.record(id: recordId)
+            store.updateProcessingState(
+                recordId: recordId,
+                status: .queued,
+                statusMessage: "已同步到最新远端任务",
+                detailMessage: "检测到这条扫描已经切换到新的远端任务，正在接续最新任务进度。",
+                progressFraction: max(existingRecord?.displayProgressFraction ?? 0.12, 0.12),
+                progressBasis: "remote_job_rebound",
+                remoteStageKey: "remote_job_rebound",
+                runtimeMetrics: objectFastPublishRuntimeMetrics(
+                    stageKey: "remote_job_rebound",
+                    detail: "rebound_to_latest_remote_job",
+                    remoteJobId: latestRemoteJobId,
+                    defaultArtifactReady: existingRecord?.artifactPath != nil
+                ),
+                remoteJobId: latestRemoteJobId,
+                failureReason: nil
+            )
+            loadRecords(scheduleRemoteResume: false)
+            return latestRemoteJobId
+        } catch {
+            return normalizedCurrentRemoteJobId
+        }
     }
 
     private func runRemoteBuild(for recordId: UUID, sourceVideoURL: URL, allowLocalFallback: Bool) async {
@@ -777,7 +861,7 @@ final class HomeViewModel: ObservableObject {
                         statusMessage: progress.isFinalizing ? "正在确认上传" : "正在上传对象素材",
                         detailMessage: progress.isFinalizing
                             ? "所有分片已发送，正在等远端确认并排队。"
-                            : "新远端对象模式正在上传素材，并准备默认成品。",
+                            : "新远端对象模式正在上传素材，并准备 HQ 成品。",
                         progressFraction: min(max(progress.fraction ?? 0.02, 0.02), 0.16),
                         progressBasis: progress.isFinalizing ? "upload_finalizing" : "uploading",
                         remoteStageKey: "uploading",
@@ -800,7 +884,7 @@ final class HomeViewModel: ObservableObject {
                 recordId: recordId,
                 status: .queued,
                 statusMessage: "远端已接收任务",
-                detailMessage: "对象成品正在排队并准备处理。",
+                detailMessage: "HQ 成品正在排队并准备处理。",
                 progressFraction: 0.18,
                 progressBasis: "queued",
                 remoteStageKey: "queued",
@@ -861,11 +945,17 @@ final class HomeViewModel: ObservableObject {
         var lastObservedRemoteFailureReason: String?
 
         while true {
+            guard shouldAcceptObjectFastPublishUpdate(recordId: recordId, jobId: jobId) else {
+                return
+            }
             let status: JobStatus
             do {
                 status = try await broker.pollStatus(jobId: jobId)
                 transientPollFailures = 0
             } catch {
+                guard shouldAcceptObjectFastPublishUpdate(recordId: recordId, jobId: jobId) else {
+                    return
+                }
                 transientPollFailures += 1
                 if transientPollFailures <= 12 {
                     store.updateProcessingState(
@@ -910,6 +1000,9 @@ final class HomeViewModel: ObservableObject {
                 return
             }
 
+            guard shouldAcceptObjectFastPublishUpdate(recordId: recordId, jobId: jobId) else {
+                return
+            }
             switch status {
             case .pending(let progress), .processing(let progress):
                 consecutiveRemoteFailedPolls = 0
@@ -926,6 +1019,9 @@ final class HomeViewModel: ObservableObject {
                 if !defaultArtifactReady {
                     do {
                         let bundle = try await broker.downloadObjectModeViewerBundle(jobId: jobId)
+                        guard shouldAcceptObjectFastPublishUpdate(recordId: recordId, jobId: jobId) else {
+                            return
+                        }
                         let persistedBundle = try persistObjectFastPublishViewerBundle(
                             bundle,
                             recordId: recordId
@@ -944,7 +1040,7 @@ final class HomeViewModel: ObservableObject {
                         store.updateProcessingState(
                             recordId: recordId,
                             status: .failed,
-                            statusMessage: "默认成品下载失败",
+                            statusMessage: "HQ 成品下载失败",
                             detailMessage: error.localizedDescription,
                             progressFraction: progress.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
                             progressBasis: progress.progressBasis,
@@ -982,6 +1078,9 @@ final class HomeViewModel: ObservableObject {
                     let comparisonMetricsPath: String?
                     let hqAssetPath: String?
                     let bundle = try await broker.downloadObjectModeViewerBundle(jobId: jobId)
+                    guard shouldAcceptObjectFastPublishUpdate(recordId: recordId, jobId: jobId) else {
+                        return
+                    }
                     let persistedBundle = try persistObjectFastPublishViewerBundle(
                         bundle,
                         recordId: recordId
@@ -999,13 +1098,16 @@ final class HomeViewModel: ObservableObject {
                         viewerManifestPath: viewerManifestPath,
                         comparisonAssetPath: comparisonAssetPath,
                         comparisonMetricsPath: comparisonMetricsPath,
-                        hqAssetPath: hqAssetPath
+                        hqAssetPath: hqAssetPath,
+                        inspectionOnly: persistedBundle.inspectionOnly,
+                        hqPassed: persistedBundle.hqPassed,
+                        failedCards: persistedBundle.failedCards
                     )
                 } catch {
                     store.updateProcessingState(
                         recordId: recordId,
                         status: .failed,
-                        statusMessage: "对象成品回传失败",
+                        statusMessage: "HQ 成品回传失败",
                         detailMessage: error.localizedDescription,
                         progressFraction: progress?.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
                         progressBasis: progress?.progressBasis,
@@ -1065,6 +1167,78 @@ final class HomeViewModel: ObservableObject {
                     continue
                 }
 
+                if isHQGateFailure(normalizedReason) {
+                    do {
+                        let persistedBundle = try persistObjectFastPublishViewerBundle(
+                            try await broker.downloadObjectModeViewerBundle(jobId: jobId),
+                            recordId: recordId
+                        )
+                        guard shouldAcceptObjectFastPublishUpdate(recordId: recordId, jobId: jobId) else {
+                            return
+                        }
+                        store.updateArtifactPath(
+                            recordId: recordId,
+                            artifactPath: persistedBundle.defaultArtifactRelativePath
+                        )
+                        let failedCards = resolvedHQFailedCards(
+                            manifestCards: persistedBundle.failedCards,
+                            failureReason: normalizedReason
+                        )
+                        let detailMessage = inspectionOnlyDetailMessage(for: failedCards)
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .failed,
+                            statusMessage: "未达 HQ，仅供质检",
+                            detailMessage: detailMessage,
+                            progressFraction: progress?.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
+                            progressBasis: progress?.progressBasis,
+                            remoteStageKey: progress?.stageKey,
+                            remotePhaseName: progress?.phaseName,
+                            currentTier: progress?.currentTier,
+                            runtimeMetrics: objectFastPublishRuntimeMetrics(
+                                stageKey: progress?.stageKey,
+                                detail: detailMessage,
+                                remoteJobId: jobId,
+                                defaultArtifactReady: true,
+                                remoteMetrics: progress?.runtimeMetrics ?? [:],
+                                localViewerManifestPath: persistedBundle.localManifestRelativePath,
+                                localComparisonAssetPath: persistedBundle.localComparisonAssetPath,
+                                localComparisonMetricsPath: persistedBundle.localComparisonMetricsPath,
+                                localHQArtifactPath: persistedBundle.localHQArtifactPath,
+                                inspectionOnly: true,
+                                hqPassed: false,
+                                failedCards: failedCards
+                            ),
+                            remoteJobId: jobId,
+                            failureReason: normalizedReason
+                        )
+                        loadRecords(scheduleRemoteResume: false)
+                    } catch {
+                        store.updateProcessingState(
+                            recordId: recordId,
+                            status: .failed,
+                            statusMessage: "候选结果回传失败",
+                            detailMessage: error.localizedDescription,
+                            progressFraction: progress?.progressFraction ?? store.record(id: recordId)?.displayProgressFraction,
+                            progressBasis: progress?.progressBasis,
+                            remoteStageKey: progress?.stageKey,
+                            remotePhaseName: progress?.phaseName,
+                            currentTier: progress?.currentTier,
+                            runtimeMetrics: objectFastPublishRuntimeMetrics(
+                                stageKey: progress?.stageKey,
+                                detail: error.localizedDescription,
+                                remoteJobId: jobId,
+                                defaultArtifactReady: false,
+                                remoteMetrics: progress?.runtimeMetrics ?? [:]
+                            ),
+                            remoteJobId: jobId,
+                            failureReason: "object_fast_publish_candidate_download_failed"
+                        )
+                        loadRecords(scheduleRemoteResume: false)
+                    }
+                    return
+                }
+
                 store.updateProcessingState(
                     recordId: recordId,
                     status: .failed,
@@ -1093,6 +1267,15 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
+    private func shouldAcceptObjectFastPublishUpdate(recordId: UUID, jobId: String) -> Bool {
+        let normalizedJobId = jobId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedJobId.isEmpty else { return false }
+        let currentRemoteJobId = store.record(id: recordId)?
+            .remoteJobId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return currentRemoteJobId == normalizedJobId
+    }
+
     private func isObjectFastPublishRecord(_ record: ScanRecord) -> Bool {
         record.isObjectFastPublishV1
     }
@@ -1102,7 +1285,7 @@ final class HomeViewModel: ObservableObject {
             "strategy": "object_slam3r_surface_v1",
             "capture_mode": "guided_object",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "matcha_mesh_glb",
+            "first_result_kind": "hq_mesh_glb",
             "hq_refine": "disabled",
             "optional_mesh_export": "disabled",
             "target_zone_mode": "subject",
@@ -1118,15 +1301,27 @@ final class HomeViewModel: ObservableObject {
         localViewerManifestPath: String? = nil,
         localComparisonAssetPath: String? = nil,
         localComparisonMetricsPath: String? = nil,
-        localHQArtifactPath: String? = nil
+        localHQArtifactPath: String? = nil,
+        inspectionOnly: Bool? = nil,
+        hqPassed: Bool? = nil,
+        failedCards: [String] = []
     ) -> [String: String] {
         var metrics = remoteMetrics
         metrics["pipeline_strategy"] = "object_slam3r_surface_v1"
         metrics["artifact_contract_version"] = "object_publish_v1"
-        metrics["first_result_kind"] = "matcha_mesh_glb"
+        metrics["first_result_kind"] = "hq_mesh_glb"
         metrics["hq_refine"] = "disabled"
         metrics["optional_mesh_export"] = "disabled"
         metrics["default_artifact_ready"] = defaultArtifactReady ? "true" : "false"
+        if let inspectionOnly {
+            metrics["inspection_only_candidate"] = inspectionOnly ? "true" : "false"
+        }
+        if let hqPassed {
+            metrics["hq_passed"] = hqPassed ? "true" : "false"
+        }
+        if !failedCards.isEmpty {
+            metrics["hq_failed_cards"] = failedCards.joined(separator: ",")
+        }
         if let stageKey, !stageKey.isEmpty {
             metrics["remote_stage_key"] = stageKey
         }
@@ -1151,6 +1346,49 @@ final class HomeViewModel: ObservableObject {
         return metrics
     }
 
+    private func isHQGateFailure(_ reason: String) -> Bool {
+        reason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("hq_gate_failed")
+    }
+
+    private func resolvedHQFailedCards(manifestCards: [String], failureReason: String) -> [String] {
+        if !manifestCards.isEmpty {
+            return manifestCards
+        }
+        let normalized = failureReason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let separator = normalized.firstIndex(of: ":") else {
+            return []
+        }
+        return normalized[normalized.index(after: separator)...]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func inspectionOnlyDetailMessage(for failedCards: [String]) -> String {
+        if failedCards.isEmpty {
+            return "候选结果已生成，但未达 HQ，仅供质检。"
+        }
+        let labels = failedCards.map(Self.hqFailedCardLabel).joined(separator: "、")
+        return "候选结果已生成，但未达 HQ，仅供质检。未通过：\(labels)。"
+    }
+
+    private static func hqFailedCardLabel(_ rawCard: String) -> String {
+        switch rawCard.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "geometry_hq":
+            return "几何"
+        case "texture_hq":
+            return "贴图"
+        case "open_surface_hq":
+            return "开放表面"
+        case "hole_fill_hq":
+            return "补洞克制"
+        case "mesh_fidelity_hq":
+            return "网格保真"
+        default:
+            return rawCard
+        }
+    }
+
     private func objectFastPublishStatus(for progress: RemoteJobProgress, defaultArtifactReady: Bool) -> ScanRecordStatus {
         let stageKey = progress.stageKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         switch stageKey {
@@ -1158,8 +1396,10 @@ final class HomeViewModel: ObservableObject {
             return .uploading
         case "queued":
             return .queued
-        case "curate", "slam3r_reconstruct", "slam3r_scene_contract", "sparse2dgs_surface":
+        case "curate", "slam3r_reconstruct", "slam3r_scene_contract":
             return .reconstructing
+        case "sparse2dgs_surface":
+            return .training
         case "matcha_mesh_extract", "optimize_default_mesh", "bake_default_texture", "publish_default_mesh", "artifact_upload":
             return .packaging
         case "downloading":
@@ -1177,7 +1417,7 @@ final class HomeViewModel: ObservableObject {
     ) {
         let existingMetrics = store.record(id: recordId)?.runtimeMetrics
         let status = objectFastPublishStatus(for: progress, defaultArtifactReady: defaultArtifactReady)
-        let detailSuffix = defaultArtifactReady ? "默认 mesh 成品已可打开。" : nil
+        let detailSuffix = defaultArtifactReady ? "HQ 成品已可打开。" : nil
         let detail: String? = {
             let base = progress.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let base, !base.isEmpty, let detailSuffix {
@@ -1192,7 +1432,7 @@ final class HomeViewModel: ObservableObject {
         store.updateProcessingState(
             recordId: recordId,
             status: status,
-            statusMessage: progress.title ?? "正在生成对象成品",
+            statusMessage: progress.title ?? "正在生成 HQ 成品",
             detailMessage: detail,
             progressFraction: progress.progressFraction,
             progressBasis: progress.progressBasis,
@@ -1229,8 +1469,8 @@ final class HomeViewModel: ObservableObject {
         record.artifactPath = artifactPath
         record.remoteJobId = remoteJobId
         record.status = .packaging
-        record.statusMessage = progress.title ?? "默认 mesh 成品已就绪"
-        record.detailMessage = "默认 mesh 成品已下载，可从首页打开。"
+        record.statusMessage = progress.title ?? "HQ 成品已就绪"
+        record.detailMessage = "HQ 成品已下载，可从首页打开。"
         record.progressFraction = max(progress.progressFraction ?? 0.92, 0.92)
         record.progressBasis = progress.progressBasis
         record.remoteStageKey = progress.stageKey
@@ -1263,7 +1503,10 @@ final class HomeViewModel: ObservableObject {
         viewerManifestPath: String?,
         comparisonAssetPath: String?,
         comparisonMetricsPath: String?,
-        hqAssetPath: String?
+        hqAssetPath: String?,
+        inspectionOnly: Bool,
+        hqPassed: Bool,
+        failedCards: [String]
     ) {
         guard var record = store.record(id: recordId) else { return }
         let now = Date()
@@ -1271,8 +1514,13 @@ final class HomeViewModel: ObservableObject {
         record.artifactPath = artifactPath
         record.remoteJobId = nil
         record.status = .completed
-        record.statusMessage = "对象成品已完成"
-        record.detailMessage = progress?.detail ?? "默认成品已完成，可从首页直接打开。"
+        if inspectionOnly {
+            record.statusMessage = "未达 HQ，仅供质检"
+            record.detailMessage = inspectionOnlyDetailMessage(for: failedCards)
+        } else {
+            record.statusMessage = "HQ 成品已完成"
+            record.detailMessage = progress?.detail ?? "HQ 成品已完成，可从首页直接打开。"
+        }
         record.progressFraction = 1.0
         record.progressBasis = progress?.progressBasis
         record.remoteStageKey = progress?.stageKey
@@ -1287,7 +1535,10 @@ final class HomeViewModel: ObservableObject {
             localViewerManifestPath: viewerManifestPath,
             localComparisonAssetPath: comparisonAssetPath,
             localComparisonMetricsPath: comparisonMetricsPath,
-            localHQArtifactPath: hqAssetPath
+            localHQArtifactPath: hqAssetPath,
+            inspectionOnly: inspectionOnly,
+            hqPassed: hqPassed,
+            failedCards: failedCards
         )
         record.processingStartedAt = startedAt
         record.processingCompletedAt = now
@@ -1491,8 +1742,17 @@ final class HomeViewModel: ObservableObject {
             remoteManifestPayload = payload
         }
 
+        let inspectionOnly = (remoteManifestPayload["inspection_only"] as? Bool) ?? false
+        let hqPassed = (remoteManifestPayload["hq_passed"] as? Bool) ?? !inspectionOnly
+        let failedCards = (remoteManifestPayload["failed_cards"] as? [String]) ?? []
+
         var localManifestPayload: [String: Any] = [
             "version": remoteManifestPayload["version"] ?? "object_publish_v1",
+            "product_mode": remoteManifestPayload["product_mode"] ?? "hq_only",
+            "primary_product": remoteManifestPayload["primary_product"] ?? "hq_mesh_glb",
+            "inspection_only": inspectionOnly,
+            "hq_passed": hqPassed,
+            "failed_cards": failedCards,
             "default_asset": [
                 "kind": bundle.defaultArtifact.format,
                 "path": defaultDestinationURL.lastPathComponent,
@@ -1539,7 +1799,10 @@ final class HomeViewModel: ObservableObject {
             localManifestRelativePath: "exports/\(localManifestURL.lastPathComponent)",
             localComparisonAssetPath: cleanedRelativePath,
             localComparisonMetricsPath: compareMetricsRelativePath,
-            localHQArtifactPath: hqRelativePath
+            localHQArtifactPath: hqRelativePath,
+            inspectionOnly: inspectionOnly,
+            hqPassed: hqPassed,
+            failedCards: failedCards
         )
     }
 

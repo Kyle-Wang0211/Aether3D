@@ -558,6 +558,41 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         return false
     }
 
+    public var isInspectionOnlyCandidate: Bool {
+        if runtimeMetricString("inspection_only_candidate") == "true" {
+            return true
+        }
+        if runtimeMetricString("hq_passed") == "false", artifactPath != nil {
+            return true
+        }
+        guard let normalizedFailureReason else { return false }
+        return normalizedFailureReason.hasPrefix(Self.hqGateFailureReasonPrefix)
+    }
+
+    public var inspectionFailedCards: [String] {
+        if let cards = runtimeMetricString("hq_failed_cards"), !cards.isEmpty {
+            return cards
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        guard let normalizedFailureReason,
+              normalizedFailureReason.hasPrefix(Self.hqGateFailureReasonPrefix),
+              let separator = normalizedFailureReason.firstIndex(of: ":") else {
+            return []
+        }
+        return normalizedFailureReason[normalizedFailureReason.index(after: separator)...]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    public var inspectionFailedCardsSummaryText: String? {
+        let labels = inspectionFailedCards.map(Self.hqFailedCardLabel)
+        guard !labels.isEmpty else { return nil }
+        return labels.joined(separator: "、")
+    }
+
     public var displayProgressFraction: Double {
         switch status {
         case .completed:
@@ -569,15 +604,22 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         }
     }
 
+    public var displayWorkflowStatus: ScanRecordStatus {
+        effectiveWorkflowStatus
+    }
+
     public var displayStatusMessage: String {
+        if isInspectionOnlyCandidate {
+            return "未达 HQ，仅供质检"
+        }
         if let statusMessage, !statusMessage.isEmpty {
             return statusMessage
         }
-        return Self.defaultStatusMessage(for: status)
+        return Self.defaultStatusMessage(for: effectiveWorkflowStatus)
     }
 
     public var isUploadFinalizing: Bool {
-        status == .uploading && normalizedProgressBasis == "upload_finalizing"
+        effectiveWorkflowStatus == .uploading && normalizedProgressBasis == "upload_finalizing"
     }
 
     public var uploadProgressText: String? {
@@ -636,7 +678,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             case "extract_frames_live":
                 return displayStatus == .uploading ? "正在边上传边抽帧" : "正在抽帧"
             case "audit_live":
-                return displayStatus == .uploading ? "正在边上传边预审核" : "正在做预审核"
+                return displayStatus == .uploading ? "正在边上传边整理关键帧" : "正在整理关键帧"
             case "sfm_wait_live":
                 return "正在等待足够帧后启动增量相机重建"
             case "live_sfm_retry_wait":
@@ -665,7 +707,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             case "prep_extract_frames_live":
                 return displayStatus == .uploading ? "正在边上传边抽帧" : "正在抽帧"
             case "prep_audit_live":
-                return displayStatus == .uploading ? "正在边上传边预审核" : "正在做预审核"
+                return displayStatus == .uploading ? "正在边上传边整理关键帧" : "正在整理关键帧"
             case "prep_live_sfm_wait_frames":
                 return "正在等待足够帧后启动增量相机重建"
             case "prep_live_sfm_retry_wait":
@@ -707,7 +749,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             return displayStatus == .uploading ? "正在边上传边抽帧" : "正在抽帧"
         }
         if source.contains("审核和筛选") || source.contains("视角审核") {
-            return displayStatus == .uploading ? "正在边上传边预审核" : "正在做预审核"
+            return displayStatus == .uploading ? "正在边上传边整理关键帧" : "正在整理关键帧"
         }
         if source.contains("特征提取") {
             return displayStatus == .uploading ? "正在边上传边提取 SfM 特征" : "正在提取特征"
@@ -1016,16 +1058,18 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private var isUploadStillOpenOnBackend: Bool {
+        if uploadCompletedOnBackend {
+            return false
+        }
+        if isAuthoritativePostUploadStage {
+            return false
+        }
         if let raw = runtimeMetricString("upload_completed")?.lowercased() {
             return raw != "true"
         }
 
-        if status == .uploading {
-            return true
-        }
-
         guard let basis = normalizedProgressBasis else {
-            return false
+            return status == .uploading
         }
 
         switch basis {
@@ -1049,7 +1093,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
              "prep_live_sfm_ready":
             return true
         default:
-            return false
+            return status == .uploading
         }
     }
 
@@ -1130,6 +1174,13 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         if status == .failed || status == .cancelled || artifactPath != nil {
             return false
         }
+        // Once the backend reports a real post-upload stage, trust that stage over stale byte counters.
+        if isAuthoritativePreprocessRuntime
+            || isAuthoritativeTrainingRuntime
+            || isAuthoritativeReturnRuntime
+            || isAuthoritativePostUploadStage {
+            return false
+        }
         if !uploadCompletedOnBackend {
             return uploadedBytes != nil
                 || totalBytes != nil
@@ -1142,7 +1193,6 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                 || normalizedProgressBasis == "object_storage_visible"
                 || hasStreamingPreprocessing
                 || hasSeedTrainingRuntime
-                || isAuthoritativeTrainingRuntime
         }
         return false
     }
@@ -1250,6 +1300,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     public var workflowModeTitle: String {
+        if isInspectionOnlyCandidate {
+            return "候选结果待质检"
+        }
         if isLocalPreviewWorkflow {
             switch status {
             case .completed:
@@ -1308,6 +1361,12 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     public var workflowModeSummaryText: String? {
+        if isInspectionOnlyCandidate {
+            if let failedSummary = inspectionFailedCardsSummaryText {
+                return "候选结果已生成，但未达 HQ，仅供质检。当前未通过：\(failedSummary)。"
+            }
+            return "候选结果已生成，但未达 HQ，仅供质检。"
+        }
         if isLocalPreviewWorkflow {
             switch status {
             case .completed:
@@ -1322,7 +1381,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             }
         }
         if isAuthoritativeGpuWaitRuntime {
-            return "当前这条任务的抽帧、重建和视角审核已完成，正在等待 GPU 训练槽。"
+            return "当前这条任务的抽帧、关键帧整理和重建已完成，正在等待 GPU 训练槽。"
         }
         if activeWorkflowTrackTitles.count > 1 {
             let titles = activeWorkflowTrackTitles.joined(separator: "、")
@@ -1343,17 +1402,17 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
                 return "所有分片已发送，正在等待对象存储确认并完成合并。"
             }
             if isStreamingLiveSfm {
-                return "当前同时开工：上传、抽帧、预审核、增量相机重建。上传未结束时，后端会持续消费已可见的视频分片。"
+                return "当前同时开工：上传、抽帧、关键帧整理、增量相机重建。上传未结束时，后端会持续消费已可见的视频分片。"
             }
             if hasStreamingPreprocessing {
-                return "当前同时开工：上传、抽帧、预审核。上传未结束时，后端会持续消费已可见的视频分片。"
+                return "当前同时开工：上传、抽帧、关键帧整理。上传未结束时，后端会持续消费已可见的视频分片。"
             }
             return "手机正在把视频直接上传到对象存储。"
         case .queued:
             return "视频已经完整到达对象存储，正在等待可用 GPU 真正接单。"
         case .reconstructing:
             if isTrainingProbeRuntime {
-                return "相机重建和视角审核已完成，正在做训练前检查。通过后才会进入完整训练。"
+                return "相机重建和关键帧整理已完成，正在做训练前检查。通过后才会进入完整训练。"
             }
             return "上传已结束，后端正在做正式预处理、视角对齐和相机重建。"
         case .training, .localFallback:
@@ -1510,7 +1569,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             case "extract_frames_live":
                 return "抽帧"
             case "audit_live":
-                return "预审核"
+                return "关键帧整理"
             case "sfm_wait_live":
                 return "等待足够帧后启动 SfM"
             case "live_sfm_retry_wait":
@@ -1536,7 +1595,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         case "prep_extract_frames_live":
             return "抽帧"
         case "prep_audit_live":
-            return "预审核"
+            return "关键帧整理"
         case "prep_live_sfm_wait_frames":
             return "等待足够帧后启动 SfM"
         case "prep_live_sfm_retry_wait":
@@ -1639,6 +1698,12 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     public var galleryStatusMetaText: String? {
+        if isInspectionOnlyCandidate {
+            if let failedSummary = inspectionFailedCardsSummaryText {
+                return "未达 HQ · \(failedSummary) 待人工质检"
+            }
+            return "未达 HQ · 候选结果待人工质检"
+        }
         if isLocalPreviewWorkflow {
             switch status {
             case .completed:
@@ -1932,15 +1997,15 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             metrics.append(
                 Self.metricCountValue(
                     id: "frames_audited",
-                    subtitle: "预审核通过",
+                    subtitle: "已整理关键帧",
                     value: acceptedFrames,
                     suffix: " 帧"
                 )
             )
         } else if allowsPreprocessMetrics, let metric = Self.metricCount(
             id: "frames_audited",
-            subtitle: "预审核通过",
-            pattern: "预审核通过\\s*(\\d[\\d,]*)\\s*帧",
+            subtitle: "已整理关键帧",
+            pattern: "已整理关键帧\\s*(\\d[\\d,]*)\\s*帧",
             in: source,
             suffix: " 帧"
         ) {
@@ -2236,6 +2301,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     public var liveStepTitle: String {
+        if isInspectionOnlyCandidate {
+            return "候选结果待质检"
+        }
         if isLocalPreviewWorkflow {
             switch status {
             case .completed:
@@ -2618,15 +2686,15 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         case .reconstructing:
             return "远端正在预处理并准备重建"
         case .training:
-            return "远端正在训练 3D 模型"
+            return "远端正在生成 HQ 3D 成品"
         case .packaging:
-            return "正在导出并打包 3DGS"
+            return "正在处理 HQ 3D 成品"
         case .downloading:
-            return "正在回传 3DGS 到手机"
+            return "正在回传 HQ 3D 成品到手机"
         case .localFallback:
             return "远端不可用，正在切到本地处理"
         case .completed:
-            return "作品已生成，可交互查看"
+            return "HQ 成品已生成，可交互查看"
         case .cancelled:
             return "你已取消这次远端任务"
         case .failed:
@@ -2784,13 +2852,28 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
         if let stage = normalizedRemoteStageKey {
             switch stage {
-            case "sfm", "sfm_extract", "sfm_match", "sfm_reconstruct":
+            case "curate",
+                 "slam3r_reconstruct",
+                 "slam3r_scene_contract",
+                 "sfm",
+                 "sfm_extract",
+                 "sfm_match",
+                 "sfm_reconstruct":
                 return .reconstructing
-            case "train":
+            case "sparse2dgs_surface",
+                 "train":
                 return .training
-            case "render", "export", "package":
+            case "matcha_mesh_extract",
+                 "optimize_default_mesh",
+                 "bake_default_texture",
+                 "publish_default_mesh",
+                 "artifact_upload",
+                 "render",
+                 "export",
+                 "package",
+                 "packaging":
                 return .packaging
-            case "download":
+            case "download", "downloading":
                 return .downloading
             default:
                 break
@@ -2801,9 +2884,13 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private var isAuthoritativeTrainingRuntime: Bool {
-        if let stage = normalizedRemoteStageKey,
-           (stage == "train" || stage.hasPrefix("train")) && normalizedRemotePhaseName == "full" {
-            return true
+        if let stage = normalizedRemoteStageKey {
+            if stage == "sparse2dgs_surface" {
+                return true
+            }
+            if (stage == "train" || stage.hasPrefix("train")) && normalizedRemotePhaseName == "full" {
+                return true
+            }
         }
         return normalizedRemotePhaseName == "full"
     }
@@ -2817,9 +2904,23 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private var isAuthoritativeReturnRuntime: Bool {
-        if let stage = normalizedRemoteStageKey,
-           stage == "render" || stage == "export" || stage == "package" || stage == "packaging" || stage == "download" || stage == "downloading" {
-            return true
+        if let stage = normalizedRemoteStageKey {
+            switch stage {
+            case "matcha_mesh_extract",
+                 "optimize_default_mesh",
+                 "bake_default_texture",
+                 "publish_default_mesh",
+                 "artifact_upload",
+                 "render",
+                 "export",
+                 "package",
+                 "packaging",
+                 "download",
+                 "downloading":
+                return true
+            default:
+                break
+            }
         }
         return normalizedProgressBasis == "runtime_render_count"
             || normalizedProgressBasis == "download_bytes"
@@ -2831,7 +2932,13 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             return true
         }
         if let stage = normalizedRemoteStageKey,
-           stage == "sfm" || stage == "sfm_extract" || stage == "sfm_match" || stage == "sfm_reconstruct" {
+           stage == "curate"
+            || stage == "slam3r_reconstruct"
+            || stage == "slam3r_scene_contract"
+            || stage == "sfm"
+            || stage == "sfm_extract"
+            || stage == "sfm_match"
+            || stage == "sfm_reconstruct" {
             return true
         }
         if let phase = normalizedRemotePhaseName,
@@ -2843,6 +2950,34 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             || phase == "prep_complete"
             || phase == "probe" {
             return true
+        }
+        return false
+    }
+
+    private var isAuthoritativePostUploadStage: Bool {
+        if let stage = normalizedRemoteStageKey {
+            switch stage {
+            case "curate",
+                 "slam3r_reconstruct",
+                 "slam3r_scene_contract",
+                 "sparse2dgs_surface",
+                 "matcha_mesh_extract",
+                 "optimize_default_mesh",
+                 "bake_default_texture",
+                 "publish_default_mesh",
+                 "artifact_upload",
+                 "render",
+                 "export",
+                 "package",
+                 "packaging",
+                 "download",
+                 "downloading":
+                return true
+            default:
+                if stage == "train" || stage.hasPrefix("train") {
+                    return true
+                }
+            }
         }
         return false
     }
@@ -3213,10 +3348,24 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         if let raw = runtimeMetricString("upload_completed")?.lowercased() {
             return raw == "true"
         }
-        switch status {
-        case .queued, .packaging, .downloading, .completed:
+        if isAuthoritativePostUploadStage {
             return true
-        case .reconstructing, .training, .localFallback:
+        }
+        if let stage = normalizedRemoteStageKey,
+           stage == "train"
+            || stage.hasPrefix("train")
+            || stage == "render"
+            || stage == "export"
+            || stage == "package"
+            || stage == "packaging"
+            || stage == "download"
+            || stage == "downloading" {
+            return true
+        }
+        switch status {
+        case .queued, .training, .packaging, .downloading, .completed:
+            return true
+        case .reconstructing, .localFallback:
             if let uploadedBytes, let totalBytes, totalBytes > 0 {
                 return uploadedBytes >= totalBytes
             }
@@ -3459,6 +3608,10 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     private var returnRuntimeRatioValue: Double? {
         guard isReturnTrackActive || isReturnTrackCompleted else { return nil }
+        if normalizedRemoteStageKey == "optimize_default_mesh",
+           let optimizeLocalProgressRatioValue {
+            return optimizeLocalProgressRatioValue
+        }
         if normalizedProgressBasis == "download_bytes" {
             if let downloadedBytes = runtimeMetricInt("downloaded_bytes"),
                let totalDownloadBytes = runtimeMetricInt("download_total_bytes"),
@@ -3494,6 +3647,10 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     private var returnRuntimeRatioTextValue: String? {
         guard isReturnTrackActive || isReturnTrackCompleted else { return nil }
+        if normalizedRemoteStageKey == "optimize_default_mesh",
+           let optimizeLocalProgressPercent {
+            return "\(optimizeLocalProgressPercent)%"
+        }
         if normalizedProgressBasis == "download_bytes" {
             if let downloadedBytes = runtimeMetricInt("downloaded_bytes"),
                let totalDownloadBytes = runtimeMetricInt("download_total_bytes"),
@@ -3518,6 +3675,11 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
 
     private var returnDisplayMetricsText: String? {
         guard isReturnTrackActive || isReturnTrackCompleted else { return nil }
+
+        if normalizedRemoteStageKey == "optimize_default_mesh",
+           let optimizeLocalProgressPercent {
+            return "网格优化 \(optimizeLocalProgressPercent)%"
+        }
 
         if let structuredPhaseMetric, structuredPhaseMetric.id == "render_count" {
             return "\(structuredPhaseMetric.subtitle) \(structuredPhaseMetric.title)"
@@ -3547,6 +3709,20 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         preprocessRuntimeRatioTextValue
             ?? trainingRuntimeRatioTextValue
             ?? returnRuntimeRatioTextValue
+    }
+
+    private var optimizeLocalProgressPercent: Int? {
+        guard normalizedRemoteStageKey == "optimize_default_mesh" else { return nil }
+        if let raw = runtimeMetricString("optimize_local_progress_percent")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let doubleValue = Double(raw) {
+            return Int(min(max(doubleValue.rounded(), 0), 100))
+        }
+        return nil
+    }
+
+    private var optimizeLocalProgressRatioValue: Double? {
+        guard let optimizeLocalProgressPercent else { return nil }
+        return min(max(Double(optimizeLocalProgressPercent) / 100.0, 0.0), 1.0)
     }
 
     private func segmentProgress(from value: Double?, start: Double, end: Double) -> Double? {
@@ -3727,7 +3903,7 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         case "prep_extract_frames_live":
             return "边上传边抽帧"
         case "prep_audit_live":
-            return "边上传边预审核"
+            return "边上传边整理关键帧"
         case "prep_live_sfm_wait_frames":
             return "等待足够帧后启动增量 SfM"
         case "prep_live_sfm_retry_wait":
@@ -3760,6 +3936,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     }
 
     private static func failureReasonDisplayTitle(for reason: String) -> String {
+        if reason.lowercased().hasPrefix(hqGateFailureReasonPrefix) {
+            return "未达 HQ"
+        }
         if let onDeviceTitle = OnDeviceProcessingCompatibility.failureReasonDisplayTitle(reason) {
             return onDeviceTitle
         }
@@ -3802,6 +3981,25 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
             return "旧远端任务已冻结"
         default:
             return reason
+        }
+    }
+
+    private static let hqGateFailureReasonPrefix = "hq_gate_failed"
+
+    private static func hqFailedCardLabel(_ rawCard: String) -> String {
+        switch rawCard.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "geometry_hq":
+            return "几何"
+        case "texture_hq":
+            return "贴图"
+        case "open_surface_hq":
+            return "开放表面"
+        case "hole_fill_hq":
+            return "补洞克制"
+        case "mesh_fidelity_hq":
+            return "网格保真"
+        default:
+            return rawCard
         }
     }
 }

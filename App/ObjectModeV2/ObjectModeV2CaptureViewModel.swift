@@ -34,9 +34,9 @@ enum ObjectModeV2Stage: String, CaseIterable, Identifiable {
         case .preview:
             return "预览"
         case .defaultStage:
-            return "默认成品"
+            return "HQ 成品"
         case .hq:
-            return "高清成品"
+            return "HQ 成品"
         }
     }
 }
@@ -56,6 +56,9 @@ private struct ObjectModeV2PersistedViewerBundle {
     let comparisonArtifactRelativePath: String?
     let comparisonMetricsRelativePath: String?
     let hqArtifactRelativePath: String?
+    let inspectionOnly: Bool
+    let hqPassed: Bool
+    let failedCards: [String]
 }
 
 enum ObjectModeV2TargetZoneMode: String, CaseIterable {
@@ -225,6 +228,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     @Published var isRunning = false
     @Published var isProcessingOverlayPresented = false
     @Published var processingFailureReason: String?
+    @Published var isInspectionOnlyCandidate = false
     @Published var statusText = "旧版云端高质量不动，这里直接走新版对象模式 Beta。"
     @Published var manifestURL: URL?
     @Published var downloadedArtifactURL: URL?
@@ -240,15 +244,25 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     #endif
     @Published var stageCards: [ObjectModeV2StageCard] = [
         .init(id: .preview, title: "Preview", subtitle: "流程预热", state: .idle),
-        .init(id: .defaultStage, title: "Default", subtitle: "默认成品", state: .idle),
-        .init(id: .hq, title: "HQ", subtitle: "高清成品", state: .idle)
+        .init(id: .defaultStage, title: "HQ", subtitle: "高质量成品", state: .idle)
     ]
     var visibleStageCards: [ObjectModeV2StageCard] {
         stageCards.filter { $0.id != .preview }
     }
 
-    private let recorder = ObjectModeV2CaptureRecorder()
     private let guidanceEngine = ObjectModeV2GuidanceEngine()
+    #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+    let domeCoordinator = ObjectModeV2ARDomeCoordinator()
+    /// AR 版捕获协调器:ARSession 接管相机 + 6DoF,同时写 .mov(下游不用改)。
+    /// 对外 API 和旧 ObjectModeV2CaptureRecorder 同构,所以 VM 其它地方全部通过
+    /// `recorder.xxx` 的调用都照常工作。
+    private lazy var recorder = ObjectModeV2ARCaptureCoordinator(domeCoordinator: domeCoordinator)
+    private var domeOriginLocked = false
+    /// AR 路径录制起始时刻(CACurrentMediaTime),用于换算 ingest 回调的相对秒数。
+    private var arCaptureStartMediaTime: TimeInterval?
+    #else
+    private let recorder = ObjectModeV2CaptureRecorder()
+    #endif
     #if canImport(CoreMotion)
     private let motionManager = CMMotionManager()
     private let motionQueue: OperationQueue = {
@@ -280,6 +294,23 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     private let maxTransientPollFailures = 30
 
     init() {
+        #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+        // AR 路径:dome 的 6DoF 姿态来自 ARSession.didUpdate(frame) 里的
+        // ARCamera.transform,recorder.prepare() 会启动 ARSession。
+        domeCoordinator.onValidFrame = nil
+        // GuidanceEngine 在 AR 路径不被喂数据,acceptedFrameTimestampsSec 会空 →
+        // 服务端 curate 阶段会以 "missing_client_live_timestamps" 拒绝。
+        // 让 dome 的每次成功 ingest 补偿填进去。
+        domeCoordinator.onValidSampleTimestamp = { [weak self] absMediaTime in
+            guard let self else { return }
+            let rel = max(0, absMediaTime - (self.arCaptureStartMediaTime ?? absMediaTime))
+            self.acceptedFrameTimestampsSec.append(rel)
+            if self.acceptedFrameTimestampsSec.count > 600 {
+                self.acceptedFrameTimestampsSec.removeFirst(self.acceptedFrameTimestampsSec.count - 600)
+            }
+            self.acceptedFrames = self.acceptedFrameTimestampsSec.count
+        }
+        #endif
         guidanceEngine.onUpdate = { [weak self] snapshot in
             guard let self else { return }
             let previousAcceptedFrames = self.acceptedFrames
@@ -320,7 +351,13 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     var canStopCapture: Bool {
-        isRecording && acceptedFrameCountForGeneration >= minimumAcceptedFrameCount
+        // AR 路径:不强加"最低帧数"门槛 —— 用户按球就停,球的 cell 颜色告诉他
+        // 当前覆盖是否够用。GuidanceEngine 在 AR 下不被喂数据,原判据永远 false。
+        #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+        return isRecording
+        #else
+        return isRecording && acceptedFrameCountForGeneration >= minimumAcceptedFrameCount
+        #endif
     }
 
     var canStartCapture: Bool {
@@ -386,6 +423,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         isPreparingCamera = false
         isProcessingOverlayPresented = false
         processingFailureReason = nil
+        isInspectionOnlyCandidate = false
     }
 
     func noteScenePhase(_ phase: ScenePhase) {
@@ -425,7 +463,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     func openRecord() {
         guard downloadedArtifactURL != nil else {
-            statusText = "默认成品仍在下载或尚未准备好。"
+            statusText = "HQ 成品仍在下载或尚未准备好。"
             return
         }
         isArtifactViewerPresented = true
@@ -442,7 +480,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             previewSession = recorder.previewSession
             isPreparingCamera = false
             cameraError = nil
-            statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并先生成默认 mesh 成品。"
+            statusText = "准备就绪。开始后系统会自动挑选有效关键帧，并生成唯一的 HQ 3D 成品。"
         } catch {
             if Task.isCancelled { return }
             cameraError = error.localizedDescription
@@ -473,6 +511,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         isArtifactViewerPresented = false
         isProcessingOverlayPresented = false
         processingFailureReason = nil
+        isInspectionOnlyCandidate = false
         lastRemoteJobId = nil
         localViewerManifestRelativePath = nil
         localComparisonArtifactRelativePath = nil
@@ -495,16 +534,21 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         do {
             try recorder.startRecording()
             isRecording = true
+            #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+            // 录制开始时锁定 dome 的物体中心:相机当前视线前方 0.5m 处。
+            // 之后 ARSession.didUpdate 的 6DoF pose 会自动驱动球按 az/el 转动。
+            _ = domeCoordinator.lockAtCameraForward(distanceMeters: 0.5)
+            arCaptureStartMediaTime = CACurrentMediaTime()
+            acceptedFrameTimestampsSec = []
+            acceptedFrames = 0
+            #endif
             if guidanceEnabled {
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 350_000_000)
                     guard let self, self.isRecording else { return }
-                    self.startCaptureGravityMonitoring()
                     self.guidanceEngine.startMonitoring()
                     self.guidanceEngine.beginRecording()
                 }
-            } else {
-                startCaptureGravityMonitoring()
             }
             statusText = guidanceEnabled ? "正在采集对象素材…" : "正在录制基础素材…"
             startDurationTicker()
@@ -518,7 +562,12 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     }
 
     private func stopCaptureAndGenerate() {
-        guard isRecording, acceptedFrameCountForGeneration >= minimumAcceptedFrameCount else { return }
+        guard isRecording else { return }
+        #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+        // AR 路径:不要求 GuidanceEngine 最小帧数。球的颜色已告知用户覆盖是否够。
+        #else
+        guard acceptedFrameCountForGeneration >= minimumAcceptedFrameCount else { return }
+        #endif
         debugLog("stopCaptureAndGenerate acceptedFrames=\(acceptedFrames) acceptedTimestamps=\(acceptedFrameTimestampsSec.count)")
         isRecording = false
         isProcessingOverlayPresented = true
@@ -532,7 +581,16 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         Task {
             do {
                 let clip = try await recorder.stopRecording()
-                debugLog("stopRecording succeeded duration=\(clip.duration) file=\(clip.fileURL.lastPathComponent)")
+                debugLog("stopRecording succeeded duration=\(clip.duration) file=\(clip.fileURL.lastPathComponent) acceptedTimestamps=\(acceptedFrameTimestampsSec.count)")
+                #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+                // C 架构 curate:在上传前从 coverage 挑 top-80 帧 + 写 curated.json
+                // 放到 .mov 同目录,上传阶段一起带走。
+                do {
+                    try writeCuratedManifestIfPossible(for: clip)
+                } catch {
+                    debugLog("curated.json 写入失败(非致命,继续老路径上传): \(error.localizedDescription)")
+                }
+                #endif
                 releasePreviewForProcessing()
                 await runPipeline(with: clip)
             } catch {
@@ -542,10 +600,79 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
     }
 
+    #if canImport(ARKit) && canImport(SwiftUI) && canImport(simd) && canImport(UIKit)
+    /// C 架构:从 DomeCoverageMap 挑 80 帧 + 组装 CuratedUploadManifest + 写到 .mov 同目录的 curated.json。
+    /// 服务器收到这个文件后按 contract_version=client_curated_v1 走新路径(跳过 az×el)。
+    private func writeCuratedManifestIfPossible(for clip: ObjectModeV2RecordedClip) throws {
+        debugLog("[C-write] enter writeCuratedManifestIfPossible clip=\(clip.fileURL.lastPathComponent) duration=\(clip.duration)")
+        let coverage = domeCoordinator.coverage
+        let counts0 = coverage.cellCounts()
+        debugLog("[C-write] coverage cellCounts: empty=\(counts0.empty) weak=\(counts0.weak) ok=\(counts0.ok) excellent=\(counts0.excellent)")
+
+        let curated = coverage.curateForUpload(targetTotal: 80)
+        debugLog("[C-write] curateForUpload returned \(curated.count) frames (target 80)")
+        guard !curated.isEmpty else {
+            debugLog("[C-write] EARLY EXIT: curateForUpload returned 0 frames — no non-empty cell. curated.json 不写。")
+            return
+        }
+
+        // cell 统计供 debug + 服务器日志使用
+        let counts = counts0
+        let totalCandidates = curated.count   // curated 已经是筛后 top-K,候选总数的精确值需要额外 API
+
+        // arkit context:worldOrigin + worldYaw 在 coverage 里,gravity 从重力 monitor 拿
+        let worldOrigin: [Float] = {
+            if let o = coverage.worldOrigin { return [o.x, o.y, o.z] }
+            return [0, 0, 0]
+        }()
+        let gravityWorld: [Float] = captureGravityUp.map { [$0.x, $0.y, $0.z] } ?? [0, -1, 0]
+        let arkitCtx = ARKitContext(
+            worldOrigin: worldOrigin,
+            worldYawRad: coverage.worldYaw,
+            gravityWorld: gravityWorld,
+            trackingStateAtLock: domeCoordinator.snapshot.trackingOK ? "normal" : "limited"
+        )
+
+        // 视频尺寸:用 ARKit 1920×1440 默认(AVAssetWriter 的设定)
+        let videoSize = VideoSize(width: 1920, height: 1440)
+        let startMediaTime = arCaptureStartMediaTime ?? (CACurrentMediaTime() - clip.duration)
+        let endMediaTime = startMediaTime + clip.duration
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+
+        let manifest = CuratedUploadBuilder.build(
+            jobId: UUID().uuidString,
+            captureStartMediaTime: startMediaTime,
+            captureStartEpochMs: nowMs - Int64(clip.duration * 1000),
+            captureEndEpochMs: nowMs,
+            videoAssetFilename: clip.fileURL.lastPathComponent,
+            videoDurationSec: clip.duration,
+            videoSize: videoSize,
+            arkit: arkitCtx,
+            curatedFrames: curated,
+            totalCandidateFrameCount: totalCandidates,
+            filledCellCount: counts.ok + counts.excellent,
+            excellentCellCount: counts.excellent,
+            okCellCount: counts.ok,
+            targetTotal: 80
+        )
+
+        let data = try CuratedUploadBuilder.encode(manifest)
+        let jsonURL = clip.fileURL.deletingLastPathComponent()
+            .appendingPathComponent("curated.json")
+        debugLog("[C-write] writing curated.json to \(jsonURL.path) (\(data.count) bytes)")
+        try data.write(to: jsonURL, options: [.atomic])
+        // 写后再 stat 一次,确认磁盘上确实有
+        let exists = FileManager.default.fileExists(atPath: jsonURL.path)
+        let onDiskSize = (try? FileManager.default.attributesOfItem(atPath: jsonURL.path)[.size] as? Int) ?? 0
+        debugLog("[C-write] post-write stat: exists=\(exists) onDiskSize=\(onDiskSize) frames=\(curated.count) excellent=\(counts.excellent) ok=\(counts.ok) weak=\(counts.weak)")
+    }
+    #endif
+
     private func runPipeline(with clip: ObjectModeV2RecordedClip) async {
         isRunning = true
         isProcessingOverlayPresented = true
         processingFailureReason = nil
+        isInspectionOnlyCandidate = false
         manifestURL = nil
         downloadedArtifactURL = nil
         downloadedArtifactFormat = nil
@@ -557,11 +684,42 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         do {
             let recordContext = try preparePersistentRecord(for: clip)
             debugLog("persistent record prepared recordId=\(recordContext.recordId.uuidString) upload=\(recordContext.uploadURL.lastPathComponent)")
+
+            // Uploading the raw, unmasked MOV. On-device foreground masking was
+            // removed: VNGenerateForegroundInstanceMaskRequest is trained for
+            // people and returned empty masks for non-person subjects (verified
+            // by source.mov having 0% black pixels even with the toggle on),
+            // and pre-masking also erases the foreground/background contrast
+            // that 3DGS + MAtCha rely on for edge precision. The server
+            // pipeline does its own confidence-based mesh filtering.
+            let uploadSourceURL = recordContext.uploadURL
+
+            // C 架构:writeCuratedManifestIfPossible 把 curated.json 写到录制目录
+            // (clip.fileURL 旁),但 preparePersistentRecord 把 .mov 复制到 imports/。
+            // 必须把 curated.json 也搬到 imports/ 让下面 createJob 找得到,否则 aux 上传永远不发生。
+            let originalCuratedURL = clip.fileURL.deletingLastPathComponent().appendingPathComponent("curated.json")
+            let persistedCuratedURL = uploadSourceURL.deletingLastPathComponent().appendingPathComponent("curated.json")
+            if FileManager.default.fileExists(atPath: originalCuratedURL.path) {
+                if persistedCuratedURL.standardizedFileURL.path != originalCuratedURL.standardizedFileURL.path {
+                    if FileManager.default.fileExists(atPath: persistedCuratedURL.path) {
+                        try? FileManager.default.removeItem(at: persistedCuratedURL)
+                    }
+                    do {
+                        try FileManager.default.copyItem(at: originalCuratedURL, to: persistedCuratedURL)
+                        debugLog("curated.json 已搬到 imports/ 给 createJob 用 (\(persistedCuratedURL.lastPathComponent))")
+                    } catch {
+                        debugLog("curated.json 搬运失败,C 路径将不会启动: \(error.localizedDescription)")
+                    }
+                }
+            } else {
+                debugLog("originalCuratedURL 不存在 → C 路径不会启动 (\(originalCuratedURL.path))")
+            }
+
             persistRecordState(
                 recordId: recordContext.recordId,
                 status: .uploading,
                 statusMessage: "正在上传对象素材",
-                detailMessage: "新远端对象模式正在上传素材，并准备默认成品。",
+                detailMessage: "新远端对象模式正在上传素材，并准备 HQ 成品。",
                 progressFraction: 0.03,
                 remoteJobId: nil,
                 runtimeMetrics: objectFastPublishRuntimeMetrics(
@@ -570,15 +728,45 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     remoteJobId: nil
                 )
             )
+            // C 架构:如果 stopCaptureAndGenerate 阶段成功写了 curated.json,
+            // 把它声明为 sidecar,服务器会返回对应的 upload URL。
+            let curatedJsonURL = uploadSourceURL.deletingLastPathComponent()
+                .appendingPathComponent("curated.json")
+            debugLog("[C-decl] looking for curated.json at: \(curatedJsonURL.path)")
+            var auxiliaryDeclarations: [BrokerAuxiliaryFileDeclaration] = []
+            let curatedExists = FileManager.default.fileExists(atPath: curatedJsonURL.path)
+            debugLog("[C-decl] curated.json exists at expected path: \(curatedExists)")
+            if curatedExists,
+               let attrs = try? FileManager.default.attributesOfItem(atPath: curatedJsonURL.path),
+               let size = (attrs[.size] as? NSNumber)?.int64Value, size > 0 {
+                auxiliaryDeclarations.append(
+                    BrokerAuxiliaryFileDeclaration(
+                        name: "curated.json",
+                        fileSizeBytes: size,
+                        contentType: "application/json",
+                        role: "client_curation"
+                    )
+                )
+                debugLog("[C-decl] declared auxiliary curated.json size=\(size)B")
+            } else {
+                debugLog("[C-decl] curated.json not declared (exists=\(curatedExists), size>0 check failed)")
+            }
+
+            debugLog("[C-decl] calling broker.createJob with auxiliaryFiles count=\(auxiliaryDeclarations.count)")
             let creation = try await broker.createJob(
-                videoURL: recordContext.uploadURL,
+                videoURL: uploadSourceURL,
                 clientRecordId: recordContext.recordId,
                 captureOrigin: "object_mode_v2",
-                pipelineProfile: objectFastPublishPipelineProfile()
+                pipelineProfile: objectFastPublishPipelineProfile(),
+                auxiliaryFiles: auxiliaryDeclarations
             )
             let jobId = creation.jobId
             lastRemoteJobId = jobId
-            debugLog("remote job created jobId=\(jobId)")
+            let auxRespCount = creation.auxiliaryUploads?.count ?? 0
+            debugLog("[C-decl] remote job created jobId=\(jobId) auxiliary_uploads_in_response=\(auxRespCount)")
+            if auxRespCount == 0 && !auxiliaryDeclarations.isEmpty {
+                debugLog("[C-decl] WARNING: server returned 0 auxiliary_uploads despite \(auxiliaryDeclarations.count) declared. Server may be old broker.")
+            }
             persistRecordState(
                 recordId: recordContext.recordId,
                 status: .uploading,
@@ -596,7 +784,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             _ = try await broker.startUpload(
                 jobId: jobId,
                 upload: creation.upload,
-                sourceURL: recordContext.uploadURL,
+                sourceURL: uploadSourceURL,
                 onProgress: { [weak self] progress in
                     await MainActor.run {
                         self?.applyUploadProgress(progress)
@@ -605,11 +793,48 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             )
             debugLog("upload completed jobId=\(jobId)")
 
+            // C 架构:主视频上传成功后,按声明顺序上传所有 sidecar。
+            // 任何一个 sidecar 失败 → 整个 pipeline 失败(不做兜底,保持 C 路径的质量保证)。
+            if !auxiliaryDeclarations.isEmpty {
+                debugLog("[C-aux] entering aux upload loop, declarations=\(auxiliaryDeclarations.count)")
+                guard let auxUploads = creation.auxiliaryUploads, !auxUploads.isEmpty else {
+                    debugLog("[C-aux] FAIL: declared \(auxiliaryDeclarations.count) but server returned no auxiliaryUploads")
+                    throw RemoteB1ClientError.uploadFailed("server_missing_auxiliary_upload_urls")
+                }
+                debugLog("[C-aux] server returned \(auxUploads.count) aux URL(s): keys=\(auxUploads.keys.sorted())")
+                for decl in auxiliaryDeclarations {
+                    guard let auxUpload = auxUploads[decl.name] else {
+                        debugLog("[C-aux] FAIL: server didn't return URL for \(decl.name)")
+                        throw RemoteB1ClientError.uploadFailed("server_missing_auxiliary_\(decl.name)")
+                    }
+                    let auxSourceURL = uploadSourceURL.deletingLastPathComponent()
+                        .appendingPathComponent(decl.name)
+                    let auxFileExists = FileManager.default.fileExists(atPath: auxSourceURL.path)
+                    let auxOnDiskSize = (try? FileManager.default.attributesOfItem(atPath: auxSourceURL.path)[.size] as? Int) ?? 0
+                    debugLog("[C-aux] preparing PUT \(decl.name): localPath=\(auxSourceURL.path) exists=\(auxFileExists) onDiskSize=\(auxOnDiskSize) declSize=\(decl.fileSizeBytes) → uploadURL=\(auxUpload.url ?? "nil")")
+                    do {
+                        _ = try await broker.startUpload(
+                            jobId: jobId,
+                            upload: auxUpload,
+                            sourceURL: auxSourceURL,
+                            onProgress: nil
+                        )
+                        debugLog("[C-aux] PUT \(decl.name) succeeded")
+                    } catch {
+                        debugLog("[C-aux] PUT \(decl.name) FAILED: \(error.localizedDescription)")
+                        throw error
+                    }
+                }
+                debugLog("[C-aux] all \(auxiliaryDeclarations.count) sidecar uploads completed")
+            } else {
+                debugLog("[C-aux] no auxiliary declarations, skipping aux upload loop (legacy path)")
+            }
+
             persistRecordState(
                 recordId: recordContext.recordId,
                 status: .queued,
                 statusMessage: "远端已接收任务",
-                detailMessage: "默认成品正在排队并准备处理。",
+                detailMessage: "HQ 成品正在排队并准备处理。",
                 progressFraction: 0.18,
                 remoteJobId: jobId,
                 runtimeMetrics: objectFastPublishRuntimeMetrics(
@@ -628,11 +853,21 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             var lastObservedRemoteFailureReason: String?
 
             while true {
+                guard shouldAcceptRemoteRecordUpdate(recordId: recordContext.recordId, remoteJobId: jobId) else {
+                    debugLog("runPipeline stopping stale writer jobId=\(jobId) recordId=\(recordContext.recordId.uuidString)")
+                    isRunning = false
+                    return
+                }
                 let status: JobStatus
                 do {
                     status = try await broker.pollStatus(jobId: jobId)
                     transientPollFailures = 0
                 } catch {
+                    guard shouldAcceptRemoteRecordUpdate(recordId: recordContext.recordId, remoteJobId: jobId) else {
+                        debugLog("pollStatus stale writer ignored jobId=\(jobId) recordId=\(recordContext.recordId.uuidString)")
+                        isRunning = false
+                        return
+                    }
                     transientPollFailures += 1
                     debugLog("pollStatus failed retry=\(transientPollFailures)/\(maxTransientPollFailures) jobId=\(jobId) error=\(error.localizedDescription)")
                     if transientPollFailures <= maxTransientPollFailures {
@@ -660,6 +895,11 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     lastLoggedStageSignature = stageSignature
                     debugLog("pollStatus jobId=\(jobId) status=\(stageSignature)")
                 }
+                guard shouldAcceptRemoteRecordUpdate(recordId: recordContext.recordId, remoteJobId: jobId) else {
+                    debugLog("remote progress stale writer ignored jobId=\(jobId) recordId=\(recordContext.recordId.uuidString)")
+                    isRunning = false
+                    return
+                }
                 switch status {
                 case .pending(let progress):
                     consecutiveRemoteFailedPolls = 0
@@ -686,12 +926,12 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                             recordId: recordContext.recordId
                         )
                         defaultDownloaded = true
-                        statusText = "默认 mesh 成品已下载，可先 Open 查看。"
+                        statusText = "HQ 成品已下载，可先 Open 查看。"
                         persistRecordState(
                             recordId: recordContext.recordId,
                             status: .packaging,
-                            statusMessage: progress.title ?? "默认 mesh 成品已就绪",
-                            detailMessage: "默认 mesh 成品已下载，可先 Open 查看。",
+                            statusMessage: progress.title ?? "HQ 成品已就绪",
+                            detailMessage: "HQ 成品已下载，可先 Open 查看。",
                             progressFraction: max(progress.progressFraction ?? currentProcessingProgress, 0.82),
                             remoteJobId: jobId,
                             runtimeMetrics: objectFastPublishRuntimeMetrics(
@@ -727,13 +967,12 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     }
                     updateStage(.preview, state: .ready)
                     updateStage(.defaultStage, state: .ready)
-                    updateStage(.hq, state: .ready)
-                    statusText = progress?.detail ?? "高清成品已完成"
+                    statusText = progress?.detail ?? "HQ 成品已完成"
                     persistRecordState(
                         recordId: recordContext.recordId,
                         status: .completed,
-                        statusMessage: "对象成品已完成",
-                        detailMessage: progress?.detail ?? "默认成品已完成下载，可从首页直接打开。",
+                        statusMessage: "HQ 成品已完成",
+                        detailMessage: progress?.detail ?? "HQ 成品已完成下载，可从首页直接打开。",
                         progressFraction: 1.0,
                         remoteJobId: nil,
                         clearRemoteJobId: true,
@@ -793,6 +1032,51 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                     debugLog(
                         "remote job failed confirmed jobId=\(jobId) reason=\(normalizedReason) attempts=\(consecutiveRemoteFailedPolls)"
                     )
+                    if isHQGateFailure(normalizedReason) {
+                        let persistedBundle = try await downloadAndPersistViewerBundle(
+                            broker: broker,
+                            jobId: jobId,
+                            recordId: recordContext.recordId
+                        )
+                        let failedCards = resolvedHQFailedCards(
+                            manifestCards: persistedBundle.failedCards,
+                            failureReason: normalizedReason
+                        )
+                        let detailMessage = inspectionOnlyDetailMessage(for: failedCards)
+                        isInspectionOnlyCandidate = true
+                        processingFailureReason = "未达 HQ，仅供质检"
+                        statusText = detailMessage
+                        updateStage(.defaultStage, state: .failed("未达 HQ，仅供质检"))
+                        store.updateArtifactPath(
+                            recordId: recordContext.recordId,
+                            artifactPath: persistedBundle.defaultArtifactRelativePath
+                        )
+                        persistRecordState(
+                            recordId: recordContext.recordId,
+                            status: .failed,
+                            statusMessage: "未达 HQ，仅供质检",
+                            detailMessage: detailMessage,
+                            progressFraction: progress?.progressFraction ?? currentProcessingProgress,
+                            remoteJobId: jobId,
+                            runtimeMetrics: objectFastPublishRuntimeMetrics(
+                                stageKey: progress?.stageKey ?? "publish_default_mesh",
+                                detail: detailMessage,
+                                remoteJobId: jobId,
+                                remoteProgress: progress,
+                                localViewerManifestPath: persistedBundle.localManifestRelativePath,
+                                localComparisonArtifactPath: persistedBundle.comparisonArtifactRelativePath,
+                                localComparisonMetricsPath: persistedBundle.comparisonMetricsRelativePath,
+                                localHQArtifactPath: persistedBundle.hqArtifactRelativePath,
+                                inspectionOnly: true,
+                                hqPassed: false,
+                                failedCards: failedCards
+                            ),
+                            failureReason: normalizedReason
+                        )
+                        isRunning = false
+                        debugLog("runPipeline inspection candidate ready jobId=\(jobId)")
+                        return
+                    }
                     throw RemoteB1ClientError.jobFailed(normalizedReason)
                 }
                 try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -818,7 +1102,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                         stepDelayNs: 800_000_000
                     )
                     manifestURL = placeholderManifestURL
-                    statusText = "高清成品已完成"
+                    statusText = "HQ 成品已完成"
                     debugLog("fallback placeholder manifest ready")
                 } catch {
                     statusText = "生成失败：\(error.localizedDescription)"
@@ -829,30 +1113,51 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 processingFailureReason = failureMessage
                 statusText = "生成失败：\(failureMessage)"
                 updateStage(.defaultStage, state: .failed(failureMessage))
-                updateStage(.hq, state: .idle)
                 debugLog("runPipeline failed error=\(error.localizedDescription) jobId=\(lastRemoteJobId ?? "nil")")
             }
             if let recordId = activeRecordId {
                 let failureMessage = userFacingFailureMessage(for: error)
-                persistRecordState(
-                    recordId: recordId,
-                    status: .failed,
-                    statusMessage: "新远端生成失败",
-                    detailMessage: failureMessage,
-                    progressFraction: currentProcessingProgress,
-                    remoteJobId: lastRemoteJobId,
-                    runtimeMetrics: objectFastPublishRuntimeMetrics(
-                        stageKey: "failed",
-                        detail: failureMessage,
-                        remoteJobId: lastRemoteJobId
-                    ),
-                    failureReason: normalizedFailureReason(for: error)
-                )
+                if shouldAcceptRemoteRecordUpdate(recordId: recordId, remoteJobId: lastRemoteJobId) {
+                    persistRecordState(
+                        recordId: recordId,
+                        status: .failed,
+                        statusMessage: "新远端生成失败",
+                        detailMessage: failureMessage,
+                        progressFraction: currentProcessingProgress,
+                        remoteJobId: lastRemoteJobId,
+                        runtimeMetrics: objectFastPublishRuntimeMetrics(
+                            stageKey: "failed",
+                            detail: failureMessage,
+                            remoteJobId: lastRemoteJobId
+                        ),
+                        failureReason: normalizedFailureReason(for: error)
+                    )
+                } else {
+                    debugLog("runPipeline failure ignored for stale writer jobId=\(lastRemoteJobId ?? "nil") recordId=\(recordId.uuidString)")
+                }
             }
         }
 
         isRunning = false
         debugLog("runPipeline end isRunning=false overlay=\(isProcessingOverlayPresented) jobId=\(lastRemoteJobId ?? "nil")")
+    }
+
+    private func shouldAcceptRemoteRecordUpdate(recordId: UUID, remoteJobId: String?) -> Bool {
+        let normalizedRemoteJobId = remoteJobId?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !normalizedRemoteJobId.isEmpty else {
+            return true
+        }
+
+        let currentRemoteJobId = store.record(id: recordId)?
+            .remoteJobId?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if currentRemoteJobId.isEmpty {
+            return true
+        }
+
+        return currentRemoteJobId == normalizedRemoteJobId
     }
 
     private func updateStage(_ stage: ObjectModeV2Stage, state: ObjectModeV2StageUIState) {
@@ -979,13 +1284,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "strategy": "object_slam3r_surface_v1",
             "capture_mode": "guided_object",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "matcha_mesh_glb",
+            "first_result_kind": "hq_mesh_glb",
             "hq_refine": "disabled",
             "optional_mesh_export": "disabled",
             "target_zone_mode": ObjectModeV2TargetZoneMode.subject.rawValue,
             "client_live_accepted_frames": "\(acceptedFrames)",
             "client_live_accepted_timestamps_ms": acceptedTimestampsMs,
-            "client_live_selection_source": "visual_realtime",
+            // 双保险:有 timestamps 就声明 visual_realtime,空时让服务端自己 curate
+            // (AR 路径下 ingest 回调应该填上 timestamps,但万一失败也不会再卡 curate)
+            "client_live_selection_source": acceptedTimestampsMs.isEmpty ? "server_visual_curation" : "visual_realtime",
             "client_live_orbit_completion": String(format: "%.4f", orbitCompletion),
             "visual_gate_version": "v1_visual_curated",
             "visual_blur_threshold_laplacian": String(format: "%.1f", FrameQualityConstants.blurThresholdLaplacian),
@@ -1053,7 +1360,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             if let detail = progress.detail, !detail.isEmpty {
                 statusText = detail
             } else {
-                statusText = "正在准备默认 mesh 成品，下载完成后会出现 Open。"
+                statusText = "正在准备 HQ 成品，下载完成后会出现 Open。"
             }
             return
         case "curate":
@@ -1074,7 +1381,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.97, 0.97)))
         case "artifact_upload":
             updateStage(.defaultStage, state: .processing(max(fraction ?? 0.99, 0.99)))
-            updateStage(.hq, state: .idle)
         default:
             updateStage(.defaultStage, state: .processing(fraction ?? 0.42))
         }
@@ -1136,7 +1442,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 durationSeconds: clip.duration,
                 status: .uploading,
                 statusMessage: "正在上传对象素材",
-                detailMessage: "新远端对象模式正在准备默认成品。",
+                detailMessage: "新远端对象模式正在准备 HQ 成品。",
                 progressFraction: 0.03,
                 runtimeMetrics: objectFastPublishRuntimeMetrics(
                     stageKey: "preparing",
@@ -1155,7 +1461,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
                 recordId: recordId,
                 status: .uploading,
                 statusMessage: "正在上传对象素材",
-                detailMessage: "新远端对象模式正在准备默认成品。",
+                detailMessage: "新远端对象模式正在准备 HQ 成品。",
                 progressFraction: 0.03,
                 runtimeMetrics: objectFastPublishRuntimeMetrics(
                     stageKey: "preparing",
@@ -1247,8 +1553,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
 
         let detail = progress.detail ?? progress.title ?? (defaultReady
-            ? "默认 mesh 成品已就绪，可直接打开。"
-            : "新远端对象模式正在生成默认 mesh 成品。")
+            ? "HQ 成品已就绪，可直接打开。"
+            : "新远端对象模式正在生成 HQ 成品。")
         persistRecordState(
             recordId: recordId,
             status: status,
@@ -1273,7 +1579,10 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         localViewerManifestPath: String? = nil,
         localComparisonArtifactPath: String? = nil,
         localComparisonMetricsPath: String? = nil,
-        localHQArtifactPath: String? = nil
+        localHQArtifactPath: String? = nil,
+        inspectionOnly: Bool? = nil,
+        hqPassed: Bool? = nil,
+        failedCards: [String] = []
     ) -> [String: String] {
         let resolvedLocalViewerManifestPath = localViewerManifestPath ?? self.localViewerManifestRelativePath
         let resolvedLocalComparisonArtifactPath = localComparisonArtifactPath ?? self.localComparisonArtifactRelativePath
@@ -1282,7 +1591,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         var metrics: [String: String] = [
             "pipeline_strategy": "object_slam3r_surface_v1",
             "artifact_contract_version": "object_publish_v1",
-            "first_result_kind": "matcha_mesh_glb",
+            "first_result_kind": "hq_mesh_glb",
             "hq_refine": "disabled",
             "optional_mesh_export": "disabled",
             "target_zone_mode": "subject",
@@ -1290,6 +1599,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "orbit_completion_percent": "\(Int((orbitCompletion * 100).rounded()))",
             "remote_stage_key": stageKey,
         ]
+        if let inspectionOnly {
+            metrics["inspection_only_candidate"] = inspectionOnly ? "true" : "false"
+        }
+        if let hqPassed {
+            metrics["hq_passed"] = hqPassed ? "true" : "false"
+        }
+        if !failedCards.isEmpty {
+            metrics["hq_failed_cards"] = failedCards.joined(separator: ",")
+        }
         if let detail, !detail.isEmpty {
             metrics["stage_detail"] = detail
         }
@@ -1419,8 +1737,17 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             remoteManifestPayload = payload
         }
 
+        let inspectionOnly = (remoteManifestPayload["inspection_only"] as? Bool) ?? false
+        let hqPassed = (remoteManifestPayload["hq_passed"] as? Bool) ?? !inspectionOnly
+        let failedCards = (remoteManifestPayload["failed_cards"] as? [String]) ?? []
+
         var localManifestPayload: [String: Any] = [
             "version": remoteManifestPayload["version"] ?? "object_publish_v1",
+            "product_mode": remoteManifestPayload["product_mode"] ?? "hq_only",
+            "primary_product": remoteManifestPayload["primary_product"] ?? "hq_mesh_glb",
+            "inspection_only": inspectionOnly,
+            "hq_passed": hqPassed,
+            "failed_cards": failedCards,
             "default_asset": [
                 "kind": bundle.defaultArtifact.format,
                 "path": defaultDestinationURL.lastPathComponent,
@@ -1475,7 +1802,10 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             localManifestRelativePath: "exports/\(localManifestURL.lastPathComponent)",
             comparisonArtifactRelativePath: cleanedRelativePath,
             comparisonMetricsRelativePath: compareMetricsRelativePath,
-            hqArtifactRelativePath: hqRelativePath
+            hqArtifactRelativePath: hqRelativePath,
+            inspectionOnly: inspectionOnly,
+            hqPassed: hqPassed,
+            failedCards: failedCards
         )
     }
 
@@ -1496,7 +1826,6 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "accepted_frames": acceptedFrames,
             "orbit_completion": orbitCompletion,
             "stages": [
-                ["id": "default", "title": "Default"],
                 ["id": "hq", "title": "HQ"]
             ]
         ]
@@ -1512,11 +1841,14 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
 
     private func userFacingFailureMessage(for error: Error) -> String {
         if case RemoteB1ClientError.jobFailed(let reason) = error {
+            if isHQGateFailure(reason) {
+                return inspectionOnlyDetailMessage(for: resolvedHQFailedCards(manifestCards: [], failureReason: reason))
+            }
             switch reason {
             case "curate_frames_insufficient_client_selected_frames":
-                return "端上选中的有效关键帧命中不足，远端没法继续生成默认成品。"
+                return "端上选中的有效关键帧命中不足，远端没法继续生成 HQ 成品。"
             case "object_surface_failed":
-                return "新远端在默认 mesh 成品阶段失败了。"
+                return "新远端在 HQ 成品阶段失败了。"
             default:
                 return reason
             }
@@ -1529,6 +1861,49 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             return reason
         }
         return "object_surface_failed"
+    }
+
+    private func isHQGateFailure(_ reason: String) -> Bool {
+        reason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("hq_gate_failed")
+    }
+
+    private func resolvedHQFailedCards(manifestCards: [String], failureReason: String) -> [String] {
+        if !manifestCards.isEmpty {
+            return manifestCards
+        }
+        let normalized = failureReason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let separator = normalized.firstIndex(of: ":") else {
+            return []
+        }
+        return normalized[normalized.index(after: separator)...]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func inspectionOnlyDetailMessage(for failedCards: [String]) -> String {
+        if failedCards.isEmpty {
+            return "候选结果已生成，但未达 HQ，仅供质检。"
+        }
+        let labels = failedCards.map(Self.hqFailedCardLabel).joined(separator: "、")
+        return "候选结果已生成，但未达 HQ，仅供质检。未通过：\(labels)。"
+    }
+
+    private static func hqFailedCardLabel(_ rawCard: String) -> String {
+        switch rawCard.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "geometry_hq":
+            return "几何"
+        case "texture_hq":
+            return "贴图"
+        case "open_surface_hq":
+            return "开放表面"
+        case "hole_fill_hq":
+            return "补洞克制"
+        case "mesh_fidelity_hq":
+            return "网格保真"
+        default:
+            return rawCard
+        }
     }
 
     private func resetCaptureGravityTracking() {

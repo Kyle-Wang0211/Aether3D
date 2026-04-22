@@ -242,7 +242,7 @@ final class ObjectModeV2GuidanceEngine {
         } else if orbitCompletion < 0.70 {
             hintText = "很好，继续补背面和边缘角度，尽量绕满一圈。"
         } else if acceptedFrames < 20 {
-            hintText = "快完成一圈了，再补一些新角度就能生成默认成品。"
+            hintText = "快完成一圈了，再补一些新角度就能生成 HQ 成品。"
         } else if acceptedFrames < 40 {
             hintText = "已经够做成品，继续补顶部和边缘细节会更稳。"
         } else {
