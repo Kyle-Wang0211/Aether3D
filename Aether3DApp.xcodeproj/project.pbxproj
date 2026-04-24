@@ -44,6 +44,7 @@
 		8EAF824F8133FB0ABB61DF4F /* ObjectModeV2ARKitRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 822964466984388DD7EBF67F /* ObjectModeV2ARKitRecorder.swift */; };
 		958E05D69837D1C7F1AFB5D4 /* spz in Frameworks */ = {isa = PBXBuildFile; productRef = 094BFC21C9AD1C5F45236897 /* spz */; };
 		9EB4B45511FEB68A40C0F253 /* CameraCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84947607474B82E0F00D980F /* CameraCapabilities.swift */; };
+		9FC65CDB8F87A83C35A5A6EA /* ObjectModeV2QualityDebugOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247AFBA65670F62035E9E388 /* ObjectModeV2QualityDebugOverlay.swift */; };
 		A0B200000000000000000001 /* ObjectModeV2CaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000011 /* ObjectModeV2CaptureView.swift */; };
 		A0B200000000000000000002 /* ObjectModeV2CaptureViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000012 /* ObjectModeV2CaptureViewModel.swift */; };
 		A0B200000000000000000003 /* ObjectModeV2CaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000013 /* ObjectModeV2CaptureRecorder.swift */; };
@@ -90,6 +91,7 @@
 		187C43DC9422CE4956EA6E8D /* CameraConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraConfig.swift; sourceTree = "<group>"; };
 		1B2806B154F05CE67AB99474 /* ScanRecordCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecordCell.swift; sourceTree = "<group>"; };
 		21275A3DB358672305FE464C /* GuidanceHints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuidanceHints.swift; sourceTree = "<group>"; };
+		247AFBA65670F62035E9E388 /* ObjectModeV2QualityDebugOverlay.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ObjectModeV2QualityDebugOverlay.swift; sourceTree = "<group>"; };
 		254FAFF2F314487C28A8504F /* ScanRecordStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecordStore.swift; sourceTree = "<group>"; };
 		2A0B5C9A42D53D2FCEFC332D /* LiDARDepthProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARDepthProcessor.swift; sourceTree = "<group>"; };
 		34B9E1402832D942C60CAEEB /* ThermalMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThermalMonitor.swift; sourceTree = "<group>"; };
@@ -259,6 +261,7 @@
 				822964466984388DD7EBF67F /* ObjectModeV2ARKitRecorder.swift */,
 				E670F840F77C2974696A7761 /* ObjectModeV2ARCaptureCoordinator.swift */,
 				6CBE862060B23269BFF85055 /* ObjectModeV2DomeUpdateObserver.swift */,
+				247AFBA65670F62035E9E388 /* ObjectModeV2QualityDebugOverlay.swift */,
 			);
 			path = ObjectModeV2;
 			sourceTree = "<group>";
@@ -497,6 +500,7 @@
 				56F8BACECBDF27C108C5EE05 /* EmailSignInView.swift in Sources */,
 				4AF235C37CA09E0F359250C8 /* PhoneSignInView.swift in Sources */,
 				C1B9688D2FD9AF667BA2CC49 /* ObjectModeV2DomeUpdateObserver.swift in Sources */,
+				9FC65CDB8F87A83C35A5A6EA /* ObjectModeV2QualityDebugOverlay.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

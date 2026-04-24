@@ -22,6 +22,11 @@ struct ObjectModeV2CaptureView: View {
     @State private var lockBadgePulse = false
     @State private var showRecordingCarryover = false
     @State private var showAcceptedFrameFlash = false
+    /// Developer-only debug HUD showing live Laplacian variance + pass
+    /// rate for tuning `DomeCoverageMap.thresholds.minSharpness`.
+    /// Toggled by a 1.2s long-press anywhere on the capture screen.
+    /// Default hidden so TestFlight users never see it.
+    @State private var showQualityDebugOverlay = false
     private let onClose: (() -> Void)?
 
     private let maxFrames = 150
@@ -38,10 +43,23 @@ struct ObjectModeV2CaptureView: View {
             } else {
                 captureScreen
             }
+            if showQualityDebugOverlay {
+                qualityDebugOverlay
+            }
         }
         .background(Color.black.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .statusBarHidden(false)
+        // Four-finger long-press to toggle the quality debug HUD. Four
+        // fingers so it can't be triggered by normal single-finger
+        // capture gestures; long enough (1.2s) that accidental palm
+        // touches don't flip it.
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 1.2, maximumDistance: 30)
+                .onEnded { _ in
+                    showQualityDebugOverlay.toggle()
+                }
+        )
         .fullScreenCover(isPresented: $viewModel.isArtifactViewerPresented) {
             if let artifactURL = viewModel.downloadedArtifactURL {
                 ObjectModeV2DefaultArtifactViewer(
@@ -109,6 +127,23 @@ struct ObjectModeV2CaptureView: View {
             }
         }
         .animation(.easeInOut(duration: 0.24), value: viewModel.shouldShowProcessingOverlay)
+    }
+
+    /// Developer HUD for tuning DomeCoverageMap thresholds. Top-trailing
+    /// corner. `allowsHitTesting(false)` so it never eats touches from
+    /// the capture UI underneath (e.g. the capture button).
+    private var qualityDebugOverlay: some View {
+        VStack {
+            HStack {
+                Spacer()
+                ObjectModeV2QualityDebugOverlay(stats: viewModel.debugQualityStats)
+                    .padding(.top, 60)
+                    .padding(.trailing, 12)
+            }
+            Spacer()
+        }
+        .allowsHitTesting(false)
+        .transition(.opacity)
     }
 
     private var captureScreen: some View {

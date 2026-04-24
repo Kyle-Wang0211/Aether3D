@@ -278,6 +278,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     /// 10Hz 的图像质量分析器。负责把 Laplacian variance 写进
     /// `captureSession.snapshot.lastQualityReport`。在 init 注册。
     private let qualityObserver = QualityAnalysisObserver()
+
+    /// 调试用 observer —— 2Hz polling snapshot,暴露 QualityDebugStats 给
+    /// UI 的 debug overlay,同时在开发期可打 console log。
+    /// 默认 console log 关掉,只输出到 @Published debugQualityStats。
+    private let qualityDebugObserver = QualityDebugObserver(consoleLogEnabled: false)
+
+    /// Debug overlay 绑定的状态。长按 capture view 开关 overlay 可见性;
+    /// 非调试场景下即使它在更新,没 UI 读也没任何影响。
+    @Published var debugQualityStats: QualityDebugStats?
     private var domeOriginLocked = false
     /// AR 路径录制起始时刻(CACurrentMediaTime),用于换算 ingest 回调的相对秒数。
     private var arCaptureStartMediaTime: TimeInterval?
@@ -326,8 +335,17 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         // 同一个 domeCoordinator 的 handleFrame 再读出来用做 coverage.ingest
         // 的 sharpness。
         domeCoordinator.captureSession = captureSession
-        Task { [captureSession, qualityObserver] in
+
+        // Debug observer 回调 —— 跳回 MainActor 写 @Published,
+        // 以便 SwiftUI overlay 零 race 读。
+        qualityDebugObserver.onStats = { [weak self] stats in
+            Task { @MainActor [weak self] in
+                self?.debugQualityStats = stats
+            }
+        }
+        Task { [captureSession, qualityObserver, qualityDebugObserver] in
             await captureSession.register(qualityObserver)
+            await captureSession.register(qualityDebugObserver)
             await captureSession.start()
         }
         // GuidanceEngine 在 AR 路径不被喂数据,acceptedFrameTimestampsSec 会空 →
