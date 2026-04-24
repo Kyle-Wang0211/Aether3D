@@ -305,6 +305,15 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         queue.maxConcurrentOperationCount = 1
         return queue
     }()
+
+    /// Exponential moving average of the gyroscope rotation-rate
+    /// magnitude. Raw rotationRate is noisy — a single frame during a
+    /// hand-off or a 100 ms flick of the wrist easily spikes past the
+    /// dome's angular-velocity gate. Smoothing with alpha 0.3 at 20 Hz
+    /// gives a time-constant of ~100 ms: transient peaks are absorbed
+    /// but sustained fast rotation still shows up.
+    private var smoothedAngularVelocity: Float = 0
+    private let angularVelocitySmoothingAlpha: Float = 0.3
     #endif
     #if canImport(UIKit)
     let previewBridge = ObjectModeV2PreviewBridge()
@@ -1953,16 +1962,26 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             //    so the dome ingest gate and the debug HUD can read it.
             //    rotationRate is in rad/s; magnitude is frame-rotation speed
             //    regardless of axis.
+            //
+            //    We EMA-smooth over ~100 ms so a 50 ms wrist-flick at the
+            //    start/end of a walk-around-the-object motion doesn't
+            //    falsely trip the dome's hard-reject gate. The tradeoff:
+            //    genuinely fast rotation still registers (the EMA will
+            //    catch up within ~3-4 samples), but instantaneous spikes
+            //    get averaged away.
             let rotation = motion.rotationRate
-            let mag = Float(sqrt(
+            let rawMag = Float(sqrt(
                 rotation.x * rotation.x +
                 rotation.y * rotation.y +
                 rotation.z * rotation.z
             ))
+            let alpha = self.angularVelocitySmoothingAlpha
+            self.smoothedAngularVelocity = (1 - alpha) * self.smoothedAngularVelocity + alpha * rawMag
+            let smoothed = self.smoothedAngularVelocity
             let session = self.captureSession
-            Task { [session, mag] in
+            Task { [session, smoothed] in
                 await session.mutateSnapshot { snap in
-                    snap.currentAngularVelocity = mag
+                    snap.currentAngularVelocity = smoothed
                 }
             }
         }

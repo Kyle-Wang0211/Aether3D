@@ -86,40 +86,32 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
     private var lastGyroMagnitude: Float = 0
     private var isRunning = false
 
-    /// Camera-up direction captured at the moment the user tapped "lock
-    /// center". All subsequent frames are compared against this to
-    /// compute tilt. nil before lock.
-    private var referenceCameraUp: SIMD3<Float>?
+    /// Roll angle (degrees) captured at the moment the user tapped
+    /// "lock center". "Roll" means rotation around the optical axis —
+    /// i.e. the phone flipping sideways (portrait → landscape → upside
+    /// down). We only measure roll (NOT pitch/yaw) because:
+    ///   * Pitch (looking up/down at the object) is a normal scan
+    ///     motion — e.g. orbiting a table-top object while standing
+    ///     naturally pitches the camera down 20-30°.
+    ///   * Yaw is the whole point of orbiting.
+    ///   * Roll is the one that hurts reconstruction (lens-corner
+    ///     bias, VIO drift amplification).
+    /// nil before lock.
+    private var referenceRollDegrees: Float?
 
-    /// Hard-reject frames whose camera-up deviates from the reference
-    /// by more than this many degrees. Chosen to be strict enough that
-    /// the final reconstruction boundary isn't fuzzed by lens-corner
-    /// bias from consistently-tilted views, while loose enough that
-    /// natural handheld sway doesn't trip it.
-    ///
-    /// Tuning notes:
-    ///   * 10° — very strict; users will complain
-    ///   * 15° — strict; edges stay crisp
-    ///   * 20° — recommended default; generous headroom for shake
-    ///   * 30° — lenient; starts letting blur-adjacent frames through
+    /// Hard-reject frames whose camera has been ROLLED (rotated around
+    /// its own optical axis) by more than this many degrees relative to
+    /// the roll at lock time. Pitch and yaw don't count.
     let maxTiltDegrees: Float = 20.0
 
-    /// Absolute-orientation safety net. Independent of `maxTiltDegrees`
-    /// because tilt's reference is "whatever pose you had at lock time"
-    /// — if the lock happened in a weird pose, tilt gate is fooled.
-    /// Gravity gate anchors on world-up (ARKit's worldAlignment = .gravity
-    /// guarantees world y-axis is anti-parallel to gravity), so it's
-    /// immune to lock-time noise.
+    /// Absolute-roll safety net. Independent of `maxTiltDegrees` because
+    /// tilt's reference is "whatever roll you had at lock time" — if
+    /// the lock happened at a half-rolled angle (between portrait and
+    /// landscape), tilt gate considers it 0 deviation. Gravity gate
+    /// anchors on world-up, so it always catches rolls that don't
+    /// resolve to a recognizable portrait/landscape orientation.
     ///
-    /// Rejection: `min(|angle - 0°|, |angle - 90°|) > maxGravityDeviationDegrees`
-    /// where `angle = acos(dot(cameraUp, worldUp))` in degrees.
-    ///
-    /// Tuning notes (match the narration in
-    /// CaptureSessionSnapshot.currentGravityDeviationDegrees):
-    ///   * 10° — very strict; natural wrist wobble may trip it
-    ///   * 15° — default; deliberate tilt from portrait/landscape rejected
-    ///   * 20° — moderate; most "just slightly off" poses pass
-    ///   * 30° — lenient; nearly anything between portrait and landscape passes
+    /// Rejection: `min(|absRoll|, |absRoll - 90°|) > maxGravityDeviationDegrees`.
     let maxGravityDeviationDegrees: Float = 15.0
 
     private let sharpnessQueue = DispatchQueue(label: "aether3d.dome.sharpness", qos: .userInitiated)
@@ -145,7 +137,7 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
     func resetAll() {
         coverage.reset()
         snapshot = ObjectModeV2DomeSnapshot()
-        referenceCameraUp = nil
+        referenceRollDegrees = nil
     }
 
     // MARK: - 外部驱动模式(不开 ARSession,从 CoreMotion / GuidanceEngine 喂数据)
@@ -228,14 +220,50 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
         let relInitial = camPos - origin
         let yaw = atan2(relInitial.z, relInitial.x)
         coverage.lockWorldOrigin(origin, yaw: yaw)
-        // 锁定 reference camera-up:后续每帧 handleFrame 用它算"相对锁定瞬间"
-        // 的倾斜角,超 maxTiltDegrees 就拒帧。column 1 = camera's world-space up。
-        referenceCameraUp = simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+        // 锁定 reference roll —— 仅围绕光轴的旋转分量,pitch / yaw 不算。
+        // 后续 handleFrame 比较 "当前 roll vs reference roll"。
+        referenceRollDegrees = Self.rollDegrees(for: t)
         var snap = snapshot
         snap.hasLockedOrigin = true
         snap.hintText = "围绕物体慢走一圈,每个扇区深绿代表拍够了。"
         snapshot = snap
         return true
+    }
+
+    /// 计算相机绕光轴的旋转角度(absolute roll),0 = 竖拍,90 = 横拍,
+    /// 180 = 倒拍。和 pitch / yaw 完全解耦。
+    ///
+    /// 算法:
+    ///   1. cameraForward = -column2(相机朝向的世界向量)
+    ///   2. levelRight = normalize(cross(cameraForward, worldUp))
+    ///      — "如果手机纯竖拍,这会是 camera-right 的世界向量"
+    ///   3. cos(roll) = dot(camera.right, levelRight) = dot(column0, levelRight)
+    ///   4. roll = acos(cos(roll))
+    ///
+    /// 边界:相机光轴近乎平行 worldUp(对着天花板或地板直拍)时,
+    /// levelRight 不可算 —— 返回 0 跳过 roll 判定,这种姿态本来也是
+    /// pitch 占主导,不是 roll 问题。
+    nonisolated static func rollDegrees(for transform: simd_float4x4) -> Float {
+        let cameraForward = -SIMD3<Float>(
+            transform.columns.2.x,
+            transform.columns.2.y,
+            transform.columns.2.z
+        )
+        let cameraRight = SIMD3<Float>(
+            transform.columns.0.x,
+            transform.columns.0.y,
+            transform.columns.0.z
+        )
+        let worldUp = SIMD3<Float>(0, 1, 0)
+        if abs(simd_dot(cameraForward, worldUp)) > 0.95 {
+            return 0
+        }
+        let levelRightRaw = simd_cross(cameraForward, worldUp)
+        let lenSq = simd_dot(levelRightRaw, levelRightRaw)
+        guard lenSq > 1e-6 else { return 0 }
+        let levelRight = levelRightRaw / sqrt(lenSq)
+        let cosRoll = simd_clamp(simd_dot(cameraRight, levelRight), -1.0, 1.0)
+        return acos(cosRoll) * 180.0 / .pi
     }
 
     // NOTE: `lockObjectCenter(at:in:)` + its helper `unprojectDirection`
@@ -411,13 +439,9 @@ private extension ObjectModeV2ARDomeCoordinator {
 
             // ───── 角速度硬门槛 ─────
             // > 2.0 rad/s 时手机正在快速旋转:rolling-shutter 画面会歪,
-            // ARKit VIO 的 yaw drift 也会被放大。variance 层抓不到这种
-            // "局部清晰但几何错位"的帧 -> 必须用陀螺仪独立拒绝。
-            //
-            // 阈值 2.0 来源:手持缓慢环绕物体的典型值 0.3-0.8 rad/s;
-            // 不小心晃一下 ~2.5 rad/s 起;故意甩手 5+ rad/s。
-            //
-            // 2.0 给手抖留了很大容差,只拦"明显在快速转"的情况。
+            // ARKit VIO 的 yaw drift 也会被放大。VM 端对 motion.rotationRate
+            // 做了 EMA 平滑(alpha=0.3,~100ms 时间常数),避免瞬时 spike
+            // 误触发。真"甩动"持续 >100ms 会被 EMA 追上,仍然拦。
             let angularVelocityLimit: Float = 2.0
             if angularVelocity > angularVelocityLimit {
                 // 拒帧 —— 仍然 publishIfDue(),让 UI 更新 tracking/pose
@@ -426,51 +450,32 @@ private extension ObjectModeV2ARDomeCoordinator {
                 return
             }
 
-            // ───── 倾斜硬门槛 ─────
-            // 把当前 camera-up 和锁定瞬间的 camera-up 夹角算成度数。
-            // 夹角大 = 用户扭手机旋转了。这个帧虽然可能清晰,但:
-            //   1. 物体边缘会一直落在 lens corner(畸变+暗角最严重区域)
-            //   2. ARKit VIO 的 yaw drift 在 off-axis 姿态下放大
-            //   3. 连续倾斜导致 3DGS 训练时某些 Gaussian 缺乏 "中心区约束"
-            //      -> 重建边界糊
-            //
-            // 用户说: "保证覆盖质量是底线。做 C" -> 拒帧。
-            let currentCamUp = simd_normalize(SIMD3<Float>(
-                transform.columns.1.x,
-                transform.columns.1.y,
-                transform.columns.1.z
-            ))
+            // ───── 倾斜硬门槛(只算 roll,不算 pitch) ─────
+            // "倾斜"在 3DGS 语境里指 roll —— 手机沿光轴旋转(竖拍 → 横拍
+            // → 倒拍),这会造成 lens corner bias + ARKit VIO drift。
+            // pitch(仰俯,对着物体上下看)和 yaw(绕物体走)都是**正常的
+            // 扫描动作**,不应拦。之前用 cameraUp 夹角会把 pitch 也算进来,
+            // 正常俯身扫桌面物体时被误拦。
+            let currentRoll = Self.rollDegrees(for: transform)
             let tiltDegrees: Float
-            if let refUp = self.referenceCameraUp {
-                // dot(a,b) = |a||b|cos(θ);两个 unit vector 下 dot = cos(θ)
-                let cosine = simd_clamp(simd_dot(refUp, currentCamUp), -1.0, 1.0)
-                tiltDegrees = acos(cosine) * 180.0 / .pi
+            if let refRoll = self.referenceRollDegrees {
+                // roll 落在 [0, 180],差 >90 说明反向滚了一圈(对称性),
+                // 取 min 保证 "差" 的几何意义。
+                let rawDiff = abs(currentRoll - refRoll)
+                tiltDegrees = min(rawDiff, 180.0 - rawDiff)
             } else {
-                // 没锁定参考 -> 不做倾斜判定(本来 handleFrame 上面 guard
-                // origin 就会把这条 path return 掉)。
                 tiltDegrees = 0
             }
 
-            // ───── 绝对重力门槛(second-layer sanity) ─────
-            // Tilt gate 相对 lock 时姿态,如果 lock 时已经斜了就被它骗过;
-            // 这里用世界重力(ARKit worldAlignment = .gravity ⇒ world +Y 就是
-            // 重力反向)算一次绝对偏差:camera-up 离 portrait (0°) 和 landscape
-            // (90°) 哪个最近,偏差 > 15° 就拒。
-            //
-            // 这样:
-            //   * lock 时再怎么斜,gravity gate 每帧独立判断,把"明显不合理
-            //     姿态"兜底拒掉,不依赖 lock 正确性。
-            //   * portrait / landscape 都算正常 → 不把 横拍 误伤。
-            //   * 纯对角姿态(45°)离两个 cardinal 都是 45° → 果断拒绝。
-            let worldUp = SIMD3<Float>(0, 1, 0)
-            let gravityAngleRad = acos(simd_clamp(simd_dot(currentCamUp, worldUp), -1.0, 1.0))
-            let gravityAngleDeg = gravityAngleRad * 180.0 / .pi
-            let devPortrait = abs(gravityAngleDeg - 0.0)
-            let devLandscape = abs(gravityAngleDeg - 90.0)
+            // ───── 绝对 roll 门槛(second-layer sanity) ─────
+            // 无视 reference:只看"当前手机相对世界竖直的 roll"离
+            // portrait(0°)和 landscape(90°)哪个最近,偏差 > 15° 拒。
+            // 兜底 lock 时已经半歪了的情况。pitch 仍然不计。
+            let devPortrait = abs(currentRoll - 0.0)
+            let devLandscape = abs(currentRoll - 90.0)
             let gravityDeviation = min(devPortrait, devLandscape)
 
-            // Publish both tilt + gravity deviation to snapshot so the HUD
-            // can render live values regardless of accept/reject.
+            // Publish both to snapshot for HUD (regardless of accept/reject).
             if let target = self.captureSession {
                 let tilt = tiltDegrees
                 let gravDev = gravityDeviation
@@ -491,6 +496,11 @@ private extension ObjectModeV2ARDomeCoordinator {
                 self.publishIfDue()
                 return
             }
+
+            // currentCamUp is no longer used directly (was previously the
+            // basis for tilt calc). Kept as a local for any downstream
+            // consumer that might want world-space camera-up; removed to
+            // avoid computing it when unused.
 
             let sharpness: Float
             let exposure: Float

@@ -88,9 +88,10 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
     public var approxThreshold: Double = 500
 
     /// Matches the hard-reject angular velocity threshold in
-    /// `ObjectModeV2ARDomeCoordinator.handleFrame` (currently 2.0 rad/s).
-    /// Surfaced here so the HUD can color-code live omega against the
-    /// active cutoff.
+    /// `ObjectModeV2ARDomeCoordinator.handleFrame` (2.0 rad/s). With
+    /// the VM's EMA smoothing on raw gyro magnitude, this is tight
+    /// enough to catch rolling-shutter territory but shouldn't trip
+    /// on routine walk-around motion.
     public var angularVelocityLimit: Float = 2.0
 
     /// Matches `ObjectModeV2ARDomeCoordinator.maxTiltDegrees` (default
