@@ -235,9 +235,12 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     @Published var downloadedArtifactFormat: String?
     @Published var isArtifactViewerPresented = false
     @Published var batteryPercentageText = "100%"
-    @Published var targetZoneMode: ObjectModeV2TargetZoneMode = .subject
-    @Published var isTargetLocked = false
-    @Published var targetZoneAnchor = CGPoint(x: 0.5, y: 0.64)
+    // Target-zone state (targetZoneMode / isTargetLocked / targetZoneAnchor)
+    // removed 2026-04-24 alongside the pre-capture reticle UI. The
+    // downstream GuidanceEngine + server audit-metadata paths still
+    // accept the parameters so we pass fixed defaults below.
+    private static let defaultTargetZoneAnchor = CGPoint(x: 0.5, y: 0.64)
+    private static let defaultTargetZoneMode: ObjectModeV2TargetZoneMode = .subject
     @Published var acceptedFrameFeedbackTick = 0
     #if canImport(UIKit)
     @Published var acceptedFrameThumbnails: [ObjectModeV2AcceptedFrameThumbnail] = []
@@ -386,8 +389,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             guard let self else { return }
             self.guidanceEngine.processVisualSample(
                 sample,
-                targetZoneAnchor: self.targetZoneAnchor,
-                targetZoneMode: self.targetZoneMode
+                targetZoneAnchor: Self.defaultTargetZoneAnchor,
+                targetZoneMode: Self.defaultTargetZoneMode
             )
         }
         #if canImport(UIKit)
@@ -489,27 +492,9 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         }
     }
 
-    func setTargetZoneMode(_ mode: ObjectModeV2TargetZoneMode) {
-        targetZoneMode = mode
-        guard isTargetLocked else { return }
-        guidanceText = "对象已锁定，开始后围绕这个目标缓慢移动。"
-    }
-
-    func lockTarget(at point: CGPoint, in size: CGSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        targetZoneAnchor = CGPoint(
-            x: min(max(point.x / size.width, 0.18), 0.82),
-            y: min(max(point.y / size.height, 0.18), 0.86)
-        )
-        isTargetLocked = true
-        guidanceText = "对象已锁定，开始后围绕这个目标缓慢移动。"
-    }
-
-    func resetTargetLock() {
-        isTargetLocked = false
-        targetZoneAnchor = CGPoint(x: 0.5, y: 0.64)
-        guidanceText = "将物体放在画面中央，开始后沿着对象缓慢绕一圈。"
-    }
+    // setTargetZoneMode / lockTarget / resetTargetLock removed 2026-04-24.
+    // Their only caller (the preCaptureReticle + targetModeSelector UI)
+    // was deleted in the same pass.
 
     func openRecord() {
         guard downloadedArtifactURL != nil else {
@@ -573,9 +558,7 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         stabilityScore = 1
         acceptedFrameTimestampsSec = []
         resetCaptureGravityTracking()
-        guidanceText = isTargetLocked
-            ? "对象已锁定，开始后围绕这个目标缓慢移动。"
-            : "将物体放在画面中央，开始后沿着对象缓慢绕一圈。"
+        guidanceText = "将物体放在画面中央，开始后沿着对象缓慢绕一圈。"
         #if canImport(UIKit)
         acceptedFrameThumbnails = []
         #endif
@@ -1290,25 +1273,11 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     #endif
 
     private func resolvedGuidanceText(for snapshot: ObjectModeV2GuidanceSnapshot) -> String {
-        guard isTargetLocked else { return snapshot.hintText }
-
-        if snapshot.stabilityScore < 0.28 {
-            return "对象已锁定，先稳住手机，再继续围绕主体移动。"
-        }
-
-        if snapshot.orbitCompletion < 0.3 {
-            return "对象已锁定，先补正面和侧面，保持目标在锁定框附近。"
-        }
-
-        if snapshot.acceptedFrames < 20 {
-            return "对象已锁定，继续补新的角度，先把一圈拍完整。"
-        }
-
-        if snapshot.acceptedFrames < 60 {
-            return "对象已锁定，质量已经不错，可以继续补顶部和边缘细节。"
-        }
-
-        return "对象已锁定，成品质量已经很好，可以结束或继续补更细节角度。"
+        // All target-lock-gated branches of this function were removed
+        // 2026-04-24 when the lock UI was deleted. The function now
+        // always surfaces whatever the guidance engine provided as the
+        // latest hint.
+        return snapshot.hintText
     }
 
     private func simulateStage(
@@ -1352,8 +1321,8 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             "visual_min_accept_interval_sec": "0.28"
         ]
         guidanceEngine.pipelineAuditFields(
-            targetZoneAnchor: targetZoneAnchor,
-            targetZoneMode: targetZoneMode
+            targetZoneAnchor: Self.defaultTargetZoneAnchor,
+            targetZoneMode: Self.defaultTargetZoneMode
         ).forEach { profile[$0.key] = $0.value }
         if let captureGravity = captureGravityMetadata() {
             profile["capture_gravity_up_x"] = String(format: "%.6f", captureGravity.up.x)

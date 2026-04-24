@@ -17,10 +17,9 @@ struct ObjectModeV2CaptureView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var viewModel: ObjectModeV2CaptureViewModel
     @State private var reticlePulse = false
-    @State private var showLockFlash = false
-    @State private var showLockBadge = false
-    @State private var lockBadgePulse = false
-    @State private var showRecordingCarryover = false
+    // showLockFlash / showLockBadge / lockBadgePulse / showRecordingCarryover
+    // removed on 2026-04-24 together with the target-zone reticle UI that
+    // was the only thing that ever set them to true.
     @State private var showAcceptedFrameFlash = false
     /// Developer-only debug HUD showing live Laplacian variance + pass
     /// rate for tuning `DomeCoverageMap.thresholds.minSharpness`.
@@ -83,39 +82,10 @@ struct ObjectModeV2CaptureView: View {
         .onChange(of: scenePhase) { _, newPhase in
             viewModel.noteScenePhase(newPhase)
         }
-        .onChange(of: viewModel.isTargetLocked) { _, isLocked in
-            if isLocked {
-                showLockBadge = true
-                showLockFlash = true
-                lockBadgePulse = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.48) {
-                    withAnimation(.easeOut(duration: 0.24)) {
-                        showLockFlash = false
-                    }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.92)) {
-                        lockBadgePulse = false
-                    }
-                }
-            } else {
-                showLockFlash = false
-                showLockBadge = false
-                lockBadgePulse = false
-            }
-        }
-        .onChange(of: captureHUDActive) { _, isActive in
-            if isActive && viewModel.isTargetLocked {
-                showRecordingCarryover = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                    withAnimation(.easeOut(duration: 0.28)) {
-                        showRecordingCarryover = false
-                    }
-                }
-            } else if !isActive {
-                showRecordingCarryover = false
-            }
-        }
+        // isTargetLocked onChange handler + recordingCarryover trigger
+        // removed alongside the reticle UI (2026-04-24). There is no
+        // longer a path from user gesture → isTargetLocked=true, so
+        // these animations could never fire.
         .onChange(of: viewModel.acceptedFrameFeedbackTick) { _, _ in
             withAnimation(.easeOut(duration: 0.08)) {
                 showAcceptedFrameFlash = true
@@ -241,25 +211,13 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var centerPreview: some View {
+        // The preCaptureReticle (green-outlined "target zone" box that the
+        // user could tap to lock) was removed on 2026-04-24. It never did
+        // anything for the real-device 3DGS path — it only fed the legacy
+        // GuidanceEngine, which is itself dead code on AR (see
+        // ObjectModeV2ARCaptureCoordinator.swift "onVisualFrameSample 故
+        // 意不喂"). Keeping only the camera-error banner in this slot.
         VStack(spacing: 18) {
-            ZStack {
-                if isPreCaptureUI {
-                    preCaptureReticle
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.96)),
-                            removal: .opacity
-                        ))
-                } else {
-                    Color.clear
-                        .frame(width: 1, height: 1)
-                        .transition(.asymmetric(
-                            insertion: .opacity,
-                            removal: .opacity
-                        ))
-                }
-            }
-            .frame(width: isPreCaptureUI ? 268 : 1, height: isPreCaptureUI ? 322 : 1)
-
             if let cameraError = viewModel.cameraError {
                 Text(cameraError)
                     .font(.system(size: 12, weight: .semibold))
@@ -418,9 +376,14 @@ struct ObjectModeV2CaptureView: View {
     }
 
     private var processingSnapshot: ObjectModeV2ProcessingSnapshot {
-        let lockAccent = viewModel.isTargetLocked
-            ? targetZoneAccentColor
-            : Color(red: 0.95, green: 0.79, blue: 0.12)
+        // lockValue / lockAccent are stubbed to constant values. The
+        // ObjectModeV2ProcessingSnapshot struct still carries these
+        // fields for backwards compatibility with the render layer, but
+        // the UI chip they power is no longer displayed (see
+        // processingContextChip renderer) and the target-zone feature
+        // that drove them was removed on 2026-04-24.
+        let lockValue = "Open"
+        let lockAccent = Color(red: 0.95, green: 0.79, blue: 0.12)
 
         #if canImport(UIKit)
         return ObjectModeV2ProcessingSnapshot(
@@ -432,7 +395,7 @@ struct ObjectModeV2CaptureView: View {
             isFailed: viewModel.processingFailureReason != nil,
             isInspectionOnlyCandidate: viewModel.isInspectionOnlyCandidate,
             modeValue: "Guided",
-            lockValue: viewModel.isTargetLocked ? "Confirmed" : "Open",
+            lockValue: lockValue,
             lockAccent: lockAccent,
             stageCards: viewModel.visibleStageCards,
             stats: [
@@ -453,7 +416,7 @@ struct ObjectModeV2CaptureView: View {
             isFailed: viewModel.processingFailureReason != nil,
             isInspectionOnlyCandidate: viewModel.isInspectionOnlyCandidate,
             modeValue: "Guided",
-            lockValue: viewModel.isTargetLocked ? "Confirmed" : "Open",
+            lockValue: lockValue,
             lockAccent: lockAccent,
             stageCards: viewModel.visibleStageCards,
             stats: [
@@ -588,11 +551,7 @@ struct ObjectModeV2CaptureView: View {
                     value: "Guided",
                     accent: .white
                 )
-                processingContextChip(
-                    title: "Lock",
-                    value: viewModel.isTargetLocked ? "Confirmed" : "Open",
-                    accent: viewModel.isTargetLocked ? targetZoneAccentColor : Color(red: 0.95, green: 0.79, blue: 0.12)
-                )
+                // "Lock" chip removed 2026-04-24 alongside target-zone UI.
             }
         }
         .padding(14)
@@ -798,75 +757,10 @@ struct ObjectModeV2CaptureView: View {
         }
     }
 
-    private var targetModeSelector: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("GUIDED TARGET")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.white.opacity(0.52))
-                    Text("Tell Guided whether you're framing one subject or a small group.")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.58))
-                }
-                Spacer()
-                if viewModel.isTargetLocked {
-                    Text("LOCKED")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(targetZoneAccentColor)
-                        .clipShape(Capsule())
-                }
-            }
-
-            HStack(spacing: 10) {
-                ForEach(ObjectModeV2TargetZoneMode.allCases, id: \.rawValue) { mode in
-                    Button(action: {
-                        withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) {
-                            viewModel.setTargetZoneMode(mode)
-                        }
-                    }) {
-                        VStack(spacing: 3) {
-                            Text(mode.title)
-                                .font(.system(size: 13, weight: .bold))
-                            Text(mode.subtitle)
-                                .font(.system(size: 10, weight: .medium))
-                        }
-                        .foregroundColor(viewModel.targetZoneMode == mode ? .black : .white.opacity(0.8))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(viewModel.targetZoneMode == mode ? Color.white : Color.black.opacity(0.28))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                }
-
-                if viewModel.isTargetLocked {
-                    Button(action: {
-                        withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) {
-                            viewModel.resetTargetLock()
-                        }
-                    }) {
-                        Text("Reset")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(Color.black.opacity(0.36))
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                }
-            }
-        }
-        .padding(14)
-        .background(Color.black.opacity(0.30))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-    }
+    // targetModeSelector (66 lines, "Guided Target" picker + Reset button)
+    // deleted 2026-04-24. It had zero callers in the view body — the
+    // pre-capture screen never surfaced it. Removed along with the
+    // reticle + target-zone infrastructure.
 
     /// 录制中显示 60-cell 球形 coverage dome,点击 = 结束拍摄;
     /// 未录制/处理中保持原白环快门。
@@ -1000,12 +894,6 @@ struct ObjectModeV2CaptureView: View {
             thumbnails: viewModel.acceptedFrameThumbnails
         )
         .frame(width: 234, height: 286)
-        .overlay {
-            if showRecordingCarryover && viewModel.isTargetLocked {
-                recordingTargetCarryover
-                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
-            }
-        }
         #else
         DraftObjectPreview(
             acceptedFrames: viewModel.acceptedFrames,
@@ -1014,13 +902,10 @@ struct ObjectModeV2CaptureView: View {
             highlightFlash: showAcceptedFrameFlash
         )
         .frame(width: 234, height: 286)
-        .overlay {
-            if showRecordingCarryover && viewModel.isTargetLocked {
-                recordingTargetCarryover
-                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
-            }
-        }
         #endif
+        // .overlay { recordingTargetCarryover } removed 2026-04-24;
+        // the carryover animation was gated on isTargetLocked which is
+        // no longer reachable.
     }
 
     @ViewBuilder
@@ -1237,83 +1122,9 @@ struct ObjectModeV2CaptureView: View {
             .foregroundColor(selected ? Color(red: 0.93, green: 0.84, blue: 0.46) : .white.opacity(0.62))
     }
 
-    private var preCaptureReticle: some View {
-        GeometryReader { proxy in
-            let size = proxy.size
-            let anchor = CGPoint(
-                x: size.width * viewModel.targetZoneAnchor.x,
-                y: size.height * viewModel.targetZoneAnchor.y
-            )
-            let zoneSize = targetZoneSize(in: size)
-
-            ZStack {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onEnded { value in
-                                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                                    viewModel.lockTarget(at: value.location, in: size)
-                                }
-                            }
-                    )
-
-                if showLockFlash {
-                    RoundedRectangle(cornerRadius: 30, style: .continuous)
-                        .stroke(targetZoneAccentColor.opacity(0.95), lineWidth: 2)
-                        .frame(width: zoneSize.width + 42, height: zoneSize.height + 42)
-                        .position(anchor)
-                        .scaleEffect(showLockFlash ? 1.08 : 0.94)
-                        .opacity(showLockFlash ? 0 : 0.9)
-                }
-
-                targetPulse(size: zoneSize)
-                    .position(anchor)
-
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.10 : 0.03))
-                    .frame(width: zoneSize.width, height: zoneSize.height)
-                    .position(anchor)
-
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(targetZoneAccentColor.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                    .frame(width: zoneSize.width + 18, height: zoneSize.height + 18)
-                    .position(anchor)
-
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.95 : 0.42), lineWidth: viewModel.isTargetLocked ? 2.2 : 1.2)
-                    .frame(width: zoneSize.width, height: zoneSize.height)
-                    .position(anchor)
-
-                TargetZoneCornerMarks(color: targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.95 : 0.46))
-                    .frame(width: zoneSize.width + 10, height: zoneSize.height + 10)
-                    .position(anchor)
-
-                Circle()
-                    .fill(targetZoneAccentColor)
-                    .frame(width: 8, height: 8)
-                    .position(anchor)
-
-                if showLockBadge || viewModel.isTargetLocked {
-                    targetLockBadge
-                        .position(x: anchor.x, y: anchor.y - (zoneSize.height * 0.5) - 22)
-                        .transition(.scale.combined(with: .opacity))
-                }
-
-                if viewModel.isTargetLocked {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(targetZoneAccentColor)
-                        .background(
-                            Circle()
-                                .fill(Color.black.opacity(0.36))
-                                .frame(width: 24, height: 24)
-                        )
-                        .position(x: anchor.x + zoneSize.width * 0.5 - 8, y: anchor.y - zoneSize.height * 0.5 + 8)
-                }
-            }
-        }
-    }
+    // preCaptureReticle (77 lines, the green/white target-zone box with
+    // tap-to-lock gesture) removed 2026-04-24. See centerPreview for the
+    // rationale — the reticle only fed a dead code path.
 
     private var isPreCaptureUI: Bool {
         !captureHUDActive && !viewModel.shouldShowProcessingOverlay && viewModel.manifestURL == nil && viewModel.acceptedFrames == 0
@@ -1373,85 +1184,10 @@ struct ObjectModeV2CaptureView: View {
         return "GOOD"
     }
 
-    private var recordingTargetCarryover: some View {
-        let size = CGSize(width: 92, height: 92)
-
-        return ZStack {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(targetZoneAccentColor.opacity(0.92), lineWidth: 2)
-                .frame(width: size.width, height: size.height)
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(targetZoneAccentColor.opacity(0.24), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                .frame(width: size.width + 16, height: size.height + 16)
-        }
-    }
-
-    private func targetZoneSize(in size: CGSize) -> CGSize {
-        CGSize(width: min(92, size.width * 0.34), height: min(92, size.height * 0.24))
-    }
-
-    private var targetZoneAccentColor: Color {
-        viewModel.isTargetLocked ? Color(red: 0.54, green: 0.96, blue: 0.62) : .white
-    }
-
-    private func targetPulse(size: CGSize) -> some View {
-        RoundedRectangle(cornerRadius: 28, style: .continuous)
-            .stroke(targetZoneAccentColor.opacity(viewModel.isTargetLocked ? 0.26 : 0.12), lineWidth: 1)
-            .frame(width: size.width + 28, height: size.height + 28)
-            .scaleEffect(reticlePulse ? 1.05 : 0.96)
-            .opacity(reticlePulse ? (viewModel.isTargetLocked ? 0.36 : 0.30) : 0.10)
-            .animation(
-                .easeInOut(duration: 1.8).repeatForever(autoreverses: true),
-                value: reticlePulse
-            )
-    }
-
-    private var targetLockBadge: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "scope")
-                .font(.system(size: 11, weight: .bold))
-            Text("OBJECT LOCKED")
-                .font(.system(size: 11, weight: .bold))
-        }
-        .foregroundColor(.black)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(targetZoneAccentColor)
-        .clipShape(Capsule())
-        .shadow(color: Color.black.opacity(lockBadgePulse ? 0.26 : 0.16), radius: lockBadgePulse ? 14 : 8, y: 3)
-        .scaleEffect(lockBadgePulse ? 1.08 : 1.0)
-    }
-}
-
-private struct TargetZoneCornerMarks: View {
-    let color: Color
-
-    var body: some View {
-        GeometryReader { proxy in
-            let w = proxy.size.width
-            let h = proxy.size.height
-            let l = min(w, h) * 0.16
-
-            Path { path in
-                path.move(to: CGPoint(x: 0, y: l))
-                path.addLine(to: CGPoint(x: 0, y: 0))
-                path.addLine(to: CGPoint(x: l, y: 0))
-
-                path.move(to: CGPoint(x: w - l, y: 0))
-                path.addLine(to: CGPoint(x: w, y: 0))
-                path.addLine(to: CGPoint(x: w, y: l))
-
-                path.move(to: CGPoint(x: 0, y: h - l))
-                path.addLine(to: CGPoint(x: 0, y: h))
-                path.addLine(to: CGPoint(x: l, y: h))
-
-                path.move(to: CGPoint(x: w - l, y: h))
-                path.addLine(to: CGPoint(x: w, y: h))
-                path.addLine(to: CGPoint(x: w, y: h - l))
-            }
-            .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-        }
-    }
+    // recordingTargetCarryover + targetZoneSize + targetZoneAccentColor +
+    // targetPulse + targetLockBadge (and the file-private
+    // TargetZoneCornerMarks struct at the bottom) — all deleted
+    // 2026-04-24 along with the preCaptureReticle they existed to serve.
 }
 
 private struct MiniFrameStack: View {
@@ -3119,11 +2855,11 @@ struct ObjectModeV2ProcessingSurface: View {
                     value: snapshot.modeValue,
                     accent: .white
                 )
-                processingContextChip(
-                    title: "Lock",
-                    value: snapshot.lockValue,
-                    accent: snapshot.lockAccent
-                )
+                // "Lock" chip (always "Open"/"Confirmed") removed
+                // 2026-04-24 alongside the target-zone UI; the
+                // lockValue/lockAccent fields remain on the snapshot
+                // struct for any external consumer but nothing renders
+                // them anymore.
             }
         }
         .padding(14)
