@@ -40,6 +40,8 @@ public struct QualityDebugStats: Sendable, Equatable {
     public let angularVelocityLimit: Float // current hard-reject threshold
     public let tiltDegrees: Float          // angle vs camera-up at lock time
     public let tiltDegreesLimit: Float     // current hard-reject threshold
+    public let gravityDeviationDegrees: Float  // distance from portrait/landscape
+    public let gravityDeviationLimit: Float
     public let timestamp: TimeInterval
 
     public init(
@@ -53,6 +55,8 @@ public struct QualityDebugStats: Sendable, Equatable {
         angularVelocityLimit: Float = 2.0,
         tiltDegrees: Float = 0,
         tiltDegreesLimit: Float = 20.0,
+        gravityDeviationDegrees: Float = 0,
+        gravityDeviationLimit: Float = 15.0,
         timestamp: TimeInterval
     ) {
         self.currentVariance = currentVariance
@@ -65,6 +69,8 @@ public struct QualityDebugStats: Sendable, Equatable {
         self.angularVelocityLimit = angularVelocityLimit
         self.tiltDegrees = tiltDegrees
         self.tiltDegreesLimit = tiltDegreesLimit
+        self.gravityDeviationDegrees = gravityDeviationDegrees
+        self.gravityDeviationLimit = gravityDeviationLimit
         self.timestamp = timestamp
     }
 }
@@ -90,6 +96,10 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
     /// Matches `ObjectModeV2ARDomeCoordinator.maxTiltDegrees` (default
     /// 20.0°). Same sync obligation as `angularVelocityLimit`.
     public var tiltDegreesLimit: Float = 20.0
+
+    /// Matches `ObjectModeV2ARDomeCoordinator.maxGravityDeviationDegrees`
+    /// (default 15.0°). Keep in sync when tuning.
+    public var gravityDeviationLimit: Float = 15.0
 
     /// Called with the latest stats. Callers are responsible for
     /// hopping to MainActor if they're driving SwiftUI. The callback is
@@ -119,6 +129,7 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
         let avg = snap.recentSharpnessAvg
         let omega = snap.currentAngularVelocity
         let tilt = snap.currentTiltDegrees
+        let gravDev = snap.currentGravityDeviationDegrees
 
         let (shouldLog, snapshotPass, snapshotTotal) = statsQueue.sync { () -> (Bool, Int, Int) in
             totalCount += 1
@@ -139,15 +150,17 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
 
         if shouldLog && consoleLogEnabled {
             print(String(
-                format: "[QualityDebug] variance=%.0f avg=%.0f brightness=%.0f omega=%.2f tilt=%.1f° threshold=%.0f omegaMax=%.1f tiltMax=%.0f° pass=%.0f%% (%d samples)",
+                format: "[QualityDebug] variance=%.0f avg=%.0f brightness=%.0f omega=%.2f tilt=%.1f° gravDev=%.1f° threshold=%.0f omegaMax=%.1f tiltMax=%.0f° gravDevMax=%.0f° pass=%.0f%% (%d samples)",
                 report.laplacianVariance,
                 avg,
                 report.meanBrightness,
                 omega,
                 tilt,
+                gravDev,
                 approxThreshold,
                 angularVelocityLimit,
                 tiltDegreesLimit,
+                gravityDeviationLimit,
                 passRate * 100,
                 snapshotTotal
             ))
@@ -170,6 +183,8 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
             angularVelocityLimit: angularVelocityLimit,
             tiltDegrees: tilt,
             tiltDegreesLimit: tiltDegreesLimit,
+            gravityDeviationDegrees: gravDev,
+            gravityDeviationLimit: gravityDeviationLimit,
             timestamp: report.timestamp
         )
         onStats?(stats)

@@ -94,6 +94,26 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
     /// point we capture the reference camera-up). Before lock: 0.
     public var currentTiltDegrees: Float
 
+    /// Deviation from the closest "natural" phone orientation (portrait at
+    /// 0° or landscape at 90° relative to world-up). Always computable
+    /// even before lock, because it references absolute gravity rather
+    /// than a user-chosen baseline.
+    ///
+    /// 0 = perfect portrait or perfect landscape. Values grow as the
+    /// phone drifts toward the "forbidden" diagonal orientations (e.g.
+    /// 45° from portrait and also 45° from landscape — no sane scanner
+    /// holds their phone like that).
+    ///
+    /// USE AS HARD GATE:
+    ///   * `< 15°`  — phone is recognizably portrait or landscape
+    ///   * `15–30°` — diagonal, rejected
+    ///   * `>= 30°` — far from any sane orientation, rejected
+    ///
+    /// Complements `currentTiltDegrees` (which is RELATIVE to lock time):
+    /// even if the lock happened in a weird pose, this gate still
+    /// bounces truly bad orientations.
+    public var currentGravityDeviationDegrees: Float
+
     // MARK: - Recording (updated by VideoWriterObserver)
 
     public var isRecording: Bool
@@ -117,6 +137,7 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
         recentSharpnessAvg: Double = 0,
         currentAngularVelocity: Float = 0,
         currentTiltDegrees: Float = 0,
+        currentGravityDeviationDegrees: Float = 0,
         isRecording: Bool = false,
         recordingDurationSec: TimeInterval = 0,
         hintText: String = ""
@@ -131,6 +152,7 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
         self.recentSharpnessAvg = recentSharpnessAvg
         self.currentAngularVelocity = currentAngularVelocity
         self.currentTiltDegrees = currentTiltDegrees
+        self.currentGravityDeviationDegrees = currentGravityDeviationDegrees
         self.isRecording = isRecording
         self.recordingDurationSec = recordingDurationSec
         self.hintText = hintText

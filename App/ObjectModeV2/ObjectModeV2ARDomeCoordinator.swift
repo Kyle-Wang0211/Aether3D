@@ -104,6 +104,24 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
     ///   * 30° — lenient; starts letting blur-adjacent frames through
     let maxTiltDegrees: Float = 20.0
 
+    /// Absolute-orientation safety net. Independent of `maxTiltDegrees`
+    /// because tilt's reference is "whatever pose you had at lock time"
+    /// — if the lock happened in a weird pose, tilt gate is fooled.
+    /// Gravity gate anchors on world-up (ARKit's worldAlignment = .gravity
+    /// guarantees world y-axis is anti-parallel to gravity), so it's
+    /// immune to lock-time noise.
+    ///
+    /// Rejection: `min(|angle - 0°|, |angle - 90°|) > maxGravityDeviationDegrees`
+    /// where `angle = acos(dot(cameraUp, worldUp))` in degrees.
+    ///
+    /// Tuning notes (match the narration in
+    /// CaptureSessionSnapshot.currentGravityDeviationDegrees):
+    ///   * 10° — very strict; natural wrist wobble may trip it
+    ///   * 15° — default; deliberate tilt from portrait/landscape rejected
+    ///   * 20° — moderate; most "just slightly off" poses pass
+    ///   * 30° — lenient; nearly anything between portrait and landscape passes
+    let maxGravityDeviationDegrees: Float = 15.0
+
     private let sharpnessQueue = DispatchQueue(label: "aether3d.dome.sharpness", qos: .userInitiated)
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
@@ -220,75 +238,16 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
         return true
     }
 
-    /// 用户点十字确认物体中心:从屏幕中心 raycast 到水平面。
-    /// 成功时锁定 worldOrigin + worldYaw。
-    func lockObjectCenter(at screenPoint: CGPoint, in viewSize: CGSize) -> Bool {
-        guard let frame = session.currentFrame else { return false }
-
-        // ARKit raycast — 只返回 world-space 的平面上命中点。
-        let query = ARRaycastQuery(
-            origin: SIMD3<Float>(frame.camera.transform.columns.3.x,
-                                 frame.camera.transform.columns.3.y,
-                                 frame.camera.transform.columns.3.z),
-            direction: unprojectDirection(screenPoint: screenPoint,
-                                          viewSize: viewSize,
-                                          camera: frame.camera),
-            allowing: .estimatedPlane,
-            alignment: .horizontal
-        )
-        let results = session.raycast(query)
-        guard let hit = results.first else { return false }
-
-        let origin = SIMD3<Float>(
-            hit.worldTransform.columns.3.x,
-            hit.worldTransform.columns.3.y,
-            hit.worldTransform.columns.3.z
-        )
-        // worldYaw = "相机相对物体的方位角基准"。handleFrame 里 az = atan2(rel.z, rel.x) - worldYaw,
-        // 录制开始瞬间 rel = camPos - origin,用这个方向算基准才能让 az 从 0 起步。
-        // ⚠️ 不能直接 atan2(fwd.z, fwd.x) —— 那和 rel 方向差 180°,会让 UI 起始点反转。
-        // 这里和 lockAtCameraForward 使用同一套公式,保持两个 lock 入口结果一致。
-        let camPos = SIMD3<Float>(
-            frame.camera.transform.columns.3.x,
-            frame.camera.transform.columns.3.y,
-            frame.camera.transform.columns.3.z
-        )
-        let relInitial = camPos - origin
-        let worldYaw = atan2(relInitial.z, relInitial.x)
-
-        coverage.lockWorldOrigin(origin, yaw: worldYaw)
-        // 锁定 reference camera-up —— 见 lockAtCameraForward 里的同步改动。
-        let t2 = frame.camera.transform
-        referenceCameraUp = simd_normalize(SIMD3<Float>(t2.columns.1.x, t2.columns.1.y, t2.columns.1.z))
-        var snap = snapshot
-        snap.hasLockedOrigin = true
-        snap.hintText = "开始绕物体走,每个扇区深绿代表拍够了。"
-        snapshot = snap
-        return true
-    }
+    // NOTE: `lockObjectCenter(at:in:)` + its helper `unprojectDirection`
+    // were removed on 2026-04-24. Historical context: they let a user tap
+    // the screen to pick the object's center manually. In practice
+    // `lockAtCameraForward` auto-runs at startRecording() (see
+    // ObjectModeV2CaptureViewModel.swift start-recording path), so no UI
+    // ever drove the manual tap. The function + its 20-line raycast
+    // helper were pure dead code. Grep -r for either name before
+    // resurrecting them.
 
     // MARK: - Private helpers
-
-    private func unprojectDirection(screenPoint: CGPoint, viewSize: CGSize, camera: ARCamera) -> SIMD3<Float> {
-        // 近似:屏幕点 → NDC → 相机局部射线 → world 方向
-        let nx = Float((2.0 * screenPoint.x / viewSize.width) - 1.0)
-        let ny = Float(1.0 - (2.0 * screenPoint.y / viewSize.height))
-        let projMat = camera.projectionMatrix(
-            for: .portrait,
-            viewportSize: viewSize,
-            zNear: 0.01,
-            zFar: 10.0
-        )
-        let invProj = projMat.inverse
-        let rayClip = SIMD4<Float>(nx, ny, -1, 1)
-        var rayCam = invProj * rayClip
-        rayCam = SIMD4<Float>(rayCam.x, rayCam.y, -1, 0)
-        let camToWorld = camera.transform
-        let rayWorld4 = camToWorld * rayCam
-        var dir = SIMD3<Float>(rayWorld4.x, rayWorld4.y, rayWorld4.z)
-        dir = simd_normalize(dir)
-        return dir
-    }
 
     private func publishIfDue(force: Bool = false) {
         let now = CACurrentMediaTime()
@@ -492,18 +451,43 @@ private extension ObjectModeV2ARDomeCoordinator {
                 tiltDegrees = 0
             }
 
-            // Publish to snapshot regardless of reject -> HUD can show
-            // live tilt even on rejected frames.
+            // ───── 绝对重力门槛(second-layer sanity) ─────
+            // Tilt gate 相对 lock 时姿态,如果 lock 时已经斜了就被它骗过;
+            // 这里用世界重力(ARKit worldAlignment = .gravity ⇒ world +Y 就是
+            // 重力反向)算一次绝对偏差:camera-up 离 portrait (0°) 和 landscape
+            // (90°) 哪个最近,偏差 > 15° 就拒。
+            //
+            // 这样:
+            //   * lock 时再怎么斜,gravity gate 每帧独立判断,把"明显不合理
+            //     姿态"兜底拒掉,不依赖 lock 正确性。
+            //   * portrait / landscape 都算正常 → 不把 横拍 误伤。
+            //   * 纯对角姿态(45°)离两个 cardinal 都是 45° → 果断拒绝。
+            let worldUp = SIMD3<Float>(0, 1, 0)
+            let gravityAngleRad = acos(simd_clamp(simd_dot(currentCamUp, worldUp), -1.0, 1.0))
+            let gravityAngleDeg = gravityAngleRad * 180.0 / .pi
+            let devPortrait = abs(gravityAngleDeg - 0.0)
+            let devLandscape = abs(gravityAngleDeg - 90.0)
+            let gravityDeviation = min(devPortrait, devLandscape)
+
+            // Publish both tilt + gravity deviation to snapshot so the HUD
+            // can render live values regardless of accept/reject.
             if let target = self.captureSession {
                 let tilt = tiltDegrees
-                Task { [target, tilt] in
+                let gravDev = gravityDeviation
+                Task { [target, tilt, gravDev] in
                     await target.mutateSnapshot { snap in
                         snap.currentTiltDegrees = tilt
+                        snap.currentGravityDeviationDegrees = gravDev
                     }
                 }
             }
 
             if tiltDegrees > self.maxTiltDegrees {
+                self.publishIfDue()
+                return
+            }
+
+            if gravityDeviation > self.maxGravityDeviationDegrees {
                 self.publishIfDue()
                 return
             }
