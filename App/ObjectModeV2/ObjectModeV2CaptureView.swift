@@ -239,10 +239,17 @@ struct ObjectModeV2CaptureView: View {
             if isPreCaptureUI {
                 preCaptureBottomHud
             } else {
-                HStack(alignment: .bottom, spacing: 26) {
-                    leftAnchor
+                // leftAnchor / trailingDock 通过 HStack 贴左右边,dome 通过
+                // ZStack 的默认 .center 对齐真居中。这样 dome 的水平位置和
+                // pre-capture 的 captureButton(同样居中)完全一致,切换到
+                // 录制态时球不会"跳"。
+                ZStack {
+                    HStack(alignment: .bottom, spacing: 0) {
+                        leftAnchor
+                        Spacer(minLength: 0)
+                        trailingDock
+                    }
                     captureButtonOrDome
-                    trailingDock
                 }
             }
         }
@@ -770,17 +777,20 @@ struct ObjectModeV2CaptureView: View {
         if viewModel.isRecording {
             // 关键:dome + 白环 两层都 allowsHitTesting(false),顶层一个透明 Color
             // 用 onTapGesture 捕获点击 —— 最稳可靠,不依赖 Button/UIView hit chain。
+            //
+            // 尺寸统一:pre-capture 的 captureButton 和录制态的 dome 都占
+            // 140×140,切换录制前后 UI 元素不位移。
             ZStack {
                 ObjectModeV2DomeContainerView(
                     coordinator: viewModel.domeCoordinator,
                     onTap: { }
                 )
-                .frame(width: 120, height: 120)
+                .frame(width: 140, height: 140)
                 .allowsHitTesting(false)
 
                 Circle()
                     .stroke(Color.white, lineWidth: 4)
-                    .frame(width: 120, height: 120)
+                    .frame(width: 140, height: 140)
                     .allowsHitTesting(false)
 
                 Color.black.opacity(0.001)     // 几乎透明但能接收 tap
@@ -804,14 +814,16 @@ struct ObjectModeV2CaptureView: View {
         Button(action: {
             viewModel.toggleCapture()
         }) {
+            // 尺寸和录制态 dome 保持一致:外圈 140×140。内部黑色底是
+            // 按比例放大过的(原来 94/110 ≈ 85% → 现在 119/140)。
             ZStack {
                 Circle()
                     .stroke(Color.white, lineWidth: 4)
-                    .frame(width: 110, height: 110)
+                    .frame(width: 140, height: 140)
 
                 Circle()
                     .fill(Color.black.opacity(0.75))
-                    .frame(width: 94, height: 94)
+                    .frame(width: 119, height: 119)
 
                 if viewModel.isRunning {
                     ProgressView()
