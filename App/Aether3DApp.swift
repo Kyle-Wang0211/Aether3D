@@ -955,11 +955,66 @@ struct Aether3DApp: App {
     @UIApplicationDelegateAdaptor(Aether3DAppDelegate.self) private var appDelegate
     #endif
 
+    @StateObject private var currentUser: CurrentUser = AppAuthFactory.makeCurrentUser()
+
     var body: some Scene {
         WindowGroup {
+            AuthGateView()
+                .environmentObject(currentUser)
+                .task { await currentUser.bootstrap() }
+        }
+    }
+}
+
+/// Root gate: waits for `CurrentUser.bootstrap()` to finish, then shows
+/// either the auth flow or the home navigation stack.
+private struct AuthGateView: View {
+    @EnvironmentObject private var currentUser: CurrentUser
+
+    var body: some View {
+        switch currentUser.state {
+        case .bootstrapping:
+            BootstrapView()
+        case .signedOut:
+            AuthRootView()
+        case .signedIn:
             NavigationStack {
                 HomePage()
             }
         }
+    }
+}
+
+private struct BootstrapView: View {
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.white)
+        }
+    }
+}
+
+/// One place that knows which AuthService backs the app at launch.
+///
+/// * If FirebaseAuth is linked into the binary → FirebaseAuthService.
+/// * Otherwise → MockAuthService (works for SwiftUI previews / any
+///   configuration where Firebase SPM hasn't been resolved yet).
+///
+/// Everywhere else in the app uses `AuthService` or `CurrentUser` — both
+/// provider-agnostic. Swapping providers = replace this factory + the
+/// concrete service, nothing else.
+private enum AppAuthFactory {
+
+    @MainActor
+    static func makeCurrentUser() -> CurrentUser {
+        let service: AuthService
+        #if canImport(FirebaseAuth)
+        service = FirebaseAuthService()
+        #else
+        service = MockAuthService()
+        #endif
+        return CurrentUser(service: service)
     }
 }

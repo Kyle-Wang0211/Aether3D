@@ -67,9 +67,22 @@ public final class ScanRecordStore {
     private let maxRecords = 1000
     private var cachedRecords: [ScanRecord]?
 
-    public init() {
+    /// - Parameter userID: When non-nil, scans are stored under
+    ///   `Documents/Aether3D/users/<userID>/` so multiple accounts on the
+    ///   same device can't see each other's history. When nil, the legacy
+    ///   shared `Documents/Aether3D/` path is used — preserved for
+    ///   compatibility with pre-auth installs and for tests.
+    public init(userID: String? = nil) {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        self.baseDirectory = documents.appendingPathComponent("Aether3D")
+        let aether = documents.appendingPathComponent("Aether3D")
+        if let userID, !userID.isEmpty {
+            let safe = Self.sanitizedUserSegment(userID)
+            self.baseDirectory = aether
+                .appendingPathComponent("users")
+                .appendingPathComponent(safe)
+        } else {
+            self.baseDirectory = aether
+        }
         self.jsonFileURL = baseDirectory.appendingPathComponent("scans.json")
         self.backupFileURL = baseDirectory.appendingPathComponent("scans.json.bak")
         self.thumbnailsDirectory = baseDirectory.appendingPathComponent("thumbnails")
@@ -80,6 +93,17 @@ public final class ScanRecordStore {
         try? FileManager.default.createDirectory(at: thumbnailsDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: exportsDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
+    }
+
+    /// Strip anything that isn't URL-path-safe. `user_id` strings come from
+    /// the auth provider (e.g. Firebase UID which is [a-zA-Z0-9]) so this
+    /// is defense-in-depth — a bad id should NEVER escape the Aether3D
+    /// directory via `..`.
+    private static func sanitizedUserSegment(_ input: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        return String(input.unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(scalar) : "_"
+        })
     }
 
     public func baseDirectoryURL() -> URL {

@@ -523,6 +523,7 @@ private struct AetherDebugGLBEntry: Identifiable {
 
 struct HomePage: View {
     @ObservedObject private var viewModel: HomeViewModel
+    @EnvironmentObject private var currentUser: CurrentUser
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedRecord: ScanRecord?
     @State private var showViewer = false
@@ -530,6 +531,7 @@ struct HomePage: View {
     @State private var showDebugGLBBrowser = false
     @State private var debugGLBEntries: [AetherDebugGLBEntry] = []
     @State private var debugViewerItem: AetherDebugGLBEntry?
+    @State private var isConfirmingSignOut = false
     @AppStorage("aether3d.home.captureMode") private var lastCaptureModeRawValue = AetherCaptureMode.newRemote.rawValue
 
     init(viewModel: HomeViewModel = HomeViewModel()) {
@@ -610,11 +612,31 @@ struct HomePage: View {
             }
         }
         .onAppear {
-            viewModel.loadRecords()
+            if case .signedIn(let user) = currentUser.state {
+                viewModel.bindToUser(user)
+            } else {
+                viewModel.loadRecords()
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }
-            viewModel.loadRecords()
+            // Check idle-expiry FIRST so a 30+ days idle user lands back
+            // on the sign-in gate instead of briefly seeing their old
+            // gallery before being signed out.
+            Task {
+                await currentUser.refreshIdleSession()
+                viewModel.loadRecords()
+            }
+        }
+        .confirmationDialog(
+            "确认退出登录？",
+            isPresented: $isConfirmingSignOut,
+            titleVisibility: .visible
+        ) {
+            Button("退出登录", role: .destructive) {
+                Task { await currentUser.signOut() }
+            }
+            Button("取消", role: .cancel) {}
         }
         #if canImport(UIKit) && canImport(Metal)
         .fullScreenCover(
@@ -646,6 +668,9 @@ struct HomePage: View {
 
     private func header(metrics: AetherLayoutMetrics) -> some View {
         HStack {
+            // Balance the trailing profile button so the title stays centered.
+            Color.clear.frame(width: 32, height: 32)
+
             Spacer()
 
             Text("AETHER3D")
@@ -659,9 +684,34 @@ struct HomePage: View {
                 }
 
             Spacer()
+
+            profileMenuButton
         }
         .frame(height: metrics.isNarrowPhone ? 56 : 60)
         .padding(.bottom, 18)
+    }
+
+    @ViewBuilder
+    private var profileMenuButton: some View {
+        Menu {
+            if case .signedIn(let user) = currentUser.state {
+                if let label = user.displayName ?? user.email ?? user.phone, !label.isEmpty {
+                    Text(label)
+                    Divider()
+                }
+            }
+            Button(role: .destructive) {
+                isConfirmingSignOut = true
+            } label: {
+                Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+        } label: {
+            Image(systemName: "person.crop.circle")
+                .font(.system(size: 22, weight: .regular))
+                .foregroundColor(AetherChromePalette.primary.opacity(0.6))
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder

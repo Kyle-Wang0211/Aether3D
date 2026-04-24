@@ -38,7 +38,7 @@ final class HomeViewModel: ObservableObject {
     @Published var busyMessage: String?
     @Published var isImportingVideo: Bool = false
 
-    private let store: ScanRecordStore
+    private var store: ScanRecordStore
     private var activeRecoveryRecordIDs: Set<UUID> = []
     private var scheduledRecoveryRecordIDs: Set<UUID> = []
     private var lastRecoveryAttemptAt: [UUID: Date] = [:]
@@ -49,6 +49,14 @@ final class HomeViewModel: ObservableObject {
     init(store: ScanRecordStore = ScanRecordStore(), preferredRemoteBackend: PipelineBackend = .productDefault()) {
         self.store = store
         self.preferredRemoteBackend = preferredRemoteBackend
+    }
+
+    /// Rebind the view model to a user-scoped store so each authenticated
+    /// user sees only their own scan history. Called from HomePage's
+    /// `.task` after CurrentUser finishes bootstrapping.
+    func bindToUser(_ user: AuthenticatedUser?) {
+        store = ScanRecordStore(userID: user?.id.rawValue)
+        loadRecords()
     }
 
     var processingRecords: [ScanRecord] {

@@ -17,7 +17,16 @@ let package = Package(
     .package(path: ".deps/MetalSplatter"),
     .package(path: ".deps/swift-crypto"),
     .package(path: ".deps/swift-ssh-client"),
-    .package(path: ".deps/swift-nio-ssh")
+    .package(path: ".deps/swift-nio-ssh"),
+    // Firebase iOS SDK — used by Core/Auth/FirebaseAuthService.swift.
+    //
+    // IMPORTANT: Info.plist contains `FirebaseAppDelegateProxyEnabled=NO`
+    // and the analytics screen-view flags to disable the runtime swizzles
+    // that otherwise interfered with AVCaptureSession / ARKit lifecycle
+    // (see PHASE 0 diagnostic log: commit/uncommitted changes 2026-04-23).
+    // If you add more Firebase products in the future, verify the capture
+    // dome still updates in real-time before shipping.
+    .package(url: "https://github.com/firebase/firebase-ios-sdk", from: "10.29.0"),
   ],
   targets: [
     .systemLibrary(
@@ -88,7 +97,12 @@ let package = Package(
         .product(name: "SplatIO", package: "MetalSplatter"),
         "CSQLite",
         "CAetherNativeBridge",
-        "SharedSecurity"
+        "SharedSecurity",
+        .product(
+          name: "FirebaseAuth",
+          package: "firebase-ios-sdk",
+          condition: .when(platforms: [.iOS, .macOS, .tvOS, .watchOS])
+        ),
       ],
       path: "Core"
     ),

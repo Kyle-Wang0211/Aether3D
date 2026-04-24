@@ -4,28 +4,34 @@
 <dict>
 	<key>AETHER_BROKER_API_KEY</key>
 	<string></string>
+	<key>AETHER_BROKER_BACKGROUND_MAX_CONNECTIONS_PER_HOST</key>
+	<string>20</string>
 	<key>AETHER_BROKER_BACKGROUND_SESSION_ID</key>
 	<string>com.aether3d.background-upload.v20260323c</string>
 	<key>AETHER_BROKER_BASE_URL</key>
 	<string>https://api.aether-3d.com</string>
 	<key>AETHER_BROKER_FALLBACK_BASE_URL</key>
 	<string></string>
-	<key>AETHER_BROKER_BACKGROUND_MAX_CONNECTIONS_PER_HOST</key>
-	<string>20</string>
 	<key>AETHER_BROKER_FOREGROUND_MULTIPART_MAX_CONNECTIONS_PER_HOST</key>
 	<string>24</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.aether3d.remote-resume.refresh</string>
+		<string>com.aether3d.remote-resume.processing</string>
+		<string>com.kyle.Aether3D.local-processing</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>Aether3D</string>
 	<key>CFBundleExecutable</key>
 	<string>Aether3D</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.kyle.Aether3D</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
-	<key>CFBundleIconName</key>
-	<string>AppIcon</string>
 	<key>CFBundleName</key>
 	<string>Aether3D</string>
 	<key>CFBundlePackageType</key>
@@ -34,12 +40,6 @@
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>com.aether3d.remote-resume.refresh</string>
-		<string>com.aether3d.remote-resume.processing</string>
-		<string>com.kyle.Aether3D.local-processing</string>
-	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -47,19 +47,32 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Camera access is required for 3D scanning</string>
-	<key>NSMotionUsageDescription</key>
-	<string>运动传感器用于 AR 追踪 + 姿态稳定</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>位置辅助 AR 世界追踪对齐</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Local network access is required to upload videos to your nearby Aether3D broker.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>位置辅助 AR 世界追踪对齐</string>
+	<key>NSMotionUsageDescription</key>
+	<string>运动传感器用于 AR 追踪 + 姿态稳定</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Select video for 3D reconstruction demo</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
 		<string>processing</string>
+		<string>remote-notification</string>
 	</array>
+	<!-- Firebase swizzle opt-outs. Without these, FirebaseAuth's
+	     GULAppDelegateSwizzler + GoogleAppMeasurement's UIViewController
+	     screen-view tracker wrap AVCaptureSession / ARKit lifecycle
+	     methods and break the ObjectModeV2 coverage dome real-time updates.
+	     We do not need the swizzled behaviors — we handle Firebase Auth
+	     URL callbacks manually inside FirebaseAuthService. -->
+	<key>FirebaseAppDelegateProxyEnabled</key>
+	<false/>
+	<key>FirebaseAutomaticScreenReportingEnabled</key>
+	<false/>
+	<key>FIREBASE_ANALYTICS_COLLECTION_ENABLED</key>
+	<false/>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
