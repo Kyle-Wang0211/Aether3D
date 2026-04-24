@@ -67,16 +67,33 @@ public final class ScanRecordStore {
     private let maxRecords = 1000
     private var cachedRecords: [ScanRecord]?
 
-    /// - Parameter userID: When non-nil, scans are stored under
-    ///   `Documents/Aether3D/users/<userID>/` so multiple accounts on the
-    ///   same device can't see each other's history. When nil, the legacy
-    ///   shared `Documents/Aether3D/` path is used — preserved for
-    ///   compatibility with pre-auth installs and for tests.
+    /// - Parameter userID: When non-nil + non-empty, scans are stored
+    ///   under `Documents/Aether3D/users/<userID>/` so multiple accounts
+    ///   on the same device can't see each other's history.
+    ///
+    ///   When `nil` (the default), the initializer falls back to reading
+    ///   `UserDefaults[AuthPersistenceKeys.currentUserID]` — that key is
+    ///   maintained by Core/Auth/CurrentUser on sign-in, bootstrap
+    ///   success, sign-out, and account deletion. This auto-resolution
+    ///   is what lets the ~16 existing `ScanRecordStore()` call sites
+    ///   (ObjectModeV2 capture VM, ScanViewModel recovery paths,
+    ///   HomePage thumbnail helpers, etc.) get per-user scoping without
+    ///   every one of them being threaded through the current user.
+    ///
+    ///   If the UserDefaults key is absent (pre-auth install, tests),
+    ///   the legacy shared `Documents/Aether3D/` path is used.
     public init(userID: String? = nil) {
+        let resolvedUserID: String?
+        if let explicit = userID, !explicit.isEmpty {
+            resolvedUserID = explicit
+        } else {
+            resolvedUserID = UserDefaults.standard.string(forKey: AuthPersistenceKeys.currentUserID)
+        }
+
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let aether = documents.appendingPathComponent("Aether3D")
-        if let userID, !userID.isEmpty {
-            let safe = Self.sanitizedUserSegment(userID)
+        if let resolved = resolvedUserID, !resolved.isEmpty {
+            let safe = Self.sanitizedUserSegment(resolved)
             self.baseDirectory = aether
                 .appendingPathComponent("users")
                 .appendingPathComponent(safe)

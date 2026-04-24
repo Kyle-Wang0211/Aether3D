@@ -55,3 +55,17 @@ public struct AuthenticatedUser: Equatable, Sendable, Codable {
         self.displayName = displayName
     }
 }
+
+/// UserDefaults keys the auth layer persists so that other modules can
+/// read the current user synchronously without awaiting the CurrentUser
+/// actor. `currentUserID` in particular exists so that the ~16 call
+/// sites of `ScanRecordStore()` scattered around the app can resolve
+/// "who is logged in right now?" at allocation time — without threading
+/// the user through every view model. CurrentUser writes it on sign-in
+/// and bootstrap success, clears it on sign-out. UserDefaults is
+/// thread-safe and persists across cold launches, so a newly-launched
+/// app can still render the right user's scans before Firebase finishes
+/// bootstrapping.
+public enum AuthPersistenceKeys {
+    public static let currentUserID = "Aether3D.auth.currentUserID"
+}

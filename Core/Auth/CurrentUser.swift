@@ -60,16 +60,19 @@ public final class CurrentUser: ObservableObject {
     /// policy window.
     public func bootstrap() async {
         guard let user = await service.currentUser() else {
+            Self.clearPersistedUserID()
             state = .signedOut
             return
         }
         if isIdleExpired() {
             try? await service.signOut()
             clearIdleTimestamp()
+            Self.clearPersistedUserID()
             state = .signedOut
             return
         }
         touchIdleTimestamp()
+        Self.persistUserID(user.id.rawValue)
         state = .signedIn(user)
     }
 
@@ -149,6 +152,7 @@ public final class CurrentUser: ObservableObject {
             // keep the user stuck in an authed UI.
         }
         clearIdleTimestamp()
+        Self.clearPersistedUserID()
         state = .signedOut
         lastError = nil
     }
@@ -159,6 +163,7 @@ public final class CurrentUser: ObservableObject {
         do {
             try await service.deleteAccount()
             clearIdleTimestamp()
+            Self.clearPersistedUserID()
             state = .signedOut
             lastError = nil
             return true
@@ -180,12 +185,28 @@ public final class CurrentUser: ObservableObject {
         do {
             let user = try await action()
             touchIdleTimestamp()
+            Self.persistUserID(user.id.rawValue)
             state = .signedIn(user)
         } catch let err as AuthError {
             lastError = err
         } catch {
             lastError = .unknown(detail: error.localizedDescription)
         }
+    }
+
+    // MARK: - currentUserID persistence
+    //
+    // The key is read (synchronously) by non-auth modules like
+    // ScanRecordStore so they can scope their per-user data without
+    // having to await the CurrentUser actor on every allocation. See
+    // AuthPersistenceKeys.currentUserID for the rationale.
+
+    private static func persistUserID(_ uid: String) {
+        UserDefaults.standard.set(uid, forKey: AuthPersistenceKeys.currentUserID)
+    }
+
+    private static func clearPersistedUserID() {
+        UserDefaults.standard.removeObject(forKey: AuthPersistenceKeys.currentUserID)
     }
 }
 
