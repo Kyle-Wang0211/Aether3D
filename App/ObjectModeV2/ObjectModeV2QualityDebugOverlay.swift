@@ -30,7 +30,9 @@ struct ObjectModeV2QualityDebugOverlay: View {
                 row(label: "variance", value: Int(s.currentVariance), color: varianceColor(s.currentVariance, threshold: s.threshold))
                 row(label: "avg30f", value: Int(s.avgVariance), color: .white)
                 row(label: "brightness", value: Int(s.brightness), color: brightnessColor(s.brightness))
+                rowFloat(label: "omega", value: Double(s.angularVelocity), suffix: "rad/s", color: omegaColor(s.angularVelocity, limit: s.angularVelocityLimit))
                 row(label: "threshold", value: Int(s.threshold), color: .white.opacity(0.5))
+                rowFloat(label: "omegaMax", value: Double(s.angularVelocityLimit), suffix: "rad/s", color: .white.opacity(0.5))
                 row(label: "accept%", value: Int(s.passRate * 100), color: passRateColor(s.passRate))
                 row(label: "samples", value: s.sampleCountInWindow, color: .white.opacity(0.5))
             } else {
@@ -62,6 +64,25 @@ struct ObjectModeV2QualityDebugOverlay: View {
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
                 .foregroundStyle(color)
         }
+    }
+
+    private func rowFloat(label: String, value: Double, suffix: String, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.55))
+            Spacer(minLength: 4)
+            Text(String(format: "%.2f %@", value, suffix))
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(color)
+        }
+    }
+
+    /// Green = comfortably below limit; yellow = approaching; red = exceeds.
+    private func omegaColor(_ omega: Float, limit: Float) -> Color {
+        if omega >= limit { return .red }
+        if omega >= limit * 0.7 { return .yellow }
+        return .green
     }
 
     /// Green when comfortably above threshold, yellow borderline, red

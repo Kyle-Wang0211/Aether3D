@@ -417,10 +417,31 @@ private extension ObjectModeV2ARDomeCoordinator {
         Task { @MainActor [weak self] in
             guard let self else { return }
 
-            // 从 CaptureSession 的 snapshot 读最新的图像质量报告。
+            // 从 CaptureSession 的 snapshot 读最新的图像质量报告 + 运动状态。
             // QualityAnalysisObserver 在 10Hz 跑,dome 在 6Hz 跑,所以这里总能
             // 拿到 <=100ms 旧的 report,对 sharpness 门槛用是足够新的。
-            let quality = await self.captureSession?.snapshot.lastQualityReport
+            // CaptureSession.snapshot 是 actor-isolated,一次 await 拿全。
+            let snap = await self.captureSession?.snapshot
+            let quality = snap?.lastQualityReport
+            let angularVelocity = snap?.currentAngularVelocity ?? 0
+
+            // ───── 角速度硬门槛 ─────
+            // > 2.0 rad/s 时手机正在快速旋转:rolling-shutter 画面会歪,
+            // ARKit VIO 的 yaw drift 也会被放大。variance 层抓不到这种
+            // "局部清晰但几何错位"的帧 -> 必须用陀螺仪独立拒绝。
+            //
+            // 阈值 2.0 来源:手持缓慢环绕物体的典型值 0.3-0.8 rad/s;
+            // 不小心晃一下 ~2.5 rad/s 起;故意甩手 5+ rad/s。
+            //
+            // 2.0 给手抖留了很大容差,只拦"明显在快速转"的情况。
+            let angularVelocityLimit: Float = 2.0
+            if angularVelocity > angularVelocityLimit {
+                // 拒帧 —— 仍然 publishIfDue(),让 UI 更新 tracking/pose
+                // 但不 ingest 到 coverage,不点亮 cell。
+                self.publishIfDue()
+                return
+            }
+
             let sharpness: Float
             let exposure: Float
             if let q = quality {

@@ -174,7 +174,7 @@ public actor CaptureSession {
 
     // MARK: - Snapshot mutation helpers (used by observers)
 
-    public func mutateSnapshot(_ body: (inout CaptureSessionSnapshot) -> Void) {
+    public func mutateSnapshot(_ body: @Sendable (inout CaptureSessionSnapshot) -> Void) {
         body(&snapshot)
     }
 }

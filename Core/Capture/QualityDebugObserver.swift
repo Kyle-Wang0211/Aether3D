@@ -36,6 +36,8 @@ public struct QualityDebugStats: Sendable, Equatable {
     public let threshold: Double
     public let passRate: Double
     public let sampleCountInWindow: Int
+    public let angularVelocity: Float      // rad/s, from gyroscope
+    public let angularVelocityLimit: Float // current hard-reject threshold
     public let timestamp: TimeInterval
 
     public init(
@@ -45,6 +47,8 @@ public struct QualityDebugStats: Sendable, Equatable {
         threshold: Double,
         passRate: Double,
         sampleCountInWindow: Int,
+        angularVelocity: Float = 0,
+        angularVelocityLimit: Float = 2.0,
         timestamp: TimeInterval
     ) {
         self.currentVariance = currentVariance
@@ -53,6 +57,8 @@ public struct QualityDebugStats: Sendable, Equatable {
         self.threshold = threshold
         self.passRate = passRate
         self.sampleCountInWindow = sampleCountInWindow
+        self.angularVelocity = angularVelocity
+        self.angularVelocityLimit = angularVelocityLimit
         self.timestamp = timestamp
     }
 }
@@ -68,6 +74,12 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
     /// Matches `DomeCoverageMap.thresholds.minSharpness`. If you tune
     /// that on-device, update this so the "pass%" reading stays in sync.
     public var approxThreshold: Double = 500
+
+    /// Matches the hard-reject angular velocity threshold in
+    /// `ObjectModeV2ARDomeCoordinator.handleFrame` (currently 2.0 rad/s).
+    /// Surfaced here so the HUD can color-code live omega against the
+    /// active cutoff.
+    public var angularVelocityLimit: Float = 2.0
 
     /// Called with the latest stats. Callers are responsible for
     /// hopping to MainActor if they're driving SwiftUI. The callback is
@@ -95,6 +107,7 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
         let snap = await session.snapshot
         guard let report = snap.lastQualityReport else { return }
         let avg = snap.recentSharpnessAvg
+        let omega = snap.currentAngularVelocity
 
         let (shouldLog, snapshotPass, snapshotTotal) = statsQueue.sync { () -> (Bool, Int, Int) in
             totalCount += 1
@@ -115,11 +128,13 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
 
         if shouldLog && consoleLogEnabled {
             print(String(
-                format: "[QualityDebug] variance=%.0f avg=%.0f brightness=%.0f threshold=%.0f pass=%.0f%% (%d samples)",
+                format: "[QualityDebug] variance=%.0f avg=%.0f brightness=%.0f omega=%.2f threshold=%.0f omegaMax=%.1f pass=%.0f%% (%d samples)",
                 report.laplacianVariance,
                 avg,
                 report.meanBrightness,
+                omega,
                 approxThreshold,
+                angularVelocityLimit,
                 passRate * 100,
                 snapshotTotal
             ))
@@ -138,6 +153,8 @@ public final class QualityDebugObserver: CaptureFrameObserver, @unchecked Sendab
             threshold: approxThreshold,
             passRate: passRate,
             sampleCountInWindow: snapshotTotal,
+            angularVelocity: omega,
+            angularVelocityLimit: angularVelocityLimit,
             timestamp: report.timestamp
         )
         onStats?(stats)

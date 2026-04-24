@@ -1967,7 +1967,10 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
         motionManager.deviceMotionUpdateInterval = 1.0 / 20.0
         motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, _ in
-            guard let self, let gravity = motion?.gravity else { return }
+            guard let self, let motion else { return }
+
+            // 1) Gravity for target-zone alignment (existing behavior).
+            let gravity = motion.gravity
             let worldUp = SIMD3<Float>(
                 Float(-gravity.x),
                 Float(-gravity.y),
@@ -1975,6 +1978,23 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
             )
             Task { @MainActor in
                 self.ingestCaptureGravity(worldUp: worldUp)
+            }
+
+            // 2) Angular velocity magnitude — push into CaptureSessionSnapshot
+            //    so the dome ingest gate and the debug HUD can read it.
+            //    rotationRate is in rad/s; magnitude is frame-rotation speed
+            //    regardless of axis.
+            let rotation = motion.rotationRate
+            let mag = Float(sqrt(
+                rotation.x * rotation.x +
+                rotation.y * rotation.y +
+                rotation.z * rotation.z
+            ))
+            let session = self.captureSession
+            Task { [session, mag] in
+                await session.mutateSnapshot { snap in
+                    snap.currentAngularVelocity = mag
+                }
             }
         }
         #endif

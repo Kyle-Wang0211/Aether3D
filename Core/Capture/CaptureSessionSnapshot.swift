@@ -58,6 +58,22 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
     /// Useful for stable UI display (vs the raw jittery per-frame value).
     public var recentSharpnessAvg: Double
 
+    // MARK: - Motion (updated from CMDeviceMotion @ ~20 Hz)
+
+    /// Magnitude of the gyroscope rotation rate in rad/s. Populated by
+    /// whatever component owns CMMotionManager (ViewModel in this app).
+    ///
+    /// USE AS HARD GATE FOR `accept`:
+    ///   * `< 2.0 rad/s` — safe for ingest, no rolling-shutter warping
+    ///   * `2.0 – 4.0 rad/s` — reject (strong rolling-shutter distortion
+    ///      even if image looks sharp; ARKit VIO drift starts mattering)
+    ///   * `> 4.0 rad/s` — reject (definitely blurry, pose highly unreliable)
+    ///
+    /// Variance alone cannot catch rolling shutter because rolling-shutter
+    /// warping leaves each row locally sharp — variance only sees blur
+    /// *within* a row, not shear *across* rows.
+    public var currentAngularVelocity: Float
+
     // MARK: - Recording (updated by VideoWriterObserver)
 
     public var isRecording: Bool
@@ -79,6 +95,7 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
         orbitCompletion: Float = 0,
         lastQualityReport: FrameQualityReport? = nil,
         recentSharpnessAvg: Double = 0,
+        currentAngularVelocity: Float = 0,
         isRecording: Bool = false,
         recordingDurationSec: TimeInterval = 0,
         hintText: String = ""
@@ -91,6 +108,7 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
         self.orbitCompletion = orbitCompletion
         self.lastQualityReport = lastQualityReport
         self.recentSharpnessAvg = recentSharpnessAvg
+        self.currentAngularVelocity = currentAngularVelocity
         self.isRecording = isRecording
         self.recordingDurationSec = recordingDurationSec
         self.hintText = hintText
