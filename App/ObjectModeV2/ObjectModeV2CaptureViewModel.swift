@@ -257,6 +257,27 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
     /// 对外 API 和旧 ObjectModeV2CaptureRecorder 同构,所以 VM 其它地方全部通过
     /// `recorder.xxx` 的调用都照常工作。
     private lazy var recorder = ObjectModeV2ARCaptureCoordinator(domeCoordinator: domeCoordinator)
+
+    /// 新管线核心 —— actor-isolated frame broadcaster。真机 AR 路径下
+    /// domeCoordinator.session(_:didUpdate:) 每帧把 CaptureFrame 推进来,
+    /// 注册上来的 observer 各自按自己的 preferredInterval 接帧。
+    ///
+    /// 现在挂的 observer:
+    ///   * QualityAnalysisObserver — 10Hz 算 Laplacian variance,写回 snapshot
+    ///     供 domeCoordinator.handleFrame 读到真清晰度(替代 hardcode 1000)
+    ///
+    /// 未来可以挂的 observer(新增文件 implements CaptureFrameObserver 就行,
+    /// 不用动这里之外的任何文件):
+    ///   * VideoWriterObserver — 已经实现在 Core/Capture,只需把 ARCaptureCoordinator
+    ///     的 writer 代码删掉,在这里 register 即可
+    ///   * ObjectModeV2DomeUpdateObserver — 已经实现,取代 ARDomeCoordinator 的
+    ///     coverage.ingest 代码路径,让 dome 成为 snapshot 的消费者而非拥有者
+    ///   * 未来的实时渲染 UI observer — SwiftUI 层就能直接读 CaptureSessionSnapshot
+    let captureSession = CaptureSession()
+
+    /// 10Hz 的图像质量分析器。负责把 Laplacian variance 写进
+    /// `captureSession.snapshot.lastQualityReport`。在 init 注册。
+    private let qualityObserver = QualityAnalysisObserver()
     private var domeOriginLocked = false
     /// AR 路径录制起始时刻(CACurrentMediaTime),用于换算 ingest 回调的相对秒数。
     private var arCaptureStartMediaTime: TimeInterval?
@@ -298,6 +319,17 @@ final class ObjectModeV2CaptureViewModel: ObservableObject {
         // AR 路径:dome 的 6DoF 姿态来自 ARSession.didUpdate(frame) 里的
         // ARCamera.transform,recorder.prepare() 会启动 ARSession。
         domeCoordinator.onValidFrame = nil
+
+        // 把 domeCoordinator(ARSessionDelegate 持有者) 接进新管线。
+        // domeCoordinator.session(_:didUpdate:) 会把每帧推进 captureSession,
+        // QualityAnalysisObserver 10Hz 算 Laplacian variance,写回 snapshot,
+        // 同一个 domeCoordinator 的 handleFrame 再读出来用做 coverage.ingest
+        // 的 sharpness。
+        domeCoordinator.captureSession = captureSession
+        Task { [captureSession, qualityObserver] in
+            await captureSession.register(qualityObserver)
+            await captureSession.start()
+        }
         // GuidanceEngine 在 AR 路径不被喂数据,acceptedFrameTimestampsSec 会空 →
         // 服务端 curate 阶段会以 "missing_client_live_timestamps" 拒绝。
         // 让 dome 的每次成功 ingest 补偿填进去。

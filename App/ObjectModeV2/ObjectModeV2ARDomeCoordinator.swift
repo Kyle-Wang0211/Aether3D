@@ -8,6 +8,7 @@ import simd
 import UIKit
 import Accelerate
 import CoreImage
+import Aether3DCore
 
 // MARK: - Snapshot published to SwiftUI
 
@@ -50,6 +51,22 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
     /// 每次成功 ingest 一个 sample 时触发(MainActor 上下文)。参数 = ARFrame.timestamp(绝对)。
     /// VM 用这个补齐 acceptedFrameTimestampsSec(服务端 curate 阶段要这个字段)。
     var onValidSampleTimestamp: ((TimeInterval) -> Void)?
+
+    /// CaptureSession 接入点 —— ViewModel 在 init 里注入。
+    ///
+    /// 新管线(Core/Capture): session(_:didUpdate:) 会把每帧 CaptureFrame 推进
+    /// 这里,QualityAnalysisObserver 在 10Hz 节流后算 Laplacian variance,
+    /// 把 FrameQualityReport 写进 snapshot。本 Coordinator 的 handleFrame
+    /// 再从同一个 snapshot 读 sharpness,替代之前的 hardcode 1000。
+    ///
+    /// 未来的实时渲染 UI 只需 register 一个新的 CaptureFrameObserver 到这个
+    /// session,完全不用动本文件。
+    ///
+    /// 弱引用:这个 coordinator 不应该延长 session 的生命周期。
+    /// `nonisolated(unsafe)` 因为 `session(_:didUpdate:)` 在 ARKit delegate
+    /// queue 上读这个字段,而本类是 @MainActor。写操作(ViewModel init)只在
+    /// MainActor 做,读是对 weak ref 的原子加载,安全。
+    nonisolated(unsafe) weak var captureSession: CaptureSession?
 
     // MARK: - AR
     let session = ARSession()
@@ -281,6 +298,21 @@ extension ObjectModeV2ARDomeCoordinator: ARSessionDelegate {
         // 消费 frame 的旁路 hook(video writer 等)—— 先分发,再释放让 VIO 继续。
         onARFrame?(frame)
 
+        // 新管线广播 —— 把当前帧拷成 CaptureFrame 送入 actor-isolated
+        // CaptureSession。QualityAnalysisObserver 会在 10Hz 节流后算
+        // Laplacian variance 并填 snapshot.lastQualityReport;本 Coordinator
+        // 的 handleFrame 再从同一 snapshot 读。不 retain ARFrame。
+        if let target = captureSession {
+            let captureFrame = CaptureFrame(
+                timestamp: frame.timestamp,
+                cameraTransform: frame.camera.transform,
+                cameraIntrinsics: frame.camera.intrinsics,
+                trackingOK: (frame.camera.trackingState == .normal),
+                pixelBuffer: frame.capturedImage
+            )
+            Task { await target.ingest(frame: captureFrame) }
+        }
+
         // ⚠️ 高频,别阻塞主线程。先把 pose + pixelbuffer 拿出来,释放 ARFrame。
         let trackingNormal: Bool
         switch frame.camera.trackingState {
@@ -362,8 +394,10 @@ private extension ObjectModeV2ARDomeCoordinator {
         let az = atan2(rel.z, rel.x) - coverage.worldYaw
         let el = atan2(rel.y, max(horizDist, 0.001))
 
-        // MVP:sharpness 固定 1000(>minSharpness=500)确保 ingest 能通过。
-        // 真 Laplacian 先不算,要回来时去掉这里的 hardcode 走 sharpnessQueue。
+        // 真 Laplacian 现在来自新管线的 QualityAnalysisObserver(见
+        // `captureSession` 字段的文档)。若 observer 尚未报出值(session 刚启动、
+        // observer 没注册、或者帧太新还没轮到分析),回退到 1000 保留原有
+        // 行为(>minSharpness=500 即被接受)。
         let ts = timestamp
         _ = pixelBuffer
         // 把 transform 和 intrinsics 展平成 [Float] 带进 sample,
@@ -382,13 +416,30 @@ private extension ObjectModeV2ARDomeCoordinator {
         ]
         Task { @MainActor [weak self] in
             guard let self else { return }
+
+            // 从 CaptureSession 的 snapshot 读最新的图像质量报告。
+            // QualityAnalysisObserver 在 10Hz 跑,dome 在 6Hz 跑,所以这里总能
+            // 拿到 <=100ms 旧的 report,对 sharpness 门槛用是足够新的。
+            let quality = await self.captureSession?.snapshot.lastQualityReport
+            let sharpness: Float
+            let exposure: Float
+            if let q = quality {
+                sharpness = Float(q.laplacianVariance)
+                // meanBrightness 0..255 -> exposureScore 0..1
+                exposure = Float(min(1.0, max(0.0, q.meanBrightness / 255.0)))
+            } else {
+                // observer 还没报第一帧 -> 退回旧 hardcode 行为,不阻塞首帧 accept。
+                sharpness = 1000
+                exposure = 0.85
+            }
+
             let sample = CapturedFrameSample(
                 timestamp: ts,
                 azimuth: az,
                 elevation: el,
-                sharpness: 1000,
+                sharpness: sharpness,
                 motionScore: self.motionBlurScore(),
-                exposureScore: 0.85,
+                exposureScore: exposure,
                 frameID: UUID(),
                 cameraExtrinsic4x4: extrinsicFlat,
                 cameraIntrinsicFxFyCxCy: intrinsicFxFyCxCy
