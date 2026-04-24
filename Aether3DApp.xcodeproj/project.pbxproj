@@ -49,13 +49,14 @@
 		A0B200000000000000000003 /* ObjectModeV2CaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000013 /* ObjectModeV2CaptureRecorder.swift */; };
 		A0B200000000000000000004 /* ObjectModeV2GuidanceEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */; };
 		A0B200000000000000000005 /* ObjectModeV2CameraPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */; };
-		A0B200000000000000000031 /* Web/model-viewer.min.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000032 /* Web/model-viewer.min.js */; };
-		A0B200000000000000000041 /* Web/babylon.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000043 /* Web/babylon.js */; };
-		A0B200000000000000000042 /* Web/babylonjs.loaders.min.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000044 /* Web/babylonjs.loaders.min.js */; };
+		A0B200000000000000000031 /* model-viewer.min.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000032 /* model-viewer.min.js */; };
+		A0B200000000000000000041 /* babylon.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000043 /* babylon.js */; };
+		A0B200000000000000000042 /* babylonjs.loaders.min.js in Resources */ = {isa = PBXBuildFile; fileRef = A0B200000000000000000044 /* babylonjs.loaders.min.js */; };
 		AAFB404504ADBFB3C8C85847 /* NIOTransportServices in Frameworks */ = {isa = PBXBuildFile; productRef = 3D7B4C4C83EF336B339FB6B8 /* NIOTransportServices */; };
 		B5E9E0998069AEB592EC8C28 /* ScanCaptureControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D17226BC03FE07B29725E54 /* ScanCaptureControls.swift */; };
 		B73BAD6DA13D505B8E3A6D42 /* NIOConcurrencyHelpers in Frameworks */ = {isa = PBXBuildFile; productRef = 1243EB227E9B37B6884ACD35 /* NIOConcurrencyHelpers */; };
 		BBBBDF1B730A02506672BF71 /* Atomics in Frameworks */ = {isa = PBXBuildFile; productRef = 790F3C1B95E7F1FA815D71A7 /* Atomics */; };
+		C1B9688D2FD9AF667BA2CC49 /* ObjectModeV2DomeUpdateObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CBE862060B23269BFF85055 /* ObjectModeV2DomeUpdateObserver.swift */; };
 		C203245060F238D6D73928A1 /* ThermalMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34B9E1402832D942C60CAEEB /* ThermalMonitor.swift */; };
 		C40953C670C4F01AE5DC43F6 /* RecordingResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB29F99F07DDECB9A64AA783 /* RecordingResult.swift */; };
 		C9D0AE24BD8288DE6DC42A2D /* ObjectModeV2ARDomeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9044B44F1BB944E644E56BB /* ObjectModeV2ARDomeCoordinator.swift */; };
@@ -107,6 +108,7 @@
 		60285716FE0712948446319C /* GoogleService-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "GoogleService-Info.plist"; sourceTree = SOURCE_ROOT; };
 		65FE3E81A75AD32AB11FAA00 /* HomeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewModel.swift; sourceTree = "<group>"; };
 		699F1D81056EC09D4E9042F4 /* CameraSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraSession.swift; sourceTree = "<group>"; };
+		6CBE862060B23269BFF85055 /* ObjectModeV2DomeUpdateObserver.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ObjectModeV2DomeUpdateObserver.swift; sourceTree = "<group>"; };
 		6D17226BC03FE07B29725E54 /* ScanCaptureControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanCaptureControls.swift; sourceTree = "<group>"; };
 		7B5B2EFF11D53C99C548D1EA /* ClockProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClockProvider.swift; sourceTree = "<group>"; };
 		7C627A72DFE978848D6B1035 /* CaptureMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureMetadata.swift; sourceTree = "<group>"; };
@@ -127,9 +129,9 @@
 		A0B200000000000000000013 /* ObjectModeV2CaptureRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2CaptureRecorder.swift; sourceTree = "<group>"; };
 		A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2GuidanceEngine.swift; sourceTree = "<group>"; };
 		A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectModeV2CameraPreview.swift; sourceTree = "<group>"; };
-		A0B200000000000000000032 /* Web/model-viewer.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "Web/model-viewer.min.js"; sourceTree = "<group>"; };
-		A0B200000000000000000043 /* Web/babylon.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/babylon.js; sourceTree = "<group>"; };
-		A0B200000000000000000044 /* Web/babylonjs.loaders.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/babylonjs.loaders.min.js; sourceTree = "<group>"; };
+		A0B200000000000000000032 /* model-viewer.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "Web/model-viewer.min.js"; sourceTree = "<group>"; };
+		A0B200000000000000000043 /* babylon.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/babylon.js; sourceTree = "<group>"; };
+		A0B200000000000000000044 /* babylonjs.loaders.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Web/babylonjs.loaders.min.js; sourceTree = "<group>"; };
 		AB29F99F07DDECB9A64AA783 /* RecordingResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingResult.swift; sourceTree = "<group>"; };
 		AB4B3856E304CFC23ED880D7 /* Aether3D.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aether3D.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B5E78E0387A5797B36E10C08 /* InterruptionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InterruptionHandler.swift; sourceTree = "<group>"; };
@@ -247,15 +249,16 @@
 				A0B200000000000000000013 /* ObjectModeV2CaptureRecorder.swift */,
 				A0B200000000000000000014 /* ObjectModeV2GuidanceEngine.swift */,
 				A0B200000000000000000015 /* ObjectModeV2CameraPreview.swift */,
-				A0B200000000000000000032 /* Web/model-viewer.min.js */,
-				A0B200000000000000000043 /* Web/babylon.js */,
-				A0B200000000000000000044 /* Web/babylonjs.loaders.min.js */,
+				A0B200000000000000000032 /* model-viewer.min.js */,
+				A0B200000000000000000043 /* babylon.js */,
+				A0B200000000000000000044 /* babylonjs.loaders.min.js */,
 				0A59CE9261E5EF71C2828723 /* ObjectModeV2CoverageMap.swift */,
 				898026FC1AB34223DFCA4CCD /* ObjectModeV2DomeView.swift */,
 				E9044B44F1BB944E644E56BB /* ObjectModeV2ARDomeCoordinator.swift */,
 				F28065FB4838DAF9D0EB5C68 /* ObjectModeV2ARKitPreview.swift */,
 				822964466984388DD7EBF67F /* ObjectModeV2ARKitRecorder.swift */,
 				E670F840F77C2974696A7761 /* ObjectModeV2ARCaptureCoordinator.swift */,
+				6CBE862060B23269BFF85055 /* ObjectModeV2DomeUpdateObserver.swift */,
 			);
 			path = ObjectModeV2;
 			sourceTree = "<group>";
@@ -419,9 +422,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				74EC72F94CA47BD22391EF2F /* Assets.xcassets in Resources */,
-				A0B200000000000000000031 /* Web/model-viewer.min.js in Resources */,
-				A0B200000000000000000041 /* Web/babylon.js in Resources */,
-				A0B200000000000000000042 /* Web/babylonjs.loaders.min.js in Resources */,
+				A0B200000000000000000031 /* model-viewer.min.js in Resources */,
+				A0B200000000000000000041 /* babylon.js in Resources */,
+				A0B200000000000000000042 /* babylonjs.loaders.min.js in Resources */,
 				DAV2000100010001BFA00001 /* DepthAnythingV2Small.mlmodelc in Resources */,
 				DAV2000100010001BFA00002 /* DepthAnythingV2Large.mlmodelc in Resources */,
 				3C5A4D810142F1D4D7B67173 /* GoogleService-Info.plist in Resources */,
@@ -493,6 +496,7 @@
 				741A1BFCD46AB7CC3B575E26 /* AuthSharedViews.swift in Sources */,
 				56F8BACECBDF27C108C5EE05 /* EmailSignInView.swift in Sources */,
 				4AF235C37CA09E0F359250C8 /* PhoneSignInView.swift in Sources */,
+				C1B9688D2FD9AF667BA2CC49 /* ObjectModeV2DomeUpdateObserver.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
