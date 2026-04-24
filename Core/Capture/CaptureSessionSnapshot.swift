@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
+// Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
+//
+// CaptureSessionSnapshot.swift
+// Aether3D
+//
+// Single source of truth for everything a UI layer might want to know
+// about the currently-running capture session. Replaces the pre-refactor
+// pattern where state was scattered across:
+//   * `ObjectModeV2ARDomeCoordinator.snapshot` (AR-side state)
+//   * `ObjectModeV2ARDomeCoordinator.coverage` (cell-level state)
+//   * `ObjectModeV2CaptureViewModel.acceptedFrames` (redundant counter)
+//   * `ObjectModeV2CaptureViewModel.orbitCompletion` (always 0 in AR path)
+//   * `ObjectModeV2CaptureViewModel.stabilityScore`   (always 0 in AR path)
+//
+// Observers write into this snapshot via CaptureSession; the ViewModel
+// reads it (via Combine) and forwards to SwiftUI `@Published` fields.
+
+import Foundation
+
+public struct CaptureSessionSnapshot: Sendable, Equatable {
+
+    // MARK: - Pose (updated every frame by the ARSessionBridge)
+
+    /// Current camera azimuth (radians) relative to the locked world origin,
+    /// if an origin has been locked; otherwise `0`.
+    public var currentAzimuth: Float
+
+    /// Current camera elevation (radians) relative to the locked world
+    /// origin, if locked; otherwise `0`.
+    public var currentElevation: Float
+
+    /// ARKit `trackingState == .normal`. False during init / tracking limited.
+    public var trackingOK: Bool
+
+    // MARK: - Coverage (updated by DomeUpdateObserver @ ~6 Hz)
+
+    /// Number of cells in the coverage dome that are saturated ("green").
+    public var validatedCellCount: Int
+
+    /// Total valid (= passed-gate) frames ingested since session start.
+    /// Replaces `ViewModel.acceptedFrames`.
+    public var validFrameCount: Int
+
+    /// Estimated orbit completion [0, 1] — how much of the intended
+    /// viewing hemisphere has been covered. Derived from
+    /// `validatedCellCount / totalCellCount` by the DomeUpdateObserver.
+    public var orbitCompletion: Float
+
+    // MARK: - Quality (updated by QualityAnalysisObserver @ ~10 Hz)
+
+    /// Most recent quality report. `nil` until the first frame has been
+    /// analyzed.
+    public var lastQualityReport: FrameQualityReport?
+
+    /// Rolling average of the last 30 analyzed frames' `laplacianVariance`.
+    /// Useful for stable UI display (vs the raw jittery per-frame value).
+    public var recentSharpnessAvg: Double
+
+    // MARK: - Recording (updated by VideoWriterObserver)
+
+    public var isRecording: Bool
+    public var recordingDurationSec: TimeInterval
+
+    // MARK: - Hint for UI
+
+    /// Human-readable hint shown under the dome, e.g. "靠近物体" / "正在锁定".
+    /// Updated by whichever observer has the most relevant info for the
+    /// current failure mode.
+    public var hintText: String
+
+    public init(
+        currentAzimuth: Float = 0,
+        currentElevation: Float = 0,
+        trackingOK: Bool = false,
+        validatedCellCount: Int = 0,
+        validFrameCount: Int = 0,
+        orbitCompletion: Float = 0,
+        lastQualityReport: FrameQualityReport? = nil,
+        recentSharpnessAvg: Double = 0,
+        isRecording: Bool = false,
+        recordingDurationSec: TimeInterval = 0,
+        hintText: String = ""
+    ) {
+        self.currentAzimuth = currentAzimuth
+        self.currentElevation = currentElevation
+        self.trackingOK = trackingOK
+        self.validatedCellCount = validatedCellCount
+        self.validFrameCount = validFrameCount
+        self.orbitCompletion = orbitCompletion
+        self.lastQualityReport = lastQualityReport
+        self.recentSharpnessAvg = recentSharpnessAvg
+        self.isRecording = isRecording
+        self.recordingDurationSec = recordingDurationSec
+        self.hintText = hintText
+    }
+}
