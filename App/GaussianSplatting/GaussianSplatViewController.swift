@@ -166,7 +166,12 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
     private func setupMetalView() {
         metalView = MTKView(frame: view.bounds, device: device)
         metalView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        metalView.colorPixelFormat = .bgra8Unorm
+        // `.bgra8Unorm_srgb` asks Metal to apply the linear→sRGB transfer
+        // when writing the final fragment. Our splat shader composes in
+        // linear space (decoded from sRGB-packed bytes) and returns a
+        // linear value, so without the sRGB-typed attachment the result
+        // was effectively shown un-gamma-encoded — visibly too dark.
+        metalView.colorPixelFormat = .bgra8Unorm_srgb
         metalView.depthStencilPixelFormat = .depth32Float
         metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1.0)
         metalView.autoResizeDrawable = false
@@ -366,7 +371,10 @@ final class GaussianSplatViewController: UIViewController, UIGestureRecognizerDe
             desc.label = "Viewer OIT Composite"
             desc.vertexFunction = vertexFn
             desc.fragmentFunction = fragmentFn
-            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            // Composite writes directly to the MTKView drawable. Match the
+            // sRGB-typed attachment so the hardware does the linear→sRGB
+            // encoding for us.
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
             desc.colorAttachments[0].isBlendingEnabled = false
             desc.depthAttachmentPixelFormat = .invalid
             oitCompositePSO = try device.makeRenderPipelineState(descriptor: desc)
