@@ -31,8 +31,10 @@ struct ObjectModeV2QualityDebugOverlay: View {
                 row(label: "avg30f", value: Int(s.avgVariance), color: .white)
                 row(label: "brightness", value: Int(s.brightness), color: brightnessColor(s.brightness))
                 rowFloat(label: "omega", value: Double(s.angularVelocity), suffix: "rad/s", color: omegaColor(s.angularVelocity, limit: s.angularVelocityLimit))
+                rowFloat(label: "tilt", value: Double(s.tiltDegrees), suffix: "°", color: tiltColor(s.tiltDegrees, limit: s.tiltDegreesLimit))
                 row(label: "threshold", value: Int(s.threshold), color: .white.opacity(0.5))
                 rowFloat(label: "omegaMax", value: Double(s.angularVelocityLimit), suffix: "rad/s", color: .white.opacity(0.5))
+                rowFloat(label: "tiltMax", value: Double(s.tiltDegreesLimit), suffix: "°", color: .white.opacity(0.5))
                 row(label: "accept%", value: Int(s.passRate * 100), color: passRateColor(s.passRate))
                 row(label: "samples", value: s.sampleCountInWindow, color: .white.opacity(0.5))
             } else {
@@ -82,6 +84,13 @@ struct ObjectModeV2QualityDebugOverlay: View {
     private func omegaColor(_ omega: Float, limit: Float) -> Color {
         if omega >= limit { return .red }
         if omega >= limit * 0.7 { return .yellow }
+        return .green
+    }
+
+    /// Same shape as omegaColor.
+    private func tiltColor(_ tilt: Float, limit: Float) -> Color {
+        if tilt >= limit { return .red }
+        if tilt >= limit * 0.7 { return .yellow }
         return .green
     }
 

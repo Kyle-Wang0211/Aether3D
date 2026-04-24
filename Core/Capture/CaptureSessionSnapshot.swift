@@ -74,6 +74,26 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
     /// *within* a row, not shear *across* rows.
     public var currentAngularVelocity: Float
 
+    // MARK: - Orientation (updated per frame by DomeCoordinator)
+
+    /// Angle in degrees between the phone's current "up" direction and
+    /// whatever "up" it had at lock time. 0 = phone held exactly the way
+    /// it was when the user tapped "lock center"; 90 = phone rotated
+    /// sideways since; 180 = flipped upside down.
+    ///
+    /// Matters because:
+    ///   * 3DGS reconstruction sees tilted frames as "scene is tilted";
+    ///     pose encodes the tilt correctly BUT edge regions of the
+    ///     object consistently land in lens-corner positions where
+    ///     distortion + lens shading is worst → fuzzy reconstruction
+    ///     boundaries.
+    ///   * ARKit VIO yaw drift scales with off-axis rotation; tilted
+    ///     frames have less reliable pose.
+    ///
+    /// Populated only after the user locks the world origin (at which
+    /// point we capture the reference camera-up). Before lock: 0.
+    public var currentTiltDegrees: Float
+
     // MARK: - Recording (updated by VideoWriterObserver)
 
     public var isRecording: Bool
@@ -96,6 +116,7 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
         lastQualityReport: FrameQualityReport? = nil,
         recentSharpnessAvg: Double = 0,
         currentAngularVelocity: Float = 0,
+        currentTiltDegrees: Float = 0,
         isRecording: Bool = false,
         recordingDurationSec: TimeInterval = 0,
         hintText: String = ""
@@ -109,6 +130,7 @@ public struct CaptureSessionSnapshot: Sendable, Equatable {
         self.lastQualityReport = lastQualityReport
         self.recentSharpnessAvg = recentSharpnessAvg
         self.currentAngularVelocity = currentAngularVelocity
+        self.currentTiltDegrees = currentTiltDegrees
         self.isRecording = isRecording
         self.recordingDurationSec = recordingDurationSec
         self.hintText = hintText

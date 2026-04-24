@@ -86,6 +86,24 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
     private var lastGyroMagnitude: Float = 0
     private var isRunning = false
 
+    /// Camera-up direction captured at the moment the user tapped "lock
+    /// center". All subsequent frames are compared against this to
+    /// compute tilt. nil before lock.
+    private var referenceCameraUp: SIMD3<Float>?
+
+    /// Hard-reject frames whose camera-up deviates from the reference
+    /// by more than this many degrees. Chosen to be strict enough that
+    /// the final reconstruction boundary isn't fuzzed by lens-corner
+    /// bias from consistently-tilted views, while loose enough that
+    /// natural handheld sway doesn't trip it.
+    ///
+    /// Tuning notes:
+    ///   * 10° — very strict; users will complain
+    ///   * 15° — strict; edges stay crisp
+    ///   * 20° — recommended default; generous headroom for shake
+    ///   * 30° — lenient; starts letting blur-adjacent frames through
+    let maxTiltDegrees: Float = 20.0
+
     private let sharpnessQueue = DispatchQueue(label: "aether3d.dome.sharpness", qos: .userInitiated)
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
@@ -109,6 +127,7 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
     func resetAll() {
         coverage.reset()
         snapshot = ObjectModeV2DomeSnapshot()
+        referenceCameraUp = nil
     }
 
     // MARK: - 外部驱动模式(不开 ARSession,从 CoreMotion / GuidanceEngine 喂数据)
@@ -191,6 +210,9 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
         let relInitial = camPos - origin
         let yaw = atan2(relInitial.z, relInitial.x)
         coverage.lockWorldOrigin(origin, yaw: yaw)
+        // 锁定 reference camera-up:后续每帧 handleFrame 用它算"相对锁定瞬间"
+        // 的倾斜角,超 maxTiltDegrees 就拒帧。column 1 = camera's world-space up。
+        referenceCameraUp = simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
         var snap = snapshot
         snap.hasLockedOrigin = true
         snap.hintText = "围绕物体慢走一圈,每个扇区深绿代表拍够了。"
@@ -235,6 +257,9 @@ final class ObjectModeV2ARDomeCoordinator: NSObject, ObservableObject {
         let worldYaw = atan2(relInitial.z, relInitial.x)
 
         coverage.lockWorldOrigin(origin, yaw: worldYaw)
+        // 锁定 reference camera-up —— 见 lockAtCameraForward 里的同步改动。
+        let t2 = frame.camera.transform
+        referenceCameraUp = simd_normalize(SIMD3<Float>(t2.columns.1.x, t2.columns.1.y, t2.columns.1.z))
         var snap = snapshot
         snap.hasLockedOrigin = true
         snap.hintText = "开始绕物体走,每个扇区深绿代表拍够了。"
@@ -438,6 +463,47 @@ private extension ObjectModeV2ARDomeCoordinator {
             if angularVelocity > angularVelocityLimit {
                 // 拒帧 —— 仍然 publishIfDue(),让 UI 更新 tracking/pose
                 // 但不 ingest 到 coverage,不点亮 cell。
+                self.publishIfDue()
+                return
+            }
+
+            // ───── 倾斜硬门槛 ─────
+            // 把当前 camera-up 和锁定瞬间的 camera-up 夹角算成度数。
+            // 夹角大 = 用户扭手机旋转了。这个帧虽然可能清晰,但:
+            //   1. 物体边缘会一直落在 lens corner(畸变+暗角最严重区域)
+            //   2. ARKit VIO 的 yaw drift 在 off-axis 姿态下放大
+            //   3. 连续倾斜导致 3DGS 训练时某些 Gaussian 缺乏 "中心区约束"
+            //      -> 重建边界糊
+            //
+            // 用户说: "保证覆盖质量是底线。做 C" -> 拒帧。
+            let currentCamUp = simd_normalize(SIMD3<Float>(
+                transform.columns.1.x,
+                transform.columns.1.y,
+                transform.columns.1.z
+            ))
+            let tiltDegrees: Float
+            if let refUp = self.referenceCameraUp {
+                // dot(a,b) = |a||b|cos(θ);两个 unit vector 下 dot = cos(θ)
+                let cosine = simd_clamp(simd_dot(refUp, currentCamUp), -1.0, 1.0)
+                tiltDegrees = acos(cosine) * 180.0 / .pi
+            } else {
+                // 没锁定参考 -> 不做倾斜判定(本来 handleFrame 上面 guard
+                // origin 就会把这条 path return 掉)。
+                tiltDegrees = 0
+            }
+
+            // Publish to snapshot regardless of reject -> HUD can show
+            // live tilt even on rejected frames.
+            if let target = self.captureSession {
+                let tilt = tiltDegrees
+                Task { [target, tilt] in
+                    await target.mutateSnapshot { snap in
+                        snap.currentTiltDegrees = tilt
+                    }
+                }
+            }
+
+            if tiltDegrees > self.maxTiltDegrees {
                 self.publishIfDue()
                 return
             }
