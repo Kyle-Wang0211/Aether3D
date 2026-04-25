@@ -42,24 +42,8 @@ inline float icp_norm_sq(const ICPVec3& v) noexcept {
     return icp_dot(v, v);
 }
 
-inline float icp_norm(const ICPVec3& v) noexcept {
-    return std::sqrt(std::max(0.0f, icp_norm_sq(v)));
-}
-
 inline ICPVec3 icp_from_c(const aether_icp_point_t& p) noexcept {
     return {p.x, p.y, p.z};
-}
-
-inline aether_icp_point_t icp_to_c(const ICPVec3& p) noexcept {
-    return {p.x, p.y, p.z};
-}
-
-inline void icp_set_identity(float pose[16]) noexcept {
-    std::memset(pose, 0, sizeof(float) * 16u);
-    pose[0] = 1.0f;
-    pose[5] = 1.0f;
-    pose[10] = 1.0f;
-    pose[15] = 1.0f;
 }
 
 inline ICPVec3 icp_transform_point(const float pose[16], const ICPVec3& p) noexcept {
@@ -67,13 +51,6 @@ inline ICPVec3 icp_transform_point(const float pose[16], const ICPVec3& p) noexc
         pose[0] * p.x + pose[4] * p.y + pose[8] * p.z + pose[12],
         pose[1] * p.x + pose[5] * p.y + pose[9] * p.z + pose[13],
         pose[2] * p.x + pose[6] * p.y + pose[10] * p.z + pose[14]};
-}
-
-inline ICPVec3 icp_rotate_point(const float pose[16], const ICPVec3& p) noexcept {
-    return {
-        pose[0] * p.x + pose[4] * p.y + pose[8] * p.z,
-        pose[1] * p.x + pose[5] * p.y + pose[9] * p.z,
-        pose[2] * p.x + pose[6] * p.y + pose[10] * p.z};
 }
 
 inline void icp_quat_to_matrix(const float q[4], float r[9]) noexcept {
@@ -360,36 +337,6 @@ inline float angular_distance_rad(const float a[3], const float b[3]) noexcept {
     return std::acos(dot);
 }
 
-inline float imported_video_patch_median_depth_m(
-    const float* depth,
-    std::uint32_t depth_w,
-    std::uint32_t depth_h) noexcept {
-    if (!depth || depth_w == 0 || depth_h == 0) {
-        return 0.0f;
-    }
-
-    const std::uint32_t u0 = depth_w / 3u;
-    const std::uint32_t u1 = depth_w - u0;
-    const std::uint32_t v0 = depth_h / 3u;
-    const std::uint32_t v1 = depth_h - v0;
-    std::vector<float> samples;
-    samples.reserve(static_cast<std::size_t>((u1 - u0) * (v1 - v0)) / 4u + 1u);
-    for (std::uint32_t v = v0; v < v1; v += 2u) {
-        for (std::uint32_t u = u0; u < u1; u += 2u) {
-            const float d = depth[static_cast<std::size_t>(v) * depth_w + u];
-            if (std::isfinite(d) && d > 0.10f && d < 5.00f) {
-                samples.push_back(d);
-            }
-        }
-    }
-    if (samples.empty()) {
-        return 0.0f;
-    }
-    const auto mid = samples.begin() + static_cast<std::ptrdiff_t>(samples.size() / 2u);
-    std::nth_element(samples.begin(), mid, samples.end());
-    return *mid;
-}
-
 inline void set_identity_pose(float pose[16]) noexcept {
     std::memset(pose, 0, sizeof(float) * 16u);
     pose[0] = 1.0f;
@@ -441,15 +388,6 @@ inline void transform_point_world(
                     pose[9] * cam_point.z + pose[13];
     world_point.z = pose[2] * cam_point.x + pose[6] * cam_point.y +
                     pose[10] * cam_point.z + pose[14];
-}
-
-inline void rotate_vector_world(
-    const float pose[16],
-    const aether_icp_point_t& cam_vec,
-    aether_icp_point_t& world_vec) noexcept {
-    world_vec.x = pose[0] * cam_vec.x + pose[4] * cam_vec.y + pose[8] * cam_vec.z;
-    world_vec.y = pose[1] * cam_vec.x + pose[5] * cam_vec.y + pose[9] * cam_vec.z;
-    world_vec.z = pose[2] * cam_vec.x + pose[6] * cam_vec.y + pose[10] * cam_vec.z;
 }
 
 inline bool normalize_point(aether_icp_point_t& p) noexcept {
