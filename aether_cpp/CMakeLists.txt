@@ -135,6 +135,23 @@ add_executable(aether_version_test tools/aether_version_test.cpp)
 target_link_libraries(aether_version_test PRIVATE aether3d_core)
 target_compile_features(aether_version_test PRIVATE cxx_std_20)
 
+# ============================================================================
+# Phase 3.4: aether3d_ffi shared library — dart:ffi-loadable surface
+#
+# This is a thin .dylib (.so on Linux, .dll on Windows) containing only the
+# public C ABI symbols meant for foreign-function interface consumption.
+# Currently just version.cpp; future FFI exports get added here, NOT mixed
+# into aether3d_core (which is an internal-implementation static lib).
+#
+# Linking strategy:
+#   - PRIVATE link against aether3d_core when FFI functions need internals.
+#   - For now, version.cpp has no dependencies, so we don't link core yet
+#     (keeps the .dylib at kilobytes for the macOS Dart CLI smoke test).
+# ============================================================================
+add_library(aether3d_ffi SHARED src/core/version.cpp)
+target_include_directories(aether3d_ffi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(aether3d_ffi PRIVATE cxx_std_20)
+
 if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
     enable_testing()
 
