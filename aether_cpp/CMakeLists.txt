@@ -46,6 +46,7 @@ set(AETHER_CORE_SOURCES
     src/tsdf_volume.cpp
     src/core/canonicalize.cpp
     src/core/numeric_guard.cpp
+    src/core/version.cpp
     src/crypto/sha256.cpp
     src/evidence/smart_anti_boost_smoother.cpp
     src/memory/arena.cpp
@@ -126,6 +127,13 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     aether_dawn_hello_sample(aether_dawn_hello_compute  tools/aether_dawn_hello_compute.cpp)   # P1.5 compute roundtrip
     aether_dawn_hello_sample(aether_dawn_hello_triangle tools/aether_dawn_hello_triangle.cpp)  # P1.7 graphics roundtrip (PPM out)
 endif()
+
+# ============================================================================
+# Phase 3.3 C ABI smoke test (no Dawn dependency, just aether3d_core)
+# ============================================================================
+add_executable(aether_version_test tools/aether_version_test.cpp)
+target_link_libraries(aether_version_test PRIVATE aether3d_core)
+target_compile_features(aether_version_test PRIVATE cxx_std_20)
 
 if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
     enable_testing()
