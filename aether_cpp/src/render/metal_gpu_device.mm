@@ -918,8 +918,10 @@ std::unique_ptr<GPUDevice> create_metal_gpu_device(void* mtl_device) noexcept {
 }
 
 std::unique_ptr<GPUCommandBuffer> create_metal_command_buffer(GPUDevice& device) noexcept {
-    auto* metal_device = dynamic_cast<MetalGPUDevice*>(&device);
-    if (!metal_device) return nullptr;
+    // Type-tag dispatch (project compiles with -fno-rtti, so dynamic_cast is unavailable).
+    // GPUDevice exposes a virtual backend() method whose return value is the type tag.
+    if (device.backend() != GraphicsBackend::kMetal) return nullptr;
+    auto* metal_device = static_cast<MetalGPUDevice*>(&device);
 
     id<MTLCommandBuffer> buffer = [metal_device->mtl_command_queue() commandBuffer];
     if (!buffer) return nullptr;
@@ -930,8 +932,9 @@ std::unique_ptr<GPUCommandBuffer> create_metal_command_buffer(GPUDevice& device)
 std::unique_ptr<GPUCommandBuffer> wrap_metal_command_buffer(void* mtl_cmd_buffer,
                                                              GPUDevice& device) noexcept {
     if (!mtl_cmd_buffer) return nullptr;
-    auto* metal_device = dynamic_cast<MetalGPUDevice*>(&device);
-    if (!metal_device) return nullptr;
+    // Type-tag dispatch (see create_metal_command_buffer comment above).
+    if (device.backend() != GraphicsBackend::kMetal) return nullptr;
+    auto* metal_device = static_cast<MetalGPUDevice*>(&device);
 
     // Swift passes MTLCommandBuffer via Unmanaged.passUnretained().toOpaque()
     // → __bridge cast recovers the ObjC object without ownership transfer.
