@@ -106,7 +106,6 @@ constexpr std::size_t kDefaultTrainingHardCapSteps = 10000;
 constexpr std::size_t kPreviewTrainingTargetSteps = 1400;
 constexpr std::size_t kPreviewTrainingHardCapSteps = 4000;
 constexpr std::size_t kPreviewMaxTrainingFrames = 24;
-constexpr std::size_t kPreviewInitialSeedCap = 30000;
 constexpr int kDepthKeyframeColorMaxLongEdge = 640;
 
 inline void store_downsampled_keyframe_rgba(
@@ -5172,7 +5171,11 @@ void PipelineCoordinator::training_thread_func() noexcept {
                 pending_gaussians.size());
         }
         if (!engine_created && imported_video_engine_gate.ready_to_create_engine) {
-            try {
+            // (try/catch wrapper removed — project compiles with -fno-exceptions,
+            // so the catches were dead. The catch handlers logged + cleared
+            // pending_gaussians. If the body now aborts on a real failure mode,
+            // surface it as a status return at the call sites that matter.)
+            {
                 std::vector<splat::GaussianParams> initial_splats;
                 std::size_t created_gaussian_count = 0;
                 std::size_t created_frame_count = 0;
@@ -5276,14 +5279,6 @@ void PipelineCoordinator::training_thread_func() noexcept {
                         initial_splat_count);
                 }
                 maybe_compact_export_surface_snapshot();
-            } catch (const std::exception& e) {
-                std::fprintf(stderr,
-                    "[Aether3D][TrainThread] Engine creation EXCEPTION: %s\n", e.what());
-                pending_gaussians.clear();
-            } catch (...) {
-                std::fprintf(stderr,
-                    "[Aether3D][TrainThread] Engine creation UNKNOWN EXCEPTION\n");
-                pending_gaussians.clear();
             }
             continue;
         }
@@ -5379,7 +5374,8 @@ void PipelineCoordinator::training_thread_func() noexcept {
                 local_subject_first_mode,
                 foreground_active,
                 foreground_pause_logged);
-            try {
+            // (try/catch wrapper removed — see engine-creation block above.)
+            {
                 const auto preview_refine_phase_t0 =
                     local_subject_first_refine::begin_preview_refine_phase(
                         local_subject_first_mode);
@@ -5600,12 +5596,6 @@ void PipelineCoordinator::training_thread_func() noexcept {
                     local_subject_first_mode,
                     preview_refine_phase_ms_,
                     preview_refine_phase_t0);
-            } catch (const std::exception& e) {
-                std::fprintf(stderr,
-                    "[Aether3D][TrainThread] train_step EXCEPTION: %s\n", e.what());
-            } catch (...) {
-                std::fprintf(stderr,
-                    "[Aether3D][TrainThread] train_step UNKNOWN EXCEPTION\n");
             }
 
             // ── Handle enhance requests ──
