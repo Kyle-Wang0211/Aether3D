@@ -1,0 +1,27 @@
+diff --git a/packages/flutter_tools/lib/src/ios/mac.dart b/packages/flutter_tools/lib/src/ios/mac.dart
+index 82e94b215ee..95ec20b0f3a 100644
+--- a/packages/flutter_tools/lib/src/ios/mac.dart
++++ b/packages/flutter_tools/lib/src/ios/mac.dart
+@@ -712,16 +712,19 @@ Future<void> removeFinderExtendedAttributes(
+   ProcessUtils processUtils,
+   Logger logger,
+ ) async {
++  // Local patch (2026-04-25): clear ALL xattrs, not just com.apple.FinderInfo.
++  // macOS 14+ adds com.apple.provenance to every copied file, which also
++  // breaks ad-hoc codesign with "resource fork ... not allowed". -c removes
++  // every xattr unconditionally. Upstream Flutter only handles FinderInfo.
+   final bool success = await processUtils.exitsHappy(<String>[
+     'xattr',
++    '-c',
+     '-r',
+-    '-d',
+-    'com.apple.FinderInfo',
+     projectDirectory.path,
+   ]);
+   // Ignore all errors, for example if directory is missing.
+   if (!success) {
+-    logger.printTrace('Failed to remove xattr com.apple.FinderInfo from ${projectDirectory.path}');
++    logger.printTrace('Failed to clear xattrs from ${projectDirectory.path}');
+   }
+ }
+ 

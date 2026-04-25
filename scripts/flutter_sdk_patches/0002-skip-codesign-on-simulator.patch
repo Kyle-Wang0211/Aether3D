@@ -1,0 +1,23 @@
+diff --git a/packages/flutter_tools/lib/src/build_system/targets/ios.dart b/packages/flutter_tools/lib/src/build_system/targets/ios.dart
+index a6116632fd4..fe90a2a4372 100644
+--- a/packages/flutter_tools/lib/src/build_system/targets/ios.dart
++++ b/packages/flutter_tools/lib/src/build_system/targets/ios.dart
+@@ -909,6 +909,18 @@ Future<void> _createStubAppFramework(
+ }
+ 
+ Future<void> _signFramework(Environment environment, File binary, BuildMode buildMode) async {
++  // Local patch (2026-04-25): skip codesign entirely for iOS Simulator builds.
++  // On macOS 14+ the com.apple.provenance xattr is kernel-protected (xattr -c
++  // / -d / ditto --noextattr all fail to remove it), and ad-hoc codesign
++  // refuses files with this xattr ("resource fork ... detritus not allowed").
++  // Simulator doesn't enforce codesign at runtime, so skipping is safe for
++  // simulator. Device / IPA builds still hit codesign below.
++  final String? sdkRoot = environment.defines[kSdkRoot];
++  if (sdkRoot != null && sdkRoot.contains('iPhoneSimulator')) {
++    environment.logger.printTrace('Skipping codesign for simulator build (provenance xattr workaround)');
++    return;
++  }
++
+   await removeFinderExtendedAttributes(
+     binary,
+     ProcessUtils(processManager: environment.processManager, logger: environment.logger),
