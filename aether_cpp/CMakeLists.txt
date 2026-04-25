@@ -116,14 +116,24 @@ target_link_libraries(aether3d_c PUBLIC aether3d_core ZLIB::ZLIB)
 target_compile_options(aether3d_c PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
 
 # ============================================================================
-# Dawn hello adapter (P1.4): print GPU name + backend
+# Dawn hello samples (Phase 1.4 / 1.5 / 1.7): print GPU info, compute, render
+#
+# Each hello is a single-translation-unit smoke test for one Dawn feature
+# layer. They're intentionally self-contained (no shared headers) so a
+# failing hello points at exactly one layer.
+#
+# Note: these targets do NOT inherit AETHER_STRICT_COMPILE_OPTIONS. Dawn's
+# webgpu_cpp.h uses patterns that conflict with -fno-exceptions / -fno-rtti.
 # ============================================================================
 if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
-    add_executable(aether_dawn_hello tools/aether_dawn_hello.cpp)
-    target_link_libraries(aether_dawn_hello PRIVATE dawn::webgpu_dawn)
-    target_compile_features(aether_dawn_hello PRIVATE cxx_std_20)
-    # Note: NOT applying AETHER_STRICT_COMPILE_OPTIONS — Dawn's webgpu_cpp.h
-    # uses exceptions / RTTI patterns that conflict with -fno-exceptions / -fno-rtti.
+    function(aether_dawn_hello_sample target src)
+        add_executable(${target} ${src})
+        target_link_libraries(${target} PRIVATE dawn::webgpu_dawn)
+        target_compile_features(${target} PRIVATE cxx_std_20)
+    endfunction()
+
+    aether_dawn_hello_sample(aether_dawn_hello         tools/aether_dawn_hello.cpp)          # P1.4 adapter info
+    aether_dawn_hello_sample(aether_dawn_hello_compute tools/aether_dawn_hello_compute.cpp)  # P1.5 compute roundtrip
 endif()
 
 if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
