@@ -1312,7 +1312,6 @@ inline std::vector<splat::GaussianParams> clean_export_gaussians(
                 }
 
                 const float dominant_y10 = nth_quantile_copy(dominant_y, 0.10f);
-                const float dominant_y20 = nth_quantile_copy(dominant_y, 0.20f);
                 const float dominant_y35 = nth_quantile_copy(dominant_y, 0.35f);
                 const float dominant_radius = std::max({
                     nth_quantile_copy(dominant_radial, 0.92f) * 1.35f,
@@ -2731,7 +2730,8 @@ void PipelineCoordinator::frame_thread_func() noexcept {
         }
 
         // ─── Thermal recommendation ───
-        auto thermal = thermal_predictor_.evaluate(input.timestamp);
+        // Call retained for any side effects on thermal_predictor_'s internal state.
+        thermal_predictor_.evaluate(input.timestamp);
 
         // ─── Brightness analysis (low-light detection) ───
         float brightness = compute_brightness(
@@ -4231,9 +4231,6 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 current_fwd);
 
             auto sel_result = frame_selector_.evaluate(candidate);
-            std::uint32_t sel_diag_counter_snapshot = 0;
-            std::uint32_t gate3_reject_streak_snapshot = 0;
-
             // ─── Frame selection diagnostic (verbose for debugging) ───
             // Gate codes: 0=selected, 1=quality, 2=blur, 3=motion
             // Log first 50 frames + every 30th + all selected + rejection summary
@@ -4250,9 +4247,6 @@ void PipelineCoordinator::frame_thread_func() noexcept {
                 } else {
                     gate3_reject_streak = 0;
                 }
-
-                sel_diag_counter_snapshot = sel_diag_counter;
-                gate3_reject_streak_snapshot = gate3_reject_streak;
 
                 bool should_log = (sel_diag_counter <= 50) ||
                                   (sel_diag_counter % 30 == 0) ||
@@ -4766,11 +4760,6 @@ void PipelineCoordinator::evidence_thread_func() noexcept {
         accumulated_quality_ = accumulated_quality_ * 0.95f + quality * 0.05f;
 
         // ─── Coverage estimation (simplified spatial hashing) ───
-        // Extract camera position from transform
-        float cam_x = obs.transform[12];
-        float cam_y = obs.transform[13];
-        float cam_z = obs.transform[14];
-
         // Simple coverage: unique spatial cells visited
         // (Full evidence grid integration happens later)
         if (obs.frame_selected) {
@@ -5818,7 +5807,6 @@ bool PipelineCoordinator::cross_validate_depth(
     constexpr float kDivergenceThreshold = 0.08f;  // 8% (tighter after alignment)
 
     std::size_t consensus_count = 0;
-    std::size_t divergent_count = 0;
 
     for (std::size_t i = 0; i < count; ++i) {
         float ds = small_result.depth_map[i];
@@ -5843,7 +5831,6 @@ bool PipelineCoordinator::cross_validate_depth(
             // for absolute depth). Small model excels at edges but may have
             // scale artifacts that survive affine alignment.
             consensus_out.depth_map[i] = dl;
-            divergent_count++;
         }
     }
 
@@ -6419,8 +6406,6 @@ void PipelineCoordinator::generate_overlay_vertices(
         double snx = cell.norm[0] * inv_w;
         double sny = cell.norm[1] * inv_w;
         double snz = cell.norm[2] * inv_w;
-        float self_w = cell.total_weight;
-        float sum_w = self_w;
 
         // Accumulate 6 face-neighbors
         static const int ndx[] = {-1, 1, 0, 0, 0, 0};
@@ -6435,7 +6420,6 @@ void PipelineCoordinator::generate_overlay_vertices(
                 snx += it->second.norm[0] * ninv * nw;
                 sny += it->second.norm[1] * ninv * nw;
                 snz += it->second.norm[2] * ninv * nw;
-                sum_w += nw;
             }
         }
         // Normalize
@@ -6472,7 +6456,7 @@ void PipelineCoordinator::generate_overlay_vertices(
 
     auto update_confirmed_dense_cell =
         [&](std::int64_t key,
-            int gx, int gy, int gz,
+            int /*gx*/, int /*gy*/, int /*gz*/,
             float px, float py, float pz,
             float nnx, float nny, float nnz,
             float avg_quality,

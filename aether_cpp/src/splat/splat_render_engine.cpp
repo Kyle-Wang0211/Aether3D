@@ -578,7 +578,6 @@ ViewerOutlierClipResult maybe_clip_extreme_viewer_outliers(
         }
     }
     const float dominant_bottom_p10 = nth_percentile(dominant_cluster_y, 1, 10);
-    const float dominant_bottom_p20 = nth_percentile(dominant_cluster_y, 1, 5);
     const float dominant_bottom_p35 = nth_percentile(dominant_cluster_y, 7, 20);
     const float dominant_footprint_p85 = nth_percentile(dominant_cluster_xz, 17, 20);
     const float dominant_footprint_p95 = nth_percentile(dominant_cluster_xz, 19, 20);
@@ -975,7 +974,6 @@ void SplatRenderEngine::set_region_fade_alphas(
 
     // Grow vector if needed (dynamic, no upper limit)
     if (count > region_fade_alphas_.size()) {
-        std::size_t old_size = region_fade_alphas_.size();
         region_fade_alphas_.resize(count, 1.0f);
     }
     for (std::size_t i = 0; i < count; ++i) {
