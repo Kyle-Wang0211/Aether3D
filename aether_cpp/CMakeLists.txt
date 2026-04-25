@@ -55,10 +55,7 @@ set(AETHER_CORE_SOURCES
     src/tsdf/pose_stabilizer.cpp
     src/tsdf/spatial_hash_table.cpp
     src/splat/spz_decoder.cpp
-    # WIP: not currently included — pre-existing bitrot, fails under Xcode 26 / Clang 17
-    # Issues: 3× try-in-fno-exceptions (lines 939, 954, 995) + 2 unused vars (581, 978)
-    # Re-enable before Phase 3 (xcframework). See aether_cpp/PHASE3_BLOCKER.md.
-    # src/splat/splat_render_engine.cpp
+    src/splat/splat_render_engine.cpp
     src/pipeline/streaming_pipeline.cpp
     src/pipeline/local_preview_runtime.cpp
     src/pipeline/local_preview_seeding.cpp
@@ -69,19 +66,13 @@ set(AETHER_CORE_SOURCES
     src/pipeline/local_subject_first_refine.cpp
     src/pipeline/local_subject_first_training.cpp
     src/pipeline/runtime_tsdf_gaussian_augmentation.cpp
-    # WIP: not currently included — pre-existing bitrot, fails under Xcode 26 / Clang 17
-    # Issues: try-in-fno-exceptions (line 5393) + 5 unused vars/params + 1 set-but-not-used
-    # Re-enable before Phase 3 (xcframework). See aether_cpp/PHASE3_BLOCKER.md.
-    # src/pipeline/pipeline_coordinator.cpp
+    src/pipeline/pipeline_coordinator.cpp
     src/pipeline/depth_inference_coreml.mm
     src/pipeline/coordinator_c_api.cpp
     src/pipeline/streaming_c_api.cpp
     src/thermal/thermal_predictor.cpp
     src/training/gaussian_training_engine.cpp
-    # WIP: not currently included — pre-existing bitrot, fails under Xcode 26 / Clang 17
-    # Issues: dynamic_cast in -fno-rtti project (lines 921, 933)
-    # Re-enable before Phase 3 (xcframework). See aether_cpp/PHASE3_BLOCKER.md.
-    # src/render/metal_gpu_device.mm
+    src/render/metal_gpu_device.mm
     src/render/metal_c_api.mm
 )
 
@@ -103,8 +94,7 @@ if(APPLE)
     )
     set_source_files_properties(
         src/pipeline/depth_inference_coreml.mm
-        # WIP: see comment in AETHER_CORE_SOURCES — re-enable before Phase 3
-        # src/render/metal_gpu_device.mm
+        src/render/metal_gpu_device.mm
         src/render/metal_c_api.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
