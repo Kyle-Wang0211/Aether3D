@@ -1,0 +1,51 @@
+name: aether_cpp clean build
+
+# Anti-bitrot guardrail. Solo + long-term incremental builds accumulate
+# warnings-as-errors that never surface until a fresh clean checkout.
+# This workflow runs `cmake --build --clean-first` on every PR touching
+# aether_cpp so the next bitrot is caught at PR time, not months later.
+#
+# Added: 2026-04-25, after discovering pipeline_coordinator.cpp /
+# metal_gpu_device.mm / splat_render_engine.cpp had never been built
+# successfully under Xcode 26 / Clang 17 (deferred to Phase 3).
+
+on:
+  pull_request:
+    paths:
+      - 'aether_cpp/**'
+      - '.github/workflows/aether-cpp-clean-build.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: aether-cpp-clean-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clean-build:
+    name: Clean build aether_cpp
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          cmake --version
+          clang++ --version
+
+      - name: Configure (fresh)
+        run: cmake -S aether_cpp -B aether_cpp/build
+
+      - name: Build clean
+        run: cmake --build aether_cpp/build --clean-first -j
+
+      - name: Verify static libs produced
+        run: |
+          test -f aether_cpp/build/libaether3d_core.a || (echo "::error::libaether3d_core.a missing" && exit 1)
+          test -f aether_cpp/build/libaether3d_c.a || (echo "::error::libaether3d_c.a missing" && exit 1)
+          ls -lh aether_cpp/build/*.a
