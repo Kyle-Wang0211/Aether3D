@@ -132,8 +132,9 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
         target_compile_features(${target} PRIVATE cxx_std_20)
     endfunction()
 
-    aether_dawn_hello_sample(aether_dawn_hello         tools/aether_dawn_hello.cpp)          # P1.4 adapter info
-    aether_dawn_hello_sample(aether_dawn_hello_compute tools/aether_dawn_hello_compute.cpp)  # P1.5 compute roundtrip
+    aether_dawn_hello_sample(aether_dawn_hello          tools/aether_dawn_hello.cpp)           # P1.4 adapter info
+    aether_dawn_hello_sample(aether_dawn_hello_compute  tools/aether_dawn_hello_compute.cpp)   # P1.5 compute roundtrip
+    aether_dawn_hello_sample(aether_dawn_hello_triangle tools/aether_dawn_hello_triangle.cpp)  # P1.7 graphics roundtrip (PPM out)
 endif()
 
 if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
