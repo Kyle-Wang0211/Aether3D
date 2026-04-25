@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.22)
 
 project(aether3d_cpp_core VERSION 0.1.0 LANGUAGES CXX OBJCXX)
 
@@ -7,17 +7,37 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS "Build only the minimal whitebox native tests" OFF)
+option(AETHER_ENABLE_DAWN "Build Dawn (WebGPU) integration + hello sample" ON)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    add_compile_options(
-        -ffp-contract=off
-        -fno-fast-math
-        -Wall
-        -Wextra
-        -Werror
-        -fno-exceptions
-        -fno-rtti
-    )
+# Strict flags — applied per-target via target_compile_options below.
+# Was previously add_compile_options(...) at directory scope, which would
+# pollute third_party/dawn. Refactored 2026-04-25 for Dawn integration.
+set(AETHER_STRICT_COMPILE_OPTIONS
+    -ffp-contract=off
+    -fno-fast-math
+    -Wall
+    -Wextra
+    -Werror
+    -fno-exceptions
+    -fno-rtti
+)
+
+# ============================================================================
+# Dawn (WebGPU) integration
+# Submodule at third_party/dawn — see aether_cpp/PHASE3_BLOCKER.md for context
+# ============================================================================
+if(AETHER_ENABLE_DAWN AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dawn/CMakeLists.txt")
+    set(DAWN_FETCH_DEPENDENCIES ON CACHE BOOL "" FORCE)
+    set(DAWN_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+    set(DAWN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(DAWN_BUILD_NODE_BINDINGS OFF CACHE BOOL "" FORCE)
+    set(DAWN_BUILD_PROTOBUF OFF CACHE BOOL "" FORCE)
+    set(DAWN_BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+    set(DAWN_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    set(DAWN_USE_GLFW OFF CACHE BOOL "" FORCE)
+    set(TINT_BUILD_CMD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(TINT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/dawn EXCLUDE_FROM_ALL)
 endif()
 
 find_package(ZLIB REQUIRED)
@@ -35,7 +55,10 @@ set(AETHER_CORE_SOURCES
     src/tsdf/pose_stabilizer.cpp
     src/tsdf/spatial_hash_table.cpp
     src/splat/spz_decoder.cpp
-    src/splat/splat_render_engine.cpp
+    # WIP: not currently included — pre-existing bitrot, fails under Xcode 26 / Clang 17
+    # Issues: 3× try-in-fno-exceptions (lines 939, 954, 995) + 2 unused vars (581, 978)
+    # Re-enable before Phase 3 (xcframework). See aether_cpp/PHASE3_BLOCKER.md.
+    # src/splat/splat_render_engine.cpp
     src/pipeline/streaming_pipeline.cpp
     src/pipeline/local_preview_runtime.cpp
     src/pipeline/local_preview_seeding.cpp
@@ -46,13 +69,19 @@ set(AETHER_CORE_SOURCES
     src/pipeline/local_subject_first_refine.cpp
     src/pipeline/local_subject_first_training.cpp
     src/pipeline/runtime_tsdf_gaussian_augmentation.cpp
-    src/pipeline/pipeline_coordinator.cpp
+    # WIP: not currently included — pre-existing bitrot, fails under Xcode 26 / Clang 17
+    # Issues: try-in-fno-exceptions (line 5393) + 5 unused vars/params + 1 set-but-not-used
+    # Re-enable before Phase 3 (xcframework). See aether_cpp/PHASE3_BLOCKER.md.
+    # src/pipeline/pipeline_coordinator.cpp
     src/pipeline/depth_inference_coreml.mm
     src/pipeline/coordinator_c_api.cpp
     src/pipeline/streaming_c_api.cpp
     src/thermal/thermal_predictor.cpp
     src/training/gaussian_training_engine.cpp
-    src/render/metal_gpu_device.mm
+    # WIP: not currently included — pre-existing bitrot, fails under Xcode 26 / Clang 17
+    # Issues: dynamic_cast in -fno-rtti project (lines 921, 933)
+    # Re-enable before Phase 3 (xcframework). See aether_cpp/PHASE3_BLOCKER.md.
+    # src/render/metal_gpu_device.mm
     src/render/metal_c_api.mm
 )
 
@@ -64,6 +93,7 @@ set(AETHER_C_API_SOURCES
 add_library(aether3d_core STATIC ${AETHER_CORE_SOURCES})
 target_include_directories(aether3d_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(aether3d_core PUBLIC ZLIB::ZLIB)
+target_compile_options(aether3d_core PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
 
 if(APPLE)
     target_link_libraries(aether3d_core PUBLIC
@@ -73,7 +103,8 @@ if(APPLE)
     )
     set_source_files_properties(
         src/pipeline/depth_inference_coreml.mm
-        src/render/metal_gpu_device.mm
+        # WIP: see comment in AETHER_CORE_SOURCES — re-enable before Phase 3
+        # src/render/metal_gpu_device.mm
         src/render/metal_c_api.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
@@ -82,6 +113,18 @@ endif()
 add_library(aether3d_c STATIC ${AETHER_C_API_SOURCES})
 target_include_directories(aether3d_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(aether3d_c PUBLIC aether3d_core ZLIB::ZLIB)
+target_compile_options(aether3d_c PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+
+# ============================================================================
+# Dawn hello adapter (P1.4): print GPU name + backend
+# ============================================================================
+if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
+    add_executable(aether_dawn_hello tools/aether_dawn_hello.cpp)
+    target_link_libraries(aether_dawn_hello PRIVATE dawn::webgpu_dawn)
+    target_compile_features(aether_dawn_hello PRIVATE cxx_std_20)
+    # Note: NOT applying AETHER_STRICT_COMPILE_OPTIONS — Dawn's webgpu_cpp.h
+    # uses exceptions / RTTI patterns that conflict with -fno-exceptions / -fno-rtti.
+endif()
 
 if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
     enable_testing()
@@ -89,6 +132,7 @@ if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
     macro(aether_test test_name test_src)
         add_executable(${test_name} ${test_src})
         target_link_libraries(${test_name} PRIVATE aether3d_core)
+        target_compile_options(${test_name} PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
         add_test(NAME ${test_name} COMMAND ${test_name})
     endmacro()
 
