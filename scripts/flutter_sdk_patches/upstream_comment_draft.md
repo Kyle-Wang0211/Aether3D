@@ -1,14 +1,21 @@
-# Upstream comment draft
+# Upstream comment — POSTED
 
-**Target issue**: [flutter/flutter#156098](https://github.com/flutter/flutter/issues/156098) (or whichever issue is currently tracking the `com.apple.provenance` codesign break — verify before posting).
+**Status**: ✅ Posted 2026-04-25 → https://github.com/flutter/flutter/issues/185395#issuecomment-4320752280
 
-**Action**: copy the body below, paste as a new comment, post. Then delete this file (or annotate at top: "posted YYYY-MM-DD").
+**Target issue context**: We searched flutter/flutter for the canonical issue. Findings:
+- `#181103` (closed COMPLETED 2026-01-17) — exact match in body, but auto-closed by github-actions bot for "no additional info" + thread locked. Can't comment.
+- `#185395` (closed COMPLETED 2026-04-22) — same title, **closure was based on reporter's iCloud-Drive-specific cause**. Underlying provenance issue still affects non-iCloud setups on macOS 26.
+- `#180351` (closed earlier) — earliest dup.
+- `#172666` (open, 2025-07) — Sequoia upgrade scenario, different.
+- `#183662` (open) — performance, not codesign.
 
-**Why post this**: the Tier 3 transition signal channel. Half a year from now we may not remember which upstream issue our local patches map to. Posting lets GitHub notify us when a fix lands, so we know to delete `scripts/flutter_sdk_patches/`.
+We commented on `#185395` arguing the closure reason was incomplete (iCloud is one trigger, kernel-level provenance is another that affects local-disk projects too). If maintainers reopen or link a new issue, the GitHub notification reaches Kyle-Wang0211 → we know to delete `scripts/flutter_sdk_patches/` (Tier 3 repaid).
+
+**The actual posted comment** (canonical source: see `git show` for this file's history; original draft kept below for reference and as spec for any follow-up comment):
 
 ---
 
-## Comment body (copy from here)
+## Original comment body (kept for reference)
 
 Hitting this on macOS 26.1 (Build 25B78) + Xcode 26.2 + Flutter 3.41.7 (commit `cc0734ac716`).
 

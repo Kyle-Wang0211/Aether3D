@@ -28,7 +28,7 @@ This complements `PHASE3_BLOCKER.md`:
 - **When CI for Flutter is added (Phase 2+)**: first step in workflow must be `bash scripts/flutter_sdk_patches/apply.sh` (idempotent, exit 1 on failure).
 - **When upstream merges fix** (track [flutter/flutter#156098](https://github.com/flutter/flutter/issues/156098) — see [`scripts/flutter_sdk_patches/upstream_comment_draft.md`](../../scripts/flutter_sdk_patches/upstream_comment_draft.md)): delete `scripts/flutter_sdk_patches/` entirely + drop the brew warning from CROSS_PLATFORM_STACK.md.
 
-**Open Tier 3 action item**: post `upstream_comment_draft.md` content as a comment on flutter/flutter#156098 to (a) help upstream, (b) hook us into GitHub notifications when fix lands.
+**Tier 3 signal channel**: ✅ established 2026-04-25. Commented on flutter/flutter#185395: https://github.com/flutter/flutter/issues/185395#issuecomment-4320752280. Argued the closure was iCloud-specific while the kernel-protected provenance still affects non-iCloud setups. If maintainers reopen / link a new issue / merge a fix, GitHub notifies Kyle-Wang0211 → we delete `scripts/flutter_sdk_patches/` and bump CROSS_PLATFORM_STACK.md.
 
 ---
 
