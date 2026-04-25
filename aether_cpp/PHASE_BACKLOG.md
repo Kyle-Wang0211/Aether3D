@@ -4,9 +4,7 @@ Deferred non-blocking work, organized by **trigger condition** (not by priority 
 Items here are NOT lost — they're parked until their trigger fires. If no trigger,
 the item shouldn't be here.
 
-This complements `PHASE3_BLOCKER.md`:
-- `PHASE3_BLOCKER.md` = blocking work that **must** land before Phase 3 (xcframework)
-- `PHASE_BACKLOG.md` = non-blocking polish parked behind a clear trigger
+**Phase 3 blocker resolved 2026-04-25** — all 3 previously-deferred bitrot files (`pipeline_coordinator.cpp`, `metal_gpu_device.mm`, `splat_render_engine.cpp`) re-enabled and compiling cleanly. See git log for the 5-commit Phase 3 prep cycle (chore trivials → refactor dynamic_cast → refactor try/catch → build re-enable → docs clear). The companion `PHASE3_BLOCKER.md` was deleted in this cycle since the work it tracked is complete.
 
 ---
 
