@@ -2181,6 +2181,11 @@ void register_baked_wgsl_into_device(GPUDevice& device) noexcept {
                          splat_render_wgsl, "vs_main");
     register_wgsl_source(device, "splat_render_fs",
                          splat_render_wgsl, "fs_main");
+    // mesh_render too — vs_main + fs_main entry points.
+    register_wgsl_source(device, "mesh_render_vs",
+                         mesh_render_wgsl, "vs_main");
+    register_wgsl_source(device, "mesh_render_fs",
+                         mesh_render_wgsl, "fs_main");
 }
 
 bool dawn_copy_buffer_to_buffer(GPUDevice& device,

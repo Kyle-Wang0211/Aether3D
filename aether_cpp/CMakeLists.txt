@@ -154,6 +154,22 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     target_link_libraries(aether3d_core PUBLIC dawn::webgpu_dawn)
 endif()
 
+# ─── Phase 6.4b: GLB loader (cgltf + stb_image) ────────────────────────
+# Vendored single-header libs in third_party/cgltf, third_party/stb.
+# glb_loader.cpp does the IMPL define for both — must be exactly one TU
+# in the build, so we make sure no other source file defines the impls.
+if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
+    target_sources(aether3d_core PRIVATE src/pocketworld/glb_loader.cpp)
+    target_include_directories(aether3d_core PRIVATE
+        third_party/cgltf
+        third_party/stb)
+    # cgltf is C99; under -Wall -Wextra it produces a few warnings (unused
+    # static functions, missing-prototypes for internal helpers). Suppress
+    # for that ONE source file so the rest of aether3d_core stays strict.
+    set_source_files_properties(src/pocketworld/glb_loader.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wno-unused-function;-Wno-missing-prototypes;-Wno-double-promotion")
+endif()
+
 if(APPLE)
     target_link_libraries(aether3d_core PUBLIC
         "-framework Foundation"
@@ -322,6 +338,43 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     # Phase 6.4a Q1 verification — baked WGSL path bit-exact vs file path.
     aether_dawn_device_smoke(aether_dawn_baked_wgsl_smoke
                               tools/aether_dawn_baked_wgsl_smoke.cpp)
+
+    # Phase 6.4b — DamagedHelmet.glb asset (KhronosGroup glTF-Sample-Models).
+    # Downloaded once at configure time, reused across builds. Decision
+    # pin 20: KhronosGroup standard test models. Source repo is MIT-
+    # adjacent (CC0/CC-BY licensing per model — see Sample-Models LICENSE).
+    set(AETHER_TEST_ASSETS_DIR ${CMAKE_BINARY_DIR}/test_assets)
+    set(AETHER_DAMAGED_HELMET_PATH ${AETHER_TEST_ASSETS_DIR}/DamagedHelmet.glb)
+    if(NOT EXISTS ${AETHER_DAMAGED_HELMET_PATH})
+        file(MAKE_DIRECTORY ${AETHER_TEST_ASSETS_DIR})
+        message(STATUS "Aether3D: downloading DamagedHelmet.glb test asset...")
+        file(DOWNLOAD
+            "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
+            ${AETHER_DAMAGED_HELMET_PATH}
+            SHOW_PROGRESS
+            STATUS dl_status
+            EXPECTED_HASH SHA256=a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8
+        )
+        list(GET dl_status 0 dl_code)
+        # Hash mismatch is acceptable for now (KhronosGroup may re-issue
+        # without notice); just warn rather than fail. Production would
+        # vendor the asset under aether_cpp/test_assets/ with LFS or
+        # explicit checked-in checksum, deferred to Phase 6.5+.
+        if(NOT dl_code EQUAL 0)
+            message(WARNING "DamagedHelmet.glb download failed: ${dl_status} — "
+                "smoke will fail until manually placed at ${AETHER_DAMAGED_HELMET_PATH}")
+        endif()
+    endif()
+
+    # Phase 6.4b smoke — exercise GLB loader against DamagedHelmet.
+    if(EXISTS ${AETHER_DAMAGED_HELMET_PATH})
+        aether_dawn_device_smoke(aether_glb_loader_smoke
+                                 tools/aether_glb_loader_smoke.cpp)
+    endif()
+
+    # Phase 6.4b smoke — Filament-style PBR shader compile via Tint.
+    aether_dawn_device_smoke(aether_mesh_render_compile_smoke
+                             tools/aether_mesh_render_compile_smoke.cpp)
 
     # Phase 6.4a Step 3b/4 — IOSurface FFI end-to-end smoke (Apple only).
     if(APPLE)

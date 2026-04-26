@@ -38,6 +38,7 @@ namespace aether {
 namespace shaders {
 
 extern const char splat_render_wgsl[];
+extern const char mesh_render_wgsl[];
 extern const char project_forward_wgsl[];
 extern const char project_visible_wgsl[];
 extern const char project_backwards_wgsl[];
