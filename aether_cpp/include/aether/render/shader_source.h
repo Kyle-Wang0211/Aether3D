@@ -18,6 +18,13 @@ enum class ShaderLanguage : std::uint8_t {
     kMSL = 0u,
     kGLSL_ES300 = 1u,
     kGLSL_Vulkan = 2u,
+    // Phase 6.1: WGSL added as the cross-platform shader language for
+    // the Dawn-backed renderer. Per the architectural commitment locked
+    // in PHASE_BACKLOG.md "Phase 6 prerequisite", WGSL is the single
+    // source of truth for all new shader code (gaussian_splat_*.wgsl,
+    // gaussian_training_*.wgsl). MSL retained only as a legacy reference
+    // path under App/GaussianSplatting/Shaders/ — no new MSL shaders.
+    kWGSL = 3u,
 };
 
 enum class BRDFApproximationPath : std::uint8_t {

@@ -216,6 +216,7 @@ Run all 6 axes. Each passes/fails independently, all must pass. Documented in `a
 
 (Newest at top. Updated as sub-steps complete.)
 
+- **6.1 (kWGSL enum) ✅ DONE 2026-04-26 ~03:15** — `kWGSL = 3u` added to `ShaderLanguage` in `aether_cpp/include/aether/render/shader_source.h`. 5 switch statements in `aether_cpp/src/render/shader_source.cpp` (BRDF / BRDF-LUT / BRDF-Poly / SH-eval / flip-rotation utility shaders) given explicit `case ShaderLanguage::kWGSL:` falling through to GLSL with `// TODO Phase 6+: translate <utility> to WGSL` comments — exhausts the switch without breaking `-Werror -Wswitch`. The utility shaders are not yet WGSL-translated; that's deferred to Phase 6+ if/when those utilities are needed in the WGSL pipeline (likely Phase 7+ once basic splat WGSL works). Clean `aether3d_core` build verified on host.
 - **6.0 (Dawn iOS unblock) ✅ SUBSTANTIALLY DONE 2026-04-26 ~03:00** — Dawn now compiles for iOS arm64 device + arm64-simulator. Specifics:
   - **Step 1 ✅**: `scripts/build_ios_xcframework.sh` flipped `-DAETHER_ENABLE_DAWN=OFF` to `=ON`; build configures cleanly with Dawn submodule pulled into iOS build tree.
   - **Step 2 ✅**: `cmake --build … --target webgpu_dawn` produces `libwebgpu_dawn_objects.a` (both arches). MetalBackend.mm + webgpu_dawn_native_proc.cpp compile clean for arm64-apple-ios14.0.

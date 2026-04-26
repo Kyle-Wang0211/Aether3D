@@ -139,6 +139,7 @@ const char* brdf_shader_source(ShaderLanguage lang) {
             return kBRDFMSL;
         case ShaderLanguage::kGLSL_ES300:
         case ShaderLanguage::kGLSL_Vulkan:
+        case ShaderLanguage::kWGSL:  // TODO Phase 6+: translate BRDF utility shaders to WGSL
             return kBRDFGLSL;
     }
     return kBRDFGLSL;
@@ -150,6 +151,7 @@ const char* brdf_lut_source(ShaderLanguage lang) {
             return kBRDFLUTMSL;
         case ShaderLanguage::kGLSL_ES300:
         case ShaderLanguage::kGLSL_Vulkan:
+        case ShaderLanguage::kWGSL:  // TODO Phase 6+: translate BRDF utility shaders to WGSL
             return kBRDFLUTGLSL;
     }
     return kBRDFLUTGLSL;
@@ -161,6 +163,7 @@ const char* brdf_polynomial_source(ShaderLanguage lang) {
             return kBRDFPolyMSL;
         case ShaderLanguage::kGLSL_ES300:
         case ShaderLanguage::kGLSL_Vulkan:
+        case ShaderLanguage::kWGSL:  // TODO Phase 6+: translate BRDF utility shaders to WGSL
             return kBRDFPolyGLSL;
     }
     return kBRDFPolyGLSL;
@@ -172,6 +175,7 @@ const char* sh_evaluation_source(ShaderLanguage lang) {
             return kSHMSL;
         case ShaderLanguage::kGLSL_ES300:
         case ShaderLanguage::kGLSL_Vulkan:
+        case ShaderLanguage::kWGSL:  // TODO Phase 6+: translate SH evaluation to WGSL
             return kSHGLSL;
     }
     return kSHGLSL;
@@ -183,6 +187,7 @@ const char* flip_rotation_source(ShaderLanguage lang) {
             return kFlipMSL;
         case ShaderLanguage::kGLSL_ES300:
         case ShaderLanguage::kGLSL_Vulkan:
+        case ShaderLanguage::kWGSL:  // TODO Phase 6+: translate flip-rotation helper to WGSL
             return kFlipGLSL;
     }
     return kFlipGLSL;
