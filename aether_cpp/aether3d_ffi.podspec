@@ -67,6 +67,16 @@ Pod::Spec.new do |s|
   s.user_target_xcconfig = {
     'LIBRARY_SEARCH_PATHS[sdk=iphoneos*]'        => '$(PODS_ROOT)/../../../dist/libs/ios-arm64',
     'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '$(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator',
+    # Constrain Runner target's archs to match the .a slices we ship.
+    # Both slices are arm64-only (sim slice dropped x86_64 to match Apple
+    # Silicon-only sim runtime); without this, Flutter's default builds
+    # x86_64+arm64 sim binaries, x86_64 link fails because force_load
+    # can't load arm64 .a into x86_64 link, and -Wl,-u makes the failure
+    # loud (which is correct — silent miss in Sim Debug masked the real
+    # bug on Release device, see f147e4af commit message).
+    'VALID_ARCHS[sdk=iphonesimulator*]'          => 'arm64',
+    'VALID_ARCHS[sdk=iphoneos*]'                 => 'arm64',
+    'EXCLUDED_ARCHS[sdk=iphonesimulator*]'       => 'x86_64',
     # NB: $(inherited) preserves CocoaPods's own -ObjC + Pod link flags.
     # Without it, OTHER_LDFLAGS[sdk=…] would override the base entirely.
     #

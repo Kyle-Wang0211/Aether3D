@@ -54,11 +54,8 @@ the item shouldn't be here.
 - **Trigger to do**: any Flutter SDK bump (currently pinned to 3.41.7 in CROSS_PLATFORM_STACK.md).
 - **Shape**: ~30 min — add weak-ref tracking around CVPixelBuffer + assertion that count drops over time, OR a unit test that mocks the Flutter compositor.
 
-### #6 — Dart-side retry mechanism on texture create failure
-- **What**: `_HomeScreenState._textureError` in `pocketworld_flutter/lib/main.dart` is set on failure and never retried. UI shows the error string until app relaunch. Add a retry button or auto-retry with backoff.
-- **Why it's not cosmetic**: any transient failure (GPU temporarily busy, OS resource pressure during create) bricks the widget for the session. Production needs a recovery path.
-- **Trigger to do**: before this surface is exposed to non-developer users.
-- **Shape**: ~15 min Dart change — wrap `_textureError` reset + invokeMethod retry in a button; or `Timer(Duration(seconds: 2), _requestTexture)` for auto.
+### #6 — Dart-side retry mechanism on texture create failure ✅ DONE Phase 5 polish
+- Resolved by wrapping `_HomeScreenState._requestTexture` with `_isRetrying` guard + ElevatedButton in the error path. Manual-only (no auto-retry — auto would mask GPU resource contention; explicit user click is the right product behavior for a dev surface). See `pocketworld_flutter/lib/main.dart`.
 
 ### #7 — RCA the 57.1 fps dip in DoD verification run
 - **What**: During Phase 4.6 DoD verification, 27 of 28 one-second windows logged 60.0 fps; one mid-run window logged 57.1 fps. Cause unknown. Possibilities: macOS Spotlight indexing tick, scheduler interrupt, GC of an unrelated process, momentary thermal throttle.
@@ -66,17 +63,11 @@ the item shouldn't be here.
 - **Trigger to do**: before Phase 5 starts, or on first reported frame-stutter complaint.
 - **Shape**: ~30 min — re-run with `os_signpost` or Instruments Time Profiler attached, identify the 57.1 fps frame, decode the cause from the trace.
 
-### #8 — Rename `GradientTexture` → `SharedNativeTexture`
-- **What**: The class still named `GradientTexture` from the Step 1 CPU-gradient era; it now renders a triangle, not a gradient.
-- **Why it's not cosmetic**: code-search misleading. Anyone grepping for "where does the triangle live" hits no result; anyone reading `GradientTexture` thinks it produces a gradient.
-- **Trigger to do**: any time `pocketworld_flutter/macos/Runner/` gets touched again.
-- **Shape**: 1-line rename + class signature update + plugin reference. ~5 min. Also rename `kTriangleShaderSource` to drop the `Triangle` prefix when content varies (Phase 5+).
+### #8 — Rename `GradientTexture` → `SharedNativeTexture` ✅ DONE Phase 5 polish
+- Resolved by `replace_all` rename across both `pocketworld_flutter/macos/Runner/MainFlutterWindow.swift` and `pocketworld_flutter/ios/Runner/AetherTexturePlugin.swift`. Channel method also renamed `createGradientTexture` → `createSharedNativeTexture` (Dart side updated to match). `kTriangleShaderSource` kept — content is still triangle in Phase 5; rename when content varies in Phase 6+.
 
-### #9 — Parametrize 256×256 hardcoded size
-- **What**: `GradientTexture.init(device:width:height:)` defaults are `256, 256` and the Dart side never passes anything. For Phase 5 splat-render the size will need to be window/device-pixel-ratio responsive.
-- **Why it's not cosmetic**: Phase 5 onwards needs the texture to match the rendering region (typically full window, retina-aware).
-- **Trigger to do**: Phase 5 first sub-step (when splat actually renders).
-- **Shape**: ~15 min — pass `{width, height}` via `createGradientTexture` method args; Dart sends device-pixel-ratio-aware size on widget build.
+### #9 — Parametrize 256×256 hardcoded size ✅ DONE Phase 5 polish
+- Resolved by adding `parseTextureDimension(args["width"], default: 256)` helpers to both plugins, threaded into `SharedNativeTexture(device:, width:, height:)`. Dart still sends no size (256×256 default) — the path is now ready for Phase 6+ to pass `MediaQuery.of(context).devicePixelRatio`-aware values. Validation: positive ints, capped at 4096 (bigger than max MTLTexture for any iPhone shipped through 2026).
 
 ### #10 — Unit / integration tests
 - **What**: Phase 4 verification was manual: build, run, eyeball screenshots, scrape stderr for fps. No automated regression catch.

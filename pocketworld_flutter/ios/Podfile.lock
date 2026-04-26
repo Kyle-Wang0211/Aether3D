@@ -13,7 +13,7 @@ EXTERNAL SOURCES:
     :path: Flutter
 
 SPEC CHECKSUMS:
-  aether3d_ffi: a8b5bbfffc9813a2afdc77092fdd36d033849dcf
+  aether3d_ffi: 3846b556abbf070f321e88ca9ccb448096fb2212
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
 
 PODFILE CHECKSUM: 61af61104a41c00f2c96c514a903ec15cf9b36bb

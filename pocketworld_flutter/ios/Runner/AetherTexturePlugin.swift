@@ -7,7 +7,7 @@ import QuartzCore
 // ─── Phase 5.1 — iOS port of Phase 4 macOS Flutter Texture plugin ──────
 //
 // 1:1 port of pocketworld_flutter/macos/Runner/MainFlutterWindow.swift
-// (the AetherTexturePlugin + GradientTexture parts) with these API
+// (the AetherTexturePlugin + SharedNativeTexture parts) with these API
 // substitutions for iOS:
 //   • import FlutterMacOS → import Flutter
 //   • import Cocoa        → import UIKit (drives CACurrentMediaTime,
@@ -68,7 +68,7 @@ fragment float4 fs_main(VertexOut in [[stage_in]]) {
 }
 """
 
-/// Specific failure points during GradientTexture allocation. Each one
+/// Specific failure points during SharedNativeTexture allocation. Each one
 /// maps to a distinct FlutterError code so a Dart-side log identifies
 /// the exact failure without binary-search bisection through the init.
 enum TextureCreateError: Error {
@@ -83,7 +83,7 @@ enum TextureCreateError: Error {
 /// 256×256 BGRA8 native-GPU-written texture, exposed to Flutter through
 /// FlutterTexture protocol via a shared IOSurface. Renders a colored
 /// triangle (R/G/B at the three vertices, barycentric blend).
-class GradientTexture: NSObject, FlutterTexture {
+class SharedNativeTexture: NSObject, FlutterTexture {
     private let pixelBuffer: CVPixelBuffer
     private let mtlTexture: MTLTexture
     private let renderPipeline: MTLRenderPipelineState
@@ -166,7 +166,7 @@ class GradientTexture: NSObject, FlutterTexture {
     /// 60 Hz display-link tick doesn't block on GPU completion.
     func render(commandQueue: MTLCommandQueue, angle: Float) {
         guard let cb = commandQueue.makeCommandBuffer() else { return }
-        cb.label = "GradientTexture.render"
+        cb.label = "SharedNativeTexture.render"
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture     = mtlTexture
@@ -193,7 +193,7 @@ class GradientTexture: NSObject, FlutterTexture {
         // are firing in the steady state.
         cb.addCompletedHandler { cmdBuf in
             if let error = cmdBuf.error {
-                NSLog("[GradientTexture] GPU error: status=%d error=%@",
+                NSLog("[SharedNativeTexture] GPU error: status=%d error=%@",
                       cmdBuf.status.rawValue, "\(error)")
             }
         }
@@ -226,14 +226,14 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     private let commandQueue: MTLCommandQueue?
     // Hold strong refs so the textures aren't deallocated while Flutter
     // is consuming them. Keyed by textureId.
-    private var registered: [Int64: GradientTexture] = [:]
+    private var registered: [Int64: SharedNativeTexture] = [:]
 
     // Animation state. CADisplayLink is the canonical type on iOS (no
     // availability gate needed unlike the macOS port which guards macOS 14+).
     private var displayLink: CADisplayLink?
     private var animationStart: CFTimeInterval = 0
     private var animatedTextureId: Int64?
-    private var animatedTexture: GradientTexture?
+    private var animatedTexture: SharedNativeTexture?
     private var frameCount: Int = 0
     private var frameStatsLogTime: CFTimeInterval = 0
 
@@ -314,10 +314,30 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// Phase 4 polish #9: parse a texture-dimension arg from Dart side.
+    /// Dart sends ints via NSNumber; FlutterMethodChannel may also surface
+    /// them as Int / Int32 / Int64 depending on platform-channel codec
+    /// version. Treat 0 / negative / unreasonably large (>4096) as
+    /// invalid → fall back to default. 4096 cap is deliberate: bigger
+    /// than max MTLTexture for any iPhone shipped through 2026, big
+    /// enough to never be the real bottleneck.
+    private func parseTextureDimension(_ raw: Any?, default fallback: Int) -> Int {
+        let n: Int?
+        switch raw {
+        case let v as Int:    n = v
+        case let v as Int32:  n = Int(v)
+        case let v as Int64:  n = Int(v)
+        case let v as NSNumber: n = v.intValue
+        default: n = nil
+        }
+        guard let v = n, v > 0, v <= 4096 else { return fallback }
+        return v
+    }
+
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
 
-        case "createGradientTexture":
+        case "createSharedNativeTexture":
             guard let device = device, let queue = commandQueue else {
                 result(FlutterError(
                     code: "NO_METAL",
@@ -326,8 +346,15 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 ))
                 return
             }
+            // Phase 4 polish #9: parametrize 256×256 hardcoded size. Dart
+            // can pass {width, height} args derived from MediaQuery and
+            // device pixel ratio; if absent or invalid, fall back to the
+            // 256×256 default that's been the Phase 4/5 baseline.
+            let args = call.arguments as? [String: Any] ?? [:]
+            let width  = parseTextureDimension(args["width"],  default: 256)
+            let height = parseTextureDimension(args["height"], default: 256)
             do {
-                let texture = try GradientTexture(device: device)
+                let texture = try SharedNativeTexture(device: device, width: width, height: height)
                 let id = textures.register(texture)
                 registered[id] = texture
                 texture.render(commandQueue: queue, angle: 0)
@@ -400,7 +427,7 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         registered.removeValue(forKey: id)
     }
 
-    private func startAnimation(textureId: Int64, texture: GradientTexture) {
+    private func startAnimation(textureId: Int64, texture: SharedNativeTexture) {
         guard displayLink == nil else { return }  // already running
         animatedTextureId = textureId
         animatedTexture   = texture
@@ -462,7 +489,7 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
 
     @objc private func handleMemoryWarning() {
         // Drop all GPU resources. Flutter's _HomeScreenState catches the
-        // MissingPluginException-style symptom on its next createGradientTexture
+        // MissingPluginException-style symptom on its next createSharedNativeTexture
         // call (or repaints with the existing _textureError state).
         NSLog("[AetherTexture] memory warning — disposing %d textures", registered.count)
         warningChannel?.invokeMethod("warning", arguments: [

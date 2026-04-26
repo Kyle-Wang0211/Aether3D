@@ -47,6 +47,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const _channel = MethodChannel('aether_texture');
   int? _textureId;
   String? _textureError;
+  bool _isRetrying = false;
 
   @override
   void initState() {
@@ -54,18 +55,40 @@ class _HomeScreenState extends State<HomeScreen> {
     _requestTexture();
   }
 
-  Future<void> _requestTexture() async {
+  /// Phase 4 polish #6: explicit-retry path for texture create failures.
+  /// Native plugin returns one of 8 distinct FlutterError codes (see
+  /// AetherTexturePlugin handle("createSharedNativeTexture")). Most are
+  /// non-recoverable (NO_METAL, SHADER_COMPILE_FAILED) — but some can be
+  /// transient (IOSURFACE_FAILED under memory pressure, MTLTEXTURE_FAILED
+  /// after a GPU reset). Without retry, a single failure bricks the
+  /// widget for the session.
+  Future<void> _requestTexture({bool isManualRetry = false}) async {
+    if (_isRetrying) return;
+    setState(() {
+      _isRetrying = true;
+      _textureError = null;
+      if (isManualRetry) _textureId = null;
+    });
     try {
-      final id = await _channel.invokeMethod<int>('createGradientTexture');
+      final id = await _channel.invokeMethod<int>('createSharedNativeTexture');
       if (!mounted) return;
-      setState(() => _textureId = id);
+      setState(() {
+        _textureId = id;
+        _isRetrying = false;
+      });
     } on MissingPluginException {
       if (!mounted) return;
-      setState(() => _textureError =
-          'plugin not registered (running on a non-macOS target?)');
+      setState(() {
+        _textureError =
+            'plugin not registered (running on a non-iOS/macOS target?)';
+        _isRetrying = false;
+      });
     } on PlatformException catch (e) {
       if (!mounted) return;
-      setState(() => _textureError = '${e.code}: ${e.message}');
+      setState(() {
+        _textureError = '${e.code}: ${e.message}';
+        _isRetrying = false;
+      });
     }
   }
 
@@ -119,11 +142,41 @@ class _HomeScreenState extends State<HomeScreen> {
                             alignment: Alignment.center,
                             child: Padding(
                               padding: const EdgeInsets.all(8.0),
-                              child: Text(
-                                _textureError ?? 'creating texture\u2026',
-                                textAlign: TextAlign.center,
-                                style: theme.textTheme.bodySmall,
-                              ),
+                              // Phase 4 polish #6: retry button when
+                              // create failed; "creating…" placeholder
+                              // otherwise. _isRetrying disables the button
+                              // so back-to-back taps don't spawn parallel
+                              // create calls (which would leak texture
+                              // IDs the user can't dispose).
+                              child: _textureError != null
+                                  ? Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          _textureError!,
+                                          textAlign: TextAlign.center,
+                                          style: theme.textTheme.bodySmall,
+                                        ),
+                                        const SizedBox(height: 12),
+                                        ElevatedButton(
+                                          onPressed: _isRetrying
+                                              ? null
+                                              : () => _requestTexture(
+                                                  isManualRetry: true),
+                                          child: Text(_isRetrying
+                                              ? 'retrying\u2026'
+                                              : 'retry'),
+                                        ),
+                                      ],
+                                    )
+                                  : Text(
+                                      _isRetrying
+                                          ? 'retrying\u2026'
+                                          : 'creating texture\u2026',
+                                      textAlign: TextAlign.center,
+                                      style: theme.textTheme.bodySmall,
+                                    ),
                             ),
                           ),
                   ),
