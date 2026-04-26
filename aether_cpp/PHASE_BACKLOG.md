@@ -86,6 +86,35 @@ the item shouldn't be here.
 
 ---
 
+## Phase 5.2 iPhone 17 Pro real device deploy (DEFERRED — codesign blocker)
+
+### macOS 26.1 + Xcode 26.2 + `com.apple.provenance` xattr blocks every codesign path
+- **What**: `flutter build ios` (release, not simulator) fails at Xcode's `CodeSign /path/Runner.app` step with `resource fork, Finder information, or similar detritus not allowed`. Same root cause as the Phase 2 macOS-desktop codesign issue: `com.apple.provenance` xattr is **kernel-generated on every file write** on macOS 26 and **kernel-protected** (cannot be removed). codesign refuses to sign files carrying it.
+- **Status as of 2026-04-25 23:58**: Phase 5.0/5.1/5.4 verified on iPhone 17 Pro Simulator (which doesn't enforce codesign — Patch 0002 skips it there). Real device deploy blocked. Kyle's iPhone IS connected and visible in `flutter devices`; the block is purely host-side codesign, not device-side.
+- **Things tried (none worked)**:
+  - `xattr -c` (Patch 0001 in scripts/flutter_sdk_patches/): exits 0 but xattr remains
+  - `xattr -d com.apple.provenance`: same — kernel rejects silently
+  - `ditto --noextattr` to a fresh path: target file STILL gets xattr (kernel applies on write)
+  - `cp -X` to a fresh path: same as ditto
+  - `cat src > dst`: even shell redirection produces a file with the xattr
+  - Even `/tmp` and `/private/var/tmp` get the xattr — system-wide
+  - Skipping Flutter tool's `_signFramework` pre-codesign (extended Patch 0002 live, then reverted): only delays the failure; Xcode's downstream codesign during Embed Frameworks hits the same xattr error on `Runner.app/Runner` (the Swift-compiled main binary)
+  - `codesign --remove-signature` then `--force --deep --options=runtime` with full entitlements: same "detritus not allowed"
+- **Why this is a hard block, not a Flutter issue**: the same codesign command would fail on a non-Flutter Swift project under macOS 26.1. The xattr is on every file, and codesign predates this xattr's existence so its sanity check rejects unknown xattrs. Apple presumably has internal infrastructure that strips xattrs before codesign, but it's not exposed to user-side codesign.
+- **What unblocks this**:
+  - Apple Xcode/codesign update that recognizes `com.apple.provenance` as known-safe (most likely path; track via macOS 26.x point releases)
+  - Boot from a different macOS install (older 14.x or 15.x) that doesn't generate this xattr — invasive, last resort
+  - Run iOS build inside a VM with macOS 14.x — extra infra, may be feasible via tart / orbstack
+  - Submit Apple Feedback Assistant ticket arguing for a `codesign --allow-provenance-xattr` flag — long lead time
+- **Trigger to retry**: any of:
+  - macOS 26.x point release where `xattr -d com.apple.provenance` actually works
+  - Discovery of an undocumented codesign flag (rg through Xcode binaries / man pages periodically)
+  - User decision to build on a different machine
+- **Why deferring is acceptable for Phase 5**: Phase 5 mission was "iOS port of Phase 4 bridge". Phase 5.0/5.1/5.4 prove the iOS port architecturally — IOSurface bridge, Metal pipeline, FFI all run on iPhone 17 Pro Simulator (which is real iOS code on real iOS Metal stack, just running on host CPU). Real device deploy is a build-environment problem, not an architectural one. The Phase 5 architectural goal is met; the deploy step waits.
+- **Shape**: when codesign is fixed, the deploy step is `flutter run -d <iphone-udid> --release`. ~5 min. The build settings are already correct (DEVELOPMENT_TEAM = 26AH7V448L, PRODUCT_BUNDLE_IDENTIFIER = com.kyle.PocketWorld, automatic signing).
+
+---
+
 ## Phase 5 polish (deferred, non-blocking)
 
 ### Flutter 3.41.7 frontend_server `--output-dill` bug — literal-hash-dirname is cursed after `flutter clean`
