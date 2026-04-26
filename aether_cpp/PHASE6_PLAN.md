@@ -216,6 +216,12 @@ Run all 6 axes. Each passes/fails independently, all must pass. Documented in `a
 
 (Newest at top. Updated as sub-steps complete.)
 
+- **6.0 (Dawn iOS unblock) ✅ SUBSTANTIALLY DONE 2026-04-26 ~03:00** — Dawn now compiles for iOS arm64 device + arm64-simulator. Specifics:
+  - **Step 1 ✅**: `scripts/build_ios_xcframework.sh` flipped `-DAETHER_ENABLE_DAWN=OFF` to `=ON`; build configures cleanly with Dawn submodule pulled into iOS build tree.
+  - **Step 2 ✅**: `cmake --build … --target webgpu_dawn` produces `libwebgpu_dawn_objects.a` (both arches). MetalBackend.mm + webgpu_dawn_native_proc.cpp compile clean for arm64-apple-ios14.0.
+  - **Step 3 🟡 PARTIAL**: CMake metadata for iOS app bundle (`MACOSX_BUNDLE`, `XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER`, `XCODE_ATTRIBUTE_DEVELOPMENT_TEAM`) added to `aether_dawn_hello*` targets in `CMakeLists.txt`. iOS `.app` bundle now produces from CMake. Hello link step fails because Dawn's `webgpu_dawn` umbrella target on iOS doesn't produce `libwebgpu_dawn.a` at the path the linker expects — only the `webgpu_dawn_objects.a` archive exists. This is a Dawn upstream packaging quirk for static-only iOS targets, not a fundamental Dawn-iOS block.
+  - **Per-step abort signal**: NOT triggered — Dawn iOS itself works, only the standalone-hello packaging path is blocked. 6.1+ can proceed because 6.2's `DawnGPUDevice` will link via `aether3d_core` (which uses `dawn::webgpu_dawn` interface target, not the umbrella library directly).
+  - **Trigger to revisit step 3**: when a CLI verification of Dawn iOS on real device is genuinely needed (e.g. to root-cause a Dawn runtime issue). Workaround: a tiny Swift `dawnHello()` button inside the existing PocketWorld plugin reaches the same goal more naturally — it's already an iOS .app with bundle ID and provisioning.
 - **Phase 6 KICKOFF 2026-04-26 ~01:55** — pre-kickoff audit done; PHASE6_PLAN.md written; locked decisions A–F resolved; 6.0 begins next.
 
 ---

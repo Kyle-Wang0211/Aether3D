@@ -124,6 +124,23 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
         # cxx_std_20 inherited from top-level CMAKE_CXX_STANDARD; explicit
         # target_compile_features() breaks under iphonesimulator sysroot
         # (CMake compiler-feature probe returns empty) — see commit history.
+
+        # Phase 6.0 (2026-04-26): iOS requires every executable to be an
+        # .app bundle with a bundle identifier. Without these properties,
+        # iOS build fails with "Bundle identifier is missing.
+        # <target> doesn't have a bundle identifier." On macOS desktop /
+        # CLI build, MACOSX_BUNDLE=FALSE keeps the executables as plain
+        # binaries (which is what the existing P1.4/1.5/1.7 PPM workflow
+        # expects). On iOS, MACOSX_BUNDLE=TRUE makes them .app bundles
+        # under com.kyle.aether.<target>.
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set_target_properties(${target} PROPERTIES
+                MACOSX_BUNDLE TRUE
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.kyle.aether.${target}"
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "26AH7V448L"
+            )
+        endif()
     endfunction()
 
     aether_dawn_hello_sample(aether_dawn_hello          tools/aether_dawn_hello.cpp)           # P1.4 adapter info

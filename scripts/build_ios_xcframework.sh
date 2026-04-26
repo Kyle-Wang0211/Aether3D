@@ -10,8 +10,11 @@
 # (CoreML / Metal API differences). Re-enabling those for iOS is a Phase 4
 # task, see PHASE_BACKLOG.md "iOS aether3d_core" entry.
 #
-# Dawn is also disabled (AETHER_ENABLE_DAWN=OFF). Dawn-on-iOS is its own
-# can of worms, deferred per PHASE_BACKLOG.md.
+# Phase 6.0 (2026-04-26): Dawn iOS unblocked. AETHER_ENABLE_DAWN flipped from
+# OFF (Phase 5.0 deferral under D2 macOS-first decision) to ON. Audit
+# confirmed Dawn submodule (third_party/dawn/) ships Metal backend with iOS
+# GPU family checks already, so the unblock is a build-flag flip — no
+# vendor work required. See aether_cpp/PHASE6_PLAN.md decision D + 6.0.
 
 set -euo pipefail
 
@@ -28,7 +31,7 @@ COMMON_ARGS=(
     -DCMAKE_SYSTEM_NAME=iOS
     -DCMAKE_OSX_ARCHITECTURES=arm64
     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
-    -DAETHER_ENABLE_DAWN=OFF
+    -DAETHER_ENABLE_DAWN=ON
     -DAETHER_FFI_BUILD_STATIC=ON
 )
 
