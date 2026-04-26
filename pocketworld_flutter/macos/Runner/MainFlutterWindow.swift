@@ -37,13 +37,15 @@ import CoreVideo  // CVPixelBuffer
 // ─── FFI binding (dynamic dlsym; no Xcode link config needed) ─────────
 
 private final class FFI {
-    typealias CreateFn  = @convention(c) (UnsafeMutableRawPointer, UInt32, UInt32) -> OpaquePointer?
-    typealias DestroyFn = @convention(c) (OpaquePointer?) -> Void
-    typealias RenderFn  = @convention(c) (OpaquePointer?, Double) -> Void
+    typealias CreateFn     = @convention(c) (UnsafeMutableRawPointer, UInt32, UInt32) -> OpaquePointer?
+    typealias DestroyFn    = @convention(c) (OpaquePointer?) -> Void
+    typealias RenderFn     = @convention(c) (OpaquePointer?, Double) -> Void
+    typealias RenderFullFn = @convention(c) (OpaquePointer?, UnsafePointer<Float>, UnsafePointer<Float>) -> Void
 
-    let create:  CreateFn
-    let destroy: DestroyFn
-    let render:  RenderFn
+    let create:     CreateFn
+    let destroy:    DestroyFn
+    let render:     RenderFn
+    let renderFull: RenderFullFn
 
     /// Returns nil (with NSLog diagnostic) if the dylib can't be found
     /// or any of the required symbols isn't present.
@@ -57,13 +59,10 @@ private final class FFI {
         // 2. Try several known dev paths. The fallback chain matches the
         //    iterative dev workflow (run cmake → flutter run).
         let candidates: [String] = [
-            // Relative to current directory (where flutter run is invoked).
             "aether_cpp/build/libaether3d_ffi.dylib",
             "../aether_cpp/build/libaether3d_ffi.dylib",
             "../../aether_cpp/build/libaether3d_ffi.dylib",
-            // App Frameworks dir (production install).
             Bundle.main.bundlePath + "/Contents/Frameworks/libaether3d_ffi.dylib",
-            // Last resort: dyld search path (DYLD_LIBRARY_PATH etc.).
             "libaether3d_ffi.dylib",
         ]
         for path in candidates {
@@ -80,14 +79,16 @@ private final class FFI {
     }()
 
     private init?(handle: UnsafeMutableRawPointer) {
-        guard let cSym = dlsym(handle, "aether_splat_renderer_create"),
-              let dSym = dlsym(handle, "aether_splat_renderer_destroy"),
-              let rSym = dlsym(handle, "aether_splat_renderer_render") else {
+        guard let cSym  = dlsym(handle, "aether_splat_renderer_create"),
+              let dSym  = dlsym(handle, "aether_splat_renderer_destroy"),
+              let rSym  = dlsym(handle, "aether_splat_renderer_render"),
+              let rfSym = dlsym(handle, "aether_splat_renderer_render_full") else {
             return nil
         }
-        self.create  = unsafeBitCast(cSym, to: CreateFn.self)
-        self.destroy = unsafeBitCast(dSym, to: DestroyFn.self)
-        self.render  = unsafeBitCast(rSym, to: RenderFn.self)
+        self.create     = unsafeBitCast(cSym,  to: CreateFn.self)
+        self.destroy    = unsafeBitCast(dSym,  to: DestroyFn.self)
+        self.render     = unsafeBitCast(rSym,  to: RenderFn.self)
+        self.renderFull = unsafeBitCast(rfSym, to: RenderFullFn.self)
     }
 }
 
@@ -110,11 +111,26 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     private let rendererHandle: OpaquePointer
     private var hasRenderedOnce = false
 
+    // Phase 6.4c: latest gesture-derived matrices, pushed by Dart via
+    // setMatrices method channel. Identity by default so the first frame
+    // (before any gesture) renders the static cross_validate baseline.
+    private var latestView: [Float] = SharedNativeTexture.identityMatrix()
+    private var latestModel: [Float] = SharedNativeTexture.identityMatrix()
+
     // Phase 4 polish #3: passRetained contract assertion. Carried forward
     // unchanged — same CVPixelBuffer lifecycle as before.
     private var copyCount: UInt64 = 0
     private let leakCheckIntervalCalls: UInt64 = 60
     private let leakCheckThresholdRefs: CFIndex = 5
+
+    private static func identityMatrix() -> [Float] {
+        return [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ]
+    }
 
     init(width: Int = 256, height: Int = 256) throws {
         guard let ffi = FFI.shared else {
@@ -164,14 +180,28 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         ffi.destroy(rendererHandle)
     }
 
-    /// Render one frame of the splat scene into the shared IOSurface.
-    /// `tSeconds` is the displayLink-derived elapsed time. Phase 6.4a
-    /// stage 1 ignores it (scene is static, matches cross_validate
-    /// baseline). Phase 6.4a' replaces this with full view+model matrix
-    /// FFI driven by Dart-side OrbitControls (Phase 6.4c).
-    func render(tSeconds: Double) {
-        ffi.render(rendererHandle, tSeconds)
+    /// Render one frame using the stored latest view + model matrices.
+    /// Driven from displayLinkTick. The matrices are updated via
+    /// setMatrices() (called from Dart's gesture handlers via
+    /// MethodChannel). Without any gesture, both default to identity.
+    func render() {
+        latestView.withUnsafeBufferPointer { viewBuf in
+            latestModel.withUnsafeBufferPointer { modelBuf in
+                ffi.renderFull(rendererHandle, viewBuf.baseAddress!, modelBuf.baseAddress!)
+            }
+        }
         hasRenderedOnce = true
+    }
+
+    /// Update the matrices used for the next render frame. Called from
+    /// the AetherTexturePlugin's setMatrices method-channel handler when
+    /// Dart pushes new orbit/object state.
+    func setMatrices(view: [Float], model: [Float]) {
+        // Defensive: caller may pass wrong-length arrays from a buggy
+        // FlutterStandardTypedData decode; clamp to 16 floats and pad
+        // with identity values rather than crashing.
+        if view.count == 16  { latestView  = view  }
+        if model.count == 16 { latestModel = model }
     }
 
     private let ffi: FFI
@@ -245,7 +275,7 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 let texture = try SharedNativeTexture(width: width, height: height)
                 let id = textures.register(texture)
                 registered[id] = texture
-                texture.render(tSeconds: 0)
+                texture.render()
                 textures.textureFrameAvailable(id)
                 startAnimation(textureId: id, texture: texture)
                 result(NSNumber(value: id))
@@ -286,6 +316,32 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 return
             }
             disposeTexture(id: id)
+            result(nil)
+
+        case "setMatrices":
+            // Phase 6.4c — Dart pushes orbit/obj-derived matrices on
+            // gesture events. We store them on the per-texture state;
+            // the next displayLinkTick will read them.
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value,
+                  let viewData  = args["view"]  as? FlutterStandardTypedData,
+                  let modelData = args["model"] as? FlutterStandardTypedData else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "setMatrices requires {textureId: int, view: Float32List(16), model: Float32List(16)}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                // Late call after dispose — silent ignore (gesture
+                // events can race ahead of disposeTexture in shutdown).
+                result(nil)
+                return
+            }
+            // FlutterStandardTypedData carries Float32 as raw bytes; parse 16 floats.
+            let viewArr  = viewData.data.toFloatArray()
+            let modelArr = modelData.data.toFloatArray()
+            texture.setMatrices(view: viewArr, model: modelArr)
             result(nil)
 
         default:
@@ -329,9 +385,10 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     @objc private func displayLinkTick() {
         guard let id = animatedTextureId,
               let texture = animatedTexture else { return }
-        let now     = CACurrentMediaTime()
-        let elapsed = now - animationStart
-        texture.render(tSeconds: elapsed)
+        let now = CACurrentMediaTime()
+        // Phase 6.4c: render uses Dart-pushed view/model matrices stored
+        // on the texture (default identity until first gesture).
+        texture.render()
         textures.textureFrameAvailable(id)
 
         frameCount += 1
@@ -341,6 +398,20 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f)", fps, frameCount, dt)
             frameStatsLogTime = now
             frameCount = 0
+        }
+    }
+}
+
+// ─── Float32List ↔ [Float] helper ─────────────────────────────────────
+
+private extension Data {
+    /// Decode the buffer's bytes as a `[Float]` (Float32 = 4 bytes each).
+    /// Used to unpack `FlutterStandardTypedData(.float32)` from Dart.
+    func toFloatArray() -> [Float] {
+        let count = self.count / MemoryLayout<Float>.size
+        return self.withUnsafeBytes { raw -> [Float] in
+            let base = raw.bindMemory(to: Float.self)
+            return Array(UnsafeBufferPointer(start: base.baseAddress, count: count))
         }
     }
 }

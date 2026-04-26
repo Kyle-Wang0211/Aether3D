@@ -1,20 +1,27 @@
 // Phase 2.4 PocketWorld hello main screen + Phase 4.1/4.5 Flutter Texture
-// widget + Phase 5.4 FFI version string.
+// widget + Phase 5.4 FFI version string + Phase 6.4a IOSurface splat
+// renderer + Phase 6.4c camera/object transform gestures.
 //
 // Below the "PocketWorld" title we render a 256×256 Flutter Texture widget
-// fed by an IOSurface-backed MTLTexture (Phase 4.2 macOS / 5.1 iOS). The
-// triangle is rotated 1 rad/s by a CADisplayLink-driven Metal render pass.
+// fed by an IOSurface-backed Dawn-rendered splat scene (Phase 6.4a). The
+// widget is wrapped in a GestureDetector that drives 4 transforms:
+//   single-finger drag        → camera orbit (OrbitControls)
+//   two-finger pinch          → camera dolly (OrbitControls)
+//   two-finger same-direction → object pan (ObjectTransform)
+//   two-finger counter-rotate → object rotate Y (ObjectTransform)
 //
-// Footer was P2.4 placeholder `'v0.1.0-phase2'`; Phase 5.4 replaces it
-// with the real `AetherFfi.versionString()` FFI call against
-// `aether_cpp/src/core/version.cpp`. If the binding fails (e.g. the
-// static lib didn't link into the host binary), the footer shows the
-// FfiResolutionError reason instead of crashing.
+// On every gesture event the new view + model matrices are pushed to the
+// native plugin via `setMatrices` method-channel call. The plugin's
+// CADisplayLink loop reads the latest matrices on every frame.
+
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'aether_ffi.dart';
+import 'orbit_controls.dart';
+import 'object_transform.dart';
 
 void main() {
   runApp(const PocketWorldApp());
@@ -48,6 +55,20 @@ class _HomeScreenState extends State<HomeScreen> {
   int? _textureId;
   String? _textureError;
   bool _isRetrying = false;
+
+  // Phase 6.4c: camera + object transform state. State changes on gesture
+  // events; matrices are pushed to native plugin via setMatrices method
+  // channel. The plugin's displayLink reads the latest matrices each frame.
+  final OrbitControls _orbit = OrbitControls();
+  final ObjectTransform _object = ObjectTransform();
+  // Vertical FOV used for object pan unprojection. Phase 6.4d may make
+  // this device-tier dependent; for now it matches the C++ pipeline's
+  // 60° default.
+  static const double _fovYRadians = 60.0 * 3.14159265 / 180.0;
+  // Texture widget renders at this size in Flutter logical pixels. The
+  // gesture math uses this for screen→world projection and rotateSpeed
+  // calibration. Kept in sync with the SizedBox in build().
+  static const Size _textureWidgetSize = Size(256, 256);
 
   @override
   void initState() {
@@ -106,6 +127,26 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  /// Push the current orbit + object matrices to the native plugin.
+  /// Called from gesture handlers — Flutter's gesture stream is sparse
+  /// (one event per finger movement frame), so this is NOT per-render-
+  /// frame. The plugin's displayLink uses the most recently set matrices
+  /// for every render frame in between gesture events.
+  void _pushMatrices() {
+    final id = _textureId;
+    if (id == null) return;
+    final viewBytes = _orbit.viewMatrix();
+    final modelBytes = _object.modelMatrix();
+    // Fire-and-forget. Errors here are diagnostic-only — a missed
+    // setMatrices means the next render uses the previously-stored
+    // matrices, which is graceful degradation rather than a crash.
+    _channel.invokeMethod('setMatrices', {
+      'textureId': id,
+      'view': viewBytes,
+      'model': modelBytes,
+    }).catchError((_) {});
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -125,14 +166,44 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                   const SizedBox(height: 32),
-                  // Phase 4.1 + 4.5 Texture widget. Phase 4.2 swaps the
-                  // CPU-rendered CVPixelBuffer for an IOSurface-backed
-                  // MTLTexture; widget tree doesn't change.
+                  // Phase 4.1 → 6.4c: Texture widget wrapped in
+                  // GestureDetector that drives camera + object transform.
+                  // SizedBox keeps the texture at its native 256×256 size
+                  // — _textureWidgetSize is kept in sync for the gesture
+                  // math's screen→world projection.
                   SizedBox(
-                    width: 256,
-                    height: 256,
+                    width: _textureWidgetSize.width,
+                    height: _textureWidgetSize.height,
                     child: _textureId != null
-                        ? Texture(textureId: _textureId!)
+                        ? GestureDetector(
+                            // Single-finger drag → camera orbit.
+                            onPanUpdate: (d) {
+                              setState(() {
+                                _orbit.rotate(
+                                    d.delta.dx, d.delta.dy, _textureWidgetSize);
+                              });
+                              _pushMatrices();
+                            },
+                            // Two-finger gestures: pinch + pan + rotate
+                            // arrive as a single ScaleUpdateDetails.
+                            // Flutter's gesture arena auto-disambiguates
+                            // single-vs-double touch — no manual handling
+                            // required (decision pin 11: zero tutorial).
+                            onScaleUpdate: (d) {
+                              setState(() {
+                                _orbit.dolly(d.scale);
+                                _object.pan(
+                                    d.focalPointDelta,
+                                    _orbit.viewMatrix(),
+                                    _fovYRadians,
+                                    _orbit.distance,
+                                    _textureWidgetSize);
+                                _object.rotate(d.rotation);
+                              });
+                              _pushMatrices();
+                            },
+                            child: Texture(textureId: _textureId!),
+                          )
                         : Container(
                             decoration: BoxDecoration(
                               border: Border.all(
