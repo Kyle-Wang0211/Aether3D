@@ -1,0 +1,19 @@
+[package]
+name = "wgsl_preprocess"
+version = "0.1.0"
+edition = "2024"
+description = "Phase 6.3 vendor-time preprocessor — resolve Brush WGSL #import + #ifdef into standard WGSL via naga_oil (Brush's own preprocessor)."
+
+[[bin]]
+name = "wgsl_preprocess"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned to the same naga_oil version Brush v0.3.0 uses — ensures
+# preprocessing output matches Brush's own runtime exactly.
+naga_oil = "0.19"
+naga = { version = "26", features = ["wgsl-out", "wgsl-in"] }
+anyhow = "1"
+# regex used to strip naga_oil's X_naga_oil_mod_X<base32>X type-name
+# mangling so the output WGSL has plain readable type names.
+regex = "1"
