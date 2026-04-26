@@ -318,6 +318,71 @@ public:
                       bytesPerRow:bytes_per_row];
     }
 
+    std::vector<std::uint8_t> readback_texture(
+        GPUTextureHandle handle,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t bytes_per_pixel) noexcept override {
+        if (width == 0 || height == 0 || bytes_per_pixel == 0) return {};
+        id<MTLTexture> tex = nil;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = textures_.find(handle.id);
+            if (it == textures_.end()) return {};
+            tex = it->second;
+        }
+        if (!tex) return {};
+
+        const std::uint32_t bpr = width * bytes_per_pixel;
+        const std::size_t total = static_cast<std::size_t>(bpr) * height;
+
+        // For shared / managed storage textures, getBytes:fromRegion: is
+        // synchronous direct read. For private storage, we have to blit
+        // into a CPU-visible MTLBuffer first. Phase 6 IOSurface render
+        // targets use shared storage (zero-copy with Flutter), so the
+        // direct path is the production hot path; the blit fallback
+        // covers any future private-storage textures we add.
+        std::vector<std::uint8_t> out(total);
+
+        if (tex.storageMode == MTLStorageModeShared
+#if TARGET_OS_OSX
+            || tex.storageMode == MTLStorageModeManaged
+#endif
+            ) {
+            // Ensure any pending writes to the texture have been
+            // committed before we read. wait_idle() is a heavy stick;
+            // for now we trust the caller to wait via their own command
+            // buffer's wait_until_completed before calling readback.
+            MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+            [tex getBytes:out.data()
+              bytesPerRow:bpr
+               fromRegion:region
+              mipmapLevel:0];
+            return out;
+        }
+
+        // Private storage path: blit into a shared buffer, then copy out.
+        id<MTLBuffer> staging = [device_ newBufferWithLength:total
+                                                     options:MTLResourceStorageModeShared];
+        if (!staging) return {};
+        id<MTLCommandBuffer> cb = [command_queue_ commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(width, height, 1)
+                     toBuffer:staging
+            destinationOffset:0
+       destinationBytesPerRow:bpr
+     destinationBytesPerImage:total];
+        [blit endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        std::memcpy(out.data(), staging.contents, total);
+        return out;
+    }
+
     // ─── Shader Management ───
 
     GPUShaderHandle load_shader(const char* name,

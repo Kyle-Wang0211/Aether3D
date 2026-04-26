@@ -7,7 +7,9 @@
 #ifdef __cplusplus
 
 #include "aether/render/gpu_resource.h"
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace aether {
 namespace render {
@@ -52,6 +54,26 @@ public:
     virtual void update_texture(GPUTextureHandle handle, const void* data,
                                 std::uint32_t width, std::uint32_t height,
                                 std::uint32_t bytes_per_row) noexcept = 0;
+
+    /// Read back the contents of a texture into a tightly-packed vector
+    /// of bytes (no row padding). Returns an empty vector on failure.
+    /// Synchronous: the call blocks until the GPU has finished writing
+    /// the texture and the data is in the returned vector.
+    ///
+    /// Used by Phase 6.4 IOSurface bridge (Flutter Texture widget needs
+    /// CPU-readable pixels) and Phase 6.5 cross-validation against
+    /// MetalSplatter (pixel-by-pixel diff).
+    ///
+    /// Default impl returns empty vector — backends that don't support
+    /// CPU readback (e.g. NullGPUDevice) inherit this no-op safely.
+    virtual std::vector<std::uint8_t> readback_texture(
+        GPUTextureHandle handle,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t bytes_per_pixel) noexcept {
+        (void)handle; (void)width; (void)height; (void)bytes_per_pixel;
+        return {};
+    }
 
     // ─── Shader Management ───
     virtual GPUShaderHandle load_shader(const char* name,

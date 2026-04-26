@@ -29,6 +29,8 @@
 #include "aether/render/gpu_device.h"
 #include "aether/render/gpu_command.h"
 #include <memory>
+#include <string>
+#include <string_view>
 
 namespace aether {
 namespace render {
@@ -61,6 +63,63 @@ std::unique_ptr<GPUDevice> create_dawn_gpu_device(bool request_high_performance 
 /// @return Owning unique_ptr, or nullptr on failure (wrong backend on
 ///         the device, OOM creating wgpu::CommandEncoder).
 std::unique_ptr<GPUCommandBuffer> create_dawn_command_buffer(GPUDevice& device) noexcept;
+
+// ─── Shader registry (Dawn-specific) ───────────────────────────────────
+//
+// Metal's load_shader looks up entry-point names in a precompiled
+// .metallib library. Dawn has no equivalent — WGSL is supplied as raw
+// source. To keep the GPUDevice virtual API unchanged, callers register
+// WGSL sources by name with this free function before calling
+// device.load_shader(name, stage). The registered name should match the
+// WGSL filename without extension (e.g. "project_forward").
+//
+// Safe to call before or after device.load_shader; the registry is
+// thread-safe via the device's internal mutex.
+//
+// No-op if device.backend() != kDawn (so smoke / wrapper code can safely
+// call this regardless of which backend the device is).
+
+/// Register a WGSL source string under `name`. Subsequent
+/// device.load_shader(name, stage) returns a handle to a compiled
+/// WGPUShaderModule with `entry_point` bound for pipeline creation.
+///
+/// @param device       Any GPUDevice; no-op if backend != kDawn.
+/// @param name         Lookup key; must remain valid for the lifetime
+///                     of the registry entry (typically a string literal).
+/// @param wgsl_source  WGSL bytes; copied into the device's registry.
+/// @param entry_point  Function name in the WGSL source. Brush kernels
+///                     all use "main" (default). For multi-entry-point
+///                     modules (splat_render.wgsl: vs_main + fs_main),
+///                     register the same source twice under different
+///                     names, each with its own entry_point.
+void register_wgsl_source(GPUDevice& device,
+                          const char* name,
+                          std::string_view wgsl_source,
+                          const char* entry_point = "main") noexcept;
+
+/// Convenience overload — load the WGSL source from `wgsl_path`, then
+/// register it under `name` with the given entry_point. Returns false
+/// (and logs) if the file can't be read or device backend isn't kDawn.
+bool register_wgsl_from_file(GPUDevice& device,
+                             const char* name,
+                             const char* wgsl_path,
+                             const char* entry_point = "main") noexcept;
+
+/// One-shot GPU→GPU buffer-to-buffer copy. Creates a transient command
+/// encoder + CopyBufferToBuffer + Submit, then blocks until the GPU has
+/// finished. Used to move data from a kStorage buffer into a kStaging
+/// buffer prior to readback via map_buffer.
+///
+/// Metal's MetalGPUDevice has no equivalent because shared-storage
+/// buffers are CPU-readable directly via map_buffer; this helper is
+/// strictly for the Dawn path.
+///
+/// @return false on any failure (wrong backend, invalid handles, GPU
+///         submission rejected). Diagnostic logged via stderr on failure.
+bool dawn_copy_buffer_to_buffer(GPUDevice& device,
+                                GPUBufferHandle src,
+                                GPUBufferHandle dst,
+                                std::size_t size) noexcept;
 
 }  // namespace render
 }  // namespace aether

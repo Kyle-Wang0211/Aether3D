@@ -235,6 +235,34 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     # Regression catcher for Brush re-pin / naga_oil drift / Tint optimizer.
     aether_dawn_smoke_test(aether_dawn_splat_smoke_cross_validate
                             tools/aether_dawn_splat_smoke_cross_validate.cpp)
+
+    # ─── 6.2.G-K production-path smokes ───
+    # These link against aether3d_core (production DawnGPUDevice path),
+    # NOT the harness library. They migrate harness-validated kernels
+    # through the GPUDevice virtual API to prove the wrapper path is
+    # equivalent. Phase 6.4 integration code can model itself on these.
+    function(aether_dawn_device_smoke target src)
+        add_executable(${target} ${src})
+        target_link_libraries(${target} PRIVATE aether3d_core)
+        target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set_target_properties(${target} PROPERTIES
+                MACOSX_BUNDLE TRUE
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.kyle.aether.${target}"
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "26AH7V448L"
+            )
+        endif()
+    endfunction()
+
+    aether_dawn_device_smoke(aether_dawn_gpu_device_smoke
+                              tools/aether_dawn_gpu_device_smoke.cpp)
+    aether_dawn_device_smoke(aether_dawn_splat_smoke_project_forward_via_device
+                              tools/aether_dawn_splat_smoke_project_forward_via_device.cpp)
+    aether_dawn_device_smoke(aether_dawn_splat_smoke_render_via_device
+                              tools/aether_dawn_splat_smoke_render_via_device.cpp)
+    aether_dawn_device_smoke(aether_dawn_splat_smoke_cross_validate_via_device
+                              tools/aether_dawn_splat_smoke_cross_validate_via_device.cpp)
 endif()
 
 # ============================================================================
