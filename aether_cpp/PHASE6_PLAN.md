@@ -1,8 +1,19 @@
-# Phase 6 plan — splat viewer + training pipeline port to PocketWorld via Dawn + WGSL
+# Phase 6 plan — splat viewer + training pipeline port to PocketWorld via Dawn + WGSL (Brush-adapt edition)
 
-**Status**: KICKED OFF 2026-04-26 ~01:55. All A–F locked decisions resolved per the 2026-04-26 user audit + revised prompt that deprecated TestFlight Aether3D as cross-validation oracle and deferred convergence testing.
+**Status**: ACTIVE 2026-04-26. **v2 upgrade in flight** — original v1 ("translate MSL → WGSL ourselves, looks-like-splat acceptance") replaced by user-direction v2 ("adapt Brush gSplat-paper-level kernels, validate vs MetalSplatter App-Store oracle, hit Mobile-GS perf bar"). v2 carries forward all v1-committed work (6.0/6.1/6.2.A-F); only 6.3 / 6.5 / 6.6 scope changes.
 
-**Phase 6 mission** (verbatim from user): "把 Apple-only 引擎变成跨平台引擎,加上 viewer 看 splat + training 的数据通路。Convergence 测试留给新 UI 出来时带真实素材验证。"
+**Phase 6 mission** (v2 verbatim from user): "Adapt Brush's 4 verified WGSL viewer kernels + training kernels (NOT translate from MSL), cross-validate against MetalSplatter (App-Store-shipped iOS reference), and meet Mobile-GS performance benchmark standards (60+ FPS at 50k Gaussians on iPhone 14 Pro / Snapdragon 8 Gen 3-class hardware)."
+
+**v1 → v2 diff (preserved here as the architectural delta)**:
+
+| Dimension | v1 | v2 |
+|---|---|---|
+| Shader source | hand-translate from `App/GaussianSplatting/Shaders/*.metal` (822 + 1460 MSL lines) | **Adapt Brush WGSL** (4 viewer + 3 training kernels, Apache-2.0, gSplat-paper-level math) |
+| Cross-validation oracle | none ("looks like a splat = OK") | **MetalSplatter** (App Store-shipped, MIT) — pixel-level diff with strict thresholds |
+| Performance bar | ≥30 fps loose | **Mobile-GS** — 60 FPS @ 50k on iPhone 14 Pro + ≥30 FPS on iPhone 12 |
+| File formats | .ply only | .ply + .spz + .splat (MetalSplatter compatibility) |
+| App size | not tracked | ≤50 MB increase vs Phase 5 baseline |
+| License compliance | none | LICENSE-Brush at repo root + per-file Brush attribution headers |
 
 ---
 
@@ -10,12 +21,15 @@
 
 | # | Decision | Choice | Rationale |
 |---|---|---|---|
-| **A** | Cross-validation oracle | **None this phase** — TestFlight Aether3D deprecated, not the reference | New test data will come later from PocketWorld's redesigned UI; bit-exact comparison against a deprecated path = wasted work |
-| **B** | Test data sourcing | **Any .ply / .spz scene** — pick / download anything | Resolved C1 from pre-kickoff audit. No external dependency on Brush / Polycam etc.; ANY publicly available 3DGS scene satisfies Axis A's "looks like a splat" check |
-| **C** | Training convergence testing | **DEFERRED** to post-UI-redesign with real captured data | Resolved C4 from pre-kickoff audit. Phase 6 only validates training data plumbing (FFI buffer round-trip), not gradient correctness. Convergence verification happens when Phase 7+ UI ships with real-world scans |
-| **D** | Dawn iOS attack | **Build-flag flip only** (audit confirmed Dawn submodule already has Metal backend + iOS GPU family code in tree at `third_party/dawn/src/dawn/native/metal/`) | Phase 5 BACKLOG estimate "1-2 days" was based on assumption of vendor work; audit shows Dawn-iOS infrastructure is already in tree, so 6.0 collapses to flipping `AETHER_ENABLE_DAWN=OFF→ON` in `build_ios_xcframework.sh` + linking the existing Dawn-Metal backend |
-| **E** | Per-step abort policy | **No phase降级; no MSL fallback** | Per the locked Phase 6 prerequisite BACKLOG entry: "per-platform shader is a violation, not a fallback." 6.0 / 6.3 abort = BACKLOG entry + diagnose, not retreat to per-platform shaders |
-| **F** | Time budget | **Multi-session, no single-night attempt** | Phase 6 is realistically 3-7 days of focused work even with relaxed quality gate. 04:00 hard stop applies per session, not per phase |
+| **A** | Cross-validation oracle | **v2: MetalSplatter (App Store-shipped, MIT-licensed iOS reference)** | v1 deprecated TestFlight Aether3D entirely; v2 picks MetalSplatter because it's actively shipped (Vision Pro viewer + OverSoul social app), so its rendering math is production-validated by Apple's review process — strictly better oracle than building one from scratch |
+| **B** | Test data sourcing | **Mip-NeRF 360 garden (50k Gaussians, 3DGS-paper academic gold standard) + synthetic_smoke.ply (~100 deterministic Gaussians, dev-iteration smoke)** | Mip-NeRF garden is the same scene Mobile-GS paper benchmarks against → directly comparable perf numbers. Synthetic smoke gives dev a sub-second-load deterministic input for inner-loop debug (garden takes seconds + hundreds of MB) |
+| **C** | Training convergence testing | **DEFERRED** to post-UI-redesign with real captured data | Phase 6 only validates training data plumbing (FFI buffer round-trip), not gradient correctness. Convergence verification happens when Phase 7+ UI ships with real-world scans |
+| **D** | Dawn iOS attack | **Build-flag flip only** (audit confirmed Dawn submodule already has Metal backend + iOS GPU family code at `third_party/dawn/src/dawn/native/metal/`) | Phase 5 BACKLOG "1-2 days" estimate assumed vendor work; audit shows infra is already in tree, so 6.0 collapsed to a single-line flip + the Abseil C++17 probe regression noted in BACKLOG |
+| **E** | Per-step abort policy | **No phase降级; no MSL fallback; no per-platform shader fallback** | Per the locked Phase 6 prerequisite BACKLOG entry: "per-platform shader is a violation, not a fallback." 6.0 / 6.3 abort = BACKLOG entry + diagnose forward, never retreat |
+| **F** | Time budget | **Multi-session, no single-night attempt** | Phase 6 v2 realistically 5-10 days of focused work given Brush adaptation + MetalSplatter cross-val infra. 04:00 hard stop applies per session, not per phase |
+| **G** | Shader strategy (v2 NEW) | **Adapt Brush WGSL kernels (math 1:1, bindings rewired to aether_cpp's GPUBufferDesc)** — NOT translate from MSL | Brush ships gSplat-paper-level math, Apache-2.0, already verified end-to-end. Translating MSL ourselves duplicates effort and introduces bug-risk. Per-file attribution header preserved; LICENSE-Brush at repo root. Brush math is sacrosanct; only the bindings change. |
+| **H** | Performance bar (v2 NEW) | **Mobile-GS standard — 60 FPS @ 50k Gaussians on iPhone 14 Pro + ≥30 FPS @ iPhone 12** | Mobile-GS paper measured 116 FPS @ 1600×1063 on Snapdragon 8 Gen 3 (≈ Apple A16). 60 FPS at 50k is the public benchmark for "national-grade mobile 3DGS"; settling for less violates user's stability requirement |
+| **I** | Cross-val frame-dump method (v2 NEW) | **Fork MetalSplatter, add IOSurface raw-RGBA dump path** (Phase 4/5 IOSurface experience reusable) | Default per user 2026-04-26; if IOSurface routing turns out more complex than expected during 6.5 implementation, fall back to "UI button → texture.getBytes() → write file" — both paths are tools, not architecture |
 
 **Pre-kickoff audit findings** (locked into plan):
 
@@ -38,8 +52,8 @@ Per Phase 4/5 de-risk principle (validation chain, not dependency order). Order:
 | 6.0 | Dawn iOS unblock (build-flag flip + iOS xcframework rebuild) | 🟡 medium (audit confirmed infra ready, but Apple toolchain quirks possible) | iPhone 14 Pro real device | None |
 | 6.1 | Add `kWGSL = 3u` to `ShaderLanguage` enum | 🟢 trivial | host build | None |
 | 6.2 | Implement `DawnGPUDevice` C++ class (~950-line mirror of `metal_gpu_device.mm`) | 🔴 highest (real engineering, every virtual override) | host + iOS | 6.0, 6.1 |
-| 6.3a | MSL → WGSL viewer shader translation (822 lines MSL → 2 WGSL files) | 🔴 high (shader translation, atomic op set differences) | Dawn Tint compile + runtime smoke | 6.1 |
-| 6.3b | MSL → WGSL training shader translation (1460 lines MSL → 3 WGSL files) | 🔴 high (atomic ops, gradient math, more surface than 6.3a) | Dawn Tint compile + smoke (NOT convergence) | 6.1 |
+| 6.3a | **Adapt Brush 4 viewer kernels** (project_forward, project_visible, map_gaussian_to_intersects, rasterize) | 🟡 medium (math is Brush's, only bindings to aether_cpp's GPUBufferDesc layout change) | Dawn Tint compile + runtime smoke + sanity-render synthetic_smoke.ply | 6.1, 6.2.H/I/J/K |
+| 6.3b | **Adapt Brush 3 training kernels** (training_forward, training_backward, training_densify) | 🟡 medium (same as 6.3a; convergence not validated this phase) | Dawn Tint compile + buffer round-trip via aether_train_step | 6.1, 6.2.J |
 | 6.4 | Wire `DawnGPUDevice` into PocketWorld iOS + macOS plugins | 🟡 medium (FFI pluming + Dart UI changes) | iPhone + macOS desktop | 6.2, 6.3a, 6.3b |
 | 6.5 | End-to-end smoke (load any .ply, render, sanity-check `train_step` buffer round-trip) | 🟢 low (verification only) | iPhone + macOS desktop | 6.0–6.4 |
 | 6.6 | 6-axis quality gate execution + `PHASE6_DONE.md` write-up | 🟢 low (instrumentation + docs) | iPhone | 6.5 |
@@ -101,102 +115,113 @@ Per Phase 4/5 de-risk principle (validation chain, not dependency order). Order:
 
 ---
 
-### 6.3a — MSL → WGSL viewer shader
+### 6.3a — Adapt Brush 4 viewer kernels (v2)
 
-**Input**: `App/GaussianSplatting/Shaders/GaussianSplat.metal` (822 lines, vertex + fragment + compute); `GaussianSplatTypes.h` (68-line shared structs).
+**Input**:
+- 4 Brush kernels at `https://github.com/ArthurBrussee/brush/tree/master/crates/brush-render/src/shaders/`:
+  - `project_forward.wgsl` (frustum cull + depth extraction with atomic compaction)
+  - `project_visible.wgsl` (2D projection + Spherical Harmonics evaluation, degree 0–4)
+  - `map_gaussian_to_intersects.wgsl` (tile mapping, TILE_WIDTH = 16 pixels)
+  - `rasterize.wgsl` (tile-based alpha blending, workgroup-shared memory batched loads)
+- `aether_cpp/include/aether/splat/splat_render_engine.h` (251 lines) for our binding layout.
 
 **Action**:
-1. Read MSL end-to-end; identify each kernel.
-2. Create `aether_cpp/shaders/wgsl/gaussian_splat_render.wgsl` (vertex + fragment).
-3. Create `aether_cpp/shaders/wgsl/gaussian_splat_compute.wgsl` (depth, sort).
-4. Translate `GaussianSplatTypes.h` structs → WGSL with bit-identical byte layout. C++ side adds `static_assert(sizeof(SplatVertex) == 64, ...)` etc. to catch divergence.
-5. Embed via new `aether_cpp/cmake/wgsl_embed.cmake` macro (build-time `xxd -i` or equivalent → C++ string constants); these become inputs to `DawnGPUDevice::create_shader`.
-6. Runtime check: Dawn Tint compiles each WGSL clean; `WGPUShaderModuleDescriptor.compilationInfoCallback` reports zero warnings.
+1. Vendor the 4 .wgsl files into `aether_cpp/shaders/wgsl/`. Each file MUST start with the attribution header per spec (Apache-2.0, original path, math source = gSplat reference). LICENSE-Brush copied to repo root.
+2. For each kernel, **the math is sacrosanct — keep Brush's math 1:1**. Only change:
+   - Brush's Burn-tensor binding declarations → aether_cpp's `GPUBufferDesc` binding layout
+   - Workgroup size constants if our renderer needs different (default = match Brush)
+   - Push constants / uniform binding indices to match aether_cpp's bind group layout
+3. Embed via new `aether_cpp/cmake/wgsl_embed.cmake` macro (build-time `xxd -i` → C++ string constants).
+4. C++-side `static_assert` that any shared struct (Camera, Splat, etc.) has the same byte layout as Brush's WGSL definition — catches divergence at build time, not at first GPU run.
+5. Compile via Dawn Tint at runtime; assert zero compilation warnings (`WGPUShaderModuleDescriptor.compilationInfoCallback`).
 
-**Verification**: shader modules build at runtime; render pipeline state object creates without error. Per the user's revised prompt, **convergence-correctness check NOT done this phase** — just "compiles + accepts input data without crash" per Axis B.
+**Verification**: 4 shader modules build at runtime + render pipeline state objects create without error + sanity-render `synthetic_smoke.ply` looks like a splat (NaN-free, recognizable structure).
 
-**Per-step abort signal**: WGSL atomic-op set missing a needed MSL atomic → log workaround design (split kernel, fence ring) into BACKLOG.
+**Per-step abort signal**: any of the 4 kernels fails Tint compile → BACKLOG entry. **Do NOT translate the math to "fix" it** — Brush's math is the reference. If Tint reports an error, the binding layout adapter is wrong, not the math.
 
 ---
 
-### 6.3b — MSL → WGSL training shader
+### 6.3b — Adapt Brush 3 training kernels (v2)
 
-**Input**: `App/GaussianSplatting/Shaders/GaussianTraining.metal` (1460 lines).
+**Input**:
+- Brush training kernels (in `crates/brush-render/src/shaders/`): forward + backward + densify
+- `aether_cpp/include/aether/training/gaussian_training_engine.h` for our binding layout
+- `aether_cpp/include/aether/training/mcmc_densifier.h` and `steepgs_densifier.h` for the densification API expected by aether_cpp
 
 **Action**:
-1. Read MSL end-to-end; decompose into 3 logical sections:
-   - Forward pass (rasterize + accumulate)
-   - Backward pass (gradient + Adam optimizer)
-   - Densify + prune (split, clone, kill)
-2. Create one WGSL file per section under `aether_cpp/shaders/wgsl/`.
-3. Atomic-op audit: list every `atomic_*` / `metal::atomic_*` in MSL; confirm WGSL equivalent exists. Flag any missing for design discussion.
+1. Vendor 3 .wgsl files into `aether_cpp/shaders/wgsl/training_*.wgsl` with attribution headers.
+2. Same math-1:1 / binding-only-rewrite principle as 6.3a.
+3. Atomic-op audit: list every `atomicAdd`, `atomicCompareExchangeWeak`, etc. in Brush's training shaders. WGSL atomic surface is well-defined (no MSL-specific atomics needed because we're starting from WGSL). Should be a clean compile.
 4. Embed via `wgsl_embed.cmake`.
-5. Compile clean via Dawn Tint; runtime smoke: pass dummy gradient buffer through `aether_train_step`, verify output buffer dimensions match input (no crash, no NaN).
+5. Runtime smoke: pass a dummy gradient buffer through `aether_train_step` FFI; verify GPU buffer shape preserved + no crash + no NaN. **Convergence not validated this phase per C.**
 
-**Verification**: shaders compile + accept dummy input. **NO convergence semantics tested** per C.
+**Per-step abort signal**: WGSL atomic op missing in Tint's lowering for a target backend (Metal-specific issue) → split kernel pass + BACKLOG entry. Not phase降级.
 
 ---
 
-### 6.4 — Wire to PocketWorld
+### 6.4 — Wire to PocketWorld (v2 with 3 file formats)
 
 **iOS** (`pocketworld_flutter/ios/Runner/`):
 1. `MetalRenderer.swift`: replace direct `MTLDevice` / `MTLCommandQueue` creation with FFI call → opaque `DawnGPUDevice` handle.
-2. `AetherTexturePlugin.swift`: add 2 method-channel handlers:
-   - `loadSplat(args["path"])` → calls `aether_splat_load_ply` (new C ABI; appended to `aether_splat_c.h`)
-   - `trainStep(args)` → calls `aether_train_step` (new C ABI)
-3. `lib/main.dart`: replace placeholder triangle with file picker for `.ply` / `.spz`; render result in existing 256×256 Texture widget.
+2. `AetherTexturePlugin.swift`: add method-channel handlers:
+   - `loadSplat(path, format)` where format ∈ {`ply`, `spz`, `splat`} → calls one of `aether_splat_load_ply`, `aether_splat_load_spz`, `aether_splat_load_splat`
+   - `trainStep(args)` → calls `aether_splat_train_step`
+3. `lib/main.dart`: file picker accepts `.ply` / `.spz` / `.splat`; render result in existing 256×256 Texture widget; expose splat scale to fullscreen.
 
 **macOS** (`pocketworld_flutter/macos/Runner/MainFlutterWindow.swift`): symmetric port.
 
-**Verification**: app launches, file picker opens, picked file loads without crash, Texture widget shows non-blank output.
+**Verification**: app launches, file picker opens, all 3 formats load without crash, Texture widget shows non-blank output for each format.
 
 ---
 
-### 6.5 — End-to-end smoke
+### 6.5 — Cross-validation against MetalSplatter (v2)
 
-**Viewer**:
-1. Pick or download any .ply / .spz (per B). Recommendation: smallest available scene (~10k Gaussians) — fastest iteration cycle.
-2. Load in PocketWorld iPhone build. Visual sanity: cloudy splat structure, recognizable scene shape, no NaN garbage.
-3. Optional: snapshot to `pocketworld_flutter/test_evidence/phase6_smoke_viewer.png`.
+**Setup** (one-time):
+1. Fork `scier/MetalSplatter` to user's GitHub. Pin commit hash in `CROSS_PLATFORM_STACK.md`.
+2. In the fork, add IOSurface raw-RGBA dump path (Phase 4/5 IOSurface experience reusable). Approximate budget: 50–80 lines of Swift in MetalSplatter's view controller, gated by a debug build flag so the production App Store version stays untouched.
+3. Build forked MetalSplatter for iPhone 14 Pro real device.
 
-**Training data pipeline**:
-1. Send dummy gradient buffer (e.g. all-zeros, or all-1e-3) through `aether_train_step`.
-2. Verify GPU buffer round-trip: same shape in / same shape out, no crash, no NaN.
+**Test matrix** (20 scene/camera pairs):
+- 3 scenes: `synthetic_smoke.ply` (~100 Gaussians) + `garden_50k.ply` (Mip-NeRF 360 garden subset) + `garden_500k.ply` (full Mip-NeRF 360 garden)
+- 20 camera angles per scene (12 azimuth at 0° elevation; 4 azimuth × 2 elevation at ±45°)
 
-**Per-step abort signal**: viewer renders garbage / NaN → 6.3a regression; `train_step` crashes → 6.3b atomic-op gap; missing buffer-shape preservation → 6.2 buffer-create bug.
+**Method per (scene, camera) pair**:
+1. Render in MetalSplatter (forked) on iPhone 14 Pro → save raw RGBA dump from IOSurface
+2. Render in PocketWorld (Dawn → adapted Brush WGSL → Metal-via-Tint) on the same iPhone → save raw RGBA dump
+3. Run `scripts/cross_validate_vs_metalsplatter.py` → emit per-pixel max abs diff, PSNR, SSIM, splat-count match
+
+**Per-step abort signal**: any pair fails any threshold (≤2/255 max diff, ≥50 dB PSNR, ≥0.9995 SSIM, exact splat-count match) → 6.3 regression. Diagnose which kernel differs by binary-searching the pipeline (cull only? project only? rasterize only?). Do NOT relax thresholds.
 
 ---
 
-### 6.6 — Quality gate execution
+### 6.6 — Quality gate execution (v2 — 6 axes upgraded)
 
-Run all 6 axes. Each passes/fails independently, all must pass. Documented in `aether_cpp/PHASE6_DONE.md` mirror of Phase 5 DoD record.
+Run all 6 axes (Axis A pixel oracle / Axis B training plumbing / Axis C Mobile-GS perf / Axis D Phase 5 7-axis / Axis E architectural / Axis F docs). Each passes/fails independently, all must pass. Documented in `aether_cpp/PHASE6_DONE.md` mirror of Phase 5 DoD record.
 
 ---
 
-## Definition of Done — 6-axis gate
-
-(Verbatim from user's revised prompt; one-line summary here.)
+## Definition of Done — 6-axis gate (v2 — industry SOTA bar)
 
 | Axis | Threshold | Source |
 |---|---|---|
-| **A** | Viewer renders any .ply/.spz looking like a splat (subjective) | User's revised prompt |
-| **B** | Training pipeline FFI buffer round-trip preserves shape, no crash | User's revised prompt |
-| **C** | iPhone 17 Pro: ≥30 fps × 60 s on 50k splats; cold launch ≤3 s | User's revised prompt |
-| **D** | Phase 5 7-axis lifecycle re-executed with splat workload | Phase 5 PHASE5_PLAN.md DoD |
-| **E** | Architectural principles upheld (zero new .metal outside legacy, zero algorithm in Swift, zero `-Wno-*` added) | Phase 6 prerequisite locked in BACKLOG |
-| **F** | `PHASE6_DONE.md` + BACKLOG updates + CROSS_PLATFORM_STACK.md lessons | Phase 5 docs precedent |
+| **A — Pixel cross-val vs MetalSplatter** | All 20 (scene, camera) pairs pass: per-pixel max abs diff ≤ 2/255 + PSNR ≥ 50 dB + SSIM ≥ 0.9995 + exact splat-count match | v2 user prompt; MetalSplatter App Store-shipped |
+| **B — Training plumbing** | FFI buffer round-trip preserves shape, no crash, no NaN. Convergence DEFERRED per C | Phase 6 v2 user prompt |
+| **C — Mobile-GS perf bar** | iPhone 14 Pro: ≥60 FPS × 60 s @ 50k Gaussians; ≥30 FPS × 30 s @ 500k; cold launch ≤2 s; GPU mem ≤250 MB @ 500k; app size ≤+50 MB vs Phase 5. iPhone 12: ≥30 FPS @ 50k | Mobile-GS paper (116 FPS @ 1600×1063 on Snapdragon 8 Gen 3) |
+| **D — Phase 5 7-axis lifecycle** | All 7 axes from PHASE5_PLAN.md DoD re-executed with splat workload (frame stability / GPU mem leak / CPU+RAM leak / thermal / background / memory warning / cold launch) | Phase 5 PHASE5_PLAN.md DoD |
+| **E — Architectural principles** | Zero new .metal files outside legacy; all new shader = WGSL adapted from Brush with attribution headers; zero algorithm math in .swift; zero `-Wno-*` added; Phase 4 4-axis + Phase 5 lifecycle patterns applied; Brush commit hash pinned in CROSS_PLATFORM_STACK.md | Phase 6 prerequisite locked in BACKLOG + v2 prompt Axis E |
+| **F — Documentation** | PHASE6_DONE.md (Brush adaptation diary + cross-val PNG/diff evidence + Mobile-GS perf numbers + axis pass/fail) + BACKLOG updates with deferred-validation triggers + CROSS_PLATFORM_STACK.md (Brush pin + MetalSplatter pin + Phase 6 lessons) + LICENSE-Brush at repo root + per-file Brush attribution | Phase 5 docs precedent + v2 prompt Axis F |
 
 ---
 
 ## Out of scope (Phase 6 explicitly excludes)
 
-- ❌ Cross-validation against TestFlight Aether3D (deprecated per A)
-- ❌ Training convergence verification (deferred per C — waits for Phase 7+ UI + real test data)
-- ❌ 60 fps performance target (Phase 6 ships at 30 fps + 3 s cold-launch baseline; tuning is Phase 7+)
-- ❌ Android Vulkan / HarmonyOS port (Phase 7+; Phase 6 closes the iOS WGSL→Dawn→Metal path, sets architectural template for the others)
-- ❌ Pixel-exact comparison with any reference (subjective visual check only — TestFlight is not the oracle)
+- ❌ Cross-validation against TestFlight Aether3D (deprecated per A; replaced by MetalSplatter)
+- ❌ Training convergence verification (deferred per C — waits for Phase 7+ UI + real test data captured by user)
+- ❌ Android Vulkan / HarmonyOS port (Phase 7+; Phase 6 closes the iOS WGSL→Dawn→Metal path, sets architectural template for Android/HarmonyOS)
 - ❌ HDR / wide-gamut color (Phase 7+ visual polish)
-- ❌ App Store submission (Phase 6 = Phase 5-equivalent device-deploy quality, not store-ready)
+- ❌ App Store submission (Phase 6 = device-deploy quality, not store-ready)
+- ❌ LoD streaming (Spark 2.0 reference; Phase 7+ scaling)
+- ❌ Foveated rendering / pruning optimizations (RTGS / Fov-3DGS reference; Phase 8+ optimization)
 
 ---
 
@@ -216,6 +241,8 @@ Run all 6 axes. Each passes/fails independently, all must pass. Documented in `a
 
 (Newest at top. Updated as sub-steps complete.)
 
+- **PHASE6_PLAN v1 → v2 in-place upgrade 2026-04-26 ~10:35** — user issued v2 prompt: shader source = Brush adapt (Apache-2.0, gSplat-paper math); cross-val oracle = MetalSplatter (MIT, App Store-shipped); perf bar = Mobile-GS (60 FPS @ 50k on iPhone 14 Pro); 3 file formats (.ply + .spz + .splat); ≤50 MB app size; LICENSE compliance. v1 work (6.0/6.1/6.2.A-F) carries forward unchanged. v2-only sub-step changes: 6.3a/b (Brush adapt) + 6.5 (MetalSplatter cross-val) + 6.6 (upgraded 6-axis gate). Locked decisions A/B updated; G/H/I added.
+- **6.2.F (DawnGPUDevice buffer impl) ✅ DONE 2026-04-26 ~10:30** (commit `4a8f2cc6`) — hybrid stability strategy locked by user: `update_buffer` = wgpuQueueWriteBuffer (HOT, zero-block); `map_buffer` for staging-read = wgpuBufferMapAsync + WaitAny spin (RARE); `map_buffer` for write = warn-once + nullptr (callers must use update_buffer). Factory init via wgpuCreateInstance with TimedWaitAny feature + sync RequestAdapter/RequestDevice via WaitAny. ~600 lines, host build clean. Telemetry: `spin_wait_count()` accessor.
 - **6.2.A-E (DawnGPUDevice skeleton + CMake wire) ✅ DONE 2026-04-26 ~10:25** — `kDawn` added to `GraphicsBackend` enum (runtime_backend.h); `aether/render/dawn_gpu_device.h` factory header written (mirror of metal_gpu_device.h shape); `src/render/dawn_gpu_device.cpp` skeleton (~330 lines) — class with all GPUDevice virtual overrides as stubs that warn-once via `stub_log_once` and return invalid handles; CMakeLists.txt conditionally adds `dawn_gpu_device.cpp` to `aether3d_core` when `AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn`; `target_link_libraries(aether3d_core PUBLIC dawn::webgpu_dawn)` propagates Dawn to consumers. **Host build verified clean** with full Dawn dep chain compiled. iOS arm64-device `dawn_gpu_device.o` compiles clean too; iOS `aether3d_core` end-to-end blocked on PRE-EXISTING `depth_inference_coreml.mm` iOS 16 availability issue (NOT new from this commit). Phase 6.2.F-K (real impls of buffer/texture/shader/pipeline/command-buffer) replace stubs in subsequent commits.
   - **Side effect handled**: flipping `AETHER_ENABLE_DAWN=ON` in `scripts/build_ios_xcframework.sh` (Phase 6.0 step 1) caused Abseil's CMake C++17 compile-feature probe to fail on iphonesimulator sysroot. Rolled back to `=OFF` so the Phase 5 vendored_libraries deploy path stays green; Dawn iOS still builds via direct `cmake --build aether_cpp/build-ios-{device,sim} --target webgpu_dawn` (proven 2026-04-26 02:49). New BACKLOG entry tracks the Abseil probe regression — needs fix before 6.4 wires Dawn into iOS Pod.
 - **6.1 (kWGSL enum) ✅ DONE 2026-04-26 ~03:15** — `kWGSL = 3u` added to `ShaderLanguage` in `aether_cpp/include/aether/render/shader_source.h`. 5 switch statements in `aether_cpp/src/render/shader_source.cpp` (BRDF / BRDF-LUT / BRDF-Poly / SH-eval / flip-rotation utility shaders) given explicit `case ShaderLanguage::kWGSL:` falling through to GLSL with `// TODO Phase 6+: translate <utility> to WGSL` comments — exhausts the switch without breaking `-Werror -Wswitch`. The utility shaders are not yet WGSL-translated; that's deferred to Phase 6+ if/when those utilities are needed in the WGSL pipeline (likely Phase 7+ once basic splat WGSL works). Clean `aether3d_core` build verified on host.
@@ -237,7 +264,22 @@ Run all 6 axes. Each passes/fails independently, all must pass. Documented in `a
 
 ## Sources
 
-- User's revised Phase 6 prompt (2026-04-26 ~01:50, this document is the planning artifact)
+### v2 references (2026-04-26 ~10:30 user upgrade)
+
+- **Brush** (Apache-2.0) — primary WGSL kernel reference: https://github.com/ArthurBrussee/brush
+  - Kernels at `crates/brush-render/src/shaders/`: project_forward / project_visible / map_gaussian_to_intersects / rasterize / training_*
+  - Math: gSplat reference kernels (3DGS paper, Kerbl et al. 2023)
+- **MetalSplatter** (MIT) — iOS oracle for cross-validation: https://github.com/scier/MetalSplatter
+  - Production-validated by App Store review (Vision Pro viewer + OverSoul social app)
+- **Mobile-GS** (research, 2024) — performance baseline: https://xiaobiaodu.github.io/mobile-gs-project/
+  - 116 FPS @ 1600×1063 on Snapdragon 8 Gen 3 (≈ Apple A16 / iPhone 14 Pro)
+- **Spark 2.0** (Phase 7+ scaling reference): https://github.com/sparkjsdev/spark
+- **RTGS / Fov-3DGS** (Phase 8+ optimization reference): https://github.com/horizon-research/Fov-3DGS
+
+### v1 sources (carried forward)
+
+- v1 Phase 6 prompt (2026-04-26 ~01:50)
+- v2 Phase 6 prompt (2026-04-26 ~10:30)
 - `aether_cpp/PHASE_BACKLOG.md` "Phase 6 prerequisite (locked)" entry
 - `aether_cpp/PHASE5_PLAN.md` (template for plan structure)
 - Pre-kickoff audit findings (2026-04-26 ~01:35 — file existence verification, Dawn submodule iOS readiness check, training engine enumeration)
