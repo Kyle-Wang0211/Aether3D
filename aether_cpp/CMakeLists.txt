@@ -182,6 +182,10 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     # ─── 6.3a viewer kernels ───
     aether_dawn_smoke_test(aether_dawn_splat_smoke_project_forward
                             tools/aether_dawn_splat_smoke_project_forward.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_project_visible
+                            tools/aether_dawn_splat_smoke_project_visible.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_map_gaussian_to_intersects
+                            tools/aether_dawn_splat_smoke_map_gaussian_to_intersects.cpp)
 endif()
 
 # ============================================================================

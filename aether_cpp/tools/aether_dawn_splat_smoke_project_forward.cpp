@@ -22,6 +22,7 @@
 // -z. Expected: all 4 splats project successfully (mean_c.z > 0.01),
 // depths populated, num_visible = 4.
 
+#include "aether_dawn_splat_test_data.h"
 #include "dawn_kernel_harness.h"
 
 #include <cmath>
@@ -36,52 +37,9 @@
 
 namespace {
 
-// ─── Match WGSL RenderUniforms layout exactly ──────────────────────────
-//
-// NB on the C++-side name vs WGSL-side name:
-//   WGSL identifier: `RenderUniforms` (Brush's name).
-//   C++ identifier:  `RenderArgsStorage` (renamed per Phase 6.3a P2 review:
-//                    the buffer is a STORAGE buffer because it contains
-//                    `atomic<u32> num_visible` — atomics aren't legal in
-//                    uniform blocks. Calling the C++ struct "Uniforms"
-//                    misled readers; "ArgsStorage" makes the kind explicit.)
-//   Byte layout MUST match (static_assert below) — that's the real contract.
-//
-// Layout offsets per WGSL storage rules (verified by inspection):
-//   0..64    viewmat (mat4x4f)
-//   64..72   focal (vec2f)
-//   72..80   img_size (vec2u)
-//   80..88   tile_bounds (vec2u)
-//   88..96   pixel_center (vec2f)
-//   96..112  camera_position (vec4f, 16-aligned)
-//   112..116 sh_degree (u32)
-//   116..120 num_visible (atomic<u32>)
-//   120..124 total_splats (u32)
-//   124..128 max_intersects (u32)
-//   128..144 background (vec4f, 16-aligned ✓)
-struct RenderArgsStorage {
-    float viewmat[16];
-    float focal[2];
-    uint32_t img_size[2];
-    uint32_t tile_bounds[2];
-    float pixel_center[2];
-    float camera_position[4];
-    uint32_t sh_degree;
-    uint32_t num_visible;     // atomic<u32> in WGSL, layout-equivalent to u32
-    uint32_t total_splats;
-    uint32_t max_intersects;
-    float background[4];
-};
-static_assert(sizeof(RenderArgsStorage) == 144,
-              "RenderArgsStorage byte layout must match WGSL RenderUniforms storage rules");
-
-// PackedVec3: WGSL `struct { x: f32, y: f32, z: f32 }` = 12 bytes (no padding
-// for storage buffer; vec3<f32> arrays would be 16-aligned but PackedVec3
-// is a literal 3-float struct so it's tightly packed).
-struct PackedVec3 {
-    float x, y, z;
-};
-static_assert(sizeof(PackedVec3) == 12, "PackedVec3 must be 12 bytes");
+using aether::tools::splat_test_data::RenderArgsStorage;
+using aether::tools::splat_test_data::PackedVec3;
+using aether::tools::splat_test_data::make_identity_camera_args;
 
 constexpr uint32_t kNumSplats = 4;
 
@@ -131,23 +89,9 @@ int main(int /*argc*/, char* argv[]) {
 
     // ─── 3. Build test inputs ─────────────────────────────────────────
 
-    // Identity-view camera (looking down -z from origin), 256×256 image.
-    RenderArgsStorage u{};
-    // viewmat = identity
-    u.viewmat[0]  = 1.0f; u.viewmat[5]  = 1.0f; u.viewmat[10] = 1.0f; u.viewmat[15] = 1.0f;
-    u.focal[0] = 256.0f; u.focal[1] = 256.0f;
-    u.img_size[0] = 256; u.img_size[1] = 256;
-    u.tile_bounds[0] = 16; u.tile_bounds[1] = 16;
-    u.pixel_center[0] = 128.0f; u.pixel_center[1] = 128.0f;
-    u.camera_position[0] = 0.0f;
-    u.camera_position[1] = 0.0f;
-    u.camera_position[2] = 0.0f;
-    u.camera_position[3] = 0.0f;
-    u.sh_degree = 0;
-    u.num_visible = 0;
-    u.total_splats = kNumSplats;
-    u.max_intersects = 1024;
-    u.background[0] = 0.0f; u.background[3] = 1.0f;
+    // Identity-view camera, 256×256 image, num_visible starts at 0
+    // (project_forward atomically increments it as splats project).
+    RenderArgsStorage u = make_identity_camera_args(kNumSplats, /*num_visible=*/0);
 
     // 4 splats at z = 2, 4, 6, 8 in front of camera (camera at z=0 looking
     // down -z means "in front" = positive z in view space).
