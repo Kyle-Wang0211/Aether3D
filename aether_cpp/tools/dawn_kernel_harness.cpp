@@ -108,6 +108,19 @@ bool DawnKernelHarness::init() {
         // actually broken. Aborting on validation error makes the failure
         // loud + immediate, which is the whole point of a smoke harness.
         device_desc.SetUncapturedErrorCallback(on_uncaptured_error);
+
+        // Phase 6.3a Step 5b: Brush prefix_sum_* kernels declare
+        // @workgroup_size(512). WebGPU's default cap is 256; bump
+        // maxComputeInvocationsPerWorkgroup + WorkgroupSizeX so the
+        // pipelines can be created. Modern desktop/mobile GPUs all
+        // support 1024 (verified at runtime: this adapter reports
+        // maxComputeWorkgroupSizeX=1024). Limits we need:
+        //   maxComputeInvocationsPerWorkgroup ≥ 512  (= total threads)
+        //   maxComputeWorkgroupSizeX           ≥ 512  (= X dim)
+        wgpu::Limits required_limits{};
+        required_limits.maxComputeInvocationsPerWorkgroup = 512;
+        required_limits.maxComputeWorkgroupSizeX = 512;
+        device_desc.requiredLimits = &required_limits;
         instance_.WaitAny(
             adapter_.RequestDevice(
                 &device_desc,

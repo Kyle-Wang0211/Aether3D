@@ -206,6 +206,16 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
                             tools/aether_dawn_splat_smoke_sort_scan_add.cpp)
     aether_dawn_smoke_test(aether_dawn_splat_smoke_sort_scatter
                             tools/aether_dawn_splat_smoke_sort_scatter.cpp)
+
+    # ─── Step 5b: Brush 3-stage prefix-sum kernels ───
+    # Used by training-side accumulation passes (gradient sums, hit counts).
+    # Each smoke verifies one stage's invariant against a hand-crafted input.
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_prefix_sum_scan
+                            tools/aether_dawn_splat_smoke_prefix_sum_scan.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_prefix_sum_scan_sums
+                            tools/aether_dawn_splat_smoke_prefix_sum_scan_sums.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_prefix_sum_add_scanned_sums
+                            tools/aether_dawn_splat_smoke_prefix_sum_add_scanned_sums.cpp)
 endif()
 
 # ============================================================================
