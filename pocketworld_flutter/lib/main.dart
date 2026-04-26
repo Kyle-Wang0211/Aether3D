@@ -1,16 +1,20 @@
-// Phase 2.4 PocketWorld hello main screen + Phase 4.1/4.5 Flutter Texture widget.
+// Phase 2.4 PocketWorld hello main screen + Phase 4.1/4.5 Flutter Texture
+// widget + Phase 5.4 FFI version string.
 //
 // Below the "PocketWorld" title we render a 256×256 Flutter Texture widget
-// fed by native-side CVPixelBuffer (currently a static CPU-rendered RGB
-// gradient — Phase 4.2 will replace the buffer source with an IOSurface-
-// backed MTLTexture so native GPU writes feed the same widget).
+// fed by an IOSurface-backed MTLTexture (Phase 4.2 macOS / 5.1 iOS). The
+// triangle is rotated 1 rad/s by a CADisplayLink-driven Metal render pass.
 //
-// Footer "v0.1.0-phase2" is still the Phase 3.5 placeholder; the FFI
-// hookup landed on macOS Dart CLI but the iOS Pod final-mile is deferred.
-// See aether_cpp/PHASE_BACKLOG.md.
+// Footer was P2.4 placeholder `'v0.1.0-phase2'`; Phase 5.4 replaces it
+// with the real `AetherFfi.versionString()` FFI call against
+// `aether_cpp/src/core/version.cpp`. If the binding fails (e.g. the
+// static lib didn't link into the host binary), the footer shows the
+// FfiResolutionError reason instead of crashing.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import 'aether_ffi.dart';
 
 void main() {
   runApp(const PocketWorldApp());
@@ -132,7 +136,13 @@ class _HomeScreenState extends State<HomeScreen> {
               bottom: 16,
               child: Center(
                 child: Text(
-                  'v0.1.0-phase2',
+                  // Phase 5.4: real FFI call replacing the P2.4 placeholder.
+                  // Resolved per build (not memoized) — the lookup is
+                  // process-symbol-table search, microseconds. If the
+                  // symbol isn't present in the host binary (link issue),
+                  // the footer surfaces the FfiResolutionError so the
+                  // failure is visible, not silent.
+                  _resolveVersionFooter(),
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -143,5 +153,26 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
+  }
+}
+
+/// Returns the version footer string. Wraps [AetherFfi.versionString] so
+/// FFI failures surface as a readable label instead of an exception
+/// bubbling out of the build phase. Failure modes worth distinguishing:
+///   - "FFI: <reason>"  → symbol resolved but call failed (rare)
+///   - "FFI miss: <reason>" → symbol not in binary (Phase 5.0 link issue)
+///   - "FFI error: <type>" → unexpected exception type (Dart VM / SDK bug)
+String _resolveVersionFooter() {
+  try {
+    return AetherFfi.versionString();
+  } on FfiResolutionError catch (e) {
+    return 'FFI miss: ${e.message}';
+  } on ArgumentError catch (e) {
+    // DynamicLibrary.process().lookupFunction throws ArgumentError on
+    // unresolved symbol (the common Phase 5.0 failure path before the
+    // -force_load fix landed).
+    return 'FFI miss: ${e.message ?? e.toString()}';
+  } catch (e) {
+    return 'FFI error: ${e.runtimeType}';
   }
 }
