@@ -1,19 +1,19 @@
-# Phase 6 plan — splat viewer + training pipeline port to PocketWorld via Dawn + WGSL (Brush-adapt edition)
+# Phase 6 plan — splat viewer (vertex+fragment) + training pipeline (Brush WGSL) — v3
 
-**Status**: ACTIVE 2026-04-26. **v2 upgrade in flight** — original v1 ("translate MSL → WGSL ourselves, looks-like-splat acceptance") replaced by user-direction v2 ("adapt Brush gSplat-paper-level kernels, validate vs MetalSplatter App-Store oracle, hit Mobile-GS perf bar"). v2 carries forward all v1-committed work (6.0/6.1/6.2.A-F); only 6.3 / 6.5 / 6.6 scope changes.
+**Status**: ACTIVE 2026-04-26. **v3 upgrade in flight** (the v2 viewer-data-flow + Brush kernel scope have been replaced by industry-aligned vertex+fragment + instanced quads viewer with freemium training tier). v3 carries forward all committed work (6.0 / 6.1 / 6.2.A-F / 6.3a Steps 1-3); only the viewer rasterizer path + sub-step ordering change.
 
-**Phase 6 mission** (v2 verbatim from user): "Adapt Brush's 4 verified WGSL viewer kernels + training kernels (NOT translate from MSL), cross-validate against MetalSplatter (App-Store-shipped iOS reference), and meet Mobile-GS performance benchmark standards (60+ FPS at 50k Gaussians on iPhone 14 Pro / Snapdragon 8 Gen 3-class hardware)."
+**Phase 6 mission (v3 verbatim from user)**: "viewer rasterizer = vertex+fragment + instanced quads (MetalSplatter style), Brush 14 WGSL files all retained as algorithm base for training, splat_render.wgsl is the only new WGSL we write in Phase 6, freemium training tier (local Phase 7 + cloud Phase 6.7), national-grade stability across iPhone 8 → iPhone 17 Pro + Snapdragon 8 Gen 2+ + cloud-fallback for Adreno/Maleoon."
 
-**v1 → v2 diff (preserved here as the architectural delta)**:
+**v1 → v2 → v3 evolution table**:
 
-| Dimension | v1 | v2 |
-|---|---|---|
-| Shader source | hand-translate from `App/GaussianSplatting/Shaders/*.metal` (822 + 1460 MSL lines) | **Adapt Brush WGSL** (4 viewer + 3 training kernels, Apache-2.0, gSplat-paper-level math) |
-| Cross-validation oracle | none ("looks like a splat = OK") | **MetalSplatter** (App Store-shipped, MIT) — pixel-level diff with strict thresholds |
-| Performance bar | ≥30 fps loose | **Mobile-GS** — 60 FPS @ 50k on iPhone 14 Pro + ≥30 FPS on iPhone 12 |
-| File formats | .ply only | .ply + .spz + .splat (MetalSplatter compatibility) |
-| App size | not tracked | ≤50 MB increase vs Phase 5 baseline |
-| License compliance | none | LICENSE-Brush at repo root + per-file Brush attribution headers |
+| Dimension | v1 | v2 | v3 |
+|---|---|---|---|
+| Viewer rasterizer path | hand-translate compute from MSL | adapt Brush 4 compute kernels | **vertex+fragment + instanced quads** (MetalSplatter style) |
+| Shader source | hand MSL→WGSL translation | adapt Brush WGSL (Apache-2.0) | adapt Brush 14 + new `splat_render.wgsl` (~80 lines, Aether3D-original) |
+| Cross-val oracle | none | MetalSplatter (compute-vs-vert+frag → architectural mismatch) | **MetalSplatter** (architecture matches v3 → diff comes from FP rounding only) |
+| Perf bar | ≥30 fps loose | Mobile-GS 60 FPS @ 50k iPhone 14 Pro | Mobile-GS bar **+ national-grade device coverage** (iPhone 8+ / Snapdragon 8 Gen 2+ / cloud fallback for older / Adreno crash mitigated) |
+| Training position | end-to-end on-device (assumed) | end-to-end on-device (assumed) | **freemium tiers**: Phase 7 on-device free + Phase 6.7 cloud paid (vast.ai A100/H100) |
+| Industry validation | none | implicit from Brush adoption | **explicit**: GauRast 23×, C3DGS 3.5×, MetalSplatter App Store, Spark.js, PlayCanvas SuperSplat v2.17 (compute→instanced quads regression), Brush Issue #77 (Adreno crash) |
 
 ---
 
@@ -30,6 +30,11 @@
 | **G** | Shader strategy (v2 NEW) | **Adapt Brush WGSL kernels (math 1:1, bindings rewired to aether_cpp's GPUBufferDesc)** — NOT translate from MSL | Brush ships gSplat-paper-level math, Apache-2.0, already verified end-to-end. Translating MSL ourselves duplicates effort and introduces bug-risk. Per-file attribution header preserved; LICENSE-Brush at repo root. Brush math is sacrosanct; only the bindings change. |
 | **H** | Performance bar (v2 NEW) | **Mobile-GS standard — 60 FPS @ 50k Gaussians on iPhone 14 Pro + ≥30 FPS @ iPhone 12** | Mobile-GS paper measured 116 FPS @ 1600×1063 on Snapdragon 8 Gen 3 (≈ Apple A16). 60 FPS at 50k is the public benchmark for "national-grade mobile 3DGS"; settling for less violates user's stability requirement |
 | **I** | Cross-val frame-dump method (v2 NEW) | **Fork MetalSplatter, add IOSurface raw-RGBA dump path** (Phase 4/5 IOSurface experience reusable) | Default per user 2026-04-26; if IOSurface routing turns out more complex than expected during 6.5 implementation, fall back to "UI button → texture.getBytes() → write file" — both paths are tools, not architecture |
+| **J** | Viewer rasterizer architecture (v3 NEW) | **vertex+fragment + instanced quads** (MetalSplatter / Spark.js / PlayCanvas SuperSplat style) | Industry evidence one-sided: GauRast 23× / C3DGS 3.5× / WebSplatter "raster substantially better" / PlayCanvas v2.17 actively reverted from compute → instanced quads / Brush Issue #77 Adreno crashes 5-750 steps / Flutter Issue #157811 Maleoon Vulkan compute disabled. Reverse evidence (compute beats vert+frag): zero. National-grade "不挑设备" requires the path that works on every mobile GPU vendor. |
+| **K** | Algorithm-base preservation (v3 NEW) | **All 14 Brush WGSL files retained**, even those the v3 viewer doesn't use (`map_gaussian_to_intersects.wgsl`, `rasterize.wgsl`) | Phase 7 on-device training + Phase 6.7 server training need them. Removing = permanently closing the freemium-local-training door. Keep cost = ~3h of additional smoke tests for unused-by-viewer kernels. |
+| **L** | Freemium training tier (v3 NEW) | **Local on-device free (Phase 7) + Cloud A100/H100 paid (Phase 6.7)** via vast.ai existing infra | Scaniverse 100% local entry-level (free, fast, lower quality) + Polycam/KIRI/Luma cloud (paid, slower, higher quality) — PocketWorld combines both. Cloud path zero-new-infrastructure (vast.ai already rented for VGGT pipeline; add Brush stage). |
+| **M** | Device capability matrix (v3 NEW) | **Whitelist on-device** for iPhone 12+ / Mac M1+ / Snapdragon 8 Gen 2+, **cloud-only fallback** for older / Adreno-old / Mali / Maleoon | Adreno crash + Maleoon-Vulkan-disabled make blanket-on-device impossible. Capability detection + cloud fallback satisfies national-grade "every-device-can-use" without forcing every device through a known-broken path. |
+| **N** | New WGSL file in Phase 6 (v3 NEW) | **`splat_render.wgsl` (~80 lines, vertex+fragment, Aether3D-original)** is the only new shader code we write | Aether3D-original code, not Brush-adapted. Apache-2.0 attribution does NOT apply (it's our code). Same conic math as Brush's rasterize.wgsl fragment but expressed as fragment shader running over rasterized instanced quads instead of compute over tile mosaic. |
 
 **Pre-kickoff audit findings** (locked into plan):
 
@@ -52,8 +57,8 @@ Per Phase 4/5 de-risk principle (validation chain, not dependency order). Order:
 | 6.0 | Dawn iOS unblock (build-flag flip + iOS xcframework rebuild) | 🟡 medium (audit confirmed infra ready, but Apple toolchain quirks possible) | iPhone 14 Pro real device | None |
 | 6.1 | Add `kWGSL = 3u` to `ShaderLanguage` enum | 🟢 trivial | host build | None |
 | 6.2 | Implement `DawnGPUDevice` C++ class (~950-line mirror of `metal_gpu_device.mm`) | 🔴 highest (real engineering, every virtual override) | host + iOS | 6.0, 6.1 |
-| 6.3a | **Adapt Brush 4 viewer kernels** (project_forward, project_visible, map_gaussian_to_intersects, rasterize) | 🟡 medium (math is Brush's, only bindings to aether_cpp's GPUBufferDesc layout change) | Dawn Tint compile + runtime smoke + sanity-render synthetic_smoke.ply | 6.1, 6.2.H/I/J/K |
-| 6.3b | **Adapt Brush 3 training kernels** (training_forward, training_backward, training_densify) | 🟡 medium (same as 6.3a; convergence not validated this phase) | Dawn Tint compile + buffer round-trip via aether_train_step | 6.1, 6.2.J |
+| 6.3a | **v3: Brush 3 viewer kernels (project_forward, project_visible, sort/prefix_sum) + new splat_render.wgsl (vertex+fragment)** | 🟡 medium (Brush math is sacrosanct, splat_render fragment is ~80-line conic-evaluation) | Dawn Tint compile + per-kernel smoke + sanity-render synthetic_smoke.ply via vert+frag pipeline to RGBA8 IOSurface | 6.1 |
+| 6.3b | **Brush 4 training kernels: project_backwards, rasterize_backwards (training-only), + retain map_gaussian_to_intersects + rasterize for training path** | 🟡 medium (compute-only; Phase 7 enables on-device, Phase 6.7 ships cloud) | Dawn Tint compile + buffer round-trip via aether_train_step | 6.1 |
 | 6.4 | Wire `DawnGPUDevice` into PocketWorld iOS + macOS plugins | 🟡 medium (FFI pluming + Dart UI changes) | iPhone + macOS desktop | 6.2, 6.3a, 6.3b |
 | 6.5 | End-to-end smoke (load any .ply, render, sanity-check `train_step` buffer round-trip) | 🟢 low (verification only) | iPhone + macOS desktop | 6.0–6.4 |
 | 6.6 | 6-axis quality gate execution + `PHASE6_DONE.md` write-up | 🟢 low (instrumentation + docs) | iPhone | 6.5 |
@@ -213,6 +218,178 @@ Run all 6 axes (Axis A pixel oracle / Axis B training plumbing / Axis C Mobile-G
 
 ---
 
+---
+
+## v3 architecture deep-dive (2026-04-26 user upgrade)
+
+### Why v3 changes the viewer rasterizer (industry evidence)
+
+**Trigger fact A — cross-platform mobile compute rasterizer is unstable:**
+
+| GPU family | compute path status | Source |
+|---|---|---|
+| Apple A/M-series (TBDR) | works but 1.5–3× slower than vert+frag | papers + MetalSplatter App Store track record |
+| Qualcomm Adreno (TBR) | **training crashes 5–750 steps** | [Brush Issue #77](https://github.com/ArthurBrussee/brush/issues/77) |
+| ARM Mali (TBR) | unmeasured, TBR-architecture inferred | — |
+| HiSilicon Maleoon (TBR) | **Vulkan compute disabled in Flutter** | [Flutter Issue #157811](https://github.com/flutter/flutter/issues/157811) |
+| Web (WebGL2 fallback) | **no compute at all, only vert+frag** | WebGL2 spec |
+
+**Trigger fact B — industry evidence is one-sided:**
+
+| Source | Test | Result |
+|---|---|---|
+| GauRast (NVIDIA Research) | desktop vs custom raster | raster **23× faster** than compute |
+| C3DGS (Niedermayr) | A5000 desktop | raster **3.5× faster** |
+| WebSplatter (arxiv 2602.03207) | Snapdragon 8 Gen 3 + iPhone 15 | "raster substantially better" |
+| PlayCanvas SuperSplat v2.17 | production viewer | **actively reverted from compute → instanced quads** |
+| Spark.js / antimatter15-splat / MetalSplatter / Scaniverse | all production viewers | all chose vert+frag + instanced quads |
+
+**Reverse evidence (compute beating vert+frag in any scenario): zero.**
+
+**Conclusion**: viewer rasterizer = vertex+fragment + instanced quads.
+
+### Viewer data flow (v3 — replaces v2's all-compute pipeline)
+
+```
+PLY/SOG file
+  ↓
+[CPU upload] splats → GPU storage buffers (means, quats, scales, opacities, sh_coeffs)
+  ↓
+[Compute] project_forward.wgsl
+  ├─ in:  splat 3D data + camera RenderUniforms
+  └─ out: depths[], xys[], conics[], colors[]    (small storage write, cross-platform stable)
+  ↓
+[Compute] project_visible.wgsl
+  ├─ in:  depths/xys/conics/colors + frustum
+  └─ out: compact_gid[]  (visible splats, frustum cull + opacity check)
+  ↓
+[Compute] Brush radix sort (5 kernels + 3 prefix_sum)
+  ├─ in:  compact_gid[] + depths[]
+  ├─ mod: sort key changes from (tile_id, depth) → depth-only (single 32-bit key)
+  └─ out: sorted_compact_gid[]
+  ↓
+[Vertex+Fragment]  splat_render.wgsl   ← only new code, ~80 WGSL lines
+  ├─ Vertex shader:
+  │     - vertexID % 4 → emit instanced quad's 4 corners
+  │     - instanceID → index sorted_compact_gid → fetch xy, conic, color
+  │     - output quad-corner screen position + conic + color/opacity
+  ├─ Fragment shader:
+  │     - σ = 0.5(conic·Δ²) + conic_xy·Δx·Δy
+  │     - α = opacity · exp(-σ),  min(0.999)
+  │     - early discard if α < 1/255
+  │     - output vec4(color * α, α)  → hardware ROP front-to-back blend
+  └─ Render target: RGBA8 IOSurface-backed MTLTexture
+  ↓
+[GPU→CPU zero-copy] IOSurface ↔ Flutter Texture widget (reuse Phase 4/5 path)
+  ↓
+screen
+```
+
+**Note:** vert+frag path does NOT need `map_gaussian_to_intersects.wgsl` (tile mapping serves only the tile-based compute rasterizer). That file stays in repo as a training-path asset.
+
+### Brush 14 file retention matrix (algorithm base preserved 100%)
+
+| File | Mobile viewer (P6) | Mobile training (P7+) | Server training (P6.7) | Notes |
+|---|---|---|---|---|
+| project_forward.wgsl | ✅ | ✅ | ✅ | Small storage write — cross-platform stable |
+| project_visible.wgsl | ✅ | ✅ | ✅ | Same |
+| map_gaussian_to_intersects.wgsl | ❌ | ✅ | ✅ | Viewer skips (no tile mosaic in vert+frag); training needs it |
+| rasterize.wgsl | ❌ | ✅ | ✅ | Viewer replaces with splat_render.wgsl; training keeps it |
+| project_backwards.wgsl | — | ✅ | ✅ | Training-only, gradient backprop must be compute |
+| rasterize_backwards.wgsl | — | ✅ | ✅ | Same; Adreno crash risk point (Phase 7 fallback to cloud) |
+| 5 sort kernels | ✅ | ✅ | ✅ | General-purpose GPU radix sort primitives |
+| 3 prefix_sum kernels | ✅ | ✅ | ✅ | Sort dependencies |
+| 🆕 splat_render.wgsl | ✅ | — | — | New, vertex+fragment, ~80 lines (Aether3D-original) |
+
+**Net result:** mobile WGSL count = 14 (Brush) + 1 (new) = **15 files**, **0 deletions**. Phase 7 on-device training enable triggers all 14 Brush files unchanged.
+
+### Freemium training tier (v3 business model)
+
+**Trigger:** Of 4 main competitors, **only Scaniverse trains on-device** (Niantic blog: "100% local"). Polycam / KIRI / Luma all cloud. Scaniverse quality < Polycam/Luma (1-min iteration vs H100-multiminute).
+
+**PocketWorld dual tier:**
+
+| Tier | Train where | Speed | Quality | Eligible devices | Cost |
+|---|---|---|---|---|---|
+| **Free** | on-device | ~1–3 min | Mid (compute limited) | See device matrix | User battery, zero marginal cost to us |
+| **Paid** | cloud (vast.ai A100/H100) | ~30 s – 3 min | High (more iterations + bigger splat counts + higher SH) | Any net-connected device | ~$0.05–0.20/run |
+
+**Why this is the national-grade path:**
+- Free covers **new-device users** (~70% traffic, Scaniverse model)
+- Paid serves **older devices + high-quality wants** (revenue path)
+- Existing infra zero-new-cost: vast.ai A100/H100 worker already rented for VGGT pipeline; add Brush training stage
+- Network-disconnect free-tier degrades gracefully (offline-album analogy)
+
+### Device capability matrix (Phase 7 on-device training enable conditions)
+
+| Device class | GPU | Status | Path | Notes |
+|---|---|---|---|---|
+| iPhone 12+ / iPad M1+ | Apple A14+ / M1+ | ✅ enable local | Brush full compute | macOS desktop already validated compute stable |
+| Mac M1+ (dev/desktop) | Apple Silicon | ✅ enable local | Brush full compute | desktop high quality, no timebox |
+| Snapdragon 8 Gen 2/3 (Adreno 740/750) | Adreno TBR | ⚠️ try-enable + fallback | Brush full compute, crash auto-fallback to cloud | Brush #77 risk, real-device gradual rollout |
+| Snapdragon X Elite (Adreno 8xx) | Adreno new driver | ⚠️ try-enable + fallback | Same | Driver may have fixed; real-device test |
+| Mid-range Snapdragon (Adreno 7xx older) | Adreno old | ❌ default cloud-only | — | UI: "local training needs newer device or choose cloud" |
+| Mali (Galaxy / Pixel / Xiaomi) | Mali TBR | ⚠️ default cloud, P8 real-device test | — | No public 3DGS Mali measurements |
+| HarmonyOS Maleoon (Mate 60+, Pura 70) | Maleoon TBR | ❌ default cloud-only | — | Vulkan compute disabled in Flutter |
+| Old Android (Snapdragon 7xx and below) | Various older | ❌ cloud-only | — | Compute + memory insufficient |
+| Web (Chrome/Safari/Edge) | WebGL2 / WebGPU | ❌ cloud-only | — | WebGL2 has no compute, WebGPU not yet ubiquitous |
+
+### Phase 6.3a Step plan (v3 — replaces v2 step list)
+
+| Step | Content | Timebox | DoD |
+|---|---|---|---|
+| Step 1 ✅ | DawnKernelHarness + project_forward smoke | done | 5-layer chain PASS (8ab52bbd) |
+| Step 2 ✅ | project_visible smoke | done | xy/conic/color expected values PASS (9ac19b32) |
+| Step 3 ✅ | map_gaussian_to_intersects smoke | done | num_intersections PASS (viewer skips, training needs) |
+| **Step 4** | 🆕 **splat_render.wgsl + harness vert+frag extension** | 3h | 4 splats render to 256×256 RGBA8 IOSurface; readback verifies non-black pixels at expected positions; no NaN |
+| Step 5 | Brush 5 sort + 3 prefix_sum smokes (8 kernels mechanical) | 1.5h | each kernel observably correct (sorted monotone, prefix accumulates) |
+| Step 6 | Brush rasterize.wgsl + rasterize_backwards.wgsl smokes | 1.5h | algorithm-base smoke PASS even though viewer skips — for Phase 7 enable readiness |
+| Step 7 | project_backwards.wgsl smoke | 0.5h | same |
+
+**Phase 6.3a DoD (v3):** 14 + 1 = 15 WGSL files all 5-layer-chain PASS via host smoke. Adreno crash mitigation cannot be validated on macOS smoke; that's Phase 7 real-device territory.
+
+### Risk + fallback matrix
+
+| Risk | Severity | Fallback |
+|---|---|---|
+| splat_render.wgsl math error → visual artifacts | High | Phase 6.5 cross-val vs MetalSplatter, diff thresholds locked |
+| Mali / Maleoon real-device measurement still vert+frag-slow | Medium | Phase 7 real-device gradual rollout; current reverse evidence is zero |
+| Brush sort key restructure introduces bug | Medium | Step 5 smoke covers (random input + verify sorted monotone) |
+| Phase 7 Adreno on-device training crash unfixable | Medium | Device matrix retreat to cloud fallback; business model unaffected |
+| Server training cost runaway | Medium | Limit free-tier monthly count, paid subscription amortizes; tier by splat count |
+| Upload 50–200 photos bandwidth | Low | Client-side resize + WebP, drops to 50–100 MB |
+| Brush upstream version bump → naga_oil re-process | Low | Path G ETL automated, `cargo run --release` re-runs |
+| MetalSplatter App Store version drift breaks cross-val baseline | Low | Lock Phase 6.5 MetalSplatter commit hash in CROSS_PLATFORM_STACK.md |
+
+### Locked decision pins (v3 — architectural; cannot regress)
+
+1. ✅ viewer rasterizer = vertex+fragment + instanced quads (MetalSplatter style)
+2. ✅ `splat_render.wgsl` is Phase 6's only new WGSL file
+3. ✅ All 14 Brush WGSL files retained — algorithm base does not contract, only execution order shifts
+4. ✅ Freemium training tier — local free (P7 enable) + cloud paid (P6.7 immediate)
+5. ✅ Device capability matrix + cloud fallback — Adreno/Maleoon orchestrated to cloud, no forced on-device
+6. ✅ Server training reuses vast.ai A100/H100 worker — zero new infrastructure cost
+7. ✅ Cross-platform single codebase — iOS/Android/HarmonyOS/Mac/Web share the same 15 WGSL; glue is Swift/Kotlin per platform
+8. ✅ WGSL is the single source of shader truth — no parallel .metal / .glsl / .hlsl path
+9. ✅ Phase 6.5 cross-val baseline = MetalSplatter App Store version (architectural match → diff = FP rounding only)
+10. ✅ National-grade principle non-negotiable: stability >> flexibility, quality >> speed, cross-platform >> single-platform optimization
+
+### Decision audit (for future-self / handoff)
+
+**Why not v2 (full Brush compute viewer)?**
+> Brush #77 Adreno crash + Maleoon Vulkan compute disabled = cross-platform viewer dataflow broken. National-grade "不挑设备 + 多人在线稳定" principle violated. MetalSplatter App Store proven 1+ year + PlayCanvas SuperSplat actively reverted compute→instanced quads = industry-aligned conclusion.
+
+**Why not abandon Brush entirely (only MetalSplatter style)?**
+> Brush provides: (1) project + sort math validated; (2) backward training gradient kernels; (3) actively maintained algorithm base. Abandoning = losing Phase 7 on-device training + Phase 6.7 server training algorithm grounding, plus self-maintenance burden. "hybrid keep 14 + write 1" is minimum-cost cross-platform path.
+
+**Why not cloud-only (drop on-device algorithm base)?**
+> Business model needs freemium tier — Scaniverse proven free-on-device is user-acquisition entry. Removing backward kernels = permanently shutting off free tier = business model castrated. Algorithm-base preservation cost is tiny (smoke 1.5h × 2 step), benefit is future commercial flexibility.
+
+**Why this timing: viewer P6, cloud-train parallel P6.7, on-device-train deferred P7?**
+> Hot-path priority: viewing >> creating. All users view, only some create. Phase 6 done = product immediately usable (cloud training already in place). On-device training waits for real-device gradual data + business metric proving free tier has value, avoiding sunk cost.
+
+---
+
 ## Out of scope (Phase 6 explicitly excludes)
 
 - ❌ Cross-validation against TestFlight Aether3D (deprecated per A; replaced by MetalSplatter)
@@ -243,6 +420,13 @@ Run all 6 axes (Axis A pixel oracle / Axis B training plumbing / Axis C Mobile-G
 
 - **PHASE6_PLAN v1 → v2 in-place upgrade 2026-04-26 ~10:35** — user issued v2 prompt: shader source = Brush adapt (Apache-2.0, gSplat-paper math); cross-val oracle = MetalSplatter (MIT, App Store-shipped); perf bar = Mobile-GS (60 FPS @ 50k on iPhone 14 Pro); 3 file formats (.ply + .spz + .splat); ≤50 MB app size; LICENSE compliance. v1 work (6.0/6.1/6.2.A-F) carries forward unchanged. v2-only sub-step changes: 6.3a/b (Brush adapt) + 6.5 (MetalSplatter cross-val) + 6.6 (upgraded 6-axis gate). Locked decisions A/B updated; G/H/I added.
 - **6.2.F (DawnGPUDevice buffer impl) ✅ DONE 2026-04-26 ~10:30** (commit `4a8f2cc6`) — hybrid stability strategy locked by user: `update_buffer` = wgpuQueueWriteBuffer (HOT, zero-block); `map_buffer` for staging-read = wgpuBufferMapAsync + WaitAny spin (RARE); `map_buffer` for write = warn-once + nullptr (callers must use update_buffer). Factory init via wgpuCreateInstance with TimedWaitAny feature + sync RequestAdapter/RequestDevice via WaitAny. ~600 lines, host build clean. Telemetry: `spin_wait_count()` accessor.
+- **PHASE6_PLAN v2 → v3 in-place upgrade 2026-04-26 ~12:30** — user issued v3 prompt: viewer rasterizer changes from "all Brush compute" to "vertex+fragment + instanced quads" (MetalSplatter / Spark.js / PlayCanvas SuperSplat industry alignment). Decisions A-I retained; J/K/L/M/N added. Brush 14 WGSL files all retained (algorithm base preserved for Phase 7+ on-device training); new `splat_render.wgsl` (~80-line vertex+fragment, Aether3D-original) is Phase 6's only new shader file. Freemium training tier locked (P7 local + P6.7 cloud A100/H100 via vast.ai). Industry evidence: GauRast 23× / C3DGS 3.5× / WebSplatter / PlayCanvas SuperSplat v2.17 (compute → instanced quads regression) / Brush #77 (Adreno crash) / Flutter #157811 (Maleoon Vulkan compute disabled). Phase 6.3a Steps 1-3 (project_forward / project_visible / map_gaussian) carry forward unchanged; map_gaussian smoke retained because it serves the training path even though viewer skips it.
+- **Plan B Step 2+3 ✅ DONE 2026-04-26 ~12:00** (commit `9ac19b32`) — project_visible smoke (8-buffer bind, xy/conic/color bit-exact correct) + map_gaussian_to_intersects smoke (6-buffer bind incl read-only uniforms; num_intersections=16 matches cum[num_visible], all tile_ids/compact_gids in valid range). Shared C++ struct mirrors extracted to `aether_cpp/tools/aether_dawn_splat_test_data.h`.
+- **Phase 6.3a P1+P2 review fixes ✅ DONE 2026-04-26 ~11:45** (commit `2657ee00`) — SetUncapturedErrorCallback registered on DawnGPUDevice descriptor (silent-validation-failure firewall) + RenderUniforms→RenderArgsStorage rename to disambiguate storage vs uniform.
+- **Plan B Step 1 (DawnKernelHarness + project_forward smoke) ✅ DONE 2026-04-26 ~11:30** (commit `8ab52bbd`) — first 5-layer chain validation. Brush WGSL → naga_oil → binding layout → Tint → Apple Silicon Metal all proven. depths=2/4/6/8 bit-exact, num_visible=4 atomic correct, no NaN.
+- **Path G (vendor-time WGSL preprocessor via naga_oil) ✅ DONE 2026-04-26 ~11:00** (commit `2afaaaaf`) — Cargo crate wgsl_preprocess emits 14 standalone WGSL files from 17 raw Brush vendored files. naga_oil 0.19 matches Brush v0.3.0 internal use. Demangling regex strips `X_naga_oil_mod_X<base32>X` type-name suffixes. Re-pin = `cargo run --release` + `git diff`.
+- **Phase 6 v1 → v2 upgrade (Brush + MetalSplatter + Mobile-GS) ✅ DONE 2026-04-26 ~10:35** (commit `df20e564`) — locked decisions G/H/I added; A/B updated (oracle = MetalSplatter, test data = Mip-NeRF garden + synthetic_smoke).
+- **6.2.F (DawnGPUDevice buffer impl, hybrid stability) ✅ DONE 2026-04-26 ~10:30** (commit `4a8f2cc6`) — update_buffer = wgpuQueueWriteBuffer hot path (zero-block); map_buffer staging-read = wgpuBufferMapAsync + WaitAny spin (rare); map_buffer write = warn-once + nullptr (callers must use update_buffer).
 - **6.2.A-E (DawnGPUDevice skeleton + CMake wire) ✅ DONE 2026-04-26 ~10:25** — `kDawn` added to `GraphicsBackend` enum (runtime_backend.h); `aether/render/dawn_gpu_device.h` factory header written (mirror of metal_gpu_device.h shape); `src/render/dawn_gpu_device.cpp` skeleton (~330 lines) — class with all GPUDevice virtual overrides as stubs that warn-once via `stub_log_once` and return invalid handles; CMakeLists.txt conditionally adds `dawn_gpu_device.cpp` to `aether3d_core` when `AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn`; `target_link_libraries(aether3d_core PUBLIC dawn::webgpu_dawn)` propagates Dawn to consumers. **Host build verified clean** with full Dawn dep chain compiled. iOS arm64-device `dawn_gpu_device.o` compiles clean too; iOS `aether3d_core` end-to-end blocked on PRE-EXISTING `depth_inference_coreml.mm` iOS 16 availability issue (NOT new from this commit). Phase 6.2.F-K (real impls of buffer/texture/shader/pipeline/command-buffer) replace stubs in subsequent commits.
   - **Side effect handled**: flipping `AETHER_ENABLE_DAWN=ON` in `scripts/build_ios_xcframework.sh` (Phase 6.0 step 1) caused Abseil's CMake C++17 compile-feature probe to fail on iphonesimulator sysroot. Rolled back to `=OFF` so the Phase 5 vendored_libraries deploy path stays green; Dawn iOS still builds via direct `cmake --build aether_cpp/build-ios-{device,sim} --target webgpu_dawn` (proven 2026-04-26 02:49). New BACKLOG entry tracks the Abseil probe regression — needs fix before 6.4 wires Dawn into iOS Pod.
 - **6.1 (kWGSL enum) ✅ DONE 2026-04-26 ~03:15** — `kWGSL = 3u` added to `ShaderLanguage` in `aether_cpp/include/aether/render/shader_source.h`. 5 switch statements in `aether_cpp/src/render/shader_source.cpp` (BRDF / BRDF-LUT / BRDF-Poly / SH-eval / flip-rotation utility shaders) given explicit `case ShaderLanguage::kWGSL:` falling through to GLSL with `// TODO Phase 6+: translate <utility> to WGSL` comments — exhausts the switch without breaking `-Werror -Wswitch`. The utility shaders are not yet WGSL-translated; that's deferred to Phase 6+ if/when those utilities are needed in the WGSL pipeline (likely Phase 7+ once basic splat WGSL works). Clean `aether3d_core` build verified on host.
