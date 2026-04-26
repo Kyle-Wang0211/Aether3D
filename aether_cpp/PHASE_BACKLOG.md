@@ -68,11 +68,9 @@ the item shouldn't be here.
 (From the Phase 4 code-review pass — issues #3 + #6–#10 of 10 total. Issues
 #1, #2, #4, #5 were fixed inline as a separate chore commit.)
 
-### #3 — `passRetained` contract assertion
-- **What**: `GradientTexture.copyPixelBuffer()` in `pocketworld_flutter/macos/Runner/MainFlutterWindow.swift` returns `Unmanaged.passRetained(pixelBuffer)` assuming Flutter's texture compositor releases it. Currently a code comment documents the contract. Add a runtime assertion (e.g. weak ref tracking) or unit test that catches a Flutter SDK regression that silently changes the contract.
-- **Why it's not cosmetic**: silent CVPixelBuffer leak on Flutter SDK upgrade. Activity Monitor would eventually show climbing memory but no crash, no error — invisible regression.
-- **Trigger to do**: any Flutter SDK bump (currently pinned to 3.41.7 in CROSS_PLATFORM_STACK.md).
-- **Shape**: ~30 min — add weak-ref tracking around CVPixelBuffer + assertion that count drops over time, OR a unit test that mocks the Flutter compositor.
+### #3 — `passRetained` contract assertion ✅ DONE Phase 5 polish (commit `a915f59b`)
+- Resolved by adding always-on `CFGetRetainCount`-based watchdog inside `copyPixelBuffer()` on both iOS (`MetalRenderer.swift`) and macOS (`MainFlutterWindow.swift`) plugins. Samples once per second (every 60th call at 60fps) and logs `passRetained contract WARNING` if retain count exceeds threshold (5 — covers normal pipelining slack). Cost: < 0.01 ms / frame.
+- The original "trigger = Flutter SDK bump" was changed to always-on after the user audit pointed out solo-dev SDK upgrades don't reliably remember dormant invariant checks. Always-on assertion shifts detection horizon from "user complaint after 30 min of use" to "log line within 1 second of leak".
 
 ### #6 — Dart-side retry mechanism on texture create failure ✅ DONE Phase 5 polish
 - Resolved by wrapping `_HomeScreenState._requestTexture` with `_isRetrying` guard + ElevatedButton in the error path. Manual-only (no auto-retry — auto would mask GPU resource contention; explicit user click is the right product behavior for a dev surface). See `pocketworld_flutter/lib/main.dart`.
