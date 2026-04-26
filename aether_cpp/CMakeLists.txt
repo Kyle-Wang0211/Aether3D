@@ -216,6 +216,15 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
                             tools/aether_dawn_splat_smoke_prefix_sum_scan_sums.cpp)
     aether_dawn_smoke_test(aether_dawn_splat_smoke_prefix_sum_add_scanned_sums
                             tools/aether_dawn_splat_smoke_prefix_sum_add_scanned_sums.cpp)
+
+    # ─── Step 6: Brush rasterize compute kernels (training path) ───
+    # Phase 6 viewer uses splat_render.wgsl (vert+frag); Brush rasterize
+    # is retained for Phase 7+ on-device training. Smokes prove the
+    # compute path still functional on Dawn iOS Metal.
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_rasterize
+                            tools/aether_dawn_splat_smoke_rasterize.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_rasterize_backwards
+                            tools/aether_dawn_splat_smoke_rasterize_backwards.cpp)
 endif()
 
 # ============================================================================

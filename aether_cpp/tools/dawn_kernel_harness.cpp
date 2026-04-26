@@ -114,13 +114,31 @@ bool DawnKernelHarness::init() {
         // maxComputeInvocationsPerWorkgroup + WorkgroupSizeX so the
         // pipelines can be created. Modern desktop/mobile GPUs all
         // support 1024 (verified at runtime: this adapter reports
-        // maxComputeWorkgroupSizeX=1024). Limits we need:
-        //   maxComputeInvocationsPerWorkgroup ≥ 512  (= total threads)
-        //   maxComputeWorkgroupSizeX           ≥ 512  (= X dim)
+        // maxComputeWorkgroupSizeX=1024).
         wgpu::Limits required_limits{};
         required_limits.maxComputeInvocationsPerWorkgroup = 512;
         required_limits.maxComputeWorkgroupSizeX = 512;
+        // Phase 6.3a Step 6: Brush rasterize_backwards binds 10 storage
+        // buffers (uniforms + 6 read inputs + 3 atomic-write outputs).
+        // WebGPU's default cap is 8; bump to 10 so the pipeline can be
+        // created. Apple Silicon supports up to 64; this 10 is well below
+        // any modern GPU's max — verified by adapter introspection.
+        required_limits.maxStorageBuffersPerShaderStage = 10;
         device_desc.requiredLimits = &required_limits;
+
+        // Phase 6.3a Step 6: Brush rasterize_backwards.wgsl uses
+        // subgroupAdd / subgroupAny / subgroup_invocation_id. WGSL
+        // requires the 'subgroups' extension to be enabled, which on
+        // the API side maps to FeatureName::Subgroups. Most modern
+        // adapters (Apple Silicon, recent Adreno/Mali, all desktop)
+        // support it; if a future adapter doesn't, the device request
+        // will fail loudly here rather than at first compile of a
+        // training kernel.
+        static constexpr wgpu::FeatureName required_features[] = {
+            wgpu::FeatureName::Subgroups,
+        };
+        device_desc.requiredFeatureCount = 1;
+        device_desc.requiredFeatures = required_features;
         instance_.WaitAny(
             adapter_.RequestDevice(
                 &device_desc,
