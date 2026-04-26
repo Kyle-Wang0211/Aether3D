@@ -4,6 +4,26 @@ Deferred non-blocking work, organized by **trigger condition** (not by priority 
 Items here are NOT lost — they're parked until their trigger fires. If no trigger,
 the item shouldn't be here.
 
+---
+
+## Phase 6 prerequisite — LOCKED, NOT DEFERRED
+
+### Dawn iOS unblock + WGSL single-source shader pipeline
+- **Status**: HARD PREREQUISITE. Phase 6 cannot start until this is resolved. Not a defer.
+- **What**: Before Phase 6 real splat shader work begins, Dawn must build for iOS xcframework (Phase 4 D1 path, deferred under Phase 4 D2 macOS-first decision). That deferral has expired — Phase 6 splat shaders need a WGSL → Dawn → Metal/Vulkan/D3D path live so the same shader source runs on iOS, Android, HarmonyOS without per-platform forks.
+- **Why it's not cosmetic**: Without Dawn iOS, real splat shaders fall back to per-platform MSL/GLSL/HLSL (Phase 4 architectural option A from D1's failure-mode table). **Per-platform shader is a violation of the user's stated cross-platform-algorithm principle (audit 2026-04-26), not a graceful degradation.** Shader code is algorithm; algorithm must be cross-platform per the architecture principle that drives this whole project. A per-platform shader split would mean the same splat-rasterizer math is hand-written 3-4 times across Swift/Kotlin/ArkUI codebases — exactly the technical debt this architecture refuses.
+- **Triggers**:
+  - **Phase 6 kickoff** (mandatory — Phase 6 cannot start until this is done)
+  - Or: discovery that real splat math benefits >2× from Metal-3-specific features Dawn doesn't expose (would force re-evaluation, but the default answer is still "stay WGSL, accept feature lag" per Brush / gsplat-rs precedent — both vendor-able into aether_cpp later precisely because they're WGSL)
+- **Method**: revisit Phase 4 D1 plan (CMake → `arm64-ios` + `arm64-iossimulator` xcframework build of Dawn). P3 prep done means more of aether_cpp builds clean for iOS now than 4 weeks ago, so the dependency graph is less hostile.
+- **What's NOT acceptable as fallback**: per-platform shader (option A from Phase 4 D1). Per-platform shader is a violation, not a graceful degradation. If Dawn iOS unblock fails:
+  - **Phase 6 ABORTS**
+  - Does NOT fall back to per-platform MSL
+  - Goes back to architecture review session before retry
+- **Shape**: 1-2 days of Dawn iOS xcframework debugging. Could trigger BACKLOG cascade similar to P3.5 CocoaPods quirk — that's expected, Phase 6 has time budget for it.
+- **Why this entry exists despite Phase 5 G having "deferred"**: Phase 5 G was the right LOCAL decision for Phase 5 (don't add Dawn complexity while porting Phase 4 to iOS). It is NOT the right decision for Phase 6+ (real shader code lands). Entry filed 2026-04-26 immediately after the Phase 5 user audit so the deferral can't quietly re-emerge in Phase 6 plan as an "easy A fallback".
+- **Architectural note** (consequence of B): shader source location going forward is `aether_cpp/shaders/*.wgsl` — single-truth-point under aether_cpp, alongside the C++ algorithm source it complements. Future Phase 7+ Brush / gsplat-rs vendoring is zero-friction because both are WGSL natives.
+
 **Phase 3 blocker resolved 2026-04-25** — all 3 previously-deferred bitrot files (`pipeline_coordinator.cpp`, `metal_gpu_device.mm`, `splat_render_engine.cpp`) re-enabled and compiling cleanly. See git log for the 5-commit Phase 3 prep cycle (chore trivials → refactor dynamic_cast → refactor try/catch → build re-enable → docs clear). The companion `PHASE3_BLOCKER.md` was deleted in this cycle since the work it tracked is complete.
 
 ---
