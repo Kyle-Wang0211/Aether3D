@@ -159,6 +159,7 @@ Verify each sub-step's validation passing before committing.
 
 (Updated as steps complete — current cursor at top.)
 
+- **Step 4 (4.3 — degraded path) ✅ PASS** — Metal-rendered triangle (R/G/B vertices, barycentric blend, dark background) writes into the IOSurface-backed MTLTexture. Same shader logic as P1.7 `aether_dawn_hello_triangle` but expressed in MSL inside Swift instead of Dawn WGSL — Dawn skipped per D1 degradation since Phase 3.5 iOS Pod is deferred and Phase 4 macOS-first means iOS isn't on the critical path. Per DoD "native GPU" — Metal counts. Step 3 (Dawn-iOS unblock) is no-op under macOS-first, recorded in plan only.
 - **Step 2 (4.2) ✅ PASS — boss fight won** — IOSurface bridge live: same IOSurface wrapped both as CVPixelBuffer (Flutter reads) and MTLTexture (Metal writes). Metal render encoder clear-color (orange) lands on screen via the Flutter Texture widget without an intermediate copy. The CPU-fill from Step 1 was replaced with a Metal render pass. Done in ~30 min, well within the 8-hour hard timebox.
   - Real cost was a single API mismatch fix: `CVPixelBufferCreateWithIOSurface` returns via `Unmanaged<CVPixelBuffer>?` (unlike the plain-Optional `CVPixelBufferCreate`); used `takeRetainedValue()` to balance the +1 refcount.
   - Visual diff vs Step 1 (gradient → solid orange) is the proof that the Metal write actually replaced the pixel source — no bridge magic, just orange where there used to be a gradient.
