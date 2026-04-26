@@ -6,6 +6,22 @@ the item shouldn't be here.
 
 ---
 
+## Phase 6.2 deferred sub-items (within-phase, not blocked-on-user)
+
+### Dawn iOS Abseil C++17 compile-feature probe regression
+- **What**: When `AETHER_ENABLE_DAWN=ON` is set for iOS sim builds via `scripts/build_ios_xcframework.sh`, Abseil's CMake compile-feature probe (under `third_party/dawn/third_party/abseil-cpp/CMake/AbseilDll.cmake:753`) fails with `"compiler defaults to or is configured for C++ < 17. C++ >= 17 is required"`. Top-level project sets `CMAKE_CXX_STANDARD=20` so this is Abseil's probe not picking up the inherited standard from a parent scope.
+- **Why this matters**: blocks the Phase 6.4 path of wiring Dawn into the iOS Pod chain. Phase 5 vendored_libraries deploy currently works because `build_ios_xcframework.sh` keeps `AETHER_ENABLE_DAWN=OFF`. Rolling that flag forward without fixing Abseil's probe regresses iOS deploy.
+- **Status as of 2026-04-26 ~10:25**: `AETHER_ENABLE_DAWN=OFF` is the script's current setting (rolled back from ON to preserve Phase 5 path). Dawn iOS build itself works via `cmake --build aether_cpp/build-ios-{device,sim} --target webgpu_dawn` (libwebgpu_dawn_objects.a produced both arches, 2026-04-26 02:49).
+- **Trigger to fix**: before Phase 6.4 wires Dawn into iOS Pod chain. Without this, 6.4 can't link against Dawn from the iOS app.
+- **Plausible directions**:
+  - Set `CMAKE_CXX_STANDARD` explicitly inside Abseil subdir scope before `add_subdirectory`
+  - Set `set(CMAKE_CXX_COMPILE_FEATURES cxx_std_20)` per-target on the subdir
+  - Patch `AbseilDll.cmake` to recognize C++20 implies C++17
+  - Force probe ENV var (`set(ENV{CXX_STANDARD} 20)`) before `add_subdirectory`
+- **Shape**: 1-2 hours of CMake debugging. Likely ends up as an `EXCLUDE_FROM_ALL` flag tweak or a 1-line scope hack.
+
+---
+
 ## Phase 6 prerequisite — LOCKED, NOT DEFERRED
 
 ### Dawn iOS unblock + WGSL single-source shader pipeline

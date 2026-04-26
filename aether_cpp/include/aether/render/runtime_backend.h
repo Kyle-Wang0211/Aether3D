@@ -23,6 +23,11 @@ enum class GraphicsBackend : std::uint8_t {
     kVulkan = 1u,
     kOpenGLES = 2u,
     kUnknown = 3u,
+    // Phase 6.2: Dawn (WebGPU) backend. Maps to Metal on Apple, Vulkan on
+    // Android/HarmonyOS, D3D12 on Windows internally — but exposed
+    // uniformly as kDawn so application code is platform-agnostic. Used
+    // by DawnGPUDevice (see aether/render/dawn_gpu_device.h).
+    kDawn = 4u,
 };
 
 inline constexpr bool is_backend_supported_for_platform(
@@ -30,10 +35,13 @@ inline constexpr bool is_backend_supported_for_platform(
     GraphicsBackend backend) {
     switch (platform) {
         case RuntimePlatform::kIOS:
-            return backend == GraphicsBackend::kMetal;
+            // Phase 6.2: Dawn iOS is supported (translates to Metal internally).
+            return backend == GraphicsBackend::kMetal || backend == GraphicsBackend::kDawn;
         case RuntimePlatform::kAndroid:
         case RuntimePlatform::kHarmonyOS:
-            return backend == GraphicsBackend::kVulkan || backend == GraphicsBackend::kOpenGLES;
+            return backend == GraphicsBackend::kVulkan
+                || backend == GraphicsBackend::kOpenGLES
+                || backend == GraphicsBackend::kDawn;
         case RuntimePlatform::kUnknown:
             return false;
     }

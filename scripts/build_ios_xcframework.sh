@@ -10,11 +10,20 @@
 # (CoreML / Metal API differences). Re-enabling those for iOS is a Phase 4
 # task, see PHASE_BACKLOG.md "iOS aether3d_core" entry.
 #
-# Phase 6.0 (2026-04-26): Dawn iOS unblocked. AETHER_ENABLE_DAWN flipped from
-# OFF (Phase 5.0 deferral under D2 macOS-first decision) to ON. Audit
-# confirmed Dawn submodule (third_party/dawn/) ships Metal backend with iOS
-# GPU family checks already, so the unblock is a build-flag flip — no
-# vendor work required. See aether_cpp/PHASE6_PLAN.md decision D + 6.0.
+# Phase 6.0 (2026-04-26): Dawn iOS unblocked at the cmake-build level (proven
+# by direct `cmake --build aether_cpp/build-ios-device --target webgpu_dawn`
+# producing libwebgpu_dawn_objects.a for arm64-device + arm64-simulator).
+# But this xcframework script keeps AETHER_ENABLE_DAWN=OFF: when Dawn is in
+# the iOS dep tree, Abseil's CMake compile-feature probe fails on the
+# iphonesimulator sysroot ("C++ >= 17 required") even though the project
+# sets CMAKE_CXX_STANDARD=20 globally — Abseil's probe doesn't pick up
+# inherited standard from a parent scope. Phase 5 vendored_libraries deploy
+# path depends on this script's aether3d_ffi-only build staying green.
+# Phase 6.2+ (DawnGPUDevice + WGSL shaders) builds via direct cmake
+# invocation (host) which works fine; the iOS Dawn-link path lights up
+# in 6.4 when Dawn is wired into the iOS Pod via a separate route.
+# Tracking BACKLOG: "Dawn iOS Abseil C++17 probe regression — fix before
+# Phase 6.4 wires Dawn into iOS Pod chain".
 
 set -euo pipefail
 
@@ -31,7 +40,7 @@ COMMON_ARGS=(
     -DCMAKE_SYSTEM_NAME=iOS
     -DCMAKE_OSX_ARCHITECTURES=arm64
     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
-    -DAETHER_ENABLE_DAWN=ON
+    -DAETHER_ENABLE_DAWN=OFF
     -DAETHER_FFI_BUILD_STATIC=ON
 )
 

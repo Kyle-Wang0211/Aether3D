@@ -88,6 +88,16 @@ target_include_directories(aether3d_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/incl
 target_link_libraries(aether3d_core PUBLIC ZLIB::ZLIB)
 target_compile_options(aether3d_core PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
 
+# ─── Phase 6.2: Dawn backend source conditionally included ─────────────
+# When AETHER_ENABLE_DAWN is ON, link the DawnGPUDevice C++ implementation
+# into aether3d_core. Uses Dawn's raw C webgpu.h (NOT webgpu_cpp.h) so the
+# strict -fno-exceptions / -fno-rtti flags stay in effect on this TU.
+if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
+    target_sources(aether3d_core PRIVATE src/render/dawn_gpu_device.cpp)
+    target_compile_definitions(aether3d_core PRIVATE AETHER_ENABLE_DAWN=1)
+    target_link_libraries(aether3d_core PUBLIC dawn::webgpu_dawn)
+endif()
+
 if(APPLE)
     target_link_libraries(aether3d_core PUBLIC
         "-framework Foundation"
