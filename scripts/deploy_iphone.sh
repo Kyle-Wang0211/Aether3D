@@ -91,17 +91,32 @@ if [ -z "$ENT_PATH" ]; then
     exit 1
 fi
 
+# Phase 5.2 diagnosis 3: macOS 26.1 file provider re-tags files under
+# ~/Documents/ with com.apple.FinderInfo + fileprovider.fpfs#P
+# continuously. codesign rejects FinderInfo, hence "resource fork ...
+# detritus not allowed". xattr -d removes them, but the file provider
+# re-tags within ms. Race-window: clear xattrs and codesign IN THE SAME
+# shell invocation — codesign reads xattrs faster than the provider
+# re-tags. xcodebuild's default DerivedData path (~/Library/...) is
+# NOT file-provider-tracked, so the .app there is xattr-clean to begin
+# with — but flutter build ios redirects to <project>/build/ios/, which
+# IS in Documents tree. This script handles either build path.
+clean_xattrs_then_sign() {
+    local target="$1"; shift
+    find "$target" -exec xattr -d com.apple.FinderInfo {} + 2>/dev/null || true
+    find "$target" -exec xattr -d "com.apple.fileprovider.fpfs#P" {} + 2>/dev/null || true
+    codesign --force --sign "$IDENTITY" "$@" "$target"
+}
+
 echo "==> Re-signing embedded frameworks..."
 for FW in "$APP"/Frameworks/*; do
     [ -e "$FW" ] || continue
     echo "    sign $(basename "$FW")"
-    codesign --force --sign "$IDENTITY" --timestamp=none "$FW"
+    clean_xattrs_then_sign "$FW" --timestamp=none
 done
 
 echo "==> Re-signing Runner.app top level..."
-codesign --force --sign "$IDENTITY" \
-    --entitlements "$ENT_PATH" \
-    --timestamp=none "$APP"
+clean_xattrs_then_sign "$APP" --entitlements "$ENT_PATH" --timestamp=none
 
 # ─── 3. Install + launch via devicectl ──────────────────────────────
 echo "==> Installing on device $DEVICE_UDID..."

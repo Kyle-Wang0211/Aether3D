@@ -99,10 +99,14 @@ the item shouldn't be here.
 
 ## Phase 5.2 iPhone real device deploy ✅ RESOLVED in Phase 5.2 (xcodebuild bypass)
 
-### Initial diagnosis was wrong: this was Flutter-tool-specific, not macOS-fundamental
+### Three diagnoses, three reframings; here's what's actually true
 
-- **First attempt (FAILED)**: `flutter build ios --release` and `flutter build ios --debug` both fail at Xcode's `CodeSign /path/Runner.app` step with `resource fork, Finder information, or similar detritus not allowed`. I initially attributed this to a kernel-protected `com.apple.provenance` xattr that no command (`xattr -c`, `xattr -d`, `ditto --noextattr`, `cp -X`, `cat`-redirect) can strip on macOS 26.1.
-- **Correct diagnosis (revised 2026-04-26 00:13)**: the codesign block is in the path Flutter's tool wrapper invokes codesign through — NOT in macOS's codesign itself. **`xcodebuild -workspace … -scheme Runner -configuration Debug -destination 'generic/platform=iOS' -allowProvisioningUpdates`** signs successfully on the same machine, same provenance xattrs everywhere. The build SUCCEEDS, producing a properly-signed `Runner.app` in `~/Library/Developer/Xcode/DerivedData/.../Build/Products/Debug-iphoneos/`.
+- **Diagnosis 1 (WRONG)** — "macOS 26.1 + provenance xattr is a fundamental codesign block." Conclusion was that no command can strip `com.apple.provenance` and codesign refuses every file. Reframed when `xcodebuild` direct (without Flutter's wrapping) signed the same project successfully.
+- **Diagnosis 2 (CLOSER)** — "The block is in Flutter's tool wrapper, not macOS's codesign." `xcodebuild -workspace ... -configuration Release -destination 'generic/platform=iOS' -allowProvisioningUpdates` signs successfully on the same machine; `flutter build ios` doesn't. Used this as the basis for `scripts/deploy_iphone.sh`. Reframed again 2026-04-26 01:00 when reproduced the failure with `xcodebuild` PLUS Flutter's `BUILD_DIR=<repo>/pocketworld_flutter/build/ios` flag.
+- **Diagnosis 3 (CORRECT, 2026-04-26 01:10)** — The codesign block is **macOS file-provider system re-tagging files under `~/Documents/` with `com.apple.FinderInfo` + `com.apple.fileprovider.fpfs#P` continuously**. The `~/Documents/` tree is tracked by the file provider (because Apple thinks it's user-content); the file provider re-applies these xattrs within milliseconds even after `xattr -d` removes them. codesign rejects files with `FinderInfo`. `~/Library/Developer/Xcode/DerivedData/` is NOT file-provider-tracked, so codesign works there.
+  - Repro: `xcodebuild -workspace ... -allowProvisioningUpdates BUILD_DIR=<documents-tree-path>` reproduces the failure exactly. Without the `BUILD_DIR=` override, builds go to DerivedData and codesign succeeds.
+  - The `com.apple.provenance` xattr is a red herring — present in both working and failing paths, kernel-protected, but not what codesign rejects. The actual rejection is on `FinderInfo`.
+  - The `xattr -c`/`xattr -d` strip ALL appear to "succeed" (exit 0) but the file provider re-tags within a few ms. **Race-windowing works: `find $APP -exec xattr -d com.apple.FinderInfo {} +; codesign ...` in a SINGLE shell invocation succeeds because codesign reads xattrs faster than the file provider can re-tag.** This is what `scripts/deploy_iphone.sh` now embeds.
 - **Working deploy workflow (Phase 5.2 actual)**:
   ```bash
   # 1. Build via xcodebuild directly (NOT `flutter build ios`):
