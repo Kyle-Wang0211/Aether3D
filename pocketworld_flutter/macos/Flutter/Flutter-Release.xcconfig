@@ -1,0 +1,5 @@
+#include "ephemeral/Flutter-Generated.xcconfig"
+
+// See Flutter-Debug.xcconfig for rationale. Release builds also unsigned
+// for now; flip to signed flow before any distribution (TestFlight, store).
+CODE_SIGNING_ALLOWED = NO

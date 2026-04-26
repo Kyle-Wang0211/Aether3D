@@ -1,0 +1,13 @@
+#include "ephemeral/Flutter-Generated.xcconfig"
+
+// Disable codesign for desktop dev builds. macOS 14+ adds the kernel-protected
+// com.apple.provenance xattr to the built .app bundle; even ad-hoc codesign
+// then fails with "resource fork, Finder information, or similar detritus
+// not allowed". Same root cause as the iOS Simulator patch in
+// scripts/flutter_sdk_patches/ but a different injection point — macOS
+// codesign happens at the Xcode build-phase level, not in flutter_tools Dart
+// code, so the fix is per-project xcconfig rather than an SDK patch.
+//
+// The unsigned .app launches on local macOS for dev. Distribution would
+// require a real Developer ID + signing flow.
+CODE_SIGNING_ALLOWED = NO
