@@ -15,7 +15,12 @@ on:
       - 'aether_cpp/**'
       - '.github/workflows/aether-cpp-clean-build.yml'
   push:
-    branches: [main]
+    # 'main' alone meant feature-branch pushes never triggered the guard,
+    # so 24 commits accumulated on feat/flutter-dawn-base without any
+    # clean-build verification. Phase 3 productive-pause Action 3 caught
+    # this. 'feat/**' fires the guard on the development branches we
+    # actually push to before opening a PR.
+    branches: [main, 'feat/**']
   workflow_dispatch:
 
 concurrency:
