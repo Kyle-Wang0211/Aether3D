@@ -37,6 +37,16 @@
 namespace {
 
 // ─── Match WGSL RenderUniforms layout exactly ──────────────────────────
+//
+// NB on the C++-side name vs WGSL-side name:
+//   WGSL identifier: `RenderUniforms` (Brush's name).
+//   C++ identifier:  `RenderArgsStorage` (renamed per Phase 6.3a P2 review:
+//                    the buffer is a STORAGE buffer because it contains
+//                    `atomic<u32> num_visible` — atomics aren't legal in
+//                    uniform blocks. Calling the C++ struct "Uniforms"
+//                    misled readers; "ArgsStorage" makes the kind explicit.)
+//   Byte layout MUST match (static_assert below) — that's the real contract.
+//
 // Layout offsets per WGSL storage rules (verified by inspection):
 //   0..64    viewmat (mat4x4f)
 //   64..72   focal (vec2f)
@@ -49,7 +59,7 @@ namespace {
 //   120..124 total_splats (u32)
 //   124..128 max_intersects (u32)
 //   128..144 background (vec4f, 16-aligned ✓)
-struct RenderUniforms {
+struct RenderArgsStorage {
     float viewmat[16];
     float focal[2];
     uint32_t img_size[2];
@@ -57,13 +67,13 @@ struct RenderUniforms {
     float pixel_center[2];
     float camera_position[4];
     uint32_t sh_degree;
-    uint32_t num_visible;     // atomic in WGSL but layout-equivalent to u32
+    uint32_t num_visible;     // atomic<u32> in WGSL, layout-equivalent to u32
     uint32_t total_splats;
     uint32_t max_intersects;
     float background[4];
 };
-static_assert(sizeof(RenderUniforms) == 144,
-              "RenderUniforms byte layout must match WGSL storage rules");
+static_assert(sizeof(RenderArgsStorage) == 144,
+              "RenderArgsStorage byte layout must match WGSL RenderUniforms storage rules");
 
 // PackedVec3: WGSL `struct { x: f32, y: f32, z: f32 }` = 12 bytes (no padding
 // for storage buffer; vec3<f32> arrays would be 16-aligned but PackedVec3
@@ -122,7 +132,7 @@ int main(int /*argc*/, char* argv[]) {
     // ─── 3. Build test inputs ─────────────────────────────────────────
 
     // Identity-view camera (looking down -z from origin), 256×256 image.
-    RenderUniforms u{};
+    RenderArgsStorage u{};
     // viewmat = identity
     u.viewmat[0]  = 1.0f; u.viewmat[5]  = 1.0f; u.viewmat[10] = 1.0f; u.viewmat[15] = 1.0f;
     u.focal[0] = 256.0f; u.focal[1] = 256.0f;
@@ -212,7 +222,7 @@ int main(int /*argc*/, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    RenderUniforms out_u{};
+    RenderArgsStorage out_u{};
     std::memcpy(&out_u, bytes_uniforms.data(), sizeof(out_u));
 
     std::cout << "=== aether_dawn_splat_smoke_project_forward ===\n";

@@ -22,6 +22,33 @@ std::ostream& operator<<(std::ostream& os, const wgpu::StringView& s) {
     return os.write(s.data, static_cast<std::streamsize>(s.length));
 }
 
+const char* error_type_name(wgpu::ErrorType t) {
+    switch (t) {
+        case wgpu::ErrorType::NoError:     return "NoError";
+        case wgpu::ErrorType::Validation:  return "Validation";
+        case wgpu::ErrorType::OutOfMemory: return "OutOfMemory";
+        case wgpu::ErrorType::Internal:    return "Internal";
+        case wgpu::ErrorType::Unknown:     return "Unknown";
+    }
+    return "<?>";
+}
+
+// Stateless uncaptured-error callback: defined at namespace scope so the
+// SetUncapturedErrorCallback assert (callback must NOT be a binding
+// lambda) is satisfied. Failure mode = abort() so a binding/validation
+// bug DOES NOT silently hide as "test passed but output zeroed". Per
+// Phase 6.3a code review (2026-04-26 ~11:30): silence is the worst
+// failure mode for a 5-layer-validation harness.
+void on_uncaptured_error(const wgpu::Device& /*device*/,
+                          wgpu::ErrorType type,
+                          wgpu::StringView msg) {
+    std::cerr << "\n[Dawn UNCAPTURED ERROR] type=" << error_type_name(type)
+              << " (" << static_cast<unsigned>(type) << ")\n  message: "
+              << msg << '\n'
+              << "  Aborting — silent validation pass would defeat the harness\n";
+    std::abort();
+}
+
 }  // namespace
 
 DawnKernelHarness::DawnKernelHarness() = default;
@@ -72,6 +99,15 @@ bool DawnKernelHarness::init() {
     // ─── Device: sync via WaitAny + UINT64_MAX ───
     {
         wgpu::DeviceDescriptor device_desc{};
+        // Phase 6.3a P1 fix: register uncaptured-error callback BEFORE
+        // requesting the device so any subsequent validation error
+        // (binding mismatch, wrong stage usage, size error, etc.) calls
+        // the abort path rather than silently corrupting test results.
+        // Without this, a wrong binding can produce "kernel ran, output
+        // is zero, no NaN" → smoke test reports PASS while binding is
+        // actually broken. Aborting on validation error makes the failure
+        // loud + immediate, which is the whole point of a smoke harness.
+        device_desc.SetUncapturedErrorCallback(on_uncaptured_error);
         instance_.WaitAny(
             adapter_.RequestDevice(
                 &device_desc,
