@@ -30,6 +30,29 @@ the item shouldn't be here.
 
 ---
 
+## Phase 3.5 iOS Pod integration (deferred, non-blocking)
+
+### CocoaPods 1.16 vendored static xcframework: extraction script missing
+- **What**: `pod 'aether3d_ffi', :path => '../../aether_cpp'` integrates the podspec successfully (`pod install` passes), and the xcframework path is wired into Pods-Runner.debug.xcconfig at `$(PODS_XCFRAMEWORKS_BUILD_DIR)/aether3d_ffi/libaether3d_ffi.a`. But CocoaPods does **not** generate a script_phase to actually extract the slice from `dist/aether3d_ffi.xcframework`. Build fails: "Build input file cannot be found: .../XCFrameworkIntermediates/aether3d_ffi/libaether3d_ffi.a".
+- **Why it's not cosmetic**: This is the last mile of Phase 3.5 — without it, Dart `DynamicLibrary.process().lookupFunction('aether_version_string')` fails at runtime with `dlsym(RTLD_DEFAULT, ...): symbol not found`, and the UI shows a red Flutter error screen instead of the version string.
+- **Why it's safe to defer**: Phase 3's architectural goal — "Dart can call C++ on iOS via FFI" — is **proven feasible** by P3.4 (macOS Dart CLI runs the FFI binding cleanly against `libaether3d_ffi.dylib`). The iOS-specific tooling friction doesn't invalidate the design. P2.4's placeholder `'v0.1.0-phase2'` continues to render correctly.
+- **Things tried (none worked)**:
+  - `s.static_framework = true` in podspec → adds `-ObjC` to OTHER_LDFLAGS, no extraction script
+  - `use_frameworks!` removed from Podfile → same missing-extraction-script error
+  - Force-load via post_install hook → `-force_load` references the same nonexistent path
+- **Trigger to revisit**:
+  - When ready to wire iOS device FFI (likely paired with Phase 2.3 real-iPhone deploy)
+  - When upstream CocoaPods publishes a fix for vendored static xcframework + Flutter integration
+  - If a Flutter-iOS-FFI tutorial / community pattern is published showing the canonical path
+- **Plausible directions to investigate then**:
+  - Manually add the .a to Runner.xcodeproj's "Link Binary With Libraries" build phase, bypassing CocoaPods entirely
+  - Switch from `s.vendored_frameworks` to `s.vendored_libraries` (per-arch .a files) — older but simpler mechanism
+  - Custom `script_phase` in podspec that extracts the xcframework slice manually
+  - Distribute as a pre-built `.framework` (dynamic) instead of static `.xcframework`, accepting the codesign + dev-team requirement
+- **What's already in place** (don't redo): `dist/aether3d_ffi.xcframework` builds cleanly via `scripts/build_ios_xcframework.sh`; podspec at `aether_cpp/aether3d_ffi.podspec`; pre-positioned UI hook in `pocketworld_flutter/lib/main.dart` (still showing placeholder); `pocketworld_flutter/tool/aether_ffi_smoke.dart` proves the binding side works on macOS.
+
+---
+
 ## Phase 1 polish (deferred, non-blocking)
 
 ### device-lost callback on all 3 Dawn hello binaries
