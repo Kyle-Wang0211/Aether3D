@@ -69,7 +69,18 @@ Pod::Spec.new do |s|
     'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '$(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator',
     # NB: $(inherited) preserves CocoaPods's own -ObjC + Pod link flags.
     # Without it, OTHER_LDFLAGS[sdk=…] would override the base entirely.
-    'OTHER_LDFLAGS[sdk=iphoneos*]'               => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64/libaether3d_ffi.a',
-    'OTHER_LDFLAGS[sdk=iphonesimulator*]'        => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator/libaether3d_ffi.a',
+    #
+    # NB on -Wl,-u,_aether_version_string (Phase 5.5 device-rebuild fix):
+    # Release builds run with -dead_strip enabled. -force_load drags the .a
+    # archive into the link but does NOT exempt its symbols from dead-strip.
+    # Since dart:ffi calls aether_version_string via runtime dlsym, the
+    # static linker has no reference to the symbol → strips it → dlsym
+    # returns NULL at runtime ("symbol not found"). -Wl,-u,<sym> tells the
+    # linker the symbol is "needed" (treated as if there were a static
+    # reference to it from outside), preventing dead-strip from dropping it.
+    # Repeat per FFI symbol added — this list must match
+    # aether_cpp/include/aether/*.h public C ABI.
+    'OTHER_LDFLAGS[sdk=iphoneos*]'               => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64/libaether3d_ffi.a -Wl,-u,_aether_version_string',
+    'OTHER_LDFLAGS[sdk=iphonesimulator*]'        => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator/libaether3d_ffi.a -Wl,-u,_aether_version_string',
   }
 end
