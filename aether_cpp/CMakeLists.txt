@@ -229,6 +229,12 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     # ─── Step 7: Brush project_backwards (last training kernel) ───
     aether_dawn_smoke_test(aether_dawn_splat_smoke_project_backwards
                             tools/aether_dawn_splat_smoke_project_backwards.cpp)
+
+    # ─── 6.5 prelude: cross-validate Brush compute vs Aether3D vert+frag ───
+    # Same input through both rasterizers; assert pixel diff ≤ 1 LSB.
+    # Regression catcher for Brush re-pin / naga_oil drift / Tint optimizer.
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_cross_validate
+                            tools/aether_dawn_splat_smoke_cross_validate.cpp)
 endif()
 
 # ============================================================================

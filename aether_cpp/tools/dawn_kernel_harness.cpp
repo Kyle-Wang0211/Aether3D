@@ -475,7 +475,14 @@ std::vector<uint8_t> DawnKernelHarness::readback_texture(
             wgpu::CallbackMode::WaitAnyOnly,
             [&done](wgpu::QueueWorkDoneStatus, wgpu::StringView) { done = true; }),
         UINT64_MAX);
-    (void)done;
+    if (!done) {
+        // Match the diagnostic style used by dispatch / copy_to_staging /
+        // dispatch_render_pass — silent timeout would let a downstream
+        // readback() return zero-filled bytes that look like a successful
+        // (but wrong) test result. The harness's P1 design rule is
+        // "silent = catastrophe"; this site was the last violation.
+        std::cerr << "[DawnKernelHarness] readback_texture WaitAny did not complete\n";
+    }
 
     auto padded_bytes = readback(staging, padded_total);
 
