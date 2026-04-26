@@ -2,6 +2,96 @@
 
 **Status**: SKELETON. Drafted at end of Phase 3 productive pause as the next-phase preparation. NOT a kickoff — fresh kickoff session is intentional.
 
+---
+
+## ⚠️ PRE-KICKOFF CORRECTIONS PENDING
+
+This skeleton has 3 internal contradictions + 1 missing piece, identified
+during a post-draft review. **Do NOT execute as-is** — resolve these 4
+items as the FIRST 30 min of the kickoff session, before touching any
+sub-step. Then update the body of this plan accordingly.
+
+### 1. Recommended execution order contradicts the "de-risk by validation chain" principle stated in the same plan
+
+The plan body declares "order by 'can I verify cheaply', front-load
+low-risk validations" — but the recommended order puts 4.0 (🔴 HIGH-risk
+Dawn-iOS unblock) first.
+
+Proposed fix (validate before adopting): swap to
+**4.1 + 4.5 → 4.2 → 4.0 → 4.3 → 4.4 → 4.6**
+
+Rationale: 4.1 + 4.5 (Flutter Texture widget plumbing with CPU pixel
+fallback) is low-risk + low-cost foundation. 4.2 (IOSurface bridge,
+the real boss fight) goes next since 4.0/4.3 depend on its output.
+4.0 (Dawn-iOS) goes mid-Phase so a 4.0 abort still leaves
+4.1+4.2+4.5 = "Flutter ↔ native GPU bridge with CPU data" landed
+as Phase 4 value, instead of Phase 4 dying on day-1 toolchain debug.
+
+### 2. Timebox inconsistency between body and kickoff prompt
+
+- Body: "Per sub-step: 1 working day"
+- Kickoff prompt at end: "set a 2-hour timer on enabling Dawn for iOS"
+
+Proposed fix: split per sub-step character.
+- **2-hour timebox for 4.0 specifically** — toolchain-spiral-prone, 2h
+  is enough to distinguish "trivial flag tuning" vs "deep
+  incompatibility"; longer means infinite-rabbit-hole risk.
+- **1-day timebox for 4.2** — IOSurface bridge is real engineering,
+  needs hours of focused implementation + testing; 2h is too short to
+  reach a confident yes/no.
+- Kickoff prompt and body must match after the fix; right now reading
+  one then the other causes execution-time hesitation.
+
+### 3. Implicit prereq: Phase 3.5 status is assumed unblocked, but BACKLOG marks it deferred
+
+Phase 4 sub-steps 4.0 / 4.1 / 4.2 / 4.3 / 4.5 all need iOS deploy to
+verify. But Phase 3.5 (CocoaPods static xcframework integration) is
+deferred — without it, no iOS deploy works.
+
+Proposed fix (validate before adopting): **do Phase 4 on macOS desktop
+first** (Flutter macOS supports Texture widget, Metal works natively
+on macOS). All sub-steps validated on macOS first, then port to iOS
+once Phase 3.5 unblocks. This decouples Phase 4 progress from Phase 3.5.
+
+Open question: does Flutter macOS desktop's Texture widget have
+feature parity with iOS for IOSurface-equivalent shared-texture
+mechanics? Apple's IOSurface is cross-platform (macOS + iOS) but
+the Flutter binding API may differ — research item before kickoff.
+
+### 4. Missing Definition of Done
+
+Sub-step 4.6 finishing doesn't equal Phase 4 finishing — there's no
+explicit measurable exit criterion in the plan, so "is this done yet?"
+becomes a judgment call.
+
+Proposed fix (validate the specific numbers): add a DoD section like
+
+> Phase 4 done = Flutter widget displays a 256×256 native-GPU-rendered
+> animated content, sustained 60 fps for 30 s on iPhone 17 Pro Simulator
+> (or, in macOS-first variant, on macOS desktop), with no frame drops
+> or crashes. Screenshot + 30-second screen recording filed alongside
+> the verification ritual.
+
+Numbers can be tuned (60 fps may be ambitious, 30 fps may be enough;
+30 s may be unnecessary). Pick numbers explicitly so kickoff has a
+falsifiable yes/no exit.
+
+### Why these are pre-kickoff corrections, not "fix now"
+
+These 4 items are **decision-load** work — choosing the right execution
+order, the right timebox split, the right prereq strategy, the right
+DoD numbers. Doing them tired-from-Phase-3 risks introducing fresh
+mistakes that the next round of review catches. Per "productive pause
+covers low-decision actions only" principle, **plan corrections deserve
+the same fresh-head treatment as execution itself**.
+
+After corrections land at kickoff start (~30 min), the rest of this
+file (sub-step inventory, abort criteria, scope, pre-kickoff checklist,
+out-of-scope list, kickoff prompt) still applies — the bones are
+sound, only ordering / prereq / timebox / DoD need decision.
+
+---
+
 **Phase 4 mission**: from Flutter UI (Dart), render Dawn-produced GPU content onto a Flutter widget. The user's stated goal: "Flutter Texture widget ↔ Dawn IOSurface 互通". This is the deepest cross-language / cross-platform plumbing in the entire roadmap.
 
 ---
@@ -101,8 +191,9 @@ Per established de-risk principle (memory: feedback_phase_ordering_by_risk): ord
 
 ## Kickoff prompt for next session
 
-> "Phase 4 kickoff. Read PHASE4_PLAN.md, then start with sub-step 4.0 evaluation:
-> set a 2-hour timer on enabling Dawn for iOS xcframework. If at the 2h mark
-> Dawn-iOS doesn't compile cleanly, abort and proceed with sub-step 4.1
-> using a CPU-rendered placeholder. Phase 4 architectural goal is the Flutter
-> ↔ native GPU bridge — Dawn vs CPU is implementation detail."
+> Phase 4 kickoff. Read PHASE4_PLAN.md top-to-bottom. **First 30 min**:
+> resolve the 4 items in "PRE-KICKOFF CORRECTIONS PENDING" — pick an
+> execution order, pick timebox split, decide macOS-first vs wait-for-3.5,
+> pick DoD numbers. Edit the plan body to reflect those decisions, then
+> delete the corrections-pending section. **Then** execute the (now
+> corrected) sub-step 1 of the new order, with that sub-step's timebox.
