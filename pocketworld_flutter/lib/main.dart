@@ -66,6 +66,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   @override
+  void dispose() {
+    final id = _textureId;
+    if (id != null) {
+      // Fire-and-forget: widget is going away, no point awaiting. Native
+      // side stops the displayLink, unregisters the texture, drops its
+      // strong ref. Without this call the texture leaks on widget rebuild.
+      _channel
+          .invokeMethod('disposeTexture', {'textureId': id})
+          .catchError((_) {});
+    }
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(

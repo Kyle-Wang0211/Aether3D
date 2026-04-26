@@ -53,6 +53,49 @@ the item shouldn't be here.
 
 ---
 
+## Phase 4 polish (deferred, non-blocking)
+
+(From the Phase 4 code-review pass — issues #3 + #6–#10 of 10 total. Issues
+#1, #2, #4, #5 were fixed inline as a separate chore commit.)
+
+### #3 — `passRetained` contract assertion
+- **What**: `GradientTexture.copyPixelBuffer()` in `pocketworld_flutter/macos/Runner/MainFlutterWindow.swift` returns `Unmanaged.passRetained(pixelBuffer)` assuming Flutter's texture compositor releases it. Currently a code comment documents the contract. Add a runtime assertion (e.g. weak ref tracking) or unit test that catches a Flutter SDK regression that silently changes the contract.
+- **Why it's not cosmetic**: silent CVPixelBuffer leak on Flutter SDK upgrade. Activity Monitor would eventually show climbing memory but no crash, no error — invisible regression.
+- **Trigger to do**: any Flutter SDK bump (currently pinned to 3.41.7 in CROSS_PLATFORM_STACK.md).
+- **Shape**: ~30 min — add weak-ref tracking around CVPixelBuffer + assertion that count drops over time, OR a unit test that mocks the Flutter compositor.
+
+### #6 — Dart-side retry mechanism on texture create failure
+- **What**: `_HomeScreenState._textureError` in `pocketworld_flutter/lib/main.dart` is set on failure and never retried. UI shows the error string until app relaunch. Add a retry button or auto-retry with backoff.
+- **Why it's not cosmetic**: any transient failure (GPU temporarily busy, OS resource pressure during create) bricks the widget for the session. Production needs a recovery path.
+- **Trigger to do**: before this surface is exposed to non-developer users.
+- **Shape**: ~15 min Dart change — wrap `_textureError` reset + invokeMethod retry in a button; or `Timer(Duration(seconds: 2), _requestTexture)` for auto.
+
+### #7 — RCA the 57.1 fps dip in DoD verification run
+- **What**: During Phase 4.6 DoD verification, 27 of 28 one-second windows logged 60.0 fps; one mid-run window logged 57.1 fps. Cause unknown. Possibilities: macOS Spotlight indexing tick, scheduler interrupt, GC of an unrelated process, momentary thermal throttle.
+- **Why it's not cosmetic**: Phase 5 splat rendering will run GPU at 5–10 ms/frame instead of <1 ms; an analogous interrupt under load could drop frames in a way the user sees. Identifying the cause now lets the fix (whatever it is) inform Phase 5 design.
+- **Trigger to do**: before Phase 5 starts, or on first reported frame-stutter complaint.
+- **Shape**: ~30 min — re-run with `os_signpost` or Instruments Time Profiler attached, identify the 57.1 fps frame, decode the cause from the trace.
+
+### #8 — Rename `GradientTexture` → `SharedNativeTexture`
+- **What**: The class still named `GradientTexture` from the Step 1 CPU-gradient era; it now renders a triangle, not a gradient.
+- **Why it's not cosmetic**: code-search misleading. Anyone grepping for "where does the triangle live" hits no result; anyone reading `GradientTexture` thinks it produces a gradient.
+- **Trigger to do**: any time `pocketworld_flutter/macos/Runner/` gets touched again.
+- **Shape**: 1-line rename + class signature update + plugin reference. ~5 min. Also rename `kTriangleShaderSource` to drop the `Triangle` prefix when content varies (Phase 5+).
+
+### #9 — Parametrize 256×256 hardcoded size
+- **What**: `GradientTexture.init(device:width:height:)` defaults are `256, 256` and the Dart side never passes anything. For Phase 5 splat-render the size will need to be window/device-pixel-ratio responsive.
+- **Why it's not cosmetic**: Phase 5 onwards needs the texture to match the rendering region (typically full window, retina-aware).
+- **Trigger to do**: Phase 5 first sub-step (when splat actually renders).
+- **Shape**: ~15 min — pass `{width, height}` via `createGradientTexture` method args; Dart sends device-pixel-ratio-aware size on widget build.
+
+### #10 — Unit / integration tests
+- **What**: Phase 4 verification was manual: build, run, eyeball screenshots, scrape stderr for fps. No automated regression catch.
+- **Why it's not cosmetic**: any of the 4 fixes from the code-review chore could regress and only surface 3 weeks later when someone re-runs the manual ritual.
+- **Trigger to do**: when Phase 4 surface stabilizes (post-Phase 5 integration when texture content flow is real).
+- **Shape**: ~2 hours — Flutter widget test for the Texture mount path (mock plugin); Swift unit test for GradientTexture init throwing the right error per failure point; integration test that boots the app and asserts frame count > N over T seconds.
+
+---
+
 ## Phase 1 polish (deferred, non-blocking)
 
 ### device-lost callback on all 3 Dawn hello binaries
@@ -61,7 +104,7 @@ the item shouldn't be here.
   - `aether_cpp/tools/aether_dawn_hello_compute.cpp` (P1.5 compute)
   - `aether_cpp/tools/aether_dawn_hello_triangle.cpp` (P1.7 triangle)
 - **Why it's not cosmetic**: device-lost is GPU-disconnect / hot-unplug / driver-crash. Currently emits "Warning: No Dawn device lost callback was set" — Dawn says "this is probably not intended" because production code MUST handle it. Phase 1 hellos run for <1s in isolation so it's harmless **for these specific binaries**.
-- **Trigger to do**: before any long-running Dawn compute job (Phase 4+ when training-kernel iterations run for minutes, or sustained render loops). The hellos themselves can stay loud-warn; the real targets that come later cannot.
+- **Trigger to do** (escalated 2026-04-25 from Phase 4+ to before-next-merge): the parallel Metal device-error handler in `pocketworld_flutter/macos/Runner/MainFlutterWindow.swift` (`cb.addCompletedHandler`) was added in the Phase 4 polish chore commit; the Dawn-side equivalent is now the lagging gap. Before any commit that adds a long-running Dawn compute path (Phase 5+), wire `SetDeviceLostCallback` on the surviving hellos so failures aren't silent.
 - **Shape**: 1 chore commit. Parallel edit, ~20 min.
 
 ---
