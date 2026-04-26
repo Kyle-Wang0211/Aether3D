@@ -159,5 +159,8 @@ Verify each sub-step's validation passing before committing.
 
 (Updated as steps complete — current cursor at top.)
 
+- **Step 2 (4.2) ✅ PASS — boss fight won** — IOSurface bridge live: same IOSurface wrapped both as CVPixelBuffer (Flutter reads) and MTLTexture (Metal writes). Metal render encoder clear-color (orange) lands on screen via the Flutter Texture widget without an intermediate copy. The CPU-fill from Step 1 was replaced with a Metal render pass. Done in ~30 min, well within the 8-hour hard timebox.
+  - Real cost was a single API mismatch fix: `CVPixelBufferCreateWithIOSurface` returns via `Unmanaged<CVPixelBuffer>?` (unlike the plain-Optional `CVPixelBufferCreate`); used `takeRetainedValue()` to balance the +1 refcount.
+  - Visual diff vs Step 1 (gradient → solid orange) is the proof that the Metal write actually replaced the pixel source — no bridge magic, just orange where there used to be a gradient.
 - **Step 1 (4.1 + 4.5) ✅ PASS** — Flutter Texture widget on macOS desktop displays a 256×256 CPU-rendered RGB gradient (R horizontal, G vertical, B=128 fixed) sourced from a `FlutterTexture` plugin via `FlutterTextureRegistry`. Plugin inline in `pocketworld_flutter/macos/Runner/MainFlutterWindow.swift` (`GradientTexture` + `AetherTexturePlugin` classes); Dart side uses `MethodChannel('aether_texture')` + `Texture(textureId:)` widget. Done well within the 3-hour timebox.
 - **Step 0 ✅ DONE** (prior session): context load + macOS desktop target scaffolded + codesign workaround applied (commit 31bbde12).
