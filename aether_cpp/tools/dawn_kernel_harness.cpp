@@ -188,19 +188,20 @@ void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
                                   const std::vector<wgpu::Buffer>& bindings,
                                   uint32_t wg_x, uint32_t wg_y, uint32_t wg_z) {
     // ─── Build a single bind group covering all `bindings` ───
-    std::vector<wgpu::BindGroupEntry> bg_entries;
-    bg_entries.reserve(bindings.size());
+    // resize-construct + index assignment (vs reserve + push_back): one
+    // less moving part, and .data() points at fully-initialized memory
+    // immediately, no risk of stale reads if a future change adds work
+    // between construction and CreateBindGroup.
+    std::vector<wgpu::BindGroupEntry> bg_entries(bindings.size());
     for (size_t i = 0; i < bindings.size(); ++i) {
-        wgpu::BindGroupEntry e{};
-        e.binding = static_cast<uint32_t>(i);
-        e.buffer = bindings[i];
-        e.offset = 0;
-        e.size = WGPU_WHOLE_SIZE;
-        bg_entries.push_back(e);
+        bg_entries[i].binding = static_cast<uint32_t>(i);
+        bg_entries[i].buffer = bindings[i];
+        bg_entries[i].offset = 0;
+        bg_entries[i].size = WGPU_WHOLE_SIZE;
     }
     wgpu::BindGroupDescriptor bg_desc{};
     bg_desc.layout = pipeline.GetBindGroupLayout(0);
-    bg_desc.entryCount = bg_entries.size();
+    bg_desc.entryCount = static_cast<uint32_t>(bg_entries.size());
     bg_desc.entries = bg_entries.data();
     wgpu::BindGroup bind_group = device_.CreateBindGroup(&bg_desc);
 
@@ -354,20 +355,18 @@ void DawnKernelHarness::dispatch_render_pass(
         const std::vector<wgpu::Buffer>& bindings,
         uint32_t vertex_count,
         uint32_t instance_count) {
-    // Build @group(0) bind group from `bindings`.
-    std::vector<wgpu::BindGroupEntry> bg_entries;
-    bg_entries.reserve(bindings.size());
+    // Build @group(0) bind group from `bindings`. Same resize-not-push_back
+    // discipline as dispatch() — see comment there.
+    std::vector<wgpu::BindGroupEntry> bg_entries(bindings.size());
     for (size_t i = 0; i < bindings.size(); ++i) {
-        wgpu::BindGroupEntry e{};
-        e.binding = static_cast<uint32_t>(i);
-        e.buffer = bindings[i];
-        e.offset = 0;
-        e.size = WGPU_WHOLE_SIZE;
-        bg_entries.push_back(e);
+        bg_entries[i].binding = static_cast<uint32_t>(i);
+        bg_entries[i].buffer = bindings[i];
+        bg_entries[i].offset = 0;
+        bg_entries[i].size = WGPU_WHOLE_SIZE;
     }
     wgpu::BindGroupDescriptor bg_desc{};
     bg_desc.layout = pipeline.GetBindGroupLayout(0);
-    bg_desc.entryCount = bg_entries.size();
+    bg_desc.entryCount = static_cast<uint32_t>(bg_entries.size());
     bg_desc.entries = bg_entries.data();
     wgpu::BindGroup bind_group = device_.CreateBindGroup(&bg_desc);
 

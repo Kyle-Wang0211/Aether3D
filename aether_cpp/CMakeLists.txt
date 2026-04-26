@@ -191,6 +191,21 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     # for viewer flow. Brush rasterize* retained for training (Step 6).
     aether_dawn_smoke_test(aether_dawn_splat_smoke_render
                             tools/aether_dawn_splat_smoke_render.cpp)
+
+    # ─── Step 5a: Brush 4-bit-per-pass radix sort (5 kernels) ───
+    # Each smoke chains the prior kernels in the pipeline so the FINAL
+    # smoke (sort_scatter) exercises the full 5-kernel chain end-to-end
+    # with multiset / monotone / element-conservation verification.
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_sort_count
+                            tools/aether_dawn_splat_smoke_sort_count.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_sort_reduce
+                            tools/aether_dawn_splat_smoke_sort_reduce.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_sort_scan
+                            tools/aether_dawn_splat_smoke_sort_scan.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_sort_scan_add
+                            tools/aether_dawn_splat_smoke_sort_scan_add.cpp)
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_sort_scatter
+                            tools/aether_dawn_splat_smoke_sort_scatter.cpp)
 endif()
 
 # ============================================================================
