@@ -100,10 +100,63 @@ void register_wgsl_source(GPUDevice& device,
 /// Convenience overload — load the WGSL source from `wgsl_path`, then
 /// register it under `name` with the given entry_point. Returns false
 /// (and logs) if the file can't be read or device backend isn't kDawn.
+///
+/// This path is for development tools (smoke binaries) where iterating
+/// on .wgsl without rebuilding C++ is the productivity win. Production
+/// callers should use register_baked_wgsl_into_device() (below).
 bool register_wgsl_from_file(GPUDevice& device,
                              const char* name,
                              const char* wgsl_path,
                              const char* entry_point = "main") noexcept;
+
+/// Register all 15 baked WGSL sources into the device's registry, keyed
+/// by canonical name (filename without extension; splat_render is
+/// registered twice with `_vs`/`_fs` suffixes for its two entry points).
+///
+/// This is the production-path WGSL load — zero filesystem dependency,
+/// sources are baked into the binary by the CMake bake step (see
+/// aether_cpp/scripts/bake_one_wgsl.cmake).
+///
+/// Safe to call multiple times (re-registration overwrites).
+/// No-op if device.backend() != kDawn.
+void register_baked_wgsl_into_device(GPUDevice& device) noexcept;
+
+// ─── 6.4a: IOSurface bridge (Apple platforms only) ─────────────────────
+//
+// Imports an IOSurface as a Dawn-writable texture via the
+// SharedTextureMemoryIOSurface feature. The texture's bytes ARE the
+// IOSurface's bytes (zero-copy). Used by the PocketWorld Flutter Texture
+// plugin to display Dawn-rendered splat output without going through a
+// CPU readback.
+//
+// Per-frame usage:
+//   dawn_iosurface_begin_access(device, tex);   // before render pass
+//   ... render ...
+//   dawn_iosurface_end_access(device, tex);     // after commit
+//
+// On non-Apple adapters (or if SharedTextureMemoryIOSurface feature
+// wasn't granted at device creation), all three functions return invalid
+// handle / false with a diagnostic.
+
+/// Import an IOSurface (passed as void* — the caller is responsible for
+/// keeping it alive for the texture's lifetime; on Apple side this is
+/// typically an `IOSurfaceRef` cast to void* via Unmanaged.toOpaque() or
+/// __bridge_retained).
+GPUTextureHandle dawn_import_iosurface_texture(GPUDevice& device,
+                                                void* iosurface,
+                                                std::uint32_t width,
+                                                std::uint32_t height,
+                                                GPUTextureFormat format) noexcept;
+
+/// Begin access fence — call BEFORE the render pass that writes to the
+/// IOSurface-backed texture. Returns false on invalid handle / non-IOSurface
+/// texture / Dawn validation error.
+bool dawn_iosurface_begin_access(GPUDevice& device, GPUTextureHandle handle) noexcept;
+
+/// End access fence — call AFTER the command buffer that wrote to the
+/// IOSurface-backed texture has committed (and ideally completed).
+/// Returns false on invalid handle / Dawn validation error.
+bool dawn_iosurface_end_access(GPUDevice& device, GPUTextureHandle handle) noexcept;
 
 /// One-shot GPU→GPU buffer-to-buffer copy. Creates a transient command
 /// encoder + CopyBufferToBuffer + Submit, then blocks until the GPU has

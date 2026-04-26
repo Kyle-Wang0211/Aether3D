@@ -83,10 +83,66 @@ set(AETHER_C_API_SOURCES
     src/splat/splat_c_api.cpp
 )
 
-add_library(aether3d_core STATIC ${AETHER_CORE_SOURCES})
+# ═══════════════════════════════════════════════════════════════════════
+# Phase 6.4a — WGSL bake (build-time .wgsl → .cpp constexpr)
+# ═══════════════════════════════════════════════════════════════════════
+# Each .wgsl file in shaders/wgsl/ is baked into a .cpp file with an
+# `extern const char NAME_wgsl[]` definition. The .cpp files are linked
+# into aether3d_core. Production binaries (DawnGPUDevice path) reference
+# these baked sources via include/aether/shaders/wgsl_sources.h, with
+# zero filesystem dependency at runtime.
+#
+# Smoke binaries in tools/ continue to read .wgsl from disk via
+# register_wgsl_from_file() — they're development tools, not production,
+# and disk reads make iteration faster (no rebake / relink).
+#
+# Re-bake trigger: .wgsl source change (CMake DEPENDS). Adding a new
+# .wgsl requires (1) drop the file in shaders/wgsl/, (2) add extern in
+# include/aether/shaders/wgsl_sources.h, (3) add register_wgsl_source
+# call in dawn_gpu_device.cpp's register_baked_wgsl_into_device(),
+# (4) cmake reconfigure. Step 2 missing = link error (loud failure).
+
+set(AETHER_WGSL_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders/wgsl)
+set(AETHER_WGSL_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated/aether/shaders)
+
+file(MAKE_DIRECTORY ${AETHER_WGSL_GENERATED_DIR})
+
+file(GLOB AETHER_WGSL_FILES "${AETHER_WGSL_SOURCE_DIR}/*.wgsl")
+list(LENGTH AETHER_WGSL_FILES AETHER_WGSL_FILE_COUNT)
+if(AETHER_WGSL_FILE_COUNT EQUAL 0)
+    message(FATAL_ERROR "No .wgsl files found in ${AETHER_WGSL_SOURCE_DIR} — bake needs source files")
+endif()
+message(STATUS "Aether3D: baking ${AETHER_WGSL_FILE_COUNT} .wgsl files → "
+        "${AETHER_WGSL_GENERATED_DIR}")
+
+set(AETHER_WGSL_GENERATED_CPPS "")
+foreach(wgsl ${AETHER_WGSL_FILES})
+    get_filename_component(wgsl_name ${wgsl} NAME_WE)
+    set(generated_cpp ${AETHER_WGSL_GENERATED_DIR}/${wgsl_name}_wgsl.cpp)
+    add_custom_command(
+        OUTPUT ${generated_cpp}
+        COMMAND ${CMAKE_COMMAND}
+            -DINPUT=${wgsl}
+            -DOUTPUT=${generated_cpp}
+            -DNAME=${wgsl_name}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bake_one_wgsl.cmake
+        DEPENDS ${wgsl} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bake_one_wgsl.cmake
+        COMMENT "Baking WGSL: ${wgsl_name}.wgsl → ${wgsl_name}_wgsl.cpp"
+        VERBATIM
+    )
+    list(APPEND AETHER_WGSL_GENERATED_CPPS ${generated_cpp})
+endforeach()
+
+# ALL target so the bake runs even if a clean build hasn't yet touched
+# aether3d_core (e.g. a tools-only build still gets fresh WGSL for any
+# header-only consumers).
+add_custom_target(aether_bake_wgsl ALL DEPENDS ${AETHER_WGSL_GENERATED_CPPS})
+
+add_library(aether3d_core STATIC ${AETHER_CORE_SOURCES} ${AETHER_WGSL_GENERATED_CPPS})
 target_include_directories(aether3d_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(aether3d_core PUBLIC ZLIB::ZLIB)
 target_compile_options(aether3d_core PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+add_dependencies(aether3d_core aether_bake_wgsl)
 
 # ─── Phase 6.2: Dawn backend source conditionally included ─────────────
 # When AETHER_ENABLE_DAWN is ON, link the DawnGPUDevice C++ implementation
@@ -263,6 +319,28 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
                               tools/aether_dawn_splat_smoke_render_via_device.cpp)
     aether_dawn_device_smoke(aether_dawn_splat_smoke_cross_validate_via_device
                               tools/aether_dawn_splat_smoke_cross_validate_via_device.cpp)
+    # Phase 6.4a Q1 verification — baked WGSL path bit-exact vs file path.
+    aether_dawn_device_smoke(aether_dawn_baked_wgsl_smoke
+                              tools/aether_dawn_baked_wgsl_smoke.cpp)
+
+    # Phase 6.4a Step 3b/4 — IOSurface FFI end-to-end smoke (Apple only).
+    if(APPLE)
+        add_executable(aether_splat_iosurface_renderer_smoke
+                       tools/aether_splat_iosurface_renderer_smoke.cpp)
+        target_link_libraries(aether_splat_iosurface_renderer_smoke
+            PRIVATE aether3d_ffi
+            "-framework IOSurface"
+            "-framework CoreFoundation"
+        )
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set_target_properties(aether_splat_iosurface_renderer_smoke PROPERTIES
+                MACOSX_BUNDLE TRUE
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.kyle.aether.aether_splat_iosurface_renderer_smoke"
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "26AH7V448L"
+            )
+        endif()
+    endif()
 endif()
 
 # ============================================================================
@@ -285,12 +363,28 @@ target_link_libraries(aether_version_test PRIVATE aether3d_core)
 #   - For now, version.cpp has no dependencies, so we don't link core yet
 #     (keeps the .dylib at kilobytes for the macOS Dart CLI smoke test).
 # ============================================================================
+set(AETHER_FFI_SOURCES
+    src/core/version.cpp
+)
+
+# Phase 6.4a: PocketWorld IOSurface-backed splat renderer C ABI.
+# Only included when Dawn is available (the impl is no-op otherwise).
+if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
+    list(APPEND AETHER_FFI_SOURCES src/pocketworld/splat_iosurface_renderer.cpp)
+endif()
+
 if(AETHER_FFI_BUILD_STATIC)
-    add_library(aether3d_ffi STATIC src/core/version.cpp)
+    add_library(aether3d_ffi STATIC ${AETHER_FFI_SOURCES})
 else()
-    add_library(aether3d_ffi SHARED src/core/version.cpp)
+    add_library(aether3d_ffi SHARED ${AETHER_FFI_SOURCES})
 endif()
 target_include_directories(aether3d_ffi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Phase 6.4a: splat_iosurface_renderer needs DawnGPUDevice internals
+# (the import_iosurface free function is in aether3d_core).
+if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
+    target_link_libraries(aether3d_ffi PRIVATE aether3d_core)
+    target_compile_definitions(aether3d_ffi PRIVATE AETHER_ENABLE_DAWN=1)
+endif()
 # cxx_std_20 inherited from top-level CMAKE_CXX_STANDARD.
 
 if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)

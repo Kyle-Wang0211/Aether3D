@@ -41,6 +41,7 @@
 
 #include "aether/render/dawn_gpu_device.h"
 #include "aether/render/gpu_command.h"
+#include "aether/shaders/wgsl_sources.h"  // 6.4a baked WGSL externs
 
 #include <webgpu/webgpu.h>  // C API — strict-flags compatible
 
@@ -260,6 +261,12 @@ struct DawnTexture {
     std::uint32_t height{0};
     GPUTextureFormat format{GPUTextureFormat::kRGBA8Unorm};
     std::uint8_t usage_mask{0};
+    // Phase 6.4a: when imported from an IOSurface via SharedTextureMemory,
+    // we hold the SharedTextureMemory handle here so the texture survives
+    // beyond a single render pass and so per-frame Begin/EndAccess fences
+    // can find the right memory object. nullptr for plain (non-imported)
+    // textures.
+    WGPUSharedTextureMemory shared_memory{nullptr};
 };
 
 // ─── Texture / blend / topology format mapping ─────────────────────────
@@ -402,7 +409,24 @@ public:
         required_limits.maxComputeWorkgroupSizeX = 512;
         required_limits.maxStorageBuffersPerShaderStage = 10;
 
-        WGPUFeatureName subgroups_feature[1] = { WGPUFeatureName_Subgroups };
+        // Phase 6.4a: also request the SharedTextureMemoryIOSurface +
+        // SharedFenceMTLSharedEvent feature pair. Both are needed for
+        // the PocketWorld Flutter Texture bridge:
+        //   - SharedTextureMemoryIOSurface: import IOSurface as WGPUTexture
+        //   - SharedFenceMTLSharedEvent:    EndAccess produces a fence
+        //                                    that synchronizes Dawn writes
+        //                                    with the IOSurface consumer
+        //                                    (Flutter compositor / Metal
+        //                                    blitter)
+        // Apple-only; graceful fallback: if either is unavailable, the
+        // IOSurface bridge degrades but the rest of the device still
+        // works (training kernels / smokes are unaffected).
+        WGPUFeatureName all_features[3] = {
+            WGPUFeatureName_Subgroups,
+            WGPUFeatureName_SharedTextureMemoryIOSurface,
+            WGPUFeatureName_SharedFenceMTLSharedEvent,
+        };
+        WGPUFeatureName subgroups_only[1] = { WGPUFeatureName_Subgroups };
 
         auto try_request_device = [&](size_t feature_count,
                                        const WGPUFeatureName* features) -> bool {
@@ -434,15 +458,23 @@ public:
             return true;
         };
 
-        // Attempt 1: with Subgroups.
-        if (try_request_device(1, subgroups_feature)) {
+        // Attempt 1: full feature set (Subgroups + IOSurface + MTLSharedEvent).
+        if (try_request_device(3, all_features)) {
             supports_subgroups_ = true;
+            supports_iosurface_  = true;
+        } else if (try_request_device(1, subgroups_only)) {
+            // Attempt 2: Subgroups only (Linux/Android/Windows path).
+            supports_subgroups_ = true;
+            supports_iosurface_  = false;
+            dawn_log("create_dawn_gpu_device: SharedTextureMemoryIOSurface "
+                     "feature unavailable on this adapter (expected on "
+                     "non-Apple platforms). Flutter Texture bridge will "
+                     "fall back to copy-based readback.");
         } else {
-            dawn_log("create_dawn_gpu_device: device request with "
-                     "Subgroups failed — retrying without Subgroups. "
-                     "rasterize_backwards.wgsl will be unavailable on "
-                     "this adapter (training path disabled).");
-            // Attempt 2: no optional features.
+            // Attempt 3: bare minimum.
+            dawn_log("create_dawn_gpu_device: device request with Subgroups "
+                     "failed — retrying with no optional features. "
+                     "rasterize_backwards.wgsl will be unavailable.");
             if (!try_request_device(0, nullptr)) {
                 dawn_log("create_dawn_gpu_device: device request failed "
                          "even with no optional features — adapter likely "
@@ -450,6 +482,7 @@ public:
                 return false;
             }
             supports_subgroups_ = false;
+            supports_iosurface_  = false;
         }
 
         // Queue — synchronous accessor.
@@ -776,10 +809,134 @@ public:
         auto it = textures_.find(handle.id);
         if (it == textures_.end()) return;
         if (it->second.handle) {
-            wgpuTextureDestroy(it->second.handle);
-            wgpuTextureRelease(it->second.handle);
+            // For SharedTextureMemory-backed textures we should NOT call
+            // wgpuTextureDestroy (the underlying storage is owned by the
+            // shared memory, not by this texture handle). Just Release
+            // the texture, then Release the SharedTextureMemory.
+            if (it->second.shared_memory) {
+                wgpuTextureRelease(it->second.handle);
+                wgpuSharedTextureMemoryRelease(it->second.shared_memory);
+            } else {
+                wgpuTextureDestroy(it->second.handle);
+                wgpuTextureRelease(it->second.handle);
+            }
         }
         textures_.erase(it);
+    }
+
+    // ─── 6.4a: IOSurface-backed texture import ─────────────────────────
+    //
+    // Creates a WGPUSharedTextureMemory from the provided IOSurfaceRef
+    // (passed as void* per the Dawn C API), then a WGPUTexture backed by
+    // that memory. The texture's bytes ARE the IOSurface's bytes — Dawn
+    // writes directly into Flutter-readable memory, no copy.
+    //
+    // Per-frame protocol: the renderer MUST wrap each render pass with
+    // BeginAccess / EndAccess (see iosurface_begin_access /
+    // iosurface_end_access below) — this is the producer/consumer fence
+    // between Dawn writes and Flutter compositor reads. On Apple this
+    // maps to MTLSharedEvent under the hood.
+    GPUTextureHandle import_iosurface(void* iosurface,
+                                       std::uint32_t width,
+                                       std::uint32_t height,
+                                       GPUTextureFormat format) noexcept {
+        if (!wgpu_device_) return GPUTextureHandle{0};
+        if (!supports_iosurface_) {
+            dawn_log("import_iosurface: SharedTextureMemoryIOSurface feature "
+                     "not enabled — Apple-platform-only path");
+            return GPUTextureHandle{0};
+        }
+        if (!iosurface || width == 0 || height == 0) {
+            dawn_log("import_iosurface: invalid args (iosurface=%p w=%u h=%u)",
+                     iosurface, width, height);
+            return GPUTextureHandle{0};
+        }
+
+        WGPUSharedTextureMemoryIOSurfaceDescriptor io_desc =
+            WGPU_SHARED_TEXTURE_MEMORY_IO_SURFACE_DESCRIPTOR_INIT;
+        io_desc.ioSurface = iosurface;
+        // allowStorageBinding=false: we use the texture as a render
+        // attachment + texture binding, never as a compute storage write.
+        io_desc.allowStorageBinding = WGPU_FALSE;
+
+        WGPUSharedTextureMemoryDescriptor mem_desc =
+            WGPU_SHARED_TEXTURE_MEMORY_DESCRIPTOR_INIT;
+        mem_desc.nextInChain = &io_desc.chain;
+
+        WGPUSharedTextureMemory mem =
+            wgpuDeviceImportSharedTextureMemory(wgpu_device_, &mem_desc);
+        if (!mem) {
+            dawn_log("import_iosurface: ImportSharedTextureMemory NULL "
+                     "(IOSurface format / Dawn-version mismatch?)");
+            return GPUTextureHandle{0};
+        }
+
+        // CreateTexture with NULL descriptor uses the SharedTextureMemory's
+        // inherent properties (matched to the IOSurface format).
+        WGPUTexture texture =
+            wgpuSharedTextureMemoryCreateTexture(mem, /*descriptor=*/nullptr);
+        if (!texture) {
+            dawn_log("import_iosurface: CreateTexture NULL");
+            wgpuSharedTextureMemoryRelease(mem);
+            return GPUTextureHandle{0};
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::uint32_t handle_id = ++next_id_;
+        DawnTexture entry{};
+        entry.handle = texture;
+        entry.width = width;
+        entry.height = height;
+        entry.format = format;
+        entry.usage_mask = static_cast<std::uint8_t>(GPUTextureUsage::kRenderTarget);
+        entry.shared_memory = mem;
+        textures_.emplace(handle_id, std::move(entry));
+        return GPUTextureHandle{handle_id};
+    }
+
+    // BeginAccess: fence between the previous IOSurface consumer (Flutter
+    // compositor reading the prior frame) and the upcoming Dawn write.
+    // Must be called BEFORE the render pass that writes the texture.
+    bool iosurface_begin_access(GPUTextureHandle handle) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = textures_.find(handle.id);
+        if (it == textures_.end() || !it->second.shared_memory) return false;
+        WGPUSharedTextureMemoryBeginAccessDescriptor desc =
+            WGPU_SHARED_TEXTURE_MEMORY_BEGIN_ACCESS_DESCRIPTOR_INIT;
+        // Texture is "initialized" — Dawn will preserve any prior content
+        // (we'll clear it on the render pass anyway).
+        desc.initialized = WGPU_TRUE;
+        // No fences chained on input — plain "we want to write" semantics.
+        WGPUStatus s = wgpuSharedTextureMemoryBeginAccess(
+            it->second.shared_memory, it->second.handle, &desc);
+        if (s != WGPUStatus_Success) {
+            dawn_log("iosurface_begin_access: status=%d", s);
+            return false;
+        }
+        return true;
+    }
+
+    // EndAccess: signals to the IOSurface (and any consumer waiting on
+    // it) that our Dawn writes are complete and the texture is ready
+    // to read. Must be called AFTER the render pass + commit.
+    bool iosurface_end_access(GPUTextureHandle handle) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = textures_.find(handle.id);
+        if (it == textures_.end() || !it->second.shared_memory) return false;
+        WGPUSharedTextureMemoryEndAccessState state = {};
+        WGPUStatus s = wgpuSharedTextureMemoryEndAccess(
+            it->second.shared_memory, it->second.handle, &state);
+        if (s != WGPUStatus_Success) {
+            dawn_log("iosurface_end_access: status=%d", s);
+            wgpuSharedTextureMemoryEndAccessStateFreeMembers(state);
+            return false;
+        }
+        // Free any signal fences Dawn allocated. We don't pass them
+        // anywhere (the consumer is Flutter compositor reading the
+        // IOSurface directly, which uses Apple's CVPixelBuffer-level
+        // sync, not Dawn fences).
+        wgpuSharedTextureMemoryEndAccessStateFreeMembers(state);
+        return true;
     }
 
     std::vector<std::uint8_t> readback_texture(
@@ -1318,6 +1475,13 @@ public:
     /// pipelines per the Phase 6.3 v3 device matrix.
     bool supports_subgroups() const noexcept { return supports_subgroups_; }
 
+    /// True if the device was created with
+    /// WGPUFeatureName_SharedTextureMemoryIOSurface (Apple platforms).
+    /// Required by the PocketWorld Flutter Texture bridge for zero-copy
+    /// display. False on non-Apple adapters (Vulkan/D3D12 use platform-
+    /// specific equivalents — DXGI shared handle / EGLImage).
+    bool supports_iosurface() const noexcept { return supports_iosurface_; }
+
     // ─── Dawn-specific accessors (used by future DawnCommandBuffer / Encoder) ───
 
     WGPUDevice wgpu_device() const noexcept { return wgpu_device_; }
@@ -1334,6 +1498,7 @@ private:
     // Optional-feature availability. False = adapter rejected the
     // feature at device-request time, fallback path was taken.
     bool supports_subgroups_{false};
+    bool supports_iosurface_{false};
 
     mutable std::mutex mutex_;
     std::uint32_t next_id_{0};
@@ -1951,6 +2116,71 @@ bool register_wgsl_from_file(GPUDevice& device,
     std::string source = ss.str();
     register_wgsl_source(device, name, source, entry_point);
     return true;
+}
+
+GPUTextureHandle dawn_import_iosurface_texture(GPUDevice& device,
+                                                void* iosurface,
+                                                std::uint32_t width,
+                                                std::uint32_t height,
+                                                GPUTextureFormat format) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return GPUTextureHandle{0};
+    auto* dawn_device = static_cast<DawnGPUDevice*>(&device);
+    return dawn_device->import_iosurface(iosurface, width, height, format);
+}
+
+bool dawn_iosurface_begin_access(GPUDevice& device, GPUTextureHandle handle) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return false;
+    return static_cast<DawnGPUDevice*>(&device)->iosurface_begin_access(handle);
+}
+
+bool dawn_iosurface_end_access(GPUDevice& device, GPUTextureHandle handle) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return false;
+    return static_cast<DawnGPUDevice*>(&device)->iosurface_end_access(handle);
+}
+
+void register_baked_wgsl_into_device(GPUDevice& device) noexcept {
+    // Register all 15 baked WGSL sources keyed by name. Each kernel uses
+    // entry point "main" except splat_render which has separate vs_main +
+    // fs_main; for the latter we register under two names (matches the
+    // splat_render_via_device sentinel smoke convention).
+    //
+    // No-op if device.backend() != kDawn (delegated to register_wgsl_source).
+    using namespace aether::shaders;
+
+    register_wgsl_source(device, "project_forward",
+                         project_forward_wgsl, "main");
+    register_wgsl_source(device, "project_visible",
+                         project_visible_wgsl, "main");
+    register_wgsl_source(device, "project_backwards",
+                         project_backwards_wgsl, "main");
+    register_wgsl_source(device, "map_gaussian_to_intersects",
+                         map_gaussian_to_intersects_wgsl, "main");
+    register_wgsl_source(device, "rasterize",
+                         rasterize_wgsl, "main");
+    register_wgsl_source(device, "rasterize_backwards",
+                         rasterize_backwards_wgsl, "main");
+    register_wgsl_source(device, "sort_count",
+                         sort_count_wgsl, "main");
+    register_wgsl_source(device, "sort_reduce",
+                         sort_reduce_wgsl, "main");
+    register_wgsl_source(device, "sort_scan",
+                         sort_scan_wgsl, "main");
+    register_wgsl_source(device, "sort_scan_add",
+                         sort_scan_add_wgsl, "main");
+    register_wgsl_source(device, "sort_scatter",
+                         sort_scatter_wgsl, "main");
+    register_wgsl_source(device, "prefix_sum_scan",
+                         prefix_sum_scan_wgsl, "main");
+    register_wgsl_source(device, "prefix_sum_scan_sums",
+                         prefix_sum_scan_sums_wgsl, "main");
+    register_wgsl_source(device, "prefix_sum_add_scanned_sums",
+                         prefix_sum_add_scanned_sums_wgsl, "main");
+
+    // splat_render has two entry points; register under split names.
+    register_wgsl_source(device, "splat_render_vs",
+                         splat_render_wgsl, "vs_main");
+    register_wgsl_source(device, "splat_render_fs",
+                         splat_render_wgsl, "fs_main");
 }
 
 bool dawn_copy_buffer_to_buffer(GPUDevice& device,
