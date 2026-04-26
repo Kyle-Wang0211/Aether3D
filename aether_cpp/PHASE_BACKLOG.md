@@ -86,32 +86,39 @@ the item shouldn't be here.
 
 ---
 
-## Phase 5.2 iPhone 17 Pro real device deploy (DEFERRED — codesign blocker)
+## Phase 5.2 iPhone real device deploy ✅ RESOLVED in Phase 5.2 (xcodebuild bypass)
 
-### macOS 26.1 + Xcode 26.2 + `com.apple.provenance` xattr blocks every codesign path
-- **What**: `flutter build ios` (release, not simulator) fails at Xcode's `CodeSign /path/Runner.app` step with `resource fork, Finder information, or similar detritus not allowed`. Same root cause as the Phase 2 macOS-desktop codesign issue: `com.apple.provenance` xattr is **kernel-generated on every file write** on macOS 26 and **kernel-protected** (cannot be removed). codesign refuses to sign files carrying it.
-- **Status as of 2026-04-25 23:58**: Phase 5.0/5.1/5.4 verified on iPhone 17 Pro Simulator (which doesn't enforce codesign — Patch 0002 skips it there). Real device deploy blocked. Kyle's iPhone IS connected and visible in `flutter devices`; the block is purely host-side codesign, not device-side.
-- **Things tried (none worked)**:
-  - `xattr -c` (Patch 0001 in scripts/flutter_sdk_patches/): exits 0 but xattr remains
-  - `xattr -d com.apple.provenance`: same — kernel rejects silently
-  - `ditto --noextattr` to a fresh path: target file STILL gets xattr (kernel applies on write)
-  - `cp -X` to a fresh path: same as ditto
-  - `cat src > dst`: even shell redirection produces a file with the xattr
-  - Even `/tmp` and `/private/var/tmp` get the xattr — system-wide
-  - Skipping Flutter tool's `_signFramework` pre-codesign (extended Patch 0002 live, then reverted): only delays the failure; Xcode's downstream codesign during Embed Frameworks hits the same xattr error on `Runner.app/Runner` (the Swift-compiled main binary)
-  - `codesign --remove-signature` then `--force --deep --options=runtime` with full entitlements: same "detritus not allowed"
-- **Why this is a hard block, not a Flutter issue**: the same codesign command would fail on a non-Flutter Swift project under macOS 26.1. The xattr is on every file, and codesign predates this xattr's existence so its sanity check rejects unknown xattrs. Apple presumably has internal infrastructure that strips xattrs before codesign, but it's not exposed to user-side codesign.
-- **What unblocks this**:
-  - Apple Xcode/codesign update that recognizes `com.apple.provenance` as known-safe (most likely path; track via macOS 26.x point releases)
-  - Boot from a different macOS install (older 14.x or 15.x) that doesn't generate this xattr — invasive, last resort
-  - Run iOS build inside a VM with macOS 14.x — extra infra, may be feasible via tart / orbstack
-  - Submit Apple Feedback Assistant ticket arguing for a `codesign --allow-provenance-xattr` flag — long lead time
-- **Trigger to retry**: any of:
-  - macOS 26.x point release where `xattr -d com.apple.provenance` actually works
-  - Discovery of an undocumented codesign flag (rg through Xcode binaries / man pages periodically)
-  - User decision to build on a different machine
-- **Why deferring is acceptable for Phase 5**: Phase 5 mission was "iOS port of Phase 4 bridge". Phase 5.0/5.1/5.4 prove the iOS port architecturally — IOSurface bridge, Metal pipeline, FFI all run on iPhone 17 Pro Simulator (which is real iOS code on real iOS Metal stack, just running on host CPU). Real device deploy is a build-environment problem, not an architectural one. The Phase 5 architectural goal is met; the deploy step waits.
-- **Shape**: when codesign is fixed, the deploy step is `flutter run -d <iphone-udid> --release`. ~5 min. The build settings are already correct (DEVELOPMENT_TEAM = 26AH7V448L, PRODUCT_BUNDLE_IDENTIFIER = com.kyle.PocketWorld, automatic signing).
+### Initial diagnosis was wrong: this was Flutter-tool-specific, not macOS-fundamental
+
+- **First attempt (FAILED)**: `flutter build ios --release` and `flutter build ios --debug` both fail at Xcode's `CodeSign /path/Runner.app` step with `resource fork, Finder information, or similar detritus not allowed`. I initially attributed this to a kernel-protected `com.apple.provenance` xattr that no command (`xattr -c`, `xattr -d`, `ditto --noextattr`, `cp -X`, `cat`-redirect) can strip on macOS 26.1.
+- **Correct diagnosis (revised 2026-04-26 00:13)**: the codesign block is in the path Flutter's tool wrapper invokes codesign through — NOT in macOS's codesign itself. **`xcodebuild -workspace … -scheme Runner -configuration Debug -destination 'generic/platform=iOS' -allowProvisioningUpdates`** signs successfully on the same machine, same provenance xattrs everywhere. The build SUCCEEDS, producing a properly-signed `Runner.app` in `~/Library/Developer/Xcode/DerivedData/.../Build/Products/Debug-iphoneos/`.
+- **Working deploy workflow (Phase 5.2 actual)**:
+  ```bash
+  # 1. Build via xcodebuild directly (NOT `flutter build ios`):
+  cd pocketworld_flutter/ios
+  xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+    -configuration Debug -destination 'generic/platform=iOS' \
+    -allowProvisioningUpdates
+
+  # 2. Re-sign embedded frameworks with the user's developer identity
+  #    (xcodebuild's deep-sign signs with the team's Apple-Distribution
+  #    cert which the device rejects with "identity no longer valid"):
+  APP=~/Library/Developer/Xcode/DerivedData/Runner-*/Build/Products/Debug-iphoneos/Runner.app
+  IDENTITY=$(security find-identity -v -p codesigning | grep "Apple Development" | head -1 | awk '{print $2}')
+  for FW in $APP/Frameworks/*; do
+      codesign --force --sign $IDENTITY --timestamp=none $FW
+  done
+  codesign --force --sign $IDENTITY \
+    --entitlements ~/Library/Developer/Xcode/DerivedData/Runner-*/Build/Intermediates.noindex/Runner.build/Debug-iphoneos/Runner.build/Runner.app.xcent \
+    --timestamp=none $APP
+
+  # 3. Install + launch on connected iPhone via devicectl:
+  xcrun devicectl device install app --device <iphone-udid> $APP
+  xcrun devicectl device process launch --device <iphone-udid> com.kyle.PocketWorld
+  ```
+- **Why `flutter build` fails but `xcodebuild` succeeds**: still not fully diagnosed. The Flutter tool's xcconfig assembly likely passes a different signing identity context. The fact that this didn't reveal itself until step 3 (after Phase 5.0/5.1/5.4 all passed via simulator-only) is why the BACKLOG entry was wrong-rooted at first. Two-line Tier 1 fix candidate: invoke `xcodebuild` for device builds instead of `flutter build`, OR sniff the flutter tool's exact xcodebuild invocation diff.
+- **Status as of 2026-04-26 00:15**: app installed + launched on Kyle's iPhone (UDID `00008120-00146C4A1AEBC01E`, iOS 26.3.1). Phase 5.2 ✅ DONE.
+- **Trigger to deepen the fix**: when this becomes painful (frequent device deploys), file Tier 1 patch / wrapper script. Not urgent now — first-time setup is paid; subsequent deploys reuse the workflow.
 
 ---
 
