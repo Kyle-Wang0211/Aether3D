@@ -225,6 +225,10 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
                             tools/aether_dawn_splat_smoke_rasterize.cpp)
     aether_dawn_smoke_test(aether_dawn_splat_smoke_rasterize_backwards
                             tools/aether_dawn_splat_smoke_rasterize_backwards.cpp)
+
+    # ─── Step 7: Brush project_backwards (last training kernel) ───
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_project_backwards
+                            tools/aether_dawn_splat_smoke_project_backwards.cpp)
 endif()
 
 # ============================================================================
