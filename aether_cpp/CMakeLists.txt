@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS "Build only the minimal whitebox native tests" OFF)
 option(AETHER_ENABLE_DAWN "Build Dawn (WebGPU) integration + hello sample" ON)
+option(AETHER_FFI_BUILD_STATIC "Build aether3d_ffi as static archive (set ON for iOS xcframework so codesign isn't required; default OFF builds .dylib for macOS Dart CLI smoke tests)" OFF)
 
 # Strict flags — applied per-target via target_compile_options below.
 # Was previously add_compile_options(...) at directory scope, which would
@@ -120,7 +121,9 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     function(aether_dawn_hello_sample target src)
         add_executable(${target} ${src})
         target_link_libraries(${target} PRIVATE dawn::webgpu_dawn)
-        target_compile_features(${target} PRIVATE cxx_std_20)
+        # cxx_std_20 inherited from top-level CMAKE_CXX_STANDARD; explicit
+        # target_compile_features() breaks under iphonesimulator sysroot
+        # (CMake compiler-feature probe returns empty) — see commit history.
     endfunction()
 
     aether_dawn_hello_sample(aether_dawn_hello          tools/aether_dawn_hello.cpp)           # P1.4 adapter info
@@ -133,7 +136,7 @@ endif()
 # ============================================================================
 add_executable(aether_version_test tools/aether_version_test.cpp)
 target_link_libraries(aether_version_test PRIVATE aether3d_core)
-target_compile_features(aether_version_test PRIVATE cxx_std_20)
+# cxx_std_20 inherited from top-level CMAKE_CXX_STANDARD.
 
 # ============================================================================
 # Phase 3.4: aether3d_ffi shared library — dart:ffi-loadable surface
@@ -148,9 +151,13 @@ target_compile_features(aether_version_test PRIVATE cxx_std_20)
 #   - For now, version.cpp has no dependencies, so we don't link core yet
 #     (keeps the .dylib at kilobytes for the macOS Dart CLI smoke test).
 # ============================================================================
-add_library(aether3d_ffi SHARED src/core/version.cpp)
+if(AETHER_FFI_BUILD_STATIC)
+    add_library(aether3d_ffi STATIC src/core/version.cpp)
+else()
+    add_library(aether3d_ffi SHARED src/core/version.cpp)
+endif()
 target_include_directories(aether3d_ffi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_features(aether3d_ffi PRIVATE cxx_std_20)
+# cxx_std_20 inherited from top-level CMAKE_CXX_STANDARD.
 
 if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
     enable_testing()

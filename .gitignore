@@ -36,3 +36,11 @@ exports/
 
 # build-dev (local xcodebuild scratch dir)
 build-dev/
+
+# CMake build dirs (host + iOS device + iOS simulator)
+aether_cpp/build/
+aether_cpp/build-ios-device/
+aether_cpp/build-ios-sim/
+
+# Distribution artifacts (iOS xcframework, etc.) — regeneratable via scripts/build_ios_xcframework.sh
+dist/
