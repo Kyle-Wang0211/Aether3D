@@ -1,13 +1,16 @@
-// Phase 2.4 PocketWorld hello main screen.
+// Phase 2.4 PocketWorld hello main screen + Phase 4.1/4.5 Flutter Texture widget.
 //
-// The footer Text widget below hardcodes "v0.1.0-phase2" as a placeholder.
-// Phase 3.5 was supposed to replace it with a real FFI call to
-// aether_version_string(); P3.4 validated the FFI design on macOS Dart CLI
-// (see tool/aether_ffi_smoke.dart) but the iOS final-mile (CocoaPods static
-// xcframework extraction) hit a 1.16 quirk and is deferred — see
-// aether_cpp/PHASE_BACKLOG.md for the trigger to revisit.
+// Below the "PocketWorld" title we render a 256×256 Flutter Texture widget
+// fed by native-side CVPixelBuffer (currently a static CPU-rendered RGB
+// gradient — Phase 4.2 will replace the buffer source with an IOSurface-
+// backed MTLTexture so native GPU writes feed the same widget).
+//
+// Footer "v0.1.0-phase2" is still the Phase 3.5 placeholder; the FFI
+// hookup landed on macOS Dart CLI but the iOS Pod final-mile is deferred.
+// See aether_cpp/PHASE_BACKLOG.md.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 void main() {
   runApp(const PocketWorldApp());
@@ -29,8 +32,38 @@ class PocketWorldApp extends StatelessWidget {
   }
 }
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  static const _channel = MethodChannel('aether_texture');
+  int? _textureId;
+  String? _textureError;
+
+  @override
+  void initState() {
+    super.initState();
+    _requestTexture();
+  }
+
+  Future<void> _requestTexture() async {
+    try {
+      final id = await _channel.invokeMethod<int>('createGradientTexture');
+      if (!mounted) return;
+      setState(() => _textureId = id);
+    } on MissingPluginException {
+      if (!mounted) return;
+      setState(() => _textureError =
+          'plugin not registered (running on a non-macOS target?)');
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() => _textureError = '${e.code}: ${e.message}');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -40,12 +73,43 @@ class HomeScreen extends StatelessWidget {
         child: Stack(
           children: [
             Center(
-              child: Text(
-                'PocketWorld',
-                style: theme.textTheme.displayMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: theme.colorScheme.primary,
-                ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'PocketWorld',
+                    style: theme.textTheme.displayMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  // Phase 4.1 + 4.5 Texture widget. Phase 4.2 swaps the
+                  // CPU-rendered CVPixelBuffer for an IOSurface-backed
+                  // MTLTexture; widget tree doesn't change.
+                  SizedBox(
+                    width: 256,
+                    height: 256,
+                    child: _textureId != null
+                        ? Texture(textureId: _textureId!)
+                        : Container(
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color: theme.colorScheme.outlineVariant,
+                              ),
+                            ),
+                            alignment: Alignment.center,
+                            child: Padding(
+                              padding: const EdgeInsets.all(8.0),
+                              child: Text(
+                                _textureError ?? 'creating texture\u2026',
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.bodySmall,
+                              ),
+                            ),
+                          ),
+                  ),
+                ],
               ),
             ),
             Positioned(
@@ -53,10 +117,6 @@ class HomeScreen extends StatelessWidget {
               right: 0,
               bottom: 16,
               child: Center(
-                // P2.4 placeholder. Phase 3.5 deferred — see PHASE_BACKLOG.md.
-                // When iOS Pod xcframework integration is unstuck, the source
-                // becomes aether_version_string() via dart:ffi (mechanics
-                // already proven on macOS in tool/aether_ffi_smoke.dart).
                 child: Text(
                   'v0.1.0-phase2',
                   style: theme.textTheme.bodySmall?.copyWith(
