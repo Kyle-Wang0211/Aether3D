@@ -75,3 +75,63 @@ bash scripts/flutter_sdk_patches/apply.sh
 - **Flutter 3.41.7** = latest stable as of P0.1 install (2026-04-25). Provides `dart:ffi` + `Texture` widget needed for Phase 3/4.
 - **Dawn `12ee391c74`** = HEAD of `google/dawn` `main` at P1.2 add (2026-04-25). New enough to have the modern callback API (StringView + lambda capture, no `void* userdata`).
 - **CMake 3.22+** = Dawn's minimum. We bumped `aether_cpp/CMakeLists.txt` from 3.16 → 3.22 in P1.3.
+
+---
+
+## Lessons learned (Phase 0 → Phase 3)
+
+Things future-Kaidong / future-collaborators should know that aren't obvious from reading the code.
+
+### Dart FFI validation pattern: macOS Dart CLI before iOS
+
+**Problem**: iOS toolchain failures during FFI bring-up are hard to debug because the failure mode is "red Flutter screen with `dlsym ... symbol not found`" — could be ABI mistake, dart:ffi mistake, codesign issue, Pod integration issue, or library packaging issue all causing the same symptom.
+
+**Pattern (proven in P3.4)**: build a tiny shared library on macOS (`libaether3d_ffi.dylib`), write a pure-Dart CLI script using `dart:ffi` + `package:ffi` that opens it and calls one function, run via `dart run tool/aether_ffi_smoke.dart`. **All FFI binding mechanics are bit-for-bit identical to iOS** — only the library-loading mechanism differs (`DynamicLibrary.open(<path>)` for macOS dev vs `DynamicLibrary.process()` for iOS app where the static lib is linked in).
+
+If this passes on macOS but fails on iOS, the bug is **necessarily** in iOS-specific tooling (Pod / xcframework / codesign / etc.), not the design. Hugely narrows the bisect.
+
+### iOS xcframework slice naming
+
+`xcodebuild -create-xcframework` outputs use these directory names:
+- `ios-arm64/` — iOS device (iPhoneOS SDK)
+- `ios-arm64-simulator/` — iOS Simulator on Apple Silicon (iPhoneSimulator SDK)
+- (historical) `ios-x86_64-simulator/` — Intel Mac Simulator, no longer relevant on M-series
+
+The platform marker in each slice's library can be verified with `otool -l <lib> | grep platform` — `platform 7` = iPhoneSimulator, `platform 2` = iPhoneOS.
+
+### CMake quirks for iOS builds
+
+1. **`target_compile_features(<t> PRIVATE cxx_std_20)` breaks under `iphonesimulator` sysroot** — CMake's compiler-feature probe returns empty there. Workaround: use the top-level `set(CMAKE_CXX_STANDARD 20)` exclusively, don't add per-target feature requirements.
+2. **`add_library(<t> SHARED ...)` on iOS requires a development team** — Xcode wants to codesign every dylib. For library targets that should ship as static, gate behind a build option (e.g., `AETHER_FFI_BUILD_STATIC=ON`) and switch between `STATIC` / `SHARED` accordingly. Default to `SHARED` for macOS dev (so `dart:ffi DynamicLibrary.open` works), `STATIC` for iOS xcframework (so codesign isn't required).
+3. **iOS configure invocation**:
+   ```bash
+   cmake -S aether_cpp -B aether_cpp/build-ios-device \
+     -G Xcode \
+     -DCMAKE_SYSTEM_NAME=iOS \
+     -DCMAKE_OSX_ARCHITECTURES=arm64 \
+     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+     -DAETHER_ENABLE_DAWN=OFF \
+     -DAETHER_FFI_BUILD_STATIC=ON
+   ```
+   For simulator, add `-DCMAKE_OSX_SYSROOT=iphonesimulator`.
+4. **`if(APPLE)` is true on both macOS and iOS**. Don't assume it means macOS.
+
+### CocoaPods 1.16 + vendored static .xcframework + Flutter (UNRESOLVED, see PHASE_BACKLOG.md)
+
+The standard CocoaPods integration path for vendored static xcframeworks fails to generate the xcframework slice-extraction `script_phase`. Build fails with `Build input file cannot be found: .../XCFrameworkIntermediates/<pod>/lib<pod>.a`. Tried 3 angles (`s.static_framework = true`, removing `use_frameworks!`, `post_install` force_load) — none worked. Deferred per Phase 3.5 abort. See `aether_cpp/PHASE_BACKLOG.md` "Phase 3.5 iOS Pod integration" for full diagnosis + 4 plausible directions to try next.
+
+### Dawn-on-iOS — also unresolved
+
+Dawn's CMake doesn't have an iOS code path tested. Phase 3.1 deliberately disabled Dawn (`AETHER_ENABLE_DAWN=OFF`) for iOS xcframework. Re-enabling Dawn for iOS is its own substantial task (likely Phase 4+). For Phase 3 scope (Dart calls C++ on iOS), Dawn isn't needed.
+
+### `aether3d_core` — also currently iOS-disabled
+
+`metal_gpu_device.mm` + `depth_inference_coreml.mm` use Metal/CoreML APIs that have iOS-vs-macOS differences. Phase 3.1 ships `aether3d_ffi` (just version.cpp) for iOS, NOT the full `aether3d_core`. Re-enabling these for iOS is a Phase 4 task.
+
+### CocoaPods locale gotcha
+
+CocoaPods 1.16 on macOS requires UTF-8 locale or fails with `Encoding::CompatibilityError` deep in unicode normalization, masquerading as a Ruby/Podfile issue. Workaround: always invoke as `LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install`. (Or set in shell profile, but explicit per-invocation is more reproducible.)
+
+### macOS provenance xattr (already documented above)
+
+The Flutter SDK patches at `scripts/flutter_sdk_patches/` work around macOS 14+'s kernel-protected `com.apple.provenance` xattr breaking ad-hoc codesign of `Flutter.framework`. See PHASE_BACKLOG.md for the full Tier 1 lifecycle.
