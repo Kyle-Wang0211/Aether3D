@@ -29,6 +29,15 @@ exports/
 # Python caches
 **/__pycache__/
 
+# Phase 6: large Mip-NeRF 360 garden splat scenes (hundreds of MB)
+# — synthetic_smoke.ply IS committed (~7 KB, deterministic, regenerable
+#   from scripts/gen_synthetic_smoke_ply.py).
+# — garden_50k.ply / garden_500k.ply are NOT (download per
+#   aether_cpp/test_data/splat/README.md).
+aether_cpp/test_data/splat/garden_*.ply
+aether_cpp/test_data/splat/garden_*.spz
+aether_cpp/test_data/splat/garden_*.splat
+
 # Firebase — never commit credentials
 **/GoogleService-Info.plist
 **/firebase-admin*.json
