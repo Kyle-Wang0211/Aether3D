@@ -37,11 +37,12 @@ target 'Runner' do
     inherit! :search_paths
   end
 
-  # P3.2 deferred: pod 'aether3d_ffi' was here but CocoaPods 1.16 didn't
-  # extract the static .a from the vendored xcframework into the build,
-  # so dlsym(RTLD_DEFAULT, 'aether_version_string') fails at runtime.
-  # See aether_cpp/PHASE_BACKLOG.md for the trigger to re-enable.
-  # pod 'aether3d_ffi', :path => '../../aether_cpp'
+  # Phase 5.0 (D2): re-enabled. The vendored_frameworks-of-static-xcframework
+  # path that broke in P3.2 is replaced in the podspec by per-arch
+  # vendored .a files + LIBRARY_SEARCH_PATHS[sdk=…] xcconfig. The xcframework
+  # itself is still produced by scripts/build_ios_xcframework.sh for non-Pod
+  # consumers; the Pod just consumes a flat-laid-out copy under dist/libs/.
+  pod 'aether3d_ffi', :path => '../../aether_cpp'
 end
 
 post_install do |installer|

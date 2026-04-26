@@ -1,16 +1,21 @@
 PODS:
+  - aether3d_ffi (0.1.0-phase3)
   - Flutter (1.0.0)
 
 DEPENDENCIES:
+  - aether3d_ffi (from `../../aether_cpp`)
   - Flutter (from `Flutter`)
 
 EXTERNAL SOURCES:
+  aether3d_ffi:
+    :path: "../../aether_cpp"
   Flutter:
     :path: Flutter
 
 SPEC CHECKSUMS:
+  aether3d_ffi: 7fabe577f1903d5d8adf447779bd6ca6b4afb97e
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
 
-PODFILE CHECKSUM: 6dbea096da08e8da5187f571591e589119a8b135
+PODFILE CHECKSUM: 61af61104a41c00f2c96c514a903ec15cf9b36bb
 
 COCOAPODS: 1.16.2

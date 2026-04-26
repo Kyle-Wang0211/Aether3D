@@ -30,26 +30,16 @@ the item shouldn't be here.
 
 ---
 
-## Phase 3.5 iOS Pod integration (deferred, non-blocking)
+## Phase 3.5 iOS Pod integration ✅ RESOLVED in Phase 5.0
 
 ### CocoaPods 1.16 vendored static xcframework: extraction script missing
-- **What**: `pod 'aether3d_ffi', :path => '../../aether_cpp'` integrates the podspec successfully (`pod install` passes), and the xcframework path is wired into Pods-Runner.debug.xcconfig at `$(PODS_XCFRAMEWORKS_BUILD_DIR)/aether3d_ffi/libaether3d_ffi.a`. But CocoaPods does **not** generate a script_phase to actually extract the slice from `dist/aether3d_ffi.xcframework`. Build fails: "Build input file cannot be found: .../XCFrameworkIntermediates/aether3d_ffi/libaether3d_ffi.a".
-- **Why it's not cosmetic**: This is the last mile of Phase 3.5 — without it, Dart `DynamicLibrary.process().lookupFunction('aether_version_string')` fails at runtime with `dlsym(RTLD_DEFAULT, ...): symbol not found`, and the UI shows a red Flutter error screen instead of the version string.
-- **Why it's safe to defer**: Phase 3's architectural goal — "Dart can call C++ on iOS via FFI" — is **proven feasible** by P3.4 (macOS Dart CLI runs the FFI binding cleanly against `libaether3d_ffi.dylib`). The iOS-specific tooling friction doesn't invalidate the design. P2.4's placeholder `'v0.1.0-phase2'` continues to render correctly.
-- **Things tried (none worked)**:
-  - `s.static_framework = true` in podspec → adds `-ObjC` to OTHER_LDFLAGS, no extraction script
-  - `use_frameworks!` removed from Podfile → same missing-extraction-script error
-  - Force-load via post_install hook → `-force_load` references the same nonexistent path
-- **Trigger to revisit**:
-  - When ready to wire iOS device FFI (likely paired with Phase 2.3 real-iPhone deploy)
-  - When upstream CocoaPods publishes a fix for vendored static xcframework + Flutter integration
-  - If a Flutter-iOS-FFI tutorial / community pattern is published showing the canonical path
-- **Plausible directions to investigate then**:
-  - Manually add the .a to Runner.xcodeproj's "Link Binary With Libraries" build phase, bypassing CocoaPods entirely
-  - Switch from `s.vendored_frameworks` to `s.vendored_libraries` (per-arch .a files) — older but simpler mechanism
-  - Custom `script_phase` in podspec that extracts the xcframework slice manually
-  - Distribute as a pre-built `.framework` (dynamic) instead of static `.xcframework`, accepting the codesign + dev-team requirement
-- **What's already in place** (don't redo): `dist/aether3d_ffi.xcframework` builds cleanly via `scripts/build_ios_xcframework.sh`; podspec at `aether_cpp/aether3d_ffi.podspec`; pre-positioned UI hook in `pocketworld_flutter/lib/main.dart` (still showing placeholder); `pocketworld_flutter/tool/aether_ffi_smoke.dart` proves the binding side works on macOS.
+- **Status**: ✅ RESOLVED 2026-04-25 in Phase 5.0 by switching from `s.vendored_frameworks = '../dist/aether3d_ffi.xcframework'` to per-arch `vendored_libraries` (D2 attack direction from Phase 4 productive-pause discussion). Implementation:
+  - `scripts/build_ios_xcframework.sh` extended to extract per-arch `.a` from each xcframework slice into `dist/libs/{ios-arm64,ios-arm64-simulator}/`
+  - `aether_cpp/aether3d_ffi.podspec` rewritten with `LIBRARY_SEARCH_PATHS[sdk=…]` + `OTHER_LDFLAGS[sdk=…] = -force_load <slice>/libaether3d_ffi.a` (per-sdk conditional, idiomatic CocoaPods pattern)
+  - `pocketworld_flutter/ios/Podfile` re-enabled the previously-commented `pod 'aether3d_ffi', :path => '../../aether_cpp'`
+  - Verified: `nm Runner.app/Runner.debug.dylib | grep _aether_version_string` returns `T _aether_version_string` (debug-build symbol lives in dylib not Runner — release build moves it back to Runner per Flutter AOT layout)
+- **Plan doc**: `aether_cpp/PHASE5_PLAN.md` decision A
+- **Surprise during execution** (not in plan): Plan's literal `s.vendored_libraries = 'dist/libs/**/libaether3d_ffi.a'` glob fails because both slices are non-fat arm64 (Apple Silicon sim dropped x86_64) — Xcode would auto-link both → "object file built for iOS Simulator, but linking for iOS" mismatch. Refined to `LIBRARY_SEARCH_PATHS[sdk=…] + -force_load` in podspec (still squarely D2, no D1 fallback). Also: `OTHER_LDFLAGS[sdk=…]` requires `$(inherited)` prefix or it strips CocoaPods's own `-ObjC` and Pod link flags.
 
 ---
 
@@ -93,6 +83,22 @@ the item shouldn't be here.
 - **Why it's not cosmetic**: any of the 4 fixes from the code-review chore could regress and only surface 3 weeks later when someone re-runs the manual ritual.
 - **Trigger to do**: when Phase 4 surface stabilizes (post-Phase 5 integration when texture content flow is real).
 - **Shape**: ~2 hours — Flutter widget test for the Texture mount path (mock plugin); Swift unit test for GradientTexture init throwing the right error per failure point; integration test that boots the app and asserts frame count > N over T seconds.
+
+---
+
+## Phase 5 polish (deferred, non-blocking)
+
+### Flutter 3.41.7 frontend_server `--output-dill` bug — `flutter clean` corrupts subsequent builds
+- **What**: After `flutter clean` (or any state where `.dart_tool/flutter_build/<hash>/app.dill` is missing), `flutter build ios|macos` fails with `PathNotFoundException: Cannot open file, path = '…/app.dill'`. Root cause: frontend_server (`bin/cache/dart-sdk/bin/snapshots/frontend_server_aot.dart.snapshot`) opens `--output-dill` without `O_CREAT` — the parent dir exists, but the file doesn't, and the open() call ENOENTs. The error message lies; the parent IS there.
+- **Why it's not cosmetic**: any `flutter clean` (a stock troubleshooting step) bricks every subsequent build until the file is hand-touched. Fresh CI checkouts also hit this if `.dart_tool/` isn't seeded.
+- **Workaround discovered Phase 5.0**: `mkdir -p .dart_tool/flutter_build/<hash> && touch .dart_tool/flutter_build/<hash>/app.dill` before each `flutter build`. Hash is deterministic per project so once known, can be wrapped.
+- **Why I didn't add a Tier 1 patch** (yet): `frontend_server_aot.dart.snapshot` is a precompiled snapshot — can't patch source-level the way we do for the codesign issue. Three real fix options:
+  1. Patch Flutter SDK at the build orchestration layer (Dart side that invokes frontend_server) to pre-touch the file before each call. Same Tier 1 mechanism as `scripts/flutter_sdk_patches/`.
+  2. Wrapper script around `flutter build` that does the pre-touch. Adds friction.
+  3. Avoid `flutter clean` — use `rm -rf build .dart_tool/flutter_build && flutter pub get` instead, which preserves the seed dill. Convention not enforcement.
+- **Trigger to do**: next `flutter clean` that bites (or, if proactive, before next CI workflow that uses `flutter clean`).
+- **Shape**: 1 hour to write Tier 1 patch + apply.sh + tests + upstream issue draft. Or 5 min to add `tools/flutter_safe_build.sh` wrapper. Or 0 min to document avoidance in CROSS_PLATFORM_STACK.md.
+- **Upstream**: not yet filed — search `flutter#PathNotFoundException output-dill` first to dedupe.
 
 ---
 
