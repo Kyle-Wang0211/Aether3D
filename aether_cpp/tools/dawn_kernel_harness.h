@@ -97,6 +97,58 @@ public:
     // for one-shot smoke tests).
     std::vector<uint8_t> readback(const wgpu::Buffer& buf, size_t size);
 
+    // ─── Texture / render-pipeline path (Phase 6.3a Step 4 v3) ─────────
+
+    // Create a render-target texture of (w, h, format). Usage =
+    // RenderAttachment | CopySrc | TextureBinding so it can be the color
+    // attachment of a render pass + readable via copy-to-buffer +
+    // sampleable as a texture in subsequent compute passes.
+    //
+    // Phase 6 v3 viewer pipeline renders to RGBA8Unorm IOSurface-backed
+    // textures (matches Phase 4/5 Flutter Texture widget zero-copy path).
+    // Smoke harness uses plain Dawn-native textures; the IOSurface bridge
+    // is reused once the DawnGPUDevice (6.2.G) wraps the render-pass API.
+    wgpu::Texture alloc_render_target(uint32_t w, uint32_t h,
+                                       wgpu::TextureFormat format);
+
+    // Compile a WGSL source containing vertex + fragment entry points
+    // into a render pipeline targeting the given color format. WGSL must
+    // declare two @vertex / @fragment fns named `vs_entry` and
+    // `fs_entry`. Topology defaults to TriangleList (instanced quads
+    // emit 6 vertices per instance via vertexID = 0..5).
+    wgpu::RenderPipeline load_render_pipeline(
+        std::string_view wgsl_source,
+        const char* vs_entry,
+        const char* fs_entry,
+        wgpu::TextureFormat color_format,
+        wgpu::PrimitiveTopology topology = wgpu::PrimitiveTopology::TriangleList);
+
+    // Encode a single render pass: clear color = (0,0,0,0), draw the
+    // pipeline with vertex_count vertices × instance_count instances.
+    // `bindings` are the @group(0) storage buffers (instanced quads
+    // typically have NO vertex buffers — vertices are computed from
+    // vertexID + instanceID). Submits + waits.
+    void dispatch_render_pass(
+        const wgpu::RenderPipeline& pipeline,
+        const wgpu::Texture& target,
+        const std::vector<wgpu::Buffer>& bindings,
+        uint32_t vertex_count,
+        uint32_t instance_count);
+
+    // Copy a 2D RGBA8 texture's pixels to a new MapRead buffer, return
+    // the bytes. Caller specifies width/height/bytes_per_pixel because
+    // texture format isn't reflectable from wgpu::Texture in the C++
+    // wrapper (Dawn limitation — internal arch is C handles).
+    //
+    // Bytes-per-row alignment: WebGPU requires 256-byte alignment for
+    // copyTextureToBuffer. We pad rows automatically and unpad on
+    // readback so the caller gets tightly-packed (w * bpp)-stride
+    // bytes back.
+    std::vector<uint8_t> readback_texture(
+        const wgpu::Texture& tex,
+        uint32_t w, uint32_t h,
+        uint32_t bytes_per_pixel);
+
     // Accessors for advanced callers.
     const wgpu::Instance& instance() const { return instance_; }
     const wgpu::Adapter&  adapter()  const { return adapter_; }

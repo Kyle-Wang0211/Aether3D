@@ -276,5 +276,188 @@ std::vector<uint8_t> DawnKernelHarness::readback(const wgpu::Buffer& buf,
     return out;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 6.3a Step 4 v3 — texture / render-pipeline path
+// ═══════════════════════════════════════════════════════════════════════
+
+wgpu::Texture DawnKernelHarness::alloc_render_target(uint32_t w, uint32_t h,
+                                                      wgpu::TextureFormat format) {
+    wgpu::TextureDescriptor desc{};
+    desc.size.width = w;
+    desc.size.height = h;
+    desc.size.depthOrArrayLayers = 1;
+    desc.format = format;
+    desc.mipLevelCount = 1;
+    desc.sampleCount = 1;
+    desc.dimension = wgpu::TextureDimension::e2D;
+    desc.usage = wgpu::TextureUsage::RenderAttachment
+               | wgpu::TextureUsage::CopySrc
+               | wgpu::TextureUsage::TextureBinding;
+    return device_.CreateTexture(&desc);
+}
+
+wgpu::RenderPipeline DawnKernelHarness::load_render_pipeline(
+        std::string_view wgsl_source,
+        const char* vs_entry,
+        const char* fs_entry,
+        wgpu::TextureFormat color_format,
+        wgpu::PrimitiveTopology topology) {
+    wgpu::ShaderSourceWGSL wgsl_desc{};
+    wgsl_desc.code = wgpu::StringView{ wgsl_source.data(), wgsl_source.size() };
+    wgpu::ShaderModuleDescriptor shader_desc{};
+    shader_desc.nextInChain = &wgsl_desc;
+    wgpu::ShaderModule shader = device_.CreateShaderModule(&shader_desc);
+
+    // Color target: enable premultiplied alpha blending so the fragment
+    // shader can output (color*α, α) and the ROP composes correctly.
+    wgpu::BlendState blend{};
+    blend.color.srcFactor = wgpu::BlendFactor::One;
+    blend.color.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+    blend.color.operation = wgpu::BlendOperation::Add;
+    blend.alpha.srcFactor = wgpu::BlendFactor::One;
+    blend.alpha.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+    blend.alpha.operation = wgpu::BlendOperation::Add;
+
+    wgpu::ColorTargetState color_target{};
+    color_target.format = color_format;
+    color_target.blend = &blend;
+    color_target.writeMask = wgpu::ColorWriteMask::All;
+
+    wgpu::FragmentState fragment{};
+    fragment.module = shader;
+    fragment.entryPoint = wgpu::StringView{ fs_entry, WGPU_STRLEN };
+    fragment.targetCount = 1;
+    fragment.targets = &color_target;
+
+    wgpu::VertexState vertex{};
+    vertex.module = shader;
+    vertex.entryPoint = wgpu::StringView{ vs_entry, WGPU_STRLEN };
+    // No vertex buffers — instanced quads pull data from storage buffers
+    // via vertexID + instanceID (MetalSplatter / Spark.js convention).
+    vertex.bufferCount = 0;
+
+    wgpu::RenderPipelineDescriptor pipeline_desc{};
+    pipeline_desc.vertex = vertex;
+    pipeline_desc.fragment = &fragment;
+    pipeline_desc.primitive.topology = topology;
+    pipeline_desc.primitive.cullMode = wgpu::CullMode::None;
+    pipeline_desc.primitive.frontFace = wgpu::FrontFace::CCW;
+    pipeline_desc.multisample.count = 1;
+    pipeline_desc.multisample.mask = 0xFFFFFFFF;
+
+    return device_.CreateRenderPipeline(&pipeline_desc);
+}
+
+void DawnKernelHarness::dispatch_render_pass(
+        const wgpu::RenderPipeline& pipeline,
+        const wgpu::Texture& target,
+        const std::vector<wgpu::Buffer>& bindings,
+        uint32_t vertex_count,
+        uint32_t instance_count) {
+    // Build @group(0) bind group from `bindings`.
+    std::vector<wgpu::BindGroupEntry> bg_entries;
+    bg_entries.reserve(bindings.size());
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        wgpu::BindGroupEntry e{};
+        e.binding = static_cast<uint32_t>(i);
+        e.buffer = bindings[i];
+        e.offset = 0;
+        e.size = WGPU_WHOLE_SIZE;
+        bg_entries.push_back(e);
+    }
+    wgpu::BindGroupDescriptor bg_desc{};
+    bg_desc.layout = pipeline.GetBindGroupLayout(0);
+    bg_desc.entryCount = bg_entries.size();
+    bg_desc.entries = bg_entries.data();
+    wgpu::BindGroup bind_group = device_.CreateBindGroup(&bg_desc);
+
+    // Color attachment: clear to transparent black, store output.
+    wgpu::TextureView view = target.CreateView();
+    wgpu::RenderPassColorAttachment color_attach{};
+    color_attach.view = view;
+    color_attach.loadOp = wgpu::LoadOp::Clear;
+    color_attach.storeOp = wgpu::StoreOp::Store;
+    color_attach.clearValue = {0.0, 0.0, 0.0, 0.0};
+
+    wgpu::RenderPassDescriptor pass_desc{};
+    pass_desc.colorAttachmentCount = 1;
+    pass_desc.colorAttachments = &color_attach;
+
+    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    {
+        wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&pass_desc);
+        pass.SetPipeline(pipeline);
+        pass.SetBindGroup(0, bind_group);
+        pass.Draw(vertex_count, instance_count, /*firstVertex=*/0, /*firstInstance=*/0);
+        pass.End();
+    }
+    wgpu::CommandBuffer commands = encoder.Finish();
+    queue_.Submit(1, &commands);
+
+    bool done = false;
+    instance_.WaitAny(
+        queue_.OnSubmittedWorkDone(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&done](wgpu::QueueWorkDoneStatus, wgpu::StringView) {
+                done = true;
+            }),
+        UINT64_MAX);
+    if (!done) {
+        std::cerr << "[DawnKernelHarness] dispatch_render_pass WaitAny did not complete\n";
+    }
+}
+
+std::vector<uint8_t> DawnKernelHarness::readback_texture(
+        const wgpu::Texture& tex,
+        uint32_t w, uint32_t h,
+        uint32_t bytes_per_pixel) {
+    // WebGPU requires 256-byte row alignment for copyTextureToBuffer.
+    // Pad each row, then unpad on readback so the caller gets tight bytes.
+    constexpr uint32_t kAlign = 256;
+    const uint32_t unpadded_bpr = w * bytes_per_pixel;
+    const uint32_t padded_bpr =
+        (unpadded_bpr + kAlign - 1) / kAlign * kAlign;
+    const uint64_t padded_total = static_cast<uint64_t>(padded_bpr) * h;
+
+    auto staging = alloc_staging_for_readback(padded_total);
+
+    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    wgpu::TexelCopyTextureInfo src_info{};
+    src_info.texture = tex;
+    src_info.mipLevel = 0;
+    src_info.origin = {0, 0, 0};
+    src_info.aspect = wgpu::TextureAspect::All;
+
+    wgpu::TexelCopyBufferInfo dst_info{};
+    dst_info.buffer = staging;
+    dst_info.layout.offset = 0;
+    dst_info.layout.bytesPerRow = padded_bpr;
+    dst_info.layout.rowsPerImage = h;
+
+    wgpu::Extent3D extent{ w, h, 1 };
+    encoder.CopyTextureToBuffer(&src_info, &dst_info, &extent);
+    wgpu::CommandBuffer commands = encoder.Finish();
+    queue_.Submit(1, &commands);
+
+    bool done = false;
+    instance_.WaitAny(
+        queue_.OnSubmittedWorkDone(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&done](wgpu::QueueWorkDoneStatus, wgpu::StringView) { done = true; }),
+        UINT64_MAX);
+    (void)done;
+
+    auto padded_bytes = readback(staging, padded_total);
+
+    // Unpad rows: copy unpadded_bpr bytes per row, skipping padding.
+    std::vector<uint8_t> tight(static_cast<size_t>(unpadded_bpr) * h);
+    for (uint32_t y = 0; y < h; ++y) {
+        std::memcpy(tight.data() + y * unpadded_bpr,
+                    padded_bytes.data() + y * padded_bpr,
+                    unpadded_bpr);
+    }
+    return tight;
+}
+
 }  // namespace tools
 }  // namespace aether

@@ -186,6 +186,11 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
                             tools/aether_dawn_splat_smoke_project_visible.cpp)
     aether_dawn_smoke_test(aether_dawn_splat_smoke_map_gaussian_to_intersects
                             tools/aether_dawn_splat_smoke_map_gaussian_to_intersects.cpp)
+    # Step 4 v3: Aether3D-original splat_render.wgsl (vertex+fragment +
+    # instanced quads). Final viewer kernel — replaces Brush rasterize.wgsl
+    # for viewer flow. Brush rasterize* retained for training (Step 6).
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_render
+                            tools/aether_dawn_splat_smoke_render.cpp)
 endif()
 
 # ============================================================================
