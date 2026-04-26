@@ -76,6 +76,14 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     private let renderPipeline: MTLRenderPipelineState
     private var hasRenderedOnce = false
 
+    // Phase 4 polish #3: passRetained contract assertion. See
+    // pocketworld_flutter/ios/Runner/MetalRenderer.swift for the full
+    // rationale comment — kept duplicated here (macOS plugin not yet
+    // refactored to share with iOS the way Phase 5.3 G-prep split).
+    private var copyCount: UInt64 = 0
+    private let leakCheckIntervalCalls: UInt64 = 60
+    private let leakCheckThresholdRefs: CFIndex = 5
+
     init(device: MTLDevice, width: Int = 256, height: Int = 256) throws {
         // 1. IOSurface
         let ioProps: [IOSurfacePropertyKey: Any] = [
@@ -200,10 +208,17 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
         // CONTRACT: Flutter docs (FlutterMacOS 3.41.7) require passRetained;
         // Flutter's texture compositor releases the CVPixelBuffer after
-        // the frame composes. If a future Flutter SDK upgrade changes
-        // this contract, the symptom is silent CVPixelBuffer leaks
-        // (Activity Monitor → Memory of pocketworld_flutter climbs).
-        // Re-verify on every Flutter SDK bump.
+        // the frame composes. The polish #3 assertion below watches
+        // refcount drift; sustained climb past leakCheckThresholdRefs
+        // indicates Flutter has stopped releasing.
+        copyCount &+= 1
+        if copyCount % leakCheckIntervalCalls == 0 {
+            let rc = CFGetRetainCount(pixelBuffer)
+            if rc > leakCheckThresholdRefs {
+                NSLog("[SharedNativeTexture] passRetained contract WARNING: pixelBuffer retainCount=%ld after %llu copyPixelBuffer calls. Flutter compositor may not be releasing. (Phase 4 polish #3 assertion)",
+                      rc, copyCount)
+            }
+        }
         return Unmanaged.passRetained(pixelBuffer)
     }
 }

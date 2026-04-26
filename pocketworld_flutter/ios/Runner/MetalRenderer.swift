@@ -85,6 +85,31 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     private let renderPipeline: MTLRenderPipelineState
     private var hasRenderedOnce = false
 
+    // Phase 4 polish #3: passRetained contract assertion.
+    //
+    // copyPixelBuffer() returns Unmanaged.passRetained(pixelBuffer) — a +1
+    // refcount handed to Flutter. The contract (Flutter 3.41.7) is the
+    // compositor releases it after the frame composes. Steady-state
+    // retain count = 1 (our private let) + a few transient refs from
+    // in-flight composition. If Flutter regresses to NOT release, the
+    // refcount grows ~60/sec at 60fps — silent CVPixelBuffer leak that
+    // shows up as Activity Monitor RAM creep with no exception, no log.
+    //
+    // This assertion samples CFGetRetainCount once per second (every
+    // 60th call at steady-state 60fps) and warns if it exceeds the
+    // threshold. Cost per non-sampled call: a single u64 increment +
+    // modulo (sub-nanosecond). Cost on sampled call: one CF refcount
+    // load + compare + (rare) NSLog. Total per-frame budget impact
+    // << 0.01 ms (well under the 16.67 ms frame budget).
+    //
+    // The threshold (5) covers normal pipelining slack: our ref +
+    // current passRetained + 2-3 in-flight composition stages. A real
+    // leak would push this past 5 within 1 second of 60fps callbacks,
+    // and keep climbing.
+    private var copyCount: UInt64 = 0
+    private let leakCheckIntervalCalls: UInt64 = 60
+    private let leakCheckThresholdRefs: CFIndex = 5
+
     init(device: MTLDevice, width: Int = 256, height: Int = 256) throws {
         // 1. IOSurface
         let ioProps: [IOSurfacePropertyKey: Any] = [
@@ -208,10 +233,21 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
         // CONTRACT: Flutter docs (Flutter 3.41.7) require passRetained;
         // Flutter's texture compositor releases the CVPixelBuffer after
-        // the frame composes. If a future Flutter SDK upgrade changes
-        // this contract, the symptom is silent CVPixelBuffer leaks
-        // (Xcode → Debug Navigator → Memory of pocketworld_flutter
-        // climbs). Re-verify on every Flutter SDK bump.
+        // the frame composes. The polish #3 assertion above watches
+        // refcount drift; if it climbs past leakCheckThresholdRefs over
+        // many frames, Flutter has stopped releasing.
+        copyCount &+= 1
+        if copyCount % leakCheckIntervalCalls == 0 {
+            // CFGetRetainCount is documented as "for debugging only" —
+            // value can be momentarily inaccurate under multithreaded
+            // CF traffic. A periodic warning under steady drift remains
+            // a strong leak signal even allowing for noise.
+            let rc = CFGetRetainCount(pixelBuffer)
+            if rc > leakCheckThresholdRefs {
+                NSLog("[SharedNativeTexture] passRetained contract WARNING: pixelBuffer retainCount=%ld after %llu copyPixelBuffer calls. Flutter compositor may not be releasing. (Phase 4 polish #3 assertion)",
+                      rc, copyCount)
+            }
+        }
         return Unmanaged.passRetained(pixelBuffer)
     }
 }
