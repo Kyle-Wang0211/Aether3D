@@ -156,6 +156,32 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     aether_dawn_hello_sample(aether_dawn_hello          tools/aether_dawn_hello.cpp)           # P1.4 adapter info
     aether_dawn_hello_sample(aether_dawn_hello_compute  tools/aether_dawn_hello_compute.cpp)   # P1.5 compute roundtrip
     aether_dawn_hello_sample(aether_dawn_hello_triangle tools/aether_dawn_hello_triangle.cpp)  # P1.7 graphics roundtrip (PPM out)
+
+    # ─── Phase 6.3 / Plan B refinement — reusable Dawn kernel-smoke harness ─
+    # Per-kernel smoke binaries validate Brush WGSL → naga_oil → Tint → Metal
+    # works in isolation BEFORE DawnGPUDevice (6.2.H/I/J/K) wraps them.
+    # Bug bisection range collapses by removing the wrapper layer from the
+    # validation chain. See aether_cpp/tools/dawn_kernel_harness.h header.
+    add_library(aether_dawn_kernel_harness STATIC tools/dawn_kernel_harness.cpp)
+    target_include_directories(aether_dawn_kernel_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    target_link_libraries(aether_dawn_kernel_harness PUBLIC dawn::webgpu_dawn)
+
+    function(aether_dawn_smoke_test target src)
+        add_executable(${target} ${src})
+        target_link_libraries(${target} PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set_target_properties(${target} PROPERTIES
+                MACOSX_BUNDLE TRUE
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.kyle.aether.${target}"
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "26AH7V448L"
+            )
+        endif()
+    endfunction()
+
+    # ─── 6.3a viewer kernels ───
+    aether_dawn_smoke_test(aether_dawn_splat_smoke_project_forward
+                            tools/aether_dawn_splat_smoke_project_forward.cpp)
 endif()
 
 # ============================================================================
