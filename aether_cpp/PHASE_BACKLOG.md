@@ -88,17 +88,16 @@ the item shouldn't be here.
 
 ## Phase 5 polish (deferred, non-blocking)
 
-### Flutter 3.41.7 frontend_server `--output-dill` bug — `flutter clean` corrupts subsequent builds
-- **What**: After `flutter clean` (or any state where `.dart_tool/flutter_build/<hash>/app.dill` is missing), `flutter build ios|macos` fails with `PathNotFoundException: Cannot open file, path = '…/app.dill'`. Root cause: frontend_server (`bin/cache/dart-sdk/bin/snapshots/frontend_server_aot.dart.snapshot`) opens `--output-dill` without `O_CREAT` — the parent dir exists, but the file doesn't, and the open() call ENOENTs. The error message lies; the parent IS there.
-- **Why it's not cosmetic**: any `flutter clean` (a stock troubleshooting step) bricks every subsequent build until the file is hand-touched. Fresh CI checkouts also hit this if `.dart_tool/` isn't seeded.
-- **Workaround discovered Phase 5.0**: `mkdir -p .dart_tool/flutter_build/<hash> && touch .dart_tool/flutter_build/<hash>/app.dill` before each `flutter build`. Hash is deterministic per project so once known, can be wrapped.
-- **Why I didn't add a Tier 1 patch** (yet): `frontend_server_aot.dart.snapshot` is a precompiled snapshot — can't patch source-level the way we do for the codesign issue. Three real fix options:
-  1. Patch Flutter SDK at the build orchestration layer (Dart side that invokes frontend_server) to pre-touch the file before each call. Same Tier 1 mechanism as `scripts/flutter_sdk_patches/`.
-  2. Wrapper script around `flutter build` that does the pre-touch. Adds friction.
-  3. Avoid `flutter clean` — use `rm -rf build .dart_tool/flutter_build && flutter pub get` instead, which preserves the seed dill. Convention not enforcement.
-- **Trigger to do**: next `flutter clean` that bites (or, if proactive, before next CI workflow that uses `flutter clean`).
-- **Shape**: 1 hour to write Tier 1 patch + apply.sh + tests + upstream issue draft. Or 5 min to add `tools/flutter_safe_build.sh` wrapper. Or 0 min to document avoidance in CROSS_PLATFORM_STACK.md.
-- **Upstream**: not yet filed — search `flutter#PathNotFoundException output-dill` first to dedupe.
+### Flutter 3.41.7 frontend_server `--output-dill` bug — literal-hash-dirname is cursed after `flutter clean`
+- **What**: After `flutter clean` (or any state where `.dart_tool/flutter_build/<hash>/app.dill` is missing), `flutter build ios|macos` fails with `PathNotFoundException: Cannot open file, path = '…/app.dill'`. **Confirmed reproducible standalone** invoking `frontend_server_aot.dart.snapshot` directly with `--output-dill .dart_tool/flutter_build/<hash>/app.dill`.
+- **Surprising specific finding (Phase 5.1)**: the failing path is the LITERAL hash directory name. Renaming the dir to `<hash>_alt` (or any other name) makes frontend_server's `--output-dill` succeed at the same depth, same parent, same xattrs (`com.apple.provenance` 11 on both), same perms (40755 on both), same owner. Some kernel-level state on macOS 26.1 is bound to that exact pathname. Symlink workaround: `ln -s <hash>_alt .dart_tool/flutter_build/<hash>` resolves writes via the symlink, frontend_server succeeds.
+- **Why it's not cosmetic**: any `flutter clean` (a stock troubleshooting step) bricks every subsequent build forever. Fresh CI checkouts also hit this if `.dart_tool/` isn't seeded.
+- **Workaround applied during Phase 5.1**: `mkdir -p .dart_tool/flutter_build/<hash>_alt && rm -rf .dart_tool/flutter_build/<hash> && ln -s <hash>_alt .dart_tool/flutter_build/<hash>`. Build then succeeds. Workaround is in `.dart_tool/` (gitignored) so doesn't pollute repo.
+- **Why this is more than a frontend_server bug**: a frontend_server bug alone wouldn't be name-specific. The pattern (`com.apple.provenance` xattr blocking codesign on macOS 26 was the first instance, and now this) suggests macOS 26 is doing per-pathname tracking that surives `rm -rf`. The provenance xattr is identical between working and failing names — but maybe the kernel maintains a separate per-pathname blocklist that's NOT exposed via xattrs. Worth a focused investigation when bandwidth permits.
+- **Trigger to do** (Tier 1 vs Tier 3):
+  - **Tier 1** (next time the bug bites a teammate / new machine): wrap the `mkdir + symlink` workaround in `scripts/flutter_sdk_patches/apply.sh` so the existing patch infra picks it up. ~30 min.
+  - **Tier 3** (root-cause fix): file an Apple Feedback Assistant ticket describing the per-pathname blocking + repro recipe. Long lead time. Document path forward in flutter#185395 thread.
+- **Upstream**: not yet filed. Search needed: `flutter#PathNotFoundException output-dill 26.1` to dedupe.
 
 ---
 
