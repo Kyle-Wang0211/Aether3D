@@ -159,6 +159,17 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     // is consuming them. Keyed by textureId.
     private var registered: [Int64: GradientTexture] = [:]
 
+    // Animation state (Step 5+6: 60fps display-link-driven render).
+    // displayLink stored as Any? to avoid hoisting CADisplayLink's
+    // macOS 14.0 availability requirement onto the property declaration
+    // (the Flutter macOS scaffold ships with deployment target 10.14).
+    private var displayLink: Any?
+    private var animationStart: CFTimeInterval = 0
+    private var animatedTextureId: Int64?
+    private var animatedTexture: GradientTexture?
+    private var frameCount: Int = 0
+    private var frameStatsLogTime: CFTimeInterval = 0
+
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
             name: "aether_texture",
@@ -200,15 +211,56 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 ))
                 return
             }
-            // Single static render at angle 0 for now. Animation comes in
-            // the next commit (displayLink + per-frame textureFrameAvailable).
-            texture.render(commandQueue: queue, angle: 0)
             let id = textures.register(texture)
             registered[id] = texture
+            // Render the first frame synchronously so the widget mounts on
+            // a populated buffer, then hand over to the display-link loop
+            // for steady-state animation.
+            texture.render(commandQueue: queue, angle: 0)
             textures.textureFrameAvailable(id)
+            startAnimation(textureId: id, texture: texture)
             result(NSNumber(value: id))
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+
+    private func startAnimation(textureId: Int64, texture: GradientTexture) {
+        guard displayLink == nil else { return }  // already running
+        animatedTextureId = textureId
+        animatedTexture   = texture
+        animationStart    = CACurrentMediaTime()
+        frameStatsLogTime = animationStart
+        frameCount        = 0
+
+        if #available(macOS 14.0, *) {
+            let dl = NSScreen.main?.displayLink(target: self, selector: #selector(displayLinkTick))
+            dl?.add(to: .main, forMode: .common)
+            displayLink = dl
+        }
+        // No fallback path — we know we're on macOS 26.1; if NSScreen.main
+        // were nil at startup the app wouldn't be visible anyway.
+    }
+
+    @objc private func displayLinkTick() {
+        guard let queue = commandQueue,
+              let id = animatedTextureId,
+              let texture = animatedTexture else { return }
+        let now     = CACurrentMediaTime()
+        let elapsed = Float(now - animationStart)
+        // ~1 rad/sec rotation; full revolution every ~6.28 s.
+        texture.render(commandQueue: queue, angle: elapsed)
+        textures.textureFrameAvailable(id)
+
+        // 1 Hz fps log so the DoD verification window can see the
+        // sustained rate in Console.app or stderr.
+        frameCount += 1
+        let dt = now - frameStatsLogTime
+        if dt >= 1.0 {
+            let fps = Double(frameCount) / dt
+            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f)", fps, frameCount, dt)
+            frameStatsLogTime = now
+            frameCount = 0
         }
     }
 }

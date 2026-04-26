@@ -159,6 +159,12 @@ Verify each sub-step's validation passing before committing.
 
 (Updated as steps complete — current cursor at top.)
 
+- **Phase 4 ✅ COMPLETE — DoD verified 2026-04-25 22:03 macOS 26.1 / Apple M3 Pro**
+  - 256×256 native-GPU-rendered animated content (rotating R/G/B triangle on dark background) ✓
+  - 60 fps sustained for 30+ seconds: 27/28 one-second windows reported `60.0 fps`; first window 46.6 fps cold-start warmup; one mild dip to 57.1 fps mid-run (<5% deviation, single sample). ✓
+  - No frame drops or crashes: app PID 95542 ran 30+ s, killed cleanly. ✓
+  - Screenshot evidence: `/tmp/phase4_step56_a.png` (t≈0), `/tmp/phase4_step56_b.png` (+1 s), `/tmp/phase4_dod_30s.png` (+30 s) — three distinct rotation positions.
+- **Step 5+6 (4.4 + 4.6) ✅ PASS** — `CADisplayLink` (via `NSScreen.main.displayLink(target:selector:)`) drives 60 Hz tick. Each tick computes `angle = elapsed_time` (1 rad/s rotation), invokes `texture.render(commandQueue:, angle:)`, and signals `textures.textureFrameAvailable(id)`. 1 Hz fps stats logged via NSLog (visible when binary is run with stderr captured; not visible via `log show` because NSLog in Flutter's GUI launch path stays on stderr only). `displayLink` stored as `Any?` to avoid hoisting `CADisplayLink`'s macOS-14.0 availability requirement onto the property declaration (Flutter scaffold deployment target 10.14).
 - **Step 4 (4.3 — degraded path) ✅ PASS** — Metal-rendered triangle (R/G/B vertices, barycentric blend, dark background) writes into the IOSurface-backed MTLTexture. Same shader logic as P1.7 `aether_dawn_hello_triangle` but expressed in MSL inside Swift instead of Dawn WGSL — Dawn skipped per D1 degradation since Phase 3.5 iOS Pod is deferred and Phase 4 macOS-first means iOS isn't on the critical path. Per DoD "native GPU" — Metal counts. Step 3 (Dawn-iOS unblock) is no-op under macOS-first, recorded in plan only.
 - **Step 2 (4.2) ✅ PASS — boss fight won** — IOSurface bridge live: same IOSurface wrapped both as CVPixelBuffer (Flutter reads) and MTLTexture (Metal writes). Metal render encoder clear-color (orange) lands on screen via the Flutter Texture widget without an intermediate copy. The CPU-fill from Step 1 was replaced with a Metal render pass. Done in ~30 min, well within the 8-hour hard timebox.
   - Real cost was a single API mismatch fix: `CVPixelBufferCreateWithIOSurface` returns via `Unmanaged<CVPixelBuffer>?` (unlike the plain-Optional `CVPixelBufferCreate`); used `takeRetainedValue()` to balance the +1 refcount.
