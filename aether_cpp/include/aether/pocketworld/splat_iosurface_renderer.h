@@ -75,24 +75,45 @@ AetherSplatRenderer* aether_splat_renderer_create(
 /// NULL (no-op).
 void aether_splat_renderer_destroy(AetherSplatRenderer* r);
 
-/// Phase 6.4a stage 1 — time-driven fixed orbit camera.
+/// Phase 6.4a stage 1 (deprecated by stage 2 below) — fixed scene.
 ///
-/// Renders 4 fixed splats (matching the cross_validate smoke baseline)
-/// with the orbit camera derived from t_seconds:
-///   azimuth = t_seconds * 0.5  (rad/s)
-///   distance = 5.0
-///   polar = π/2
+/// Internally forwards to aether_splat_renderer_render_full with
+/// identity view / identity model matrices. t_seconds is recorded but
+/// ignored (the WGSL viewer does not currently consume the view matrix
+/// — splat positions are pre-projected screen coordinates from the
+/// cross_validate baseline).
 ///
-/// At t_seconds = 0.0 the output matches the harness cross_validate smoke
-/// within 1 LSB (regression check baseline).
-///
-/// Wraps the Dawn render pass in BeginAccess/EndAccess fences so the
-/// IOSurface is safe for Flutter compositor read after this call returns.
-///
-/// @deprecated Use aether_splat_renderer_render_full once Phase 6.4a' lands.
-///             Kept across 6.4a → 6.4a' transition for ABI continuity; the
-///             internal implementation forwards to render_full at that point.
+/// Kept for ABI continuity across Phase 6.4a → 6.4a' transition; new
+/// callers should use render_full with caller-supplied matrices.
 void aether_splat_renderer_render(AetherSplatRenderer* r, double t_seconds);
+
+/// Phase 6.4a' — full-matrix FFI.
+///
+/// Caller supplies the view + model matrices (16 floats each, column-
+/// major; matching glm / GLSL convention). The C++ side memcpy's the
+/// bytes into the uniforms buffer's `viewmat` field and dispatches the
+/// render pass. No internal time-derivation, no hardcoded camera
+/// assumptions.
+///
+/// Note on visual: the current splat_render.wgsl reads ProjectedSplat
+/// values that are already in screen space, so the view matrix is
+/// uploaded but does not yet affect the visible output. Phase 6.4c
+/// will either:
+///   (a) extend splat_render.wgsl to apply view matrix to per-splat
+///       world-space positions, or
+///   (b) run the full Brush project_forward → project_visible chain
+///       inside this function before calling splat_render.
+/// Either way, the FFI shape locked here doesn't change.
+///
+/// @param view_matrix   16-float column-major view matrix (camera).
+/// @param model_matrix  16-float column-major model matrix (object).
+///                      Currently unused; reserved for Phase 6.4c
+///                      object transform support.
+void aether_splat_renderer_render_full(
+    AetherSplatRenderer* r,
+    const float* view_matrix,
+    const float* model_matrix
+);
 
 #ifdef __cplusplus
 }

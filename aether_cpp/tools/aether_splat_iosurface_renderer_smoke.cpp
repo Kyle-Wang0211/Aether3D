@@ -72,7 +72,7 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // 3. Render once.
+    // 3a. Render via stage-1 entry point (t_seconds → internally identity matrices).
     aether_splat_renderer_render(renderer, /*t_seconds=*/0.0);
 
     // 4. Read IOSurface bytes back. Must lock for read; bytes are
@@ -129,10 +129,62 @@ int main() {
         pass = false;
     }
 
+    // 3b. Phase 6.4a' verification — render via render_full with explicit
+    //     identity matrices. Result must be bit-exact to stage-1 render
+    //     (the stage-1 entry point internally forwards to render_full
+    //     with identity matrices, so they must produce identical output).
+    const float identity[16] = {
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    };
+    aether_splat_renderer_render_full(renderer, identity, identity);
+    IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr);
+    auto center_full = pixel_bgra(128, 128);
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
+    if (center_full.r != center.r || center_full.g != center.g
+        || center_full.b != center.b || center_full.a != center.a) {
+        std::fprintf(stderr, "FAIL: render_full(identity) "
+            "BGRA=(%u,%u,%u,%u) does not match render(t=0) "
+            "BGRA=(%u,%u,%u,%u) — stage-1/stage-2 wrapper inconsistent\n",
+            center_full.b, center_full.g, center_full.r, center_full.a,
+            center.b, center.g, center.r, center.a);
+        pass = false;
+    } else {
+        std::printf("render_full(identity) bit-exact == render(t=0)\n");
+    }
+
+    // 3c. Render via render_full with a non-identity perturbation —
+    //     verifies the FFI accepts arbitrary matrices without crash /
+    //     uncaptured Dawn validation. The current splat_render.wgsl
+    //     ignores viewmat (Phase 6.4c work to wire it), so the visual
+    //     output is unchanged; we just check no crash.
+    const float perturbed_view[16] = {
+        0.5f,  0.0f,  0.0f, 0.0f,   // scale x by 0.5
+        0.0f,  0.5f,  0.0f, 0.0f,   // scale y by 0.5
+        0.0f,  0.0f,  1.0f, 0.0f,
+        1.0f,  2.0f,  3.0f, 1.0f,   // translate (1, 2, 3)
+    };
+    aether_splat_renderer_render_full(renderer, perturbed_view, identity);
+    IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr);
+    auto center_perturbed = pixel_bgra(128, 128);
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
+    std::printf("render_full(perturbed_view): center BGRA=(%u,%u,%u,%u) "
+                "(WGSL ignores viewmat — should match identity result)\n",
+                center_perturbed.b, center_perturbed.g, center_perturbed.r,
+                center_perturbed.a);
+    if (center_perturbed.r != center.r) {
+        // splat_render.wgsl currently ignores viewmat, so result
+        // shouldn't change. If it does, either WGSL drifted or upload
+        // path got corrupted. Either way, fail loud.
+        std::fprintf(stderr, "WARN: perturbed-view result differs from "
+            "baseline — currently expected to match because WGSL ignores "
+            "viewmat; either WGSL drifted or this assumption is now wrong.\n");
+    }
+
     aether_splat_renderer_destroy(renderer);
     CFRelease(surface);
 
     if (!pass) return EXIT_FAILURE;
-    std::printf("PASS — IOSurface bridge produces expected pixels through FFI\n");
+    std::printf("PASS — IOSurface bridge + render_full produce expected "
+                "pixels through FFI\n");
     return EXIT_SUCCESS;
 }

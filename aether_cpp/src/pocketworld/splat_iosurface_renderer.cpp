@@ -286,16 +286,26 @@ extern "C" void aether_splat_renderer_destroy(AetherSplatRenderer* r) {
     release_device_if_unused_locked();
 }
 
-extern "C" void aether_splat_renderer_render(AetherSplatRenderer* r,
-                                              double /*t_seconds*/) {
-    if (!r || !r->device) return;
+extern "C" void aether_splat_renderer_render_full(
+    AetherSplatRenderer* r,
+    const float* view_matrix,
+    const float* model_matrix
+) {
+    if (!r || !r->device || !view_matrix || !model_matrix) return;
     using namespace aether::render;
 
-    // Stage 1: scene is static (cross_validate baseline). t_seconds is
-    // ignored. Stage 2 (6.4a') will replace this entry point with one
-    // that takes view+model matrices from the caller.
+    // 1. Update uniforms with the caller-supplied matrices.
+    // RenderArgsStorage's viewmat is the first 64 bytes (mat4x4f).
+    // model_matrix is reserved (Phase 6.4c will use it once the WGSL
+    // path applies world-space transforms); we don't currently upload
+    // it because the existing RenderArgsStorage layout has no model
+    // field. A future schema bump adds it without breaking this FFI.
+    (void)model_matrix;
+    RenderArgsStorage uniforms = make_baseline_uniforms(r->width, r->height);
+    std::memcpy(uniforms.viewmat, view_matrix, 16 * sizeof(float));
+    r->device->update_buffer(r->uniforms_buf, &uniforms, 0, sizeof(uniforms));
 
-    // 1. BeginAccess fence: synchronize with any prior IOSurface consumer
+    // 2. BeginAccess fence: synchronize with any prior IOSurface consumer
     //    (Flutter compositor reading the previous frame).
     if (!dawn_iosurface_begin_access(*r->device, r->iosurface_tex)) {
         // Logged inside dawn_iosurface_begin_access. Skip this frame —
@@ -303,7 +313,7 @@ extern "C" void aether_splat_renderer_render(AetherSplatRenderer* r,
         return;
     }
 
-    // 2. Encode + submit render pass.
+    // 3. Encode + submit render pass.
     auto cb = r->device->create_command_buffer();
     if (!cb) {
         dawn_iosurface_end_access(*r->device, r->iosurface_tex);
@@ -317,9 +327,8 @@ extern "C" void aether_splat_renderer_render(AetherSplatRenderer* r,
     pass_desc.color_attachments[0].texture = r->iosurface_tex;
     pass_desc.color_attachments[0].load = GPULoadAction::kClear;
     pass_desc.color_attachments[0].store = GPUStoreAction::kStore;
-    // Clear to opaque black so the alpha channel reads as visible. The
-    // splat fragments use premultiplied-alpha blend so the splat
-    // contribution composes on top of this background.
+    // Clear to opaque black so alpha reads as visible. Splat fragments
+    // use premultiplied-alpha blend, composing over this background.
     pass_desc.color_attachments[0].clear_color[0] = 0.0f;
     pass_desc.color_attachments[0].clear_color[1] = 0.0f;
     pass_desc.color_attachments[0].clear_color[2] = 0.0f;
@@ -327,7 +336,7 @@ extern "C" void aether_splat_renderer_render(AetherSplatRenderer* r,
 
     auto* re = cb->make_render_encoder(pass_desc);
     if (!re) {
-        std::fprintf(stderr, "[splat_iosurface_renderer] render: "
+        std::fprintf(stderr, "[splat_iosurface_renderer] render_full: "
                              "make_render_encoder NULL\n");
         dawn_iosurface_end_access(*r->device, r->iosurface_tex);
         return;
@@ -342,8 +351,24 @@ extern "C" void aether_splat_renderer_render(AetherSplatRenderer* r,
     cb->commit();
     cb->wait_until_completed();
 
-    // 3. EndAccess: IOSurface is now safe for Flutter compositor read.
+    // 4. EndAccess: IOSurface is now safe for Flutter compositor read.
     dawn_iosurface_end_access(*r->device, r->iosurface_tex);
+}
+
+extern "C" void aether_splat_renderer_render(AetherSplatRenderer* r,
+                                              double /*t_seconds*/) {
+    // Stage-1 wrapper: forward to render_full with identity view/model.
+    // The 6.4a baseline scene is static (cross_validate match) and the
+    // current splat_render.wgsl ignores viewmat anyway, so identity is
+    // correct here. Phase 6.4c replaces callers of this with direct
+    // render_full calls supplying gesture-derived matrices.
+    static const float kIdentity[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    };
+    aether_splat_renderer_render_full(r, kIdentity, kIdentity);
 }
 
 #else  // !AETHER_ENABLE_DAWN
@@ -362,5 +387,7 @@ extern "C" AetherSplatRenderer* aether_splat_renderer_create(
 }
 extern "C" void aether_splat_renderer_destroy(AetherSplatRenderer*) {}
 extern "C" void aether_splat_renderer_render(AetherSplatRenderer*, double) {}
+extern "C" void aether_splat_renderer_render_full(
+    AetherSplatRenderer*, const float*, const float*) {}
 
 #endif  // AETHER_ENABLE_DAWN

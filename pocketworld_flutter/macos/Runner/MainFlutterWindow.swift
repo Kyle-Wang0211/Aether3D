@@ -1,91 +1,127 @@
 import Cocoa
 import FlutterMacOS
 import IOSurface
-import Metal
 import QuartzCore
+import CoreVideo  // CVPixelBuffer
 
-// ─── Phase 4 — Flutter Texture widget on macOS desktop ─────────────────
+// ─── Phase 6.4a — splat IOSurface bridge ───────────────────────────────
 //
-// Pipeline: Swift Metal (vs/fs MSL) writes an IOSurface-backed MTLTexture;
-// Flutter samples the same IOSurface zero-copy via a CVPixelBuffer wrapper
-// returned from FlutterTexture.copyPixelBuffer(). 60 fps animation driven
-// by NSScreen's CADisplayLink.
+// Phase 4-5 used a hardcoded MSL triangle shader rendered directly via
+// MTLRenderPipelineState. Phase 6.4a swaps the renderer for Aether3D's
+// production splat pipeline: DawnGPUDevice writes 4 Gaussian splats into
+// the same IOSurface that Flutter compositor samples. Zero copies; the
+// bytes written by Dawn ARE the bytes Flutter reads.
 //
-// Post-DoD polish landed in this file (separate chore commit, not a
-// Phase 4.7 sub-step):
-//   #1 disposeTexture lifecycle path so repeated create calls don't leak
-//   #2 waitUntilCompleted only on first render (not per frame in steady state)
-//   #4 specific error codes per failure point (instead of one umbrella)
-//   #5 GPU command-buffer completion handler logs device errors
+// SharedNativeTexture's init / render / dispose are now thin wrappers
+// over the C ABI in aether_cpp/include/aether/pocketworld/
+// splat_iosurface_renderer.h:
+//   aether_splat_renderer_create(iosurface, w, h)   — at construct time
+//   aether_splat_renderer_render(handle, t_seconds)  — per displayLink tick
+//   aether_splat_renderer_destroy(handle)            — at dispose
+//
+// The plugin (AetherTexturePlugin) — its lifecycle / method-channel /
+// thermal handlers — is UNCHANGED. The renderer class swap was the
+// architectural intent of the Phase 5.3 split (split + comment in iOS
+// MetalRenderer.swift literally said "Future Dawn-iOS swap = replace
+// this file's SharedNativeTexture implementation with a Dawn/WebGPU
+// equivalent. The plugin code doesn't need to change.")
+//
+// Why dlopen+dlsym vs @_silgen_name: avoids needing the dylib linked at
+// Xcode build time. We dlopen at first-renderer-create from a known dev
+// path (aether_cpp/build/libaether3d_ffi.dylib) OR @rpath for production.
+// If the dylib is missing OR a symbol can't be resolved, FFI.shared is
+// nil and SharedNativeTexture.init throws TextureCreateError.ffiUnavailable
+// → Flutter UI shows the error message instead of silently displaying
+// a black widget (silent = catastrophe rule from Phase 6.3a).
 
-private let kTriangleShaderSource = """
-#include <metal_stdlib>
-using namespace metal;
+// ─── FFI binding (dynamic dlsym; no Xcode link config needed) ─────────
 
-struct VertexOut {
-    float4 position [[position]];
-    float3 color;
-};
+private final class FFI {
+    typealias CreateFn  = @convention(c) (UnsafeMutableRawPointer, UInt32, UInt32) -> OpaquePointer?
+    typealias DestroyFn = @convention(c) (OpaquePointer?) -> Void
+    typealias RenderFn  = @convention(c) (OpaquePointer?, Double) -> Void
 
-vertex VertexOut vs_main(uint vid [[vertex_id]],
-                          constant float& angle [[buffer(0)]]) {
-    float2 positions[3] = {
-        float2( 0.0,  0.7),
-        float2(-0.7, -0.7),
-        float2( 0.7, -0.7),
-    };
-    float3 colors[3] = {
-        float3(1.0, 0.0, 0.0),
-        float3(0.0, 1.0, 0.0),
-        float3(0.0, 0.0, 1.0),
-    };
-    float c = cos(angle);
-    float s = sin(angle);
-    float2 p = positions[vid];
-    p = float2(c * p.x - s * p.y, s * p.x + c * p.y);
+    let create:  CreateFn
+    let destroy: DestroyFn
+    let render:  RenderFn
 
-    VertexOut out;
-    out.position = float4(p, 0.0, 1.0);
-    out.color    = colors[vid];
-    return out;
+    /// Returns nil (with NSLog diagnostic) if the dylib can't be found
+    /// or any of the required symbols isn't present.
+    static let shared: FFI? = {
+        // 1. Try RTLD_DEFAULT first — symbols are already in the process
+        //    namespace if Flutter linked the dylib via build config.
+        if let f = FFI(handle: UnsafeMutableRawPointer(bitPattern: -2)!) {
+            return f
+        }
+
+        // 2. Try several known dev paths. The fallback chain matches the
+        //    iterative dev workflow (run cmake → flutter run).
+        let candidates: [String] = [
+            // Relative to current directory (where flutter run is invoked).
+            "aether_cpp/build/libaether3d_ffi.dylib",
+            "../aether_cpp/build/libaether3d_ffi.dylib",
+            "../../aether_cpp/build/libaether3d_ffi.dylib",
+            // App Frameworks dir (production install).
+            Bundle.main.bundlePath + "/Contents/Frameworks/libaether3d_ffi.dylib",
+            // Last resort: dyld search path (DYLD_LIBRARY_PATH etc.).
+            "libaether3d_ffi.dylib",
+        ]
+        for path in candidates {
+            if let handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL) {
+                NSLog("[AetherFFI] dlopen succeeded: %@", path)
+                if let f = FFI(handle: handle) { return f }
+            }
+        }
+        NSLog("[AetherFFI] FATAL: aether3d_ffi.dylib not found in any search path. "
+            + "Build with `cmake --build aether_cpp/build` and ensure the dylib "
+            + "is in one of: aether_cpp/build/, Runner.app/Contents/Frameworks/, "
+            + "or DYLD_LIBRARY_PATH.")
+        return nil
+    }()
+
+    private init?(handle: UnsafeMutableRawPointer) {
+        guard let cSym = dlsym(handle, "aether_splat_renderer_create"),
+              let dSym = dlsym(handle, "aether_splat_renderer_destroy"),
+              let rSym = dlsym(handle, "aether_splat_renderer_render") else {
+            return nil
+        }
+        self.create  = unsafeBitCast(cSym, to: CreateFn.self)
+        self.destroy = unsafeBitCast(dSym, to: DestroyFn.self)
+        self.render  = unsafeBitCast(rSym, to: RenderFn.self)
+    }
 }
 
-fragment float4 fs_main(VertexOut in [[stage_in]]) {
-    return float4(in.color, 1.0);
-}
-"""
+// ─── Texture creation error codes ─────────────────────────────────────
 
-/// Specific failure points during SharedNativeTexture allocation. Each one
-/// maps to a distinct FlutterError code so a Dart-side log identifies
-/// the exact failure without binary-search bisection through the init.
 enum TextureCreateError: Error {
+    case ffiUnavailable              // dylib not found or symbols missing
     case iosurfaceCreate
     case cvpixelbufferCreate(CVReturn)
-    case mtlTextureCreate
-    case shaderCompile(Error)
-    case shaderFunctionMissing(String)
-    case renderPipelineCreate(Error)
+    case rendererCreate              // C ABI returned NULL
 }
 
-/// 256×256 BGRA8 native-GPU-written texture, exposed to Flutter through
-/// FlutterTexture protocol via a shared IOSurface. Renders a colored
-/// triangle (R/G/B at the three vertices, barycentric blend).
+/// 256×256 BGRA8 IOSurface-backed texture, exposed to Flutter through
+/// FlutterTexture protocol. Phase 4-5 rendered a rotating triangle via
+/// MTLRenderPipelineState; Phase 6.4a renders 4 Gaussian splats via the
+/// Aether3D production pipeline (DawnGPUDevice → splat_render.wgsl).
 class SharedNativeTexture: NSObject, FlutterTexture {
     private let pixelBuffer: CVPixelBuffer
-    private let mtlTexture: MTLTexture
-    private let renderPipeline: MTLRenderPipelineState
+    private let ioSurface: IOSurfaceRef
+    private let rendererHandle: OpaquePointer
     private var hasRenderedOnce = false
 
-    // Phase 4 polish #3: passRetained contract assertion. See
-    // pocketworld_flutter/ios/Runner/MetalRenderer.swift for the full
-    // rationale comment — kept duplicated here (macOS plugin not yet
-    // refactored to share with iOS the way Phase 5.3 G-prep split).
+    // Phase 4 polish #3: passRetained contract assertion. Carried forward
+    // unchanged — same CVPixelBuffer lifecycle as before.
     private var copyCount: UInt64 = 0
     private let leakCheckIntervalCalls: UInt64 = 60
     private let leakCheckThresholdRefs: CFIndex = 5
 
-    init(device: MTLDevice, width: Int = 256, height: Int = 256) throws {
-        // 1. IOSurface
+    init(width: Int = 256, height: Int = 256) throws {
+        guard let ffi = FFI.shared else {
+            throw TextureCreateError.ffiUnavailable
+        }
+
+        // 1. IOSurface (BGRA8, the IOSurface-canonical pixel format).
         let ioProps: [IOSurfacePropertyKey: Any] = [
             .width:           width,
             .height:          height,
@@ -93,129 +129,60 @@ class SharedNativeTexture: NSObject, FlutterTexture {
             .bytesPerElement: 4,
             .bytesPerRow:     width * 4,
         ]
-        guard let ioSurface = IOSurface(properties: ioProps) else {
+        guard let surface = IOSurface(properties: ioProps) else {
             throw TextureCreateError.iosurfaceCreate
         }
+        let surfaceRef = surface as IOSurfaceRef
 
-        // 2. CVPixelBuffer wrapping the IOSurface (Flutter reads).
-        // Note: CVPixelBufferCreateWithIOSurface returns via Unmanaged
-        // (unlike the plain-Optional CVPixelBufferCreate); takeRetainedValue
-        // balances the +1 refcount the API hands us.
+        // 2. CVPixelBuffer wrapping the IOSurface (Flutter compositor reads).
         var pbUnmanaged: Unmanaged<CVPixelBuffer>?
         let cvStatus = CVPixelBufferCreateWithIOSurface(
-            kCFAllocatorDefault, ioSurface, nil, &pbUnmanaged
+            kCFAllocatorDefault, surfaceRef, nil, &pbUnmanaged
         )
         guard cvStatus == kCVReturnSuccess,
               let buffer = pbUnmanaged?.takeRetainedValue() else {
             throw TextureCreateError.cvpixelbufferCreate(cvStatus)
         }
 
-        // 3. MTLTexture wrapping the SAME IOSurface (Metal writes).
-        let texDesc = MTLTextureDescriptor()
-        texDesc.pixelFormat = .bgra8Unorm
-        texDesc.width  = width
-        texDesc.height = height
-        texDesc.usage  = [.renderTarget, .shaderRead]
-        texDesc.storageMode = .shared
-        guard let texture = device.makeTexture(
-            descriptor: texDesc, iosurface: ioSurface, plane: 0
-        ) else {
-            throw TextureCreateError.mtlTextureCreate
-        }
-
-        // 4. Compile shaders.
-        let library: MTLLibrary
-        do {
-            library = try device.makeLibrary(source: kTriangleShaderSource, options: nil)
-        } catch {
-            throw TextureCreateError.shaderCompile(error)
-        }
-        guard let vertexFn = library.makeFunction(name: "vs_main") else {
-            throw TextureCreateError.shaderFunctionMissing("vs_main")
-        }
-        guard let fragmentFn = library.makeFunction(name: "fs_main") else {
-            throw TextureCreateError.shaderFunctionMissing("fs_main")
-        }
-
-        // 5. Render pipeline state.
-        let pipelineDesc = MTLRenderPipelineDescriptor()
-        pipelineDesc.vertexFunction   = vertexFn
-        pipelineDesc.fragmentFunction = fragmentFn
-        pipelineDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
-        let pipeline: MTLRenderPipelineState
-        do {
-            pipeline = try device.makeRenderPipelineState(descriptor: pipelineDesc)
-        } catch {
-            throw TextureCreateError.renderPipelineCreate(error)
+        // 3. Aether3D splat renderer over the same IOSurface (Dawn writes).
+        // IOSurfaceRef cast to void* — Dawn internally CFRetains for the
+        // lifetime of the renderer.
+        let surfaceVoidPtr = unsafeBitCast(surfaceRef, to: UnsafeMutableRawPointer.self)
+        guard let handle = ffi.create(surfaceVoidPtr, UInt32(width), UInt32(height)) else {
+            throw TextureCreateError.rendererCreate
         }
 
         self.pixelBuffer    = buffer
-        self.mtlTexture     = texture
-        self.renderPipeline = pipeline
+        self.ioSurface      = surfaceRef
+        self.rendererHandle = handle
+        self.ffi            = ffi
         super.init()
     }
 
-    /// Draw a triangle into the shared texture. `angle` rotates vertex
-    /// positions in-shader (radians). Synchronous on the FIRST frame so
-    /// the widget mounts on populated content; async thereafter so the
-    /// 60 Hz display-link tick doesn't block on GPU completion.
-    func render(commandQueue: MTLCommandQueue, angle: Float) {
-        guard let cb = commandQueue.makeCommandBuffer() else { return }
-        cb.label = "SharedNativeTexture.render"
-
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture     = mtlTexture
-        pass.colorAttachments[0].loadAction  = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(
-            red: 0.05, green: 0.05, blue: 0.08, alpha: 1.0
-        )
-
-        guard let encoder = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
-        encoder.label = "triangle pass"
-        encoder.setRenderPipelineState(renderPipeline)
-        var a = angle
-        encoder.setVertexBytes(&a, length: MemoryLayout<Float>.size, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
-
-        // Fix #5: GPU command-buffer completion handler. Catches device
-        // loss / out-of-memory / shader runtime errors that would
-        // otherwise be silent (the widget would just freeze on the last
-        // good frame). For Phase 5 / splat workloads this should escalate
-        // back to Dart via an event channel; for now logging is enough
-        // because this surface is dev-only and a sustained 60 fps
-        // confirms no errors are firing in the steady state.
-        cb.addCompletedHandler { cmdBuf in
-            if let error = cmdBuf.error {
-                NSLog("[SharedNativeTexture] GPU error: status=%d error=%@",
-                      cmdBuf.status.rawValue, "\(error)")
-            }
-        }
-
-        cb.commit()
-        // Fix #2: only wait on the first frame (so widget mounts on a
-        // populated buffer). Steady state lets Metal pipeline overlap
-        // with the next display-link tick — required to keep 60 fps once
-        // GPU work grows past trivial (Phase 5 splat: ~5–10 ms per frame
-        // on M3 Pro instead of ~0.1 ms for one triangle).
-        if !hasRenderedOnce {
-            cb.waitUntilCompleted()
-            hasRenderedOnce = true
-        }
+    deinit {
+        // Free the renderer's GPU resources. C ABI is NULL-safe.
+        ffi.destroy(rendererHandle)
     }
 
+    /// Render one frame of the splat scene into the shared IOSurface.
+    /// `tSeconds` is the displayLink-derived elapsed time. Phase 6.4a
+    /// stage 1 ignores it (scene is static, matches cross_validate
+    /// baseline). Phase 6.4a' replaces this with full view+model matrix
+    /// FFI driven by Dart-side OrbitControls (Phase 6.4c).
+    func render(tSeconds: Double) {
+        ffi.render(rendererHandle, tSeconds)
+        hasRenderedOnce = true
+    }
+
+    private let ffi: FFI
+
     func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
-        // CONTRACT: Flutter docs (FlutterMacOS 3.41.7) require passRetained;
-        // Flutter's texture compositor releases the CVPixelBuffer after
-        // the frame composes. The polish #3 assertion below watches
-        // refcount drift; sustained climb past leakCheckThresholdRefs
-        // indicates Flutter has stopped releasing.
+        // Same passRetained contract assertion as Phase 4 polish #3.
         copyCount &+= 1
         if copyCount % leakCheckIntervalCalls == 0 {
             let rc = CFGetRetainCount(pixelBuffer)
             if rc > leakCheckThresholdRefs {
-                NSLog("[SharedNativeTexture] passRetained contract WARNING: pixelBuffer retainCount=%ld after %llu copyPixelBuffer calls. Flutter compositor may not be releasing. (Phase 4 polish #3 assertion)",
+                NSLog("[SharedNativeTexture] passRetained contract WARNING: pixelBuffer retainCount=%ld after %llu copyPixelBuffer calls. Flutter compositor may not be releasing.",
                       rc, copyCount)
             }
         }
@@ -223,17 +190,16 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     }
 }
 
+// ─── Plugin (lifecycle / channels) — unchanged from Phase 4 ────────────
+
 class AetherTexturePlugin: NSObject, FlutterPlugin {
     private let textures: FlutterTextureRegistry
-    private let device: MTLDevice?
-    private let commandQueue: MTLCommandQueue?
-    // Hold strong refs so the textures aren't deallocated while Flutter
-    // is consuming them. Keyed by textureId.
+    // Phase 6.4a: device + commandQueue removed — the renderer is now
+    // managed entirely by the C ABI (singleton DawnGPUDevice inside
+    // aether3d_ffi). Plugin no longer needs Metal directly.
+
     private var registered: [Int64: SharedNativeTexture] = [:]
 
-    // Animation state. displayLink stored as Any? to avoid hoisting
-    // CADisplayLink's macOS 14.0 availability requirement onto the
-    // property declaration (Flutter scaffold deployment target is 10.14).
     private var displayLink: Any?
     private var animationStart: CFTimeInterval = 0
     private var animatedTextureId: Int64?
@@ -246,28 +212,15 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             name: "aether_texture",
             binaryMessenger: registrar.messenger
         )
-        let device = MTLCreateSystemDefaultDevice()
-        let queue  = device?.makeCommandQueue()
-        let instance = AetherTexturePlugin(
-            textures: registrar.textures,
-            device:   device,
-            commandQueue: queue
-        )
+        let instance = AetherTexturePlugin(textures: registrar.textures)
         registrar.addMethodCallDelegate(instance, channel: channel)
     }
 
-    init(textures: FlutterTextureRegistry, device: MTLDevice?, commandQueue: MTLCommandQueue?) {
+    init(textures: FlutterTextureRegistry) {
         self.textures = textures
-        self.device = device
-        self.commandQueue = commandQueue
         super.init()
     }
 
-    /// Phase 4 polish #9: parse a texture-dimension arg from Dart side.
-    /// Same shape as the iOS plugin's parseTextureDimension; kept inline
-    /// here (vs shared helper) because the macOS plugin lives in
-    /// MainFlutterWindow.swift while the iOS plugin lives in
-    /// AetherTexturePlugin.swift — no module to share through.
     private func parseTextureDimension(_ raw: Any?, default fallback: Int) -> Int {
         let n: Int?
         switch raw {
@@ -285,26 +238,22 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         switch call.method {
 
         case "createSharedNativeTexture":
-            guard let device = device, let queue = commandQueue else {
-                result(FlutterError(
-                    code: "NO_METAL",
-                    message: "MTLCreateSystemDefaultDevice returned nil",
-                    details: nil
-                ))
-                return
-            }
-            // Phase 4 polish #9: parametrize 256×256 hardcoded size.
             let args = call.arguments as? [String: Any] ?? [:]
             let width  = parseTextureDimension(args["width"],  default: 256)
             let height = parseTextureDimension(args["height"], default: 256)
             do {
-                let texture = try SharedNativeTexture(device: device, width: width, height: height)
+                let texture = try SharedNativeTexture(width: width, height: height)
                 let id = textures.register(texture)
                 registered[id] = texture
-                texture.render(commandQueue: queue, angle: 0)
+                texture.render(tSeconds: 0)
                 textures.textureFrameAvailable(id)
                 startAnimation(textureId: id, texture: texture)
                 result(NSNumber(value: id))
+            } catch TextureCreateError.ffiUnavailable {
+                result(FlutterError(
+                    code: "FFI_UNAVAILABLE",
+                    message: "aether3d_ffi.dylib not loaded — see Console.app for [AetherFFI] dlopen diagnostic. Build dylib with `cmake --build aether_cpp/build` and ensure it's in aether_cpp/build/, Runner.app/Contents/Frameworks/, or DYLD_LIBRARY_PATH.",
+                    details: nil))
             } catch TextureCreateError.iosurfaceCreate {
                 result(FlutterError(
                     code: "IOSURFACE_FAILED",
@@ -315,25 +264,10 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                     code: "CVPIXELBUFFER_FAILED",
                     message: "CVPixelBufferCreateWithIOSurface returned CVReturn=\(cvret)",
                     details: nil))
-            } catch TextureCreateError.mtlTextureCreate {
+            } catch TextureCreateError.rendererCreate {
                 result(FlutterError(
-                    code: "MTLTEXTURE_FAILED",
-                    message: "device.makeTexture(descriptor:iosurface:plane:) returned nil",
-                    details: nil))
-            } catch TextureCreateError.shaderCompile(let err) {
-                result(FlutterError(
-                    code: "SHADER_COMPILE_FAILED",
-                    message: "device.makeLibrary(source:options:) threw: \(err)",
-                    details: nil))
-            } catch TextureCreateError.shaderFunctionMissing(let name) {
-                result(FlutterError(
-                    code: "SHADER_FUNCTION_MISSING",
-                    message: "library.makeFunction(name: \"\(name)\") returned nil",
-                    details: nil))
-            } catch TextureCreateError.renderPipelineCreate(let err) {
-                result(FlutterError(
-                    code: "PIPELINE_FAILED",
-                    message: "device.makeRenderPipelineState threw: \(err)",
+                    code: "RENDERER_FAILED",
+                    message: "aether_splat_renderer_create returned NULL — see stderr for diagnostic (Dawn device init / IOSurface import / pipeline creation failed)",
                     details: nil))
             } catch {
                 result(FlutterError(
@@ -359,20 +293,17 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         }
     }
 
-    /// Fix #1: tear down a texture's lifecycle. Stops the display-link
-    /// loop if it was animating this texture, unregisters from the
-    /// FlutterTextureRegistry, drops our strong ref. Safe to call on an
-    /// unknown id (no-op).
     private func disposeTexture(id: Int64) {
         if animatedTextureId == id {
             stopAnimation()
         }
         textures.unregisterTexture(id)
         registered.removeValue(forKey: id)
+        // SharedNativeTexture's deinit calls aether_splat_renderer_destroy.
     }
 
     private func startAnimation(textureId: Int64, texture: SharedNativeTexture) {
-        guard displayLink == nil else { return }  // already running
+        guard displayLink == nil else { return }
         animatedTextureId = textureId
         animatedTexture   = texture
         animationStart    = CACurrentMediaTime()
@@ -396,19 +327,13 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     }
 
     @objc private func displayLinkTick() {
-        guard let queue = commandQueue,
-              let id = animatedTextureId,
+        guard let id = animatedTextureId,
               let texture = animatedTexture else { return }
         let now     = CACurrentMediaTime()
-        let elapsed = Float(now - animationStart)
-        // ~1 rad/sec rotation; full revolution every ~6.28 s.
-        texture.render(commandQueue: queue, angle: elapsed)
+        let elapsed = now - animationStart
+        texture.render(tSeconds: elapsed)
         textures.textureFrameAvailable(id)
 
-        // 1 Hz fps log so the DoD verification window can see the
-        // sustained rate in stderr (run binary directly to capture; not
-        // surfaced to unified log because NSLog in Flutter's GUI launch
-        // path stays on stderr only).
         frameCount += 1
         let dt = now - frameStatsLogTime
         if dt >= 1.0 {
