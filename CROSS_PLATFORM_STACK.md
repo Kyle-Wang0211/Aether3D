@@ -9,6 +9,8 @@ Locked at Phase 1.4 milestone (`aether_dawn_hello` printed Apple M3 Pro / Metal)
 | **Flutter SDK** | `3.41.7` exact (channel stable, commit `cc0734ac716`, 2026-04-15) — **see "DO NOT brew upgrade flutter" warning below** | `flutter --version`; `git -C $(flutter --version --machine \| python3 -c "import sys,json; print(json.load(sys.stdin)['flutterRoot'])") rev-parse --short HEAD` |
 | **Dart SDK** | `3.11.5` (bundled with Flutter, 2026-04-15) | `dart --version` |
 | **Dawn (WebGPU)** | commit `12ee391c7411285895f4289a3d889a182c093014` (v20260423.175430-13) | `aether_cpp/third_party/dawn` submodule + `.gitmodules` |
+| **Brush (Phase 6.3 WGSL kernels)** | `v0.3.0` tag, commit `3edecbb2fe79d3e2c87eeab85b15e0b1dd10d486` (2025-09-14) | Vendored at `aether_cpp/shaders/wgsl/_brush_raw/` (raw, attribution-headered) + `aether_cpp/third_party/brush/LICENSE` (Apache-2.0). Re-pin = re-fetch into `_brush_raw/` per `scripts/vendor_brush_wgsl.sh` (Phase 6.3 helper). Adapted versions in `aether_cpp/shaders/wgsl/*.wgsl` are derived; never hand-edit raw files. |
+| **MetalSplatter (Phase 6.5 cross-val oracle)** | TBD — pin commit hash here when fork created. Upstream: `scier/MetalSplatter`. | Fork URL pinned here; iOS build of fork used for IOSurface raw RGBA dump path during cross-validation only (NOT vendored into PocketWorld production build). |
 
 ## Toolchain (current Mac dev box)
 
