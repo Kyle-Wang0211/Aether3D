@@ -4,6 +4,7 @@ import IOSurface
 import QuartzCore
 import CoreVideo  // CVPixelBuffer
 import Darwin
+import Metal
 
 // ─── Phase 6.4b stage 2 — Scene IOSurface bridge (mesh + splat) ────────
 //
@@ -173,6 +174,15 @@ private enum SurfacePixelConfig: String {
             return 8
         }
     }
+
+    var mtlPixelFormat: MTLPixelFormat {
+        switch self {
+        case .bgra8:
+            return .bgra8Unorm
+        case .rgba16Half:
+            return .rgba16Float
+        }
+    }
 }
 
 private enum MacDeviceTier: String {
@@ -186,6 +196,7 @@ private struct MacDisplayCapabilities {
     let hardwareModel: String
     let preferredSurfaceConfig: SurfacePixelConfig
     let supportsEDR: Bool
+    let supportsMetalFX: Bool
 }
 
 private func currentHardwareModel() -> String {
@@ -220,7 +231,10 @@ private func detectMacDisplayCapabilities() -> MacDisplayCapabilities {
         tier: tier,
         hardwareModel: model,
         preferredSurfaceConfig: preferredSurfaceConfig,
-        supportsEDR: edrHeadroom > 1.0
+        supportsEDR: edrHeadroom > 1.0,
+        supportsMetalFX: ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 13, minorVersion: 0, patchVersion: 0)
+        )
     )
 }
 
@@ -266,37 +280,82 @@ private func configureWideColorOutput(for view: NSView) {
           caps.supportsEDR.description)
 }
 
-private func flutterTextureDisplayConfigs(
-    caps: MacDisplayCapabilities
-) -> [SurfacePixelConfig] {
-    if caps.preferredSurfaceConfig == .rgba16Half {
-        NSLog("[SharedNativeTexture] FlutterMacOS rejects %@ CVPixelBuffer textures; "
-              + "using BGRA8 display surface until the Phase 6.4d.2 render/display split lands.",
-              SurfacePixelConfig.rgba16Half.rawValue)
+private final class DrsController {
+    private static let rollingWindow = 30
+    private static let targetMs = 16.6
+    private static let minScale = 0.5
+    private static let maxScale = 1.0
+    private static let decayRate = 0.05
+    private static let recoveryRate = 0.02
+    private static let hysteresisHigh = 1.1
+    private static let hysteresisLow = 0.9
+
+    private var recent = Array(repeating: 0.0, count: DrsController.rollingWindow)
+    private var index = 0
+    private var filled = 0
+    private(set) var currentScale = 1.0
+    private var enabled = false
+
+    func onFrameDone(frameMs: Double) {
+        guard enabled else { return }
+        recent[index] = frameMs
+        index = (index + 1) % Self.rollingWindow
+        if filled < Self.rollingWindow { filled += 1 }
+        guard filled >= 5 else { return }
+
+        let avg = recent.prefix(filled).reduce(0, +) / Double(filled)
+        if avg > Self.targetMs * Self.hysteresisHigh {
+            currentScale = max(Self.minScale, currentScale - Self.decayRate)
+        } else if avg < Self.targetMs * Self.hysteresisLow && currentScale < Self.maxScale {
+            currentScale = min(Self.maxScale, currentScale + Self.recoveryRate)
+        }
     }
-    return [.bgra8]
+
+    func renderSizeFor(nativeWidth: Int, nativeHeight: Int) -> (Int, Int) {
+        guard enabled else { return (nativeWidth, nativeHeight) }
+        let width = max(8, Int(Double(nativeWidth) * currentScale))
+        let height = max(8, Int(Double(nativeHeight) * currentScale))
+        return ((width + 7) & ~7, (height + 7) & ~7)
+    }
 }
 
 enum TextureCreateError: Error {
     case ffiUnavailable              // dylib not found or symbols missing
     case iosurfaceCreate
     case cvpixelbufferCreate(CVReturn)
+    case metalUnavailable
+    case commandQueueCreate
+    case mtltextureCreate(String)
+    case upsamplerCreate(String)
     case rendererCreate              // C ABI returned NULL
 }
 
-/// 256×256 IOSurface-backed texture, exposed to Flutter through
-/// FlutterTexture protocol. Phase 4-5 rendered a rotating triangle via
-/// MTLRenderPipelineState; Phase 6.4a renders 4 Gaussian splats via the
-/// Aether3D production pipeline (DawnGPUDevice → splat_render.wgsl);
-/// Phase 6.4b stage 2 adds a GLB mesh PBR pass underneath the splat
-/// overlay (mesh_render.wgsl, Filament BRDF) — both share the same
-/// IOSurface and depth buffer.
+/// 256×256 Flutter display texture with a separate render IOSurface.
+/// Dawn renders into `renderSurface` (RGBA16F on high tiers), then MetalFX
+/// or a bilinear Metal pass writes into the BGRA8 `displaySurface` that
+/// FlutterMacOS can composite.
 class SharedNativeTexture: NSObject, FlutterTexture {
-    private let pixelBuffer: CVPixelBuffer
-    private let ioSurface: IOSurfaceRef
-    private let rendererHandle: OpaquePointer
-    private let surfaceConfig: SurfacePixelConfig
+    private let displayPixelBuffer: CVPixelBuffer
+    private let displaySurface: IOSurfaceRef
+    private let displayTexture: MTLTexture
+    private let displayWidth: Int
+    private let displayHeight: Int
+    private let renderSurfaceConfig: SurfacePixelConfig
+    private var renderSurface: IOSurfaceRef?
+    private var renderTexture: MTLTexture?
+    private var rendererHandle: OpaquePointer?
+    private var renderWidth: Int = 0
+    private var renderHeight: Int = 0
     private var hasRenderedOnce = false
+
+    private let caps: MacDisplayCapabilities
+    private let metalDevice: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let upsampler: MetalFXUpsampler
+    private let drs = DrsController()
+    private var loadedGlbPath: String?
+    private var lastUpsampleMethod: MetalFXUpsampler.Method?
+    private var lastLoggedScale: Double = 1.0
 
     // Phase 6.4c: latest gesture-derived matrices, pushed by Dart via
     // setMatrices method channel. Identity by default so the first frame
@@ -319,12 +378,11 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         ]
     }
 
-    private static func makeBackingResources(
+    private static func makeIOSurface(
         width: Int,
         height: Int,
-        ffi: FFI,
         config: SurfacePixelConfig
-    ) throws -> (CVPixelBuffer, IOSurfaceRef, OpaquePointer) {
+    ) throws -> IOSurfaceRef {
         let ioProps: [IOSurfacePropertyKey: Any] = [
             .width:           width,
             .height:          height,
@@ -335,7 +393,39 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         guard let surface = IOSurface(properties: ioProps) else {
             throw TextureCreateError.iosurfaceCreate
         }
-        let surfaceRef = surface as IOSurfaceRef
+        return surface as IOSurfaceRef
+    }
+
+    private static func makeMetalTexture(
+        device: MTLDevice,
+        surface: IOSurfaceRef,
+        width: Int,
+        height: Int,
+        config: SurfacePixelConfig,
+        usage: MTLTextureUsage,
+        label: String
+    ) throws -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: config.mtlPixelFormat,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        desc.storageMode = .shared
+        desc.usage = usage
+        guard let texture = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) else {
+            throw TextureCreateError.mtltextureCreate(label)
+        }
+        texture.label = label
+        return texture
+    }
+
+    private static func makeDisplayResources(
+        width: Int,
+        height: Int,
+        device: MTLDevice
+    ) throws -> (CVPixelBuffer, IOSurfaceRef, MTLTexture) {
+        let surfaceRef = try makeIOSurface(width: width, height: height, config: .bgra8)
 
         var pbUnmanaged: Unmanaged<CVPixelBuffer>?
         let cvStatus = CVPixelBufferCreateWithIOSurface(
@@ -346,61 +436,84 @@ class SharedNativeTexture: NSObject, FlutterTexture {
             throw TextureCreateError.cvpixelbufferCreate(cvStatus)
         }
 
+        let texture = try makeMetalTexture(
+            device: device,
+            surface: surfaceRef,
+            width: width,
+            height: height,
+            config: .bgra8,
+            usage: [.renderTarget, .shaderRead, .shaderWrite],
+            label: "Aether display BGRA8"
+        )
+        return (buffer, surfaceRef, texture)
+    }
+
+    private static func makeRenderResources(
+        width: Int,
+        height: Int,
+        ffi: FFI,
+        device: MTLDevice,
+        config: SurfacePixelConfig
+    ) throws -> (IOSurfaceRef, MTLTexture, OpaquePointer) {
+        let surfaceRef = try makeIOSurface(width: width, height: height, config: config)
+        let texture = try makeMetalTexture(
+            device: device,
+            surface: surfaceRef,
+            width: width,
+            height: height,
+            config: config,
+            usage: [.renderTarget, .shaderRead, .shaderWrite],
+            label: "Aether render \(config.rawValue)"
+        )
         let surfaceVoidPtr = unsafeBitCast(surfaceRef, to: UnsafeMutableRawPointer.self)
         guard let handle = ffi.create(surfaceVoidPtr, UInt32(width), UInt32(height)) else {
             throw TextureCreateError.rendererCreate
         }
-
-        return (buffer, surfaceRef, handle)
+        return (surfaceRef, texture, handle)
     }
 
     init(width: Int = 256, height: Int = 256) throws {
         guard let ffi = FFI.shared else {
             throw TextureCreateError.ffiUnavailable
         }
+        guard let metalDevice = MTLCreateSystemDefaultDevice() else {
+            throw TextureCreateError.metalUnavailable
+        }
+        guard let commandQueue = metalDevice.makeCommandQueue() else {
+            throw TextureCreateError.commandQueueCreate
+        }
 
         let caps = detectMacDisplayCapabilities()
-        let configs = flutterTextureDisplayConfigs(caps: caps)
-
-        var selected: (CVPixelBuffer, IOSurfaceRef, OpaquePointer, SurfacePixelConfig)?
-        var lastError: Error?
-        for config in configs {
-            do {
-                let resources = try SharedNativeTexture.makeBackingResources(
-                    width: width,
-                    height: height,
-                    ffi: ffi,
-                    config: config
-                )
-                selected = (resources.0, resources.1, resources.2, config)
-                break
-            } catch {
-                lastError = error
-                if config != configs.last {
-                    NSLog("[SharedNativeTexture] %@ init failed on tier=%@ model=%@; "
-                          + "falling back to BGRA8. Error=%@",
-                          config.rawValue,
-                          caps.tier.rawValue,
-                          caps.hardwareModel,
-                          String(describing: error))
-                }
-            }
+        let display = try SharedNativeTexture.makeDisplayResources(
+            width: width,
+            height: height,
+            device: metalDevice
+        )
+        let upsampler: MetalFXUpsampler
+        do {
+            upsampler = try MetalFXUpsampler(device: metalDevice)
+        } catch {
+            throw TextureCreateError.upsamplerCreate("\(error)")
         }
 
-        guard let selected else {
-            throw lastError ?? TextureCreateError.rendererCreate
-        }
-
-        self.pixelBuffer = selected.0
-        self.ioSurface = selected.1
-        self.rendererHandle = selected.2
-        self.surfaceConfig = selected.3
+        self.displayPixelBuffer = display.0
+        self.displaySurface = display.1
+        self.displayTexture = display.2
+        self.displayWidth = width
+        self.displayHeight = height
+        self.renderSurfaceConfig = caps.preferredSurfaceConfig
+        self.caps = caps
+        self.metalDevice = metalDevice
+        self.commandQueue = commandQueue
+        self.upsampler = upsampler
         self.ffi = ffi
         super.init()
-        NSLog("[SharedNativeTexture] created tier=%@ model=%@ surface=%@ edr=%@",
+        try ensureRenderResources(width: width, height: height)
+        NSLog("[SharedNativeTexture] created tier=%@ model=%@ renderSurface=%@ displaySurface=BGRA8 metalfx=%@ edr=%@",
               caps.tier.rawValue,
               caps.hardwareModel,
-              surfaceConfig.rawValue,
+              renderSurfaceConfig.rawValue,
+              caps.supportsMetalFX.description,
               caps.supportsEDR.description)
     }
 
@@ -414,13 +527,39 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     /// Driven from displayLinkTick. The matrices are updated via
     /// setMatrices() (called from Dart's gesture handlers via
     /// MethodChannel). Without any gesture, both default to identity.
-    func render() {
+    @discardableResult
+    func render() -> Double {
+        let frameStart = CACurrentMediaTime()
+        let desired = drs.renderSizeFor(nativeWidth: displayWidth, nativeHeight: displayHeight)
+        do {
+            try ensureRenderResources(width: desired.0, height: desired.1)
+        } catch {
+            NSLog("[SharedNativeTexture] render resource resize failed: %@", "\(error)")
+        }
+        guard let rendererHandle, let renderTexture else {
+            return 0.0
+        }
+
         latestView.withUnsafeBufferPointer { viewBuf in
             latestModel.withUnsafeBufferPointer { modelBuf in
                 ffi.renderFull(rendererHandle, viewBuf.baseAddress!, modelBuf.baseAddress!)
             }
         }
+        upsampleToDisplay(input: renderTexture)
         hasRenderedOnce = true
+        let frameMs = (CACurrentMediaTime() - frameStart) * 1000.0
+        drs.onFrameDone(frameMs: frameMs)
+        if abs(drs.currentScale - lastLoggedScale) >= 0.049 {
+            lastLoggedScale = drs.currentScale
+            NSLog("[SharedNativeTexture] DRS scale=%.2f render=%dx%d display=%dx%d frameMs=%.2f",
+                  drs.currentScale,
+                  renderWidth,
+                  renderHeight,
+                  displayWidth,
+                  displayHeight,
+                  frameMs)
+        }
+        return frameMs
     }
 
     /// Update the matrices used for the next render frame. Called from
@@ -440,6 +579,8 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     /// validation failure — the caller should surface this via
     /// FlutterError so the UI doesn't silently render with no mesh.
     func loadGlb(path: String) -> Bool {
+        loadedGlbPath = path
+        guard let rendererHandle else { return false }
         return path.withCString { cPath in
             return ffi.loadGlb(rendererHandle, cPath)
         }
@@ -447,17 +588,99 @@ class SharedNativeTexture: NSObject, FlutterTexture {
 
     private let ffi: FFI
 
+    private func ensureRenderResources(width: Int, height: Int) throws {
+        if rendererHandle != nil,
+           renderTexture != nil,
+           renderWidth == width,
+           renderHeight == height {
+            return
+        }
+
+        let configs: [SurfacePixelConfig] =
+            (renderSurfaceConfig == .bgra8) ? [.bgra8] : [.rgba16Half, .bgra8]
+        var lastError: Error?
+
+        for config in configs {
+            do {
+                let resources = try SharedNativeTexture.makeRenderResources(
+                    width: width,
+                    height: height,
+                    ffi: ffi,
+                    device: metalDevice,
+                    config: config
+                )
+                if let loadedGlbPath {
+                    let ok = loadedGlbPath.withCString { cPath in
+                        ffi.loadGlb(resources.2, cPath)
+                    }
+                    if !ok {
+                        ffi.destroy(resources.2)
+                        throw TextureCreateError.rendererCreate
+                    }
+                }
+
+                let oldHandle = rendererHandle
+                renderSurface = resources.0
+                renderTexture = resources.1
+                rendererHandle = resources.2
+                renderWidth = width
+                renderHeight = height
+                ffi.destroy(oldHandle)
+                NSLog("[SharedNativeTexture] render surface ready %@ %dx%d",
+                      config.rawValue,
+                      width,
+                      height)
+                return
+            } catch {
+                lastError = error
+                if config != configs.last {
+                    NSLog("[SharedNativeTexture] render %@ init failed; trying BGRA8. Error=%@",
+                          config.rawValue,
+                          "\(error)")
+                }
+            }
+        }
+
+        throw lastError ?? TextureCreateError.rendererCreate
+    }
+
+    private func upsampleToDisplay(input: MTLTexture) {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            NSLog("[SharedNativeTexture] Metal upsample command buffer creation failed")
+            return
+        }
+        commandBuffer.label = "Aether render-to-display upsample"
+        let preferMetalFX = caps.supportsMetalFX &&
+            (input.width != displayTexture.width || input.height != displayTexture.height)
+        let method = upsampler.encode(
+            commandBuffer: commandBuffer,
+            input: input,
+            output: displayTexture,
+            preferMetalFX: preferMetalFX
+        )
+        commandBuffer.commit()
+        if lastUpsampleMethod != method {
+            lastUpsampleMethod = method
+            NSLog("[SharedNativeTexture] upsample method=%@ input=%dx%d output=%dx%d",
+                  method.rawValue,
+                  input.width,
+                  input.height,
+                  displayTexture.width,
+                  displayTexture.height)
+        }
+    }
+
     func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
         // Same passRetained contract assertion as Phase 4 polish #3.
         copyCount &+= 1
         if copyCount % leakCheckIntervalCalls == 0 {
-            let rc = CFGetRetainCount(pixelBuffer)
+            let rc = CFGetRetainCount(displayPixelBuffer)
             if rc > leakCheckThresholdRefs {
                 NSLog("[SharedNativeTexture] passRetained contract WARNING: pixelBuffer retainCount=%ld after %llu copyPixelBuffer calls. Flutter compositor may not be releasing.",
                       rc, copyCount)
             }
         }
-        return Unmanaged.passRetained(pixelBuffer)
+        return Unmanaged.passRetained(displayPixelBuffer)
     }
 }
 
@@ -540,6 +763,26 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 result(FlutterError(
                     code: "CVPIXELBUFFER_FAILED",
                     message: "CVPixelBufferCreateWithIOSurface returned CVReturn=\(cvret)",
+                    details: nil))
+            } catch TextureCreateError.metalUnavailable {
+                result(FlutterError(
+                    code: "NO_METAL",
+                    message: "MTLCreateSystemDefaultDevice returned nil",
+                    details: nil))
+            } catch TextureCreateError.commandQueueCreate {
+                result(FlutterError(
+                    code: "COMMAND_QUEUE_FAILED",
+                    message: "MTLDevice.makeCommandQueue returned nil",
+                    details: nil))
+            } catch TextureCreateError.mtltextureCreate(let label) {
+                result(FlutterError(
+                    code: "MTLTEXTURE_FAILED",
+                    message: "MTLDevice.makeTexture failed for \(label)",
+                    details: nil))
+            } catch TextureCreateError.upsamplerCreate(let message) {
+                result(FlutterError(
+                    code: "UPSAMPLER_FAILED",
+                    message: message,
                     details: nil))
             } catch TextureCreateError.rendererCreate {
                 result(FlutterError(
@@ -645,6 +888,23 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             }
             result(nil)
 
+        case "getDeviceCapabilities":
+            let caps = detectMacDisplayCapabilities()
+            let scale = NSScreen.main?.backingScaleFactor ?? 1.0
+            let frame = NSScreen.main?.frame ?? .zero
+            result([
+                "tier": caps.tier.rawValue,
+                "hardwareModel": caps.hardwareModel,
+                "nativeDisplayW": Int(frame.width * scale),
+                "nativeDisplayH": Int(frame.height * scale),
+                "baseRenderW": 256,
+                "baseRenderH": 256,
+                "wcgSupported": caps.preferredSurfaceConfig == .rgba16Half,
+                "edrSupported": caps.supportsEDR,
+                "metalfxSupported": caps.supportsMetalFX,
+                "targetFps": 60,
+            ])
+
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -689,14 +949,18 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         let now = CACurrentMediaTime()
         // Phase 6.4c: render uses Dart-pushed view/model matrices stored
         // on the texture (default identity until first gesture).
-        texture.render()
+        let renderMs = texture.render()
         textures.textureFrameAvailable(id)
 
         frameCount += 1
         let dt = now - frameStatsLogTime
         if dt >= 1.0 {
             let fps = Double(frameCount) / dt
-            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f)", fps, frameCount, dt)
+            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f, renderMs=%.2f)",
+                  fps,
+                  frameCount,
+                  dt,
+                  renderMs)
             frameStatsLogTime = now
             frameCount = 0
         }
