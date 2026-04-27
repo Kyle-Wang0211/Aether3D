@@ -297,6 +297,21 @@ class _HomeScreenState extends State<HomeScreen> {
                                       _orbit.distance,
                                       _textureWidgetSize);
                                   _object.rotate(d.rotation);
+                                  // Bug fix (post-cleanup): orbit.target
+                                  // must follow object.position so the
+                                  // single-finger orbit AFTER a pan
+                                  // rotates around the (now moved) helmet
+                                  // — not around world origin (which
+                                  // would make the helmet swing past the
+                                  // camera looking like a translation,
+                                  // and pinch dolly toward empty air
+                                  // looking like "broken zoom").
+                                  // Per decision pin "object.pan moves
+                                  // the object, not the orbit target",
+                                  // we keep pan acting on _object but
+                                  // sync target afterwards so the camera
+                                  // stays correctly framed.
+                                  _orbit.target.setFrom(_object.position);
                                 }
                               });
                               _pushMatrices();
