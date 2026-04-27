@@ -30,7 +30,9 @@ MainFlutterWindow.swift):
   3. `../aether_cpp/build/libaether3d_ffi.dylib`
   4. `../../aether_cpp/build/libaether3d_ffi.dylib`
   5. `Bundle.main.bundlePath/Contents/Frameworks/libaether3d_ffi.dylib`
-  6. `libaether3d_ffi.dylib` (generic dyld search path)
+  6. `/Users/kaidongwang/Documents/Aether3D-cross/aether_cpp/build/libaether3d_ffi.dylib`
+     (explicit dev-tree fallback for Xcode DerivedData runs)
+  7. `libaether3d_ffi.dylib` (generic dyld search path)
 
 `Console.app` shows `[AetherFFI]` log lines indicating which path
 resolved (or which all failed).
@@ -55,3 +57,34 @@ in `Configs/Debug.xcconfig`) no codesign needed.
 Phase 6.4 cleanup retired the standalone `aether_splat_iosurface_renderer_smoke` —
 runtime visual coverage is now provided by the `flutter -d macos run`
 PocketWorld app itself (which exercises the same FFI surface).
+
+## MetalFX interop smoke
+
+Phase 6.4d.2 keeps an explicit Swift smoke for the Metal + MetalFX +
+IOSurface leg. Run it when touching `MetalFXUpsampler`, IOSurface pixel
+formats, or render/display surface handoff code:
+
+```bash
+cd /Users/kaidongwang/Documents/Aether3D-cross
+xcrun swiftc \
+  -framework Foundation \
+  -framework CoreVideo \
+  -framework IOSurface \
+  -framework Metal \
+  -framework MetalFX \
+  pocketworld_flutter/macos/Runner/SmokeTests/MetalFXInteropSmoke.swift \
+  -o /tmp/MetalFXInteropSmoke
+/tmp/MetalFXInteropSmoke
+```
+
+Expected output includes a near-red center pixel and:
+
+```text
+PASS MetalFXInteropSmoke
+```
+
+Current Batch 2 production app note: PocketWorld still displays a
+256×256 widget, so the normal frame path usually has `input == output`
+and uses simple blit. The MetalFX smoke is the regression guard until
+Phase 6.4d.3 / large render-display separation makes upscaling
+observable in-app.
