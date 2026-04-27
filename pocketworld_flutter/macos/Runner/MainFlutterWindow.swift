@@ -103,6 +103,11 @@ private final class FFI {
             }
         }
 
+        // Xcode Run launches the macOS app from DerivedData, not from
+        // pocketworld_flutter/build. Those ancestors never include the
+        // repo checkout, so keep an explicit dev-tree fallback for local
+        // verification. Production still prefers Contents/Frameworks.
+        add("/Users/kaidongwang/Documents/Aether3D-cross/aether_cpp/build/libaether3d_ffi.dylib")
         add("libaether3d_ffi.dylib")
         return candidates
     }

@@ -84,6 +84,12 @@ class AetherFfi {
         add('$ancestor/Frameworks/libaether3d_ffi.dylib');
       }
     }
+    // Xcode Run launches from DerivedData, whose bundle ancestors never
+    // reach the repo checkout. Keep this dev-tree fallback explicit so
+    // local Xcode verification behaves like `flutter run -d macos`.
+    add(
+      '/Users/kaidongwang/Documents/Aether3D-cross/aether_cpp/build/libaether3d_ffi.dylib',
+    );
     add('libaether3d_ffi.dylib');
     return candidates;
   }
@@ -95,7 +101,8 @@ class AetherFfi {
     try {
       final lib = DynamicLibrary.process();
       lib.lookup<NativeFunction<_AetherVersionStringNative>>(
-          'aether_version_string');
+        'aether_version_string',
+      );
       _cachedLibrary = lib;
       return lib;
     } catch (e) {
@@ -104,7 +111,8 @@ class AetherFfi {
 
     if (!Platform.isMacOS) {
       throw FfiResolutionError(
-          'Failed to resolve aether_version_string from process: $processError');
+        'Failed to resolve aether_version_string from process: $processError',
+      );
     }
 
     Object? lastOpenError;
@@ -115,7 +123,8 @@ class AetherFfi {
       try {
         final lib = DynamicLibrary.open(path);
         lib.lookup<NativeFunction<_AetherVersionStringNative>>(
-            'aether_version_string');
+          'aether_version_string',
+        );
         _cachedLibrary = lib;
         return lib;
       } catch (e) {
@@ -127,15 +136,18 @@ class AetherFfi {
         ? 'no existing dylib candidates'
         : existingCandidates.join(', ');
     throw FfiResolutionError(
-        'Failed to resolve aether_version_string from process or dylib candidates. '
-        'processError=$processError; searched=$searched; lastOpenError=$lastOpenError');
+      'Failed to resolve aether_version_string from process or dylib candidates. '
+      'processError=$processError; searched=$searched; lastOpenError=$lastOpenError',
+    );
   }
 
   static _AetherVersionStringDart _resolveVersionFn() {
     if (_cachedVersionFn != null) return _cachedVersionFn!;
     final lib = _resolveLibrary();
-    _cachedVersionFn = lib.lookupFunction<_AetherVersionStringNative,
-        _AetherVersionStringDart>('aether_version_string');
+    _cachedVersionFn = lib
+        .lookupFunction<_AetherVersionStringNative, _AetherVersionStringDart>(
+          'aether_version_string',
+        );
     return _cachedVersionFn!;
   }
 
@@ -157,7 +169,8 @@ class AetherFfi {
     final ptr = fn();
     if (ptr == nullptr) {
       throw const FfiResolutionError(
-          'aether_version_string() returned NULL — C ABI bug');
+        'aether_version_string() returned NULL — C ABI bug',
+      );
     }
     return ptr.toDartString();
   }
