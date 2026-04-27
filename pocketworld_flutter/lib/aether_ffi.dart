@@ -20,6 +20,7 @@
 //   (P3.3 ABI), the FFI bridge is alive end-to-end.
 
 import 'dart:ffi';
+import 'dart:io';
 import 'package:ffi/ffi.dart';
 
 /// FFI lookup or call failed. Carries a human-readable reason; not meant
@@ -34,11 +35,109 @@ class FfiResolutionError implements Exception {
 typedef _AetherVersionStringNative = Pointer<Utf8> Function();
 typedef _AetherVersionStringDart = Pointer<Utf8> Function();
 
-/// Static-only namespace for aether_cpp FFI calls. No state — every
-/// call resolves the symbol fresh against `DynamicLibrary.process()` so
-/// hot-reload doesn't cache stale function pointers.
+/// Static-only namespace for aether_cpp FFI calls.
+///
+/// iOS resolves symbols from the running process (the static archive is
+/// force-loaded into the app binary). macOS supports that path too, but
+/// direct `.app` launches often need an explicit `DynamicLibrary.open()`
+/// against the sibling `aether_cpp/build/libaether3d_ffi.dylib`.
 class AetherFfi {
   AetherFfi._();
+
+  static DynamicLibrary? _cachedLibrary;
+  static _AetherVersionStringDart? _cachedVersionFn;
+
+  static Iterable<String> _ancestorDirectories(String path) sync* {
+    if (path.isEmpty) return;
+    var entity = FileSystemEntity.typeSync(path);
+    var dir = (entity == FileSystemEntityType.directory)
+        ? Directory(path)
+        : File(path).parent;
+    while (true) {
+      final current = dir.absolute.path;
+      yield current;
+      final parent = dir.parent.absolute.path;
+      if (parent == current) break;
+      dir = dir.parent;
+    }
+  }
+
+  static List<String> _candidateLibraryPaths() {
+    final candidates = <String>[];
+    final seen = <String>{};
+
+    void add(String path) {
+      if (path.isEmpty) return;
+      final normalized = File(path).absolute.path;
+      if (seen.add(normalized)) {
+        candidates.add(normalized);
+      }
+    }
+
+    for (final root in <String>[
+      Directory.current.path,
+      Platform.resolvedExecutable,
+    ]) {
+      for (final ancestor in _ancestorDirectories(root)) {
+        add('$ancestor/aether_cpp/build/libaether3d_ffi.dylib');
+        add('$ancestor/Contents/Frameworks/libaether3d_ffi.dylib');
+        add('$ancestor/Frameworks/libaether3d_ffi.dylib');
+      }
+    }
+    add('libaether3d_ffi.dylib');
+    return candidates;
+  }
+
+  static DynamicLibrary _resolveLibrary() {
+    if (_cachedLibrary != null) return _cachedLibrary!;
+
+    Object? processError;
+    try {
+      final lib = DynamicLibrary.process();
+      lib.lookup<NativeFunction<_AetherVersionStringNative>>(
+          'aether_version_string');
+      _cachedLibrary = lib;
+      return lib;
+    } catch (e) {
+      processError = e;
+    }
+
+    if (!Platform.isMacOS) {
+      throw FfiResolutionError(
+          'Failed to resolve aether_version_string from process: $processError');
+    }
+
+    Object? lastOpenError;
+    final existingCandidates = <String>[];
+    for (final path in _candidateLibraryPaths()) {
+      if (!File(path).existsSync()) continue;
+      existingCandidates.add(path);
+      try {
+        final lib = DynamicLibrary.open(path);
+        lib.lookup<NativeFunction<_AetherVersionStringNative>>(
+            'aether_version_string');
+        _cachedLibrary = lib;
+        return lib;
+      } catch (e) {
+        lastOpenError = e;
+      }
+    }
+
+    final searched = existingCandidates.isEmpty
+        ? 'no existing dylib candidates'
+        : existingCandidates.join(', ');
+    throw FfiResolutionError(
+        'Failed to resolve aether_version_string from process or dylib candidates. '
+        'processError=$processError; searched=$searched; lastOpenError=$lastOpenError');
+  }
+
+  static _AetherVersionStringDart _resolveVersionFn() {
+    if (_cachedVersionFn != null) return _cachedVersionFn!;
+    final lib = _resolveLibrary();
+    _cachedVersionFn = lib.lookupFunction<_AetherVersionStringNative,
+        _AetherVersionStringDart>('aether_version_string');
+    return _cachedVersionFn!;
+  }
 
   /// Returns the version string baked into aether_cpp's `version.cpp`.
   /// Format on Phase 3 is `"aether 0.1.0-phase3"` (subject to the C ABI
@@ -51,12 +150,10 @@ class AetherFfi {
   ///   - the C function returned NULL (program bug; not currently
   ///     possible per the C source but documented for safety)
   ///
-  /// Cost: the lookup is process-symbol-table search (microseconds).
-  /// Calling this every widget rebuild is fine; no need to memoize.
+  /// Cost: after the first successful resolution the function pointer is
+  /// cached for the life of the process.
   static String versionString() {
-    final lib = DynamicLibrary.process();
-    final fn = lib.lookupFunction<_AetherVersionStringNative,
-        _AetherVersionStringDart>('aether_version_string');
+    final fn = _resolveVersionFn();
     final ptr = fn();
     if (ptr == nullptr) {
       throw const FfiResolutionError(

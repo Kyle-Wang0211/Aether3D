@@ -51,6 +51,61 @@ private final class FFI {
     let loadGlb:    LoadGlbFn
     let renderFull: RenderFullFn
 
+    private static func ancestorDirectories(for path: String) -> [String] {
+        guard !path.isEmpty else { return [] }
+        let fm = FileManager.default
+        var url = URL(fileURLWithPath: path).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        if fm.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue {
+            url.deleteLastPathComponent()
+        }
+
+        var results: [String] = []
+        while true {
+            let current = url.path
+            if results.last != current {
+                results.append(current)
+            }
+            let parent = url.deletingLastPathComponent()
+            if parent.path == current { break }
+            url = parent
+        }
+        return results
+    }
+
+    private static func candidateLibraryPaths() -> [String] {
+        var candidates: [String] = []
+        var seen: Set<String> = []
+
+        func add(_ path: String) {
+            guard !path.isEmpty else { return }
+            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            if seen.insert(normalized).inserted {
+                candidates.append(normalized)
+            }
+        }
+
+        if let frameworksPath = Bundle.main.privateFrameworksPath {
+            add((frameworksPath as NSString).appendingPathComponent("libaether3d_ffi.dylib"))
+        }
+
+        let roots = [
+            FileManager.default.currentDirectoryPath,
+            Bundle.main.bundlePath,
+            Bundle.main.executablePath ?? "",
+        ]
+        for root in roots {
+            for ancestor in ancestorDirectories(for: root) {
+                add((ancestor as NSString).appendingPathComponent("aether_cpp/build/libaether3d_ffi.dylib"))
+                add((ancestor as NSString).appendingPathComponent("Contents/Frameworks/libaether3d_ffi.dylib"))
+                add((ancestor as NSString).appendingPathComponent("Frameworks/libaether3d_ffi.dylib"))
+            }
+        }
+
+        add("libaether3d_ffi.dylib")
+        return candidates
+    }
+
     /// Returns nil (with NSLog diagnostic) if the dylib can't be found
     /// or any of the required symbols isn't present.
     static let shared: FFI? = {
@@ -60,25 +115,24 @@ private final class FFI {
             return f
         }
 
-        // 2. Try several known dev paths. The fallback chain matches the
-        //    iterative dev workflow (run cmake → flutter run).
-        let candidates: [String] = [
-            "aether_cpp/build/libaether3d_ffi.dylib",
-            "../aether_cpp/build/libaether3d_ffi.dylib",
-            "../../aether_cpp/build/libaether3d_ffi.dylib",
-            Bundle.main.bundlePath + "/Contents/Frameworks/libaether3d_ffi.dylib",
-            "libaether3d_ffi.dylib",
-        ]
+        // 2. Walk from cwd + bundle/executable ancestors so direct
+        //    `.app` launches still find the sibling aether_cpp/build dylib.
+        let candidates = candidateLibraryPaths()
+        var errors: [String] = []
         for path in candidates {
-            if let handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL) {
+            if let handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL) {
                 NSLog("[AetherFFI] dlopen succeeded: %@", path)
                 if let f = FFI(handle: handle) { return f }
+            } else if let cErr = dlerror() {
+                errors.append("\(path) :: \(String(cString: cErr))")
             }
         }
         NSLog("[AetherFFI] FATAL: aether3d_ffi.dylib not found in any search path. "
-            + "Build with `cmake --build aether_cpp/build` and ensure the dylib "
-            + "is in one of: aether_cpp/build/, Runner.app/Contents/Frameworks/, "
-            + "or DYLD_LIBRARY_PATH.")
+            + "Tried %@",
+              candidates.joined(separator: " | "))
+        if !errors.isEmpty {
+            NSLog("[AetherFFI] dlopen errors: %@", errors.joined(separator: " || "))
+        }
         return nil
     }()
 
