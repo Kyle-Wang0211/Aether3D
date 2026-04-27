@@ -65,11 +65,15 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _textureError;
   bool _isRetrying = false;
 
-  // Phase 6.4b stage 2: status of the GLB load, surfaced as a small
-  // overlay above the texture (success "mesh: DamagedHelmet" or failure
-  // "mesh: <error>"). The texture widget keeps working either way — a
-  // failed loadGlb just leaves the renderer in splat-overlay-only mode.
-  String? _glbStatus;
+  // Phase 6.4e polish: make the cold-start gap explicit. The scene
+  // renderer starts before DamagedHelmet.glb has finished parsing and
+  // uploading textures, so the first few frames can legitimately be
+  // splat-only. This small status pill prevents that from looking like a
+  // silent black-screen failure.
+  String? _meshStatus = 'warming up renderer...';
+  bool _meshStatusBusy = true;
+  bool _meshStatusError = false;
+  Timer? _meshStatusHideTimer;
 
   // Phase 6.4c: camera + object transform state. State changes on gesture
   // events; matrices are pushed to native plugin via setMatrices method
@@ -114,6 +118,9 @@ class _HomeScreenState extends State<HomeScreen> {
       _isRetrying = true;
       _textureError = null;
       if (isManualRetry) _textureId = null;
+      _meshStatus = 'warming up renderer...';
+      _meshStatusBusy = true;
+      _meshStatusError = false;
     });
     try {
       final id = await _channel.invokeMethod<int>('createSharedNativeTexture');
@@ -121,6 +128,9 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _textureId = id;
         _isRetrying = false;
+        _meshStatus = 'loading DamagedHelmet.glb...';
+        _meshStatusBusy = true;
+        _meshStatusError = false;
       });
       if (id != null) {
         // Phase 6.4b stage 2: push the initial OrbitControls + object
@@ -144,18 +154,25 @@ class _HomeScreenState extends State<HomeScreen> {
         _textureError =
             'plugin not registered (running on a non-iOS/macOS target?)';
         _isRetrying = false;
+        _meshStatus = 'renderer unavailable';
+        _meshStatusBusy = false;
+        _meshStatusError = true;
       });
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() {
         _textureError = '${e.code}: ${e.message}';
         _isRetrying = false;
+        _meshStatus = 'renderer unavailable';
+        _meshStatusBusy = false;
+        _meshStatusError = true;
       });
     }
   }
 
   @override
   void dispose() {
+    _meshStatusHideTimer?.cancel();
     _lifecycle?.dispose();
     final id = _textureId;
     if (id != null) {
@@ -199,26 +216,52 @@ class _HomeScreenState extends State<HomeScreen> {
     if (found == null) {
       if (!mounted) return;
       setState(() {
-        _glbStatus =
+        _meshStatus =
             'mesh: $filename not found (looked in cwd / ../ / ../../ / dev abspath)';
+        _meshStatusBusy = false;
+        _meshStatusError = true;
       });
       return;
     }
     try {
+      if (!mounted) return;
+      setState(() {
+        _meshStatus = 'loading $filename...';
+        _meshStatusBusy = true;
+        _meshStatusError = false;
+      });
       await _channel.invokeMethod('loadGlb', {
         'textureId': textureId,
         'path': found,
       });
       if (!mounted) return;
+      const readyStatus = 'mesh ready';
       setState(() {
-        _glbStatus = 'mesh: $filename';
+        _meshStatus = readyStatus;
+        _meshStatusBusy = false;
+        _meshStatusError = false;
       });
+      _scheduleMeshStatusAutoHide(readyStatus);
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() {
-        _glbStatus = 'mesh: ${e.code} — ${e.message ?? "(no message)"}';
+        _meshStatus = 'mesh: ${e.code} - ${e.message ?? "(no message)"}';
+        _meshStatusBusy = false;
+        _meshStatusError = true;
       });
     }
+  }
+
+  void _scheduleMeshStatusAutoHide(String statusToHide) {
+    _meshStatusHideTimer?.cancel();
+    _meshStatusHideTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (!mounted || _meshStatus != statusToHide) return;
+      setState(() {
+        _meshStatus = null;
+        _meshStatusBusy = false;
+        _meshStatusError = false;
+      });
+    });
   }
 
   /// Push the current orbit + object matrices to the native plugin.
@@ -234,11 +277,13 @@ class _HomeScreenState extends State<HomeScreen> {
     // Fire-and-forget. Errors here are diagnostic-only — a missed
     // setMatrices means the next render uses the previously-stored
     // matrices, which is graceful degradation rather than a crash.
-    _channel.invokeMethod('setMatrices', {
-      'textureId': id,
-      'view': viewBytes,
-      'model': modelBytes,
-    }).catchError((_) {});
+    _channel
+        .invokeMethod('setMatrices', {
+          'textureId': id,
+          'view': viewBytes,
+          'model': modelBytes,
+        })
+        .catchError((_) {});
   }
 
   @override
@@ -265,15 +310,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   // SizedBox keeps the texture at its native 256×256 size
                   // — _textureWidgetSize is kept in sync for the gesture
                   // math's screen→world projection.
-                  if (_glbStatus != null) ...[
+                  if (_meshStatus != null) ...[
                     const SizedBox(height: 4),
-                    Text(
-                      _glbStatus!,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: _glbStatus!.startsWith('mesh: DamagedHelmet')
-                            ? theme.colorScheme.primary
-                            : theme.colorScheme.error,
-                      ),
+                    _MeshWarmupPill(
+                      message: _meshStatus!,
+                      isBusy: _meshStatusBusy,
+                      isError: _meshStatusError,
                     ),
                     const SizedBox(height: 4),
                   ],
@@ -296,18 +338,20 @@ class _HomeScreenState extends State<HomeScreen> {
                                   // Single-finger drag → camera orbit.
                                   // focalPointDelta IS the drag delta.
                                   _orbit.rotate(
-                                      d.focalPointDelta.dx,
-                                      d.focalPointDelta.dy,
-                                      _textureWidgetSize);
+                                    d.focalPointDelta.dx,
+                                    d.focalPointDelta.dy,
+                                    _textureWidgetSize,
+                                  );
                                 } else {
                                   // Two-finger: pinch + pan + rotate.
                                   _orbit.dolly(d.scale);
                                   _object.pan(
-                                      d.focalPointDelta,
-                                      _orbit.viewMatrix(),
-                                      _fovYRadians,
-                                      _orbit.distance,
-                                      _textureWidgetSize);
+                                    d.focalPointDelta,
+                                    _orbit.viewMatrix(),
+                                    _fovYRadians,
+                                    _orbit.distance,
+                                    _textureWidgetSize,
+                                  );
                                   _object.rotate(d.rotation);
                                   // Bug fix (post-cleanup): orbit.target
                                   // must follow object.position so the
@@ -360,10 +404,13 @@ class _HomeScreenState extends State<HomeScreen> {
                                           onPressed: _isRetrying
                                               ? null
                                               : () => _requestTexture(
-                                                  isManualRetry: true),
-                                          child: Text(_isRetrying
-                                              ? 'retrying\u2026'
-                                              : 'retry'),
+                                                  isManualRetry: true,
+                                                ),
+                                          child: Text(
+                                            _isRetrying
+                                                ? 'retrying\u2026'
+                                                : 'retry',
+                                          ),
                                         ),
                                       ],
                                     )
@@ -400,6 +447,71 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MeshWarmupPill extends StatelessWidget {
+  const _MeshWarmupPill({
+    required this.message,
+    required this.isBusy,
+    required this.isError,
+  });
+
+  final String message;
+  final bool isBusy;
+  final bool isError;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final fg = isError
+        ? theme.colorScheme.onErrorContainer
+        : theme.colorScheme.onPrimaryContainer;
+    final bg = isError
+        ? theme.colorScheme.errorContainer
+        : theme.colorScheme.primaryContainer;
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 160),
+        child: Container(
+          key: ValueKey(message),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isBusy) ...[
+                SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(fg),
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: Text(
+                  message,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: fg,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
