@@ -46,11 +46,39 @@ private final class FFI {
     typealias DestroyFn    = @convention(c) (OpaquePointer?) -> Void
     typealias LoadGlbFn    = @convention(c) (OpaquePointer?, UnsafePointer<CChar>) -> Bool
     typealias RenderFullFn = @convention(c) (OpaquePointer?, UnsafePointer<Float>, UnsafePointer<Float>) -> Void
+    typealias ChoosePolicyFn = @convention(c) (
+        UInt8,
+        UnsafePointer<CChar>?,
+        UInt32,
+        UInt32,
+        UInt32,
+        UInt32,
+        UInt8,
+        UInt8,
+        UnsafeMutableRawPointer?
+    ) -> Void
+    typealias DrsCreateFn          = @convention(c) () -> OpaquePointer?
+    typealias DrsDestroyFn         = @convention(c) (OpaquePointer?) -> Void
+    typealias DrsResetFn           = @convention(c) (OpaquePointer?) -> Void
+    typealias DrsSetEnabledFn      = @convention(c) (OpaquePointer?, UInt8) -> Void
+    typealias DrsEnabledFn         = @convention(c) (OpaquePointer?) -> UInt8
+    typealias DrsOnFrameDoneFn     = @convention(c) (OpaquePointer?, Float) -> Void
+    typealias DrsRenderSizeForFn   = @convention(c) (OpaquePointer?, UInt32, UInt32, UnsafeMutablePointer<UInt32>?, UnsafeMutablePointer<UInt32>?) -> Void
+    typealias DrsCurrentScaleFn    = @convention(c) (OpaquePointer?) -> Float
 
     let create:     CreateFn
     let destroy:    DestroyFn
     let loadGlb:    LoadGlbFn
     let renderFull: RenderFullFn
+    let choosePolicy: ChoosePolicyFn
+    let drsCreate: DrsCreateFn
+    let drsDestroy: DrsDestroyFn
+    let drsReset: DrsResetFn
+    let drsSetEnabled: DrsSetEnabledFn
+    let drsEnabled: DrsEnabledFn
+    let drsOnFrameDone: DrsOnFrameDoneFn
+    let drsRenderSizeFor: DrsRenderSizeForFn
+    let drsCurrentScale: DrsCurrentScaleFn
 
     private static func ancestorDirectories(for path: String) -> [String] {
         guard !path.isEmpty else { return [] }
@@ -146,13 +174,31 @@ private final class FFI {
         guard let cSym  = dlsym(handle, "aether_scene_renderer_create"),
               let dSym  = dlsym(handle, "aether_scene_renderer_destroy"),
               let lgSym = dlsym(handle, "aether_scene_renderer_load_glb"),
-              let rfSym = dlsym(handle, "aether_scene_renderer_render_full") else {
+              let rfSym = dlsym(handle, "aether_scene_renderer_render_full"),
+              let pcSym = dlsym(handle, "aether_render_policy_choose"),
+              let dcSym = dlsym(handle, "aether_drs_create"),
+              let ddSym = dlsym(handle, "aether_drs_destroy"),
+              let drSym = dlsym(handle, "aether_drs_reset"),
+              let dsSym = dlsym(handle, "aether_drs_set_enabled"),
+              let deSym = dlsym(handle, "aether_drs_enabled"),
+              let dfSym = dlsym(handle, "aether_drs_on_frame_done"),
+              let dzSym = dlsym(handle, "aether_drs_render_size_for"),
+              let scSym = dlsym(handle, "aether_drs_current_scale") else {
             return nil
         }
-        self.create     = unsafeBitCast(cSym,  to: CreateFn.self)
-        self.destroy    = unsafeBitCast(dSym,  to: DestroyFn.self)
-        self.loadGlb    = unsafeBitCast(lgSym, to: LoadGlbFn.self)
-        self.renderFull = unsafeBitCast(rfSym, to: RenderFullFn.self)
+        self.create           = unsafeBitCast(cSym,  to: CreateFn.self)
+        self.destroy          = unsafeBitCast(dSym,  to: DestroyFn.self)
+        self.loadGlb          = unsafeBitCast(lgSym, to: LoadGlbFn.self)
+        self.renderFull       = unsafeBitCast(rfSym, to: RenderFullFn.self)
+        self.choosePolicy     = unsafeBitCast(pcSym, to: ChoosePolicyFn.self)
+        self.drsCreate        = unsafeBitCast(dcSym, to: DrsCreateFn.self)
+        self.drsDestroy       = unsafeBitCast(ddSym, to: DrsDestroyFn.self)
+        self.drsReset         = unsafeBitCast(drSym, to: DrsResetFn.self)
+        self.drsSetEnabled    = unsafeBitCast(dsSym, to: DrsSetEnabledFn.self)
+        self.drsEnabled       = unsafeBitCast(deSym, to: DrsEnabledFn.self)
+        self.drsOnFrameDone   = unsafeBitCast(dfSym, to: DrsOnFrameDoneFn.self)
+        self.drsRenderSizeFor = unsafeBitCast(dzSym, to: DrsRenderSizeForFn.self)
+        self.drsCurrentScale  = unsafeBitCast(scSym, to: DrsCurrentScaleFn.self)
     }
 }
 
@@ -161,6 +207,15 @@ private final class FFI {
 private enum SurfacePixelConfig: String {
     case bgra8 = "BGRA8"
     case rgba16Half = "RGBA16F"
+
+    init(policyValue: UInt8) {
+        switch policyValue {
+        case 1:
+            self = .rgba16Half
+        default:
+            self = .bgra8
+        }
+    }
 
     var cvPixelFormat: OSType {
         switch self {
@@ -194,14 +249,46 @@ private enum MacDeviceTier: String {
     case flagship
     case high
     case mid
+    case unknown
+
+    init(policyValue: UInt8) {
+        switch policyValue {
+        case 0:
+            self = .flagship
+        case 1:
+            self = .high
+        case 2:
+            self = .mid
+        default:
+            self = .unknown
+        }
+    }
 }
 
 private struct MacDisplayCapabilities {
     let tier: MacDeviceTier
     let hardwareModel: String
     let preferredSurfaceConfig: SurfacePixelConfig
+    let wcgSupported: Bool
     let supportsEDR: Bool
     let supportsMetalFX: Bool
+    let drsEnabled: Bool
+    let targetFps: Int
+    let baseRenderW: Int
+    let baseRenderH: Int
+}
+
+private struct NativeRenderPolicyDecision {
+    var tier: UInt8 = 6
+    var preferredSurface: UInt8 = 0
+    var wcgSupported: UInt8 = 0
+    var edrSupported: UInt8 = 0
+    var metalfxSupported: UInt8 = 0
+    var drsEnabled: UInt8 = 0
+    var targetFps: UInt8 = 60
+    var reserved: UInt8 = 0
+    var baseRenderW: UInt32 = 256
+    var baseRenderH: UInt32 = 256
 }
 
 private func currentHardwareModel() -> String {
@@ -216,30 +303,47 @@ private func currentHardwareModel() -> String {
     return String(cString: model)
 }
 
-private func detectMacDeviceTier(model: String) -> MacDeviceTier {
-    if model.contains("Mac15") || model.contains("Mac16") {
-        return .flagship
-    }
-    if model.contains("Mac14") || model.contains("MacBookPro18") {
-        return .high
-    }
-    return .mid
-}
-
 private func detectMacDisplayCapabilities() -> MacDisplayCapabilities {
     let model = currentHardwareModel()
-    let tier = detectMacDeviceTier(model: model)
-    let preferredSurfaceConfig: SurfacePixelConfig = (tier == .mid) ? .bgra8 : .rgba16Half
     let edrHeadroom =
         NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
+    let scale = NSScreen.main?.backingScaleFactor ?? 1.0
+    let frame = NSScreen.main?.frame ?? .zero
+    let os = ProcessInfo.processInfo.operatingSystemVersion
+    let metalfxRuntimeAvailable = ProcessInfo.processInfo.isOperatingSystemAtLeast(
+        OperatingSystemVersion(majorVersion: 13, minorVersion: 0, patchVersion: 0)
+    )
+    var decision = NativeRenderPolicyDecision()
+    if let ffi = FFI.shared {
+        withUnsafeMutablePointer(to: &decision) { decisionPtr in
+            model.withCString { cModel in
+                ffi.choosePolicy(
+                    1,  // macOS
+                    cModel,
+                    UInt32(max(os.majorVersion, 0)),
+                    UInt32(max(os.minorVersion, 0)),
+                    UInt32(max(Int(frame.width * scale), 0)),
+                    UInt32(max(Int(frame.height * scale), 0)),
+                    edrHeadroom > 1.0 ? 1 : 0,
+                    metalfxRuntimeAvailable ? 1 : 0,
+                    UnsafeMutableRawPointer(decisionPtr)
+                )
+            }
+        }
+    } else {
+        NSLog("[AetherTexture] render policy fallback: FFI unavailable during capability probe")
+    }
     return MacDisplayCapabilities(
-        tier: tier,
+        tier: MacDeviceTier(policyValue: decision.tier),
         hardwareModel: model,
-        preferredSurfaceConfig: preferredSurfaceConfig,
-        supportsEDR: edrHeadroom > 1.0,
-        supportsMetalFX: ProcessInfo.processInfo.isOperatingSystemAtLeast(
-            OperatingSystemVersion(majorVersion: 13, minorVersion: 0, patchVersion: 0)
-        )
+        preferredSurfaceConfig: SurfacePixelConfig(policyValue: decision.preferredSurface),
+        wcgSupported: decision.wcgSupported != 0,
+        supportsEDR: decision.edrSupported != 0,
+        supportsMetalFX: decision.metalfxSupported != 0,
+        drsEnabled: decision.drsEnabled != 0,
+        targetFps: Int(decision.targetFps),
+        baseRenderW: Int(decision.baseRenderW),
+        baseRenderH: Int(decision.baseRenderH)
     )
 }
 
@@ -278,49 +382,44 @@ private func configureWideColorOutput(for view: NSView) {
     if caps.supportsEDR {
         metalLayer.wantsExtendedDynamicRangeContent = true
     }
-    NSLog("[AetherTexture] output tier=%@ model=%@ surface=%@ edr=%@",
+    NSLog("[AetherTexture] output tier=%@ model=%@ surface=%@ wcg=%@ edr=%@",
           caps.tier.rawValue,
           caps.hardwareModel,
           caps.preferredSurfaceConfig.rawValue,
+          caps.wcgSupported.description,
           caps.supportsEDR.description)
 }
 
-private final class DrsController {
-    private static let rollingWindow = 30
-    private static let targetMs = 16.6
-    private static let minScale = 0.5
-    private static let maxScale = 1.0
-    private static let decayRate = 0.05
-    private static let recoveryRate = 0.02
-    private static let hysteresisHigh = 1.1
-    private static let hysteresisLow = 0.9
+private final class NativeDrsController {
+    private let ffi: FFI
+    private let handle: OpaquePointer?
 
-    private var recent = Array(repeating: 0.0, count: DrsController.rollingWindow)
-    private var index = 0
-    private var filled = 0
-    private(set) var currentScale = 1.0
-    private var enabled = false
-
-    func onFrameDone(frameMs: Double) {
-        guard enabled else { return }
-        recent[index] = frameMs
-        index = (index + 1) % Self.rollingWindow
-        if filled < Self.rollingWindow { filled += 1 }
-        guard filled >= 5 else { return }
-
-        let avg = recent.prefix(filled).reduce(0, +) / Double(filled)
-        if avg > Self.targetMs * Self.hysteresisHigh {
-            currentScale = max(Self.minScale, currentScale - Self.decayRate)
-        } else if avg < Self.targetMs * Self.hysteresisLow && currentScale < Self.maxScale {
-            currentScale = min(Self.maxScale, currentScale + Self.recoveryRate)
+    init(ffi: FFI, enabled: Bool) {
+        self.ffi = ffi
+        self.handle = ffi.drsCreate()
+        ffi.drsSetEnabled(handle, enabled ? 1 : 0)
+        if handle == nil {
+            NSLog("[AetherTexture] DRS native controller allocation failed; falling back to 1.0x")
         }
     }
 
+    deinit {
+        ffi.drsDestroy(handle)
+    }
+
+    var currentScale: Double {
+        Double(ffi.drsCurrentScale(handle))
+    }
+
+    func onFrameDone(frameMs: Double) {
+        ffi.drsOnFrameDone(handle, Float(frameMs))
+    }
+
     func renderSizeFor(nativeWidth: Int, nativeHeight: Int) -> (Int, Int) {
-        guard enabled else { return (nativeWidth, nativeHeight) }
-        let width = max(8, Int(Double(nativeWidth) * currentScale))
-        let height = max(8, Int(Double(nativeHeight) * currentScale))
-        return ((width + 7) & ~7, (height + 7) & ~7)
+        var w = UInt32(max(nativeWidth, 0))
+        var h = UInt32(max(nativeHeight, 0))
+        ffi.drsRenderSizeFor(handle, w, h, &w, &h)
+        return (Int(w), Int(h))
     }
 }
 
@@ -357,7 +456,7 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     private let metalDevice: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let upsampler: MetalFXUpsampler
-    private let drs = DrsController()
+    private let drs: NativeDrsController
     private var loadedGlbPath: String?
     private var lastUpsampleMethod: MetalFXUpsampler.Method?
     private var lastLoggedScale: Double = 1.0
@@ -511,15 +610,18 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         self.metalDevice = metalDevice
         self.commandQueue = commandQueue
         self.upsampler = upsampler
+        self.drs = NativeDrsController(ffi: ffi, enabled: caps.drsEnabled)
         self.ffi = ffi
         super.init()
         try ensureRenderResources(width: width, height: height)
-        NSLog("[SharedNativeTexture] created tier=%@ model=%@ renderSurface=%@ displaySurface=BGRA8 metalfx=%@ edr=%@",
+        NSLog("[SharedNativeTexture] created tier=%@ model=%@ renderSurface=%@ displaySurface=BGRA8 metalfx=%@ edr=%@ drs=%@ targetFps=%d",
               caps.tier.rawValue,
               caps.hardwareModel,
               renderSurfaceConfig.rawValue,
               caps.supportsMetalFX.description,
-              caps.supportsEDR.description)
+              caps.supportsEDR.description,
+              caps.drsEnabled.description,
+              caps.targetFps)
     }
 
     deinit {
@@ -910,12 +1012,12 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 "hardwareModel": caps.hardwareModel,
                 "nativeDisplayW": Int(frame.width * scale),
                 "nativeDisplayH": Int(frame.height * scale),
-                "baseRenderW": 256,
-                "baseRenderH": 256,
-                "wcgSupported": caps.preferredSurfaceConfig == .rgba16Half,
+                "baseRenderW": caps.baseRenderW,
+                "baseRenderH": caps.baseRenderH,
+                "wcgSupported": caps.wcgSupported,
                 "edrSupported": caps.supportsEDR,
                 "metalfxSupported": caps.supportsMetalFX,
-                "targetFps": 60,
+                "targetFps": caps.targetFps,
             ])
 
         default:

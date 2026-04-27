@@ -399,6 +399,12 @@ add_executable(aether_version_test tools/aether_version_test.cpp)
 target_link_libraries(aether_version_test PRIVATE aether3d_core)
 # cxx_std_20 inherited from top-level CMAKE_CXX_STANDARD.
 
+add_executable(aether_render_policy_smoke
+    tools/aether_render_policy_smoke.cpp
+    src/pocketworld/render_policy.cpp)
+target_include_directories(aether_render_policy_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(aether_render_policy_smoke PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+
 # ============================================================================
 # Phase 3.4: aether3d_ffi shared library — dart:ffi-loadable surface
 #
@@ -415,6 +421,7 @@ target_link_libraries(aether_version_test PRIVATE aether3d_core)
 set(AETHER_FFI_SOURCES
     src/core/version.cpp
     src/pocketworld/background_download.cpp
+    src/pocketworld/render_policy.cpp
     src/pocketworld/training_checkpoint.cpp
 )
 
