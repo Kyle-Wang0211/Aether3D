@@ -1,4 +1,4 @@
-# macOS FFI Linking — Phase 6.4a
+# macOS FFI Linking — Phase 6.4b stage 2 (post-cleanup)
 
 The macOS Flutter plugin (`MainFlutterWindow.swift`) calls into
 `aether3d_ffi.dylib` (built by `aether_cpp/build/`) at runtime via
@@ -48,17 +48,10 @@ in `Configs/Debug.xcconfig`) no codesign needed.
 | Symptom | Root cause |
 |---|---|
 | Widget shows `FFI_UNAVAILABLE` | dylib not found in any candidate path |
-| Widget shows `RENDERER_FAILED` | dylib loaded but `aether_splat_renderer_create` returned NULL — check stderr for Dawn diagnostic |
+| Widget shows `RENDERER_FAILED` | dylib loaded but `aether_scene_renderer_create` returned NULL — check stderr for Dawn diagnostic |
+| Widget shows `GLB_LOAD_FAILED` | scene_renderer was created but `aether_scene_renderer_load_glb` returned false — check stderr for `[Aether3D][scene_renderer]` cgltf / mesh upload diagnostic |
 | Widget shows `IOSURFACE_FAILED` | Apple-platform IOSurface allocation failed (rare; OOM territory) |
 
-Run the FFI smoke directly to bypass Flutter and verify the C++ side:
-
-```bash
-cd /path/to/Aether3D-cross
-./aether_cpp/build/aether_splat_iosurface_renderer_smoke
-# Expected:
-# === aether_splat_iosurface_renderer_smoke ===
-# center (128,128) BGRA: B=162 G=162 R=162 A=255
-# corner (0,0)     BGRA: B=0 G=0 R=0 A=255
-# PASS
-```
+Phase 6.4 cleanup retired the standalone `aether_splat_iosurface_renderer_smoke` —
+runtime visual coverage is now provided by the `flutter -d macos run`
+PocketWorld app itself (which exercises the same FFI surface).

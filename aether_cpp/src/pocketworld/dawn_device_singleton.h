@@ -6,9 +6,9 @@
 
 // ─── Process-level singleton DawnGPUDevice ─────────────────────────────
 //
-// Shared by all PocketWorld renderers (splat_iosurface_renderer,
-// scene_iosurface_renderer, future plugin renderers). Refcounted by
-// active renderer count — when the last renderer is destroyed, the
+// Shared by PocketWorld renderers (currently scene_iosurface_renderer;
+// Phase 6.4 cleanup dropped the legacy splat-only renderer). Refcounted
+// by active renderer count — when the last renderer is destroyed, the
 // device is released so memory-pressure recovery (background → foreground
 // after iOS suspended) gets a fresh device on next acquire.
 //

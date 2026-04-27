@@ -8,9 +8,8 @@
 //           color + depth. Skipped when no mesh is loaded.
 //   Pass 2: splat overlay (vert+frag splat_render.wgsl) — reads depth
 //           from pass 1 (no write), composes over mesh color via
-//           premultiplied alpha. Same hardcoded screen-space splat
-//           scene as splat_iosurface_renderer (Phase 6.4f tracks the
-//           upgrade to Brush full pipeline).
+//           premultiplied alpha. Hardcoded screen-space splat scene
+//           (Phase 6.4f tracks the upgrade to Brush full pipeline).
 //
 // Why fully Dawn-direct (vs going through the GPUDevice virtual
 // encoder API):
@@ -89,7 +88,7 @@ bool is_dawn(GPUDevice* d) noexcept {
     return d && d->backend() == ::aether::render::GraphicsBackend::kDawn;
 }
 
-// ─── Splat scene baseline (shared with splat_iosurface_renderer) ───────
+// ─── Splat scene baseline (cross_validate-aligned 4-splat fixture) ─────
 
 struct ProjectedSplatLayout {
     float xy_x, xy_y;
@@ -332,7 +331,7 @@ WGPURenderPipeline create_mesh_pipeline(WGPUDevice wd,
     return wgpuDeviceCreateRenderPipeline(wd, &desc);
 }
 
-// Splat overlay pipeline — same blend / topology as splat_iosurface_renderer
+// Splat overlay pipeline — premultiplied alpha blend, no depth write
 // but with depth-test enabled (read from pass 1) + no depth write.
 WGPURenderPipeline create_splat_overlay_pipeline(WGPUDevice wd,
                                                   WGPUShaderModule vs,
@@ -459,7 +458,16 @@ static void encode_splat_pass(WGPUCommandEncoder encoder,
         ? WGPULoadOp_Load : WGPULoadOp_Clear;
     depth_attach.depthClearValue = 1.0f;
     depth_attach.depthStoreOp = WGPUStoreOp_Store;
-    depth_attach.depthReadOnly = WGPU_FALSE;  // pass 2 we need to keep depth around
+    // depthReadOnly = false because we DO supply depthLoadOp + depthStoreOp.
+    // Dawn validation rule (verified empirically 2026-04-26):
+    //   "Both depthLoadOp and depthStoreOp must not be set if depthReadOnly
+    //    is true."
+    // i.e. readOnly=true requires both ops to be Undefined. The splat
+    // overlay pipeline itself has depthWriteEnabled=false, so the depth
+    // buffer is unchanged either way — the choice between true/false is
+    // purely about which attachment shape Dawn lets us encode. Load+Store
+    // mandates readOnly=false.
+    depth_attach.depthReadOnly = WGPU_FALSE;
 
     WGPURenderPassDescriptor pass_desc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
     pass_desc.colorAttachmentCount = 1;
@@ -861,8 +869,15 @@ extern "C" void aether_scene_renderer_render_full(
         r->device->update_buffer(r->mesh_model_buf, &mt, 0, sizeof(mt));
     }
 
-    // Splat uniforms: keep the baseline. View matrix uploaded for
-    // future-compat but splat_render.wgsl doesn't read it (Phase 6.4f).
+    // Splat uniforms: write the cross_validate-aligned baseline + view.
+    // The view matrix copy below is intentionally kept even though
+    // splat_render.wgsl currently does NOT read it — splat positions are
+    // hardcoded screen-space (see splat_render.wgsl). Phase 6.4f will
+    // swap splat_render.wgsl for the Brush full pipeline (project_forward
+    // → project_visible → … → render) where viewmat IS consumed; keeping
+    // the upload now means 6.4f can land WGSL-side without forgetting
+    // the host-side push (silent shader-side regression = catastrophe
+    // per Phase 6.3a rule).
     RenderArgsStorage splat_u = make_baseline_uniforms(r->width, r->height);
     std::memcpy(splat_u.viewmat, view_matrix, 16 * sizeof(float));
     r->device->update_buffer(r->splat_uniforms_buf, &splat_u, 0, sizeof(splat_u));

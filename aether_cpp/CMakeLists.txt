@@ -376,24 +376,13 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     aether_dawn_device_smoke(aether_mesh_render_compile_smoke
                              tools/aether_mesh_render_compile_smoke.cpp)
 
-    # Phase 6.4a Step 3b/4 — IOSurface FFI end-to-end smoke (Apple only).
-    if(APPLE)
-        add_executable(aether_splat_iosurface_renderer_smoke
-                       tools/aether_splat_iosurface_renderer_smoke.cpp)
-        target_link_libraries(aether_splat_iosurface_renderer_smoke
-            PRIVATE aether3d_ffi
-            "-framework IOSurface"
-            "-framework CoreFoundation"
-        )
-        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-            set_target_properties(aether_splat_iosurface_renderer_smoke PROPERTIES
-                MACOSX_BUNDLE TRUE
-                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.kyle.aether.aether_splat_iosurface_renderer_smoke"
-                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
-                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "26AH7V448L"
-            )
-        endif()
-    endif()
+    # Phase 6.4a smoke (aether_splat_iosurface_renderer_smoke) was deleted
+    # in the Phase 6.4 cleanup along with the legacy splat-only renderer
+    # (Phase 6.4b stage 2 superseded it with scene_iosurface_renderer).
+    # Per-frame visual coverage is now via the macOS PocketWorld app
+    # itself; if the IOSurface bridge ever needs unit-level coverage
+    # again, write it against scene_iosurface_renderer (with mesh=none)
+    # instead of resurrecting the old smoke.
 endif()
 
 # ============================================================================
@@ -420,14 +409,15 @@ set(AETHER_FFI_SOURCES
     src/core/version.cpp
 )
 
-# Phase 6.4a/b: PocketWorld IOSurface-backed renderers (splat + scene)
-# share a singleton DawnGPUDevice for refcount-managed memory pressure
-# recovery. Only included when Dawn is available; impls are no-op
-# otherwise so the FFI symbols still exist (link-time stability).
+# Phase 6.4b: PocketWorld scene IOSurface renderer (mesh PBR + splat
+# overlay) with refcount-managed shared DawnGPUDevice singleton for
+# memory pressure recovery. Phase 6.4 cleanup dropped the legacy splat-
+# only renderer (scene_renderer covers the no-mesh case via the splat
+# overlay pass alone). Only included when Dawn is available; impls are
+# no-op otherwise so the FFI symbols still exist (link-time stability).
 if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     list(APPEND AETHER_FFI_SOURCES
         src/pocketworld/dawn_device_singleton.cpp
-        src/pocketworld/splat_iosurface_renderer.cpp
         src/pocketworld/scene_iosurface_renderer.cpp)
 endif()
 
@@ -437,8 +427,9 @@ else()
     add_library(aether3d_ffi SHARED ${AETHER_FFI_SOURCES})
 endif()
 target_include_directories(aether3d_ffi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-# Phase 6.4a: splat_iosurface_renderer needs DawnGPUDevice internals
-# (the import_iosurface free function is in aether3d_core).
+# Phase 6.4b: scene_iosurface_renderer needs DawnGPUDevice internals
+# (the import_iosurface free function is in aether3d_core, plus the
+# narrow internal:: accessors declared in src/render/dawn_gpu_device_internal.h).
 if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     target_link_libraries(aether3d_ffi PRIVATE aether3d_core)
     target_compile_definitions(aether3d_ffi PRIVATE AETHER_ENABLE_DAWN=1)

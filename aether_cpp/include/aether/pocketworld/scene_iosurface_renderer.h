@@ -7,9 +7,9 @@
 // ─── Phase 6.4b stage 2 — Scene IOSurface renderer (C ABI) ─────────────
 //
 // Combines GLB mesh (PBR) and splat in a single IOSurface-backed
-// renderer. Replaces aether_splat_renderer_* once the Flutter plugin
-// migrates to it; the older splat-only renderer stays for FFI smoke
-// continuity.
+// renderer. Phase 6.4 cleanup retired the legacy splat-only renderer —
+// callers that just need a splat overlay can use this renderer with no
+// GLB loaded (no-mesh state = splat overlay alone, depth cleared).
 //
 // Two-pass render per frame:
 //   Pass 1  (mesh):  PBR via mesh_render.wgsl + Filament BRDF.
@@ -17,19 +17,18 @@
 //                    Writes color + depth.
 //   Pass 2  (splat): vert+frag splat_render.wgsl over the same color
 //                    target, reading the depth from pass 1 (no write).
-//                    Splats currently use hardcoded screen-space
-//                    coords (same as splat_iosurface_renderer); they
-//                    do NOT respond to view/model gestures yet — that
-//                    work is locked in PHASE_BACKLOG.md as Phase 6.4f
-//                    (Brush full pipeline integration).
+//                    Splats use hardcoded screen-space coords; they do
+//                    NOT respond to view/model gestures yet — that work
+//                    is locked in PHASE_BACKLOG.md as Phase 6.4f (Brush
+//                    full pipeline integration).
 //
-// Per-frame protocol same as splat-only renderer:
+// Per-frame protocol:
 //   BeginAccess → encode 2 render passes → commit + wait → EndAccess
 //
-// FFI surface (kept compatible with aether_splat_renderer_*):
-//   create / destroy / render_full   match the splat-only signatures
-//   load_glb                         new — loads a .glb file, replaces
-//                                    any prior mesh
+// FFI surface:
+//   create / destroy / render_full   per-frame matrices view + model
+//   load_glb                         loads a .glb file, replaces any
+//                                    prior mesh
 
 #include <stdint.h>
 
@@ -63,9 +62,8 @@ void aether_scene_renderer_destroy(AetherSceneRenderer* r);
 bool aether_scene_renderer_load_glb(AetherSceneRenderer* r, const char* glb_path);
 
 /// Per-frame render. View and model matrices are 16-float column-major
-/// arrays (same convention as aether_splat_renderer_render_full).
-/// The mesh applies BOTH matrices through its full PBR shader; the
-/// splat overlay currently ignores them visually (Phase 6.4f).
+/// arrays. The mesh applies BOTH matrices through its full PBR shader;
+/// the splat overlay currently ignores them visually (Phase 6.4f).
 void aether_scene_renderer_render_full(
     AetherSceneRenderer* r,
     const float* view_matrix,

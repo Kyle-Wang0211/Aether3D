@@ -6,14 +6,16 @@ import CoreVideo  // CVPixelBuffer
 
 // ─── Phase 6.4b stage 2 — Scene IOSurface bridge (mesh + splat) ────────
 //
-// Phase 6.4a wired the splat-only renderer; stage 2 swaps it for the
-// scene renderer (mesh PBR + splat overlay in a single IOSurface). The
-// only differences vs the splat-only path:
-//   1. dlsym the aether_scene_renderer_* symbols (instead of *_splat_*).
-//   2. New loadGlb method-channel handler — Dart resolves the asset path
+// Phase 6.4a wired a splat-only renderer; stage 2 replaced it with the
+// scene renderer (mesh PBR + splat overlay in a single IOSurface), and
+// Phase 6.4 cleanup retired the legacy splat-only renderer entirely
+// (scene renderer with no GLB loaded covers the splat-only case).
+//
+// FFI surface:
+//   1. dlsym the aether_scene_renderer_* symbols.
+//   2. loadGlb method-channel handler — Dart resolves the asset path
 //      and pushes it down to C ABI aether_scene_renderer_load_glb().
-//   3. The time-based aether_splat_renderer_render fn is gone; only
-//      render_full (view+model matrices) is used.
+//   3. render_full(view, model) per displayLink tick (no time-based fn).
 //
 // Mesh DOES respond to gesture matrices through Filament-style PBR. The
 // splat overlay currently still uses hardcoded screen-space coords

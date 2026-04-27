@@ -169,9 +169,10 @@ the item shouldn't be here.
 ## Phase 6.4f — Brush full pipeline → splat world-space + gesture-responsive
 
 - **What**: Replace the hardcoded screen-space `kBaselineSplats` in
-  `aether_cpp/src/pocketworld/splat_iosurface_renderer.cpp:90-112` (or its
-  Phase 6.4b stage 2 successor `scene_iosurface_renderer.cpp`) with a
-  per-frame run of the full Brush pipeline:
+  `aether_cpp/src/pocketworld/scene_iosurface_renderer.cpp` (the
+  `make_baseline_uniforms` function and `kBaselineSplats` array; legacy
+  `splat_iosurface_renderer.cpp` was retired in the Phase 6.4 cleanup)
+  with a per-frame run of the full Brush pipeline:
     `project_forward → project_visible → sort_count/reduce/scan/scan_add/scatter
      → map_gaussian_to_intersects → splat_render`
   driven by world-space Gaussian primitives (means, log_scales, quats, opacities,

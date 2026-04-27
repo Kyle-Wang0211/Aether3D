@@ -24,7 +24,7 @@ import 'package:vector_math/vector_math_64.dart' as v;
 class OrbitControls {
   /// World-space point the camera orbits around. The default (0,0,0) places
   /// the splat scene at the world origin (matches the cross_validate baseline
-  /// in splat_iosurface_renderer.cpp).
+  /// in scene_iosurface_renderer.cpp's make_baseline_uniforms).
   final v.Vector3 target = v.Vector3.zero();
 
   /// Radial distance from camera to target. Phase 6.4c default places the
