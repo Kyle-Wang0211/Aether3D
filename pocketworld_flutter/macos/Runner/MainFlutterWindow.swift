@@ -237,6 +237,12 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     private var frameCount: Int = 0
     private var frameStatsLogTime: CFTimeInterval = 0
 
+    // Phase 6.4c verification: counts setMatrices method-channel hits.
+    // Used by the rate-limited NSLog in the setMatrices handler so
+    // Console.app shows a sample of every ~30th gesture event without
+    // drowning in 60 Hz output.
+    private var setMatricesCallCount: UInt64 = 0
+
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
             name: "aether_texture",
@@ -342,6 +348,26 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             let viewArr  = viewData.data.toFloatArray()
             let modelArr = modelData.data.toFloatArray()
             texture.setMatrices(view: viewArr, model: modelArr)
+
+            // Phase 6.4c verification log — fires on every gesture event
+            // (sparse, only when fingers move). Rate-limited to once every
+            // 30 calls (~ every 0.5 s of continuous gesture) so Console
+            // doesn't drown in 60 Hz output. The viewArr[12..14] columns
+            // = column-major translation column (= camera-to-target offset
+            // for OrbitControls' lookAt). The modelArr[12..14] columns =
+            // object position. Both visibly change as you gesture, so a
+            // glance at Console.app confirms the matrix-push chain works
+            // even though splat_render.wgsl currently ignores them
+            // visually (Phase 6.4b stage 2 wires the visual feedback).
+            setMatricesCallCount &+= 1
+            if setMatricesCallCount % 30 == 0 || setMatricesCallCount == 1 {
+                if viewArr.count == 16 && modelArr.count == 16 {
+                    NSLog("[AetherTexture] setMatrices #%llu  view_t=(%.2f, %.2f, %.2f) model_t=(%.2f, %.2f, %.2f)",
+                          setMatricesCallCount,
+                          viewArr[12], viewArr[13], viewArr[14],
+                          modelArr[12], modelArr[13], modelArr[14])
+                }
+            }
             result(nil)
 
         default:
