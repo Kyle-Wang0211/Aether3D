@@ -4,27 +4,28 @@ import IOSurface
 import QuartzCore
 import CoreVideo  // CVPixelBuffer
 
-// ─── Phase 6.4a — splat IOSurface bridge ───────────────────────────────
+// ─── Phase 6.4b stage 2 — Scene IOSurface bridge (mesh + splat) ────────
 //
-// Phase 4-5 used a hardcoded MSL triangle shader rendered directly via
-// MTLRenderPipelineState. Phase 6.4a swaps the renderer for Aether3D's
-// production splat pipeline: DawnGPUDevice writes 4 Gaussian splats into
-// the same IOSurface that Flutter compositor samples. Zero copies; the
-// bytes written by Dawn ARE the bytes Flutter reads.
+// Phase 6.4a wired the splat-only renderer; stage 2 swaps it for the
+// scene renderer (mesh PBR + splat overlay in a single IOSurface). The
+// only differences vs the splat-only path:
+//   1. dlsym the aether_scene_renderer_* symbols (instead of *_splat_*).
+//   2. New loadGlb method-channel handler — Dart resolves the asset path
+//      and pushes it down to C ABI aether_scene_renderer_load_glb().
+//   3. The time-based aether_splat_renderer_render fn is gone; only
+//      render_full (view+model matrices) is used.
 //
-// SharedNativeTexture's init / render / dispose are now thin wrappers
+// Mesh DOES respond to gesture matrices through Filament-style PBR. The
+// splat overlay currently still uses hardcoded screen-space coords
+// (Phase 6.4f tracks the upgrade to Brush full-pipeline integration).
+//
+// SharedNativeTexture's init / render / dispose remain thin wrappers
 // over the C ABI in aether_cpp/include/aether/pocketworld/
-// splat_iosurface_renderer.h:
-//   aether_splat_renderer_create(iosurface, w, h)   — at construct time
-//   aether_splat_renderer_render(handle, t_seconds)  — per displayLink tick
-//   aether_splat_renderer_destroy(handle)            — at dispose
-//
-// The plugin (AetherTexturePlugin) — its lifecycle / method-channel /
-// thermal handlers — is UNCHANGED. The renderer class swap was the
-// architectural intent of the Phase 5.3 split (split + comment in iOS
-// MetalRenderer.swift literally said "Future Dawn-iOS swap = replace
-// this file's SharedNativeTexture implementation with a Dawn/WebGPU
-// equivalent. The plugin code doesn't need to change.")
+// scene_iosurface_renderer.h:
+//   aether_scene_renderer_create(iosurface, w, h)        — at construct
+//   aether_scene_renderer_load_glb(handle, path)         — on demand
+//   aether_scene_renderer_render_full(handle, view, model) — per tick
+//   aether_scene_renderer_destroy(handle)                — at dispose
 //
 // Why dlopen+dlsym vs @_silgen_name: avoids needing the dylib linked at
 // Xcode build time. We dlopen at first-renderer-create from a known dev
@@ -39,12 +40,12 @@ import CoreVideo  // CVPixelBuffer
 private final class FFI {
     typealias CreateFn     = @convention(c) (UnsafeMutableRawPointer, UInt32, UInt32) -> OpaquePointer?
     typealias DestroyFn    = @convention(c) (OpaquePointer?) -> Void
-    typealias RenderFn     = @convention(c) (OpaquePointer?, Double) -> Void
+    typealias LoadGlbFn    = @convention(c) (OpaquePointer?, UnsafePointer<CChar>) -> Bool
     typealias RenderFullFn = @convention(c) (OpaquePointer?, UnsafePointer<Float>, UnsafePointer<Float>) -> Void
 
     let create:     CreateFn
     let destroy:    DestroyFn
-    let render:     RenderFn
+    let loadGlb:    LoadGlbFn
     let renderFull: RenderFullFn
 
     /// Returns nil (with NSLog diagnostic) if the dylib can't be found
@@ -79,15 +80,15 @@ private final class FFI {
     }()
 
     private init?(handle: UnsafeMutableRawPointer) {
-        guard let cSym  = dlsym(handle, "aether_splat_renderer_create"),
-              let dSym  = dlsym(handle, "aether_splat_renderer_destroy"),
-              let rSym  = dlsym(handle, "aether_splat_renderer_render"),
-              let rfSym = dlsym(handle, "aether_splat_renderer_render_full") else {
+        guard let cSym  = dlsym(handle, "aether_scene_renderer_create"),
+              let dSym  = dlsym(handle, "aether_scene_renderer_destroy"),
+              let lgSym = dlsym(handle, "aether_scene_renderer_load_glb"),
+              let rfSym = dlsym(handle, "aether_scene_renderer_render_full") else {
             return nil
         }
         self.create     = unsafeBitCast(cSym,  to: CreateFn.self)
         self.destroy    = unsafeBitCast(dSym,  to: DestroyFn.self)
-        self.render     = unsafeBitCast(rSym,  to: RenderFn.self)
+        self.loadGlb    = unsafeBitCast(lgSym, to: LoadGlbFn.self)
         self.renderFull = unsafeBitCast(rfSym, to: RenderFullFn.self)
     }
 }
@@ -104,7 +105,10 @@ enum TextureCreateError: Error {
 /// 256×256 BGRA8 IOSurface-backed texture, exposed to Flutter through
 /// FlutterTexture protocol. Phase 4-5 rendered a rotating triangle via
 /// MTLRenderPipelineState; Phase 6.4a renders 4 Gaussian splats via the
-/// Aether3D production pipeline (DawnGPUDevice → splat_render.wgsl).
+/// Aether3D production pipeline (DawnGPUDevice → splat_render.wgsl);
+/// Phase 6.4b stage 2 adds a GLB mesh PBR pass underneath the splat
+/// overlay (mesh_render.wgsl, Filament BRDF) — both share the same
+/// IOSurface and depth buffer.
 class SharedNativeTexture: NSObject, FlutterTexture {
     private let pixelBuffer: CVPixelBuffer
     private let ioSurface: IOSurfaceRef
@@ -177,6 +181,7 @@ class SharedNativeTexture: NSObject, FlutterTexture {
 
     deinit {
         // Free the renderer's GPU resources. C ABI is NULL-safe.
+        // (aether_scene_renderer_destroy releases the GLB if loaded.)
         ffi.destroy(rendererHandle)
     }
 
@@ -202,6 +207,17 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         // with identity values rather than crashing.
         if view.count == 16  { latestView  = view  }
         if model.count == 16 { latestModel = model }
+    }
+
+    /// Load a .glb file (KhronosGroup glTF-Sample-Models compatible)
+    /// for the mesh pass. Replaces any previously-loaded GLB. Returns
+    /// false (with stderr diagnostic from C) on parse / GPU upload /
+    /// validation failure — the caller should surface this via
+    /// FlutterError so the UI doesn't silently render with no mesh.
+    func loadGlb(path: String) -> Bool {
+        return path.withCString { cPath in
+            return ffi.loadGlb(rendererHandle, cPath)
+        }
     }
 
     private let ffi: FFI
@@ -303,7 +319,7 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             } catch TextureCreateError.rendererCreate {
                 result(FlutterError(
                     code: "RENDERER_FAILED",
-                    message: "aether_splat_renderer_create returned NULL — see stderr for diagnostic (Dawn device init / IOSurface import / pipeline creation failed)",
+                    message: "aether_scene_renderer_create returned NULL — see stderr for diagnostic (Dawn device init / IOSurface import / pipeline creation failed)",
                     details: nil))
             } catch {
                 result(FlutterError(
@@ -322,6 +338,40 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 return
             }
             disposeTexture(id: id)
+            result(nil)
+
+        case "loadGlb":
+            // Phase 6.4b stage 2 — Dart tells us which GLB to load (it
+            // resolves the asset path from rootBundle into an absolute
+            // filesystem path before calling, so we just hand it down to
+            // the C ABI). Returns true on success, throws FlutterError on
+            // failure so the Dart caller can surface the diagnostic
+            // (silent = catastrophe rule from Phase 6.3a).
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value,
+                  let path = args["path"] as? String else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "loadGlb requires {textureId: int, path: String}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                result(FlutterError(
+                    code: "NO_SUCH_TEXTURE",
+                    message: "loadGlb called with textureId=\(id) which is not registered",
+                    details: nil))
+                return
+            }
+            let ok = texture.loadGlb(path: path)
+            if !ok {
+                result(FlutterError(
+                    code: "GLB_LOAD_FAILED",
+                    message: "aether_scene_renderer_load_glb returned false for path=\(path) — see stderr / Console.app for [Aether3D][scene_renderer] diagnostic (cgltf parse / mesh upload / texture upload failed)",
+                    details: nil))
+                return
+            }
+            NSLog("[AetherTexture] loadGlb succeeded: %@", path)
             result(nil)
 
         case "setMatrices":
@@ -381,7 +431,7 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         }
         textures.unregisterTexture(id)
         registered.removeValue(forKey: id)
-        // SharedNativeTexture's deinit calls aether_splat_renderer_destroy.
+        // SharedNativeTexture's deinit calls aether_scene_renderer_destroy.
     }
 
     private func startAnimation(textureId: Int64, texture: SharedNativeTexture) {

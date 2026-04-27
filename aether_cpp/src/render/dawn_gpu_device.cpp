@@ -42,6 +42,7 @@
 #include "aether/render/dawn_gpu_device.h"
 #include "aether/render/gpu_command.h"
 #include "aether/shaders/wgsl_sources.h"  // 6.4a baked WGSL externs
+#include "dawn_gpu_device_internal.h"     // 6.4b stage 2 internal accessors
 
 #include <webgpu/webgpu.h>  // C API — strict-flags compatible
 
@@ -748,10 +749,15 @@ public:
         if (!wgpu_device_) return GPUTextureHandle{0};
         if (desc.width == 0 || desc.height == 0) return GPUTextureHandle{0};
 
-        // Map usage mask. For render targets we always include CopySrc
-        // so readback_texture (Step 9) can copyTextureToBuffer without a
-        // second usage hint. This matches the harness alloc_render_target
-        // contract (RenderAttachment | CopySrc | TextureBinding).
+        // Depth/stencil formats have stricter usage rules in Dawn:
+        // CopyDst, CopySrc, and TextureBinding are accepted for some
+        // depth formats but reject silently on others (Apple Silicon
+        // Depth32Float rejects CopySrc on macOS 14). Restrict depth
+        // textures to the minimum usage we need for render attachments.
+        const bool is_depth_format =
+            (desc.format == GPUTextureFormat::kDepth32Float
+             || desc.format == GPUTextureFormat::kDepth32Float_Stencil8);
+
         WGPUTextureUsage usage = WGPUTextureUsage_None;
         if (desc.usage_mask & static_cast<std::uint8_t>(GPUTextureUsage::kShaderRead))
             usage |= WGPUTextureUsage_TextureBinding;
@@ -759,15 +765,21 @@ public:
             usage |= WGPUTextureUsage_StorageBinding;
         if (desc.usage_mask & static_cast<std::uint8_t>(GPUTextureUsage::kRenderTarget)) {
             usage |= WGPUTextureUsage_RenderAttachment;
-            usage |= WGPUTextureUsage_CopySrc;
-            // Render targets are commonly sampled in subsequent passes
-            // (e.g. compose pass after splat_render). Allow that without
-            // forcing the caller to opt in explicitly.
-            usage |= WGPUTextureUsage_TextureBinding;
+            if (!is_depth_format) {
+                usage |= WGPUTextureUsage_CopySrc;
+                // Render targets are commonly sampled in subsequent passes
+                // (e.g. compose pass after splat_render). Allow that without
+                // forcing the caller to opt in explicitly.
+                usage |= WGPUTextureUsage_TextureBinding;
+            }
         }
-        // CopyDst added unconditionally so update_texture (queue write)
-        // works on any texture without the caller having to opt in.
-        usage |= WGPUTextureUsage_CopyDst;
+        // CopyDst added so update_texture (queue write) works on any
+        // color texture without the caller having to opt in. Skipped for
+        // depth formats — depth textures are written by render passes,
+        // not by queue.WriteTexture.
+        if (!is_depth_format) {
+            usage |= WGPUTextureUsage_CopyDst;
+        }
 
         WGPUTextureDescriptor tex_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
         tex_desc.usage = usage;
@@ -2233,6 +2245,48 @@ bool dawn_copy_buffer_to_buffer(GPUDevice& device,
     }
     return true;
 }
+
+// ─── Internal accessors (same library only) ────────────────────────────
+//
+// scene_iosurface_renderer.cpp uses these to author multi-pass renders
+// directly via WGPU C API. Public app code MUST NOT include
+// dawn_gpu_device_internal.h.
+
+namespace internal {
+
+WGPUDevice dawn_internal_wgpu_device(GPUDevice& device) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return nullptr;
+    return static_cast<DawnGPUDevice*>(&device)->wgpu_device();
+}
+WGPUQueue dawn_internal_wgpu_queue(GPUDevice& device) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return nullptr;
+    return static_cast<DawnGPUDevice*>(&device)->wgpu_queue();
+}
+WGPUInstance dawn_internal_wgpu_instance(GPUDevice& device) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return nullptr;
+    return static_cast<DawnGPUDevice*>(&device)->wgpu_instance();
+}
+WGPUBuffer dawn_internal_get_buffer(GPUDevice& device, GPUBufferHandle h) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return nullptr;
+    return static_cast<DawnGPUDevice*>(&device)->get_buffer(h);
+}
+WGPUTexture dawn_internal_get_texture(GPUDevice& device, GPUTextureHandle h) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return nullptr;
+    return static_cast<DawnGPUDevice*>(&device)->get_texture(h);
+}
+WGPURenderPipeline dawn_internal_get_render_pipeline(
+        GPUDevice& device, GPURenderPipelineHandle h) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return nullptr;
+    return static_cast<DawnGPUDevice*>(&device)->get_render_pipeline(h);
+}
+WGPUShaderModule dawn_internal_get_shader_module(
+        GPUDevice& device, GPUShaderHandle h,
+        std::string& out_entry_point) noexcept {
+    if (device.backend() != GraphicsBackend::kDawn) return nullptr;
+    return static_cast<DawnGPUDevice*>(&device)->get_shader_module(h, out_entry_point);
+}
+
+}  // namespace internal
 
 }  // namespace render
 }  // namespace aether

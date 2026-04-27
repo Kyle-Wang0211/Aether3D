@@ -27,6 +27,7 @@
 #if defined(AETHER_ENABLE_DAWN)
 
 #include "aether/pocketworld/splat_iosurface_renderer.h"
+#include "dawn_device_singleton.h"
 
 #include "aether/render/dawn_gpu_device.h"
 #include "aether/render/gpu_command.h"
@@ -41,51 +42,6 @@
 #include <mutex>
 
 namespace {
-
-// ─── Singleton DawnGPUDevice ───────────────────────────────────────────
-
-std::mutex& device_mutex() {
-    static std::mutex m;
-    return m;
-}
-
-// Active renderer count. When the last renderer is destroyed, the
-// singleton device is also released (so a fresh background→foreground
-// cycle gets a fresh device, useful for memory pressure recovery).
-std::uint32_t& active_renderer_count() {
-    static std::uint32_t count = 0;
-    return count;
-}
-
-std::unique_ptr<aether::render::GPUDevice>& singleton_device() {
-    static std::unique_ptr<aether::render::GPUDevice> device;
-    return device;
-}
-
-// Acquire (create-if-needed + register WGSL). Caller MUST hold device_mutex.
-aether::render::GPUDevice* ensure_device_locked() {
-    auto& dev = singleton_device();
-    if (!dev) {
-        dev = aether::render::create_dawn_gpu_device(/*request_high_performance=*/true);
-        if (!dev) {
-            std::fprintf(stderr,
-                "[splat_iosurface_renderer] FATAL: create_dawn_gpu_device "
-                "returned nullptr\n");
-            return nullptr;
-        }
-        // Production-path: baked WGSL only, no filesystem access.
-        aether::render::register_baked_wgsl_into_device(*dev);
-    }
-    return dev.get();
-}
-
-// Release the singleton device when active_renderer_count drops to 0.
-// Caller MUST hold device_mutex.
-void release_device_if_unused_locked() {
-    if (active_renderer_count() == 0) {
-        singleton_device().reset();
-    }
-}
 
 // ─── Splat scene baseline (matches cross_validate smoke) ───────────────
 //
@@ -181,8 +137,7 @@ extern "C" AetherSplatRenderer* aether_splat_renderer_create(
 
     using namespace aether::render;
 
-    std::lock_guard<std::mutex> lock(device_mutex());
-    GPUDevice* device = ensure_device_locked();
+    GPUDevice* device = ::aether::pocketworld::dawn_singleton_acquire();
     if (!device) return nullptr;
 
     auto* r = new AetherSplatRenderer();
@@ -197,6 +152,7 @@ extern "C" AetherSplatRenderer* aether_splat_renderer_create(
         std::fprintf(stderr, "[splat_iosurface_renderer] create: "
                              "dawn_import_iosurface_texture failed\n");
         delete r;
+        ::aether::pocketworld::dawn_singleton_release();
         return nullptr;
     }
 
@@ -222,6 +178,7 @@ extern "C" AetherSplatRenderer* aether_splat_renderer_create(
         if (r->uniforms_buf.valid()) device->destroy_buffer(r->uniforms_buf);
         if (r->splats_buf.valid())   device->destroy_buffer(r->splats_buf);
         delete r;
+        ::aether::pocketworld::dawn_singleton_release();
         return nullptr;
     }
 
@@ -241,6 +198,7 @@ extern "C" AetherSplatRenderer* aether_splat_renderer_create(
         device->destroy_buffer(r->uniforms_buf);
         device->destroy_texture(r->iosurface_tex);
         delete r;
+        ::aether::pocketworld::dawn_singleton_release();
         return nullptr;
     }
 
@@ -262,16 +220,15 @@ extern "C" AetherSplatRenderer* aether_splat_renderer_create(
         device->destroy_buffer(r->uniforms_buf);
         device->destroy_texture(r->iosurface_tex);
         delete r;
+        ::aether::pocketworld::dawn_singleton_release();
         return nullptr;
     }
 
-    ++active_renderer_count();
     return r;
 }
 
 extern "C" void aether_splat_renderer_destroy(AetherSplatRenderer* r) {
     if (!r) return;
-    std::lock_guard<std::mutex> lock(device_mutex());
     auto* device = r->device;
     if (device) {
         if (r->pipeline.valid())     device->destroy_render_pipeline(r->pipeline);
@@ -282,8 +239,7 @@ extern "C" void aether_splat_renderer_destroy(AetherSplatRenderer* r) {
         if (r->iosurface_tex.valid())device->destroy_texture(r->iosurface_tex);
     }
     delete r;
-    if (active_renderer_count() > 0) --active_renderer_count();
-    release_device_if_unused_locked();
+    ::aether::pocketworld::dawn_singleton_release();
 }
 
 extern "C" void aether_splat_renderer_render_full(

@@ -420,10 +420,15 @@ set(AETHER_FFI_SOURCES
     src/core/version.cpp
 )
 
-# Phase 6.4a: PocketWorld IOSurface-backed splat renderer C ABI.
-# Only included when Dawn is available (the impl is no-op otherwise).
+# Phase 6.4a/b: PocketWorld IOSurface-backed renderers (splat + scene)
+# share a singleton DawnGPUDevice for refcount-managed memory pressure
+# recovery. Only included when Dawn is available; impls are no-op
+# otherwise so the FFI symbols still exist (link-time stability).
 if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
-    list(APPEND AETHER_FFI_SOURCES src/pocketworld/splat_iosurface_renderer.cpp)
+    list(APPEND AETHER_FFI_SOURCES
+        src/pocketworld/dawn_device_singleton.cpp
+        src/pocketworld/splat_iosurface_renderer.cpp
+        src/pocketworld/scene_iosurface_renderer.cpp)
 endif()
 
 if(AETHER_FFI_BUILD_STATIC)

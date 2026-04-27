@@ -1,10 +1,12 @@
 // Phase 2.4 PocketWorld hello main screen + Phase 4.1/4.5 Flutter Texture
 // widget + Phase 5.4 FFI version string + Phase 6.4a IOSurface splat
-// renderer + Phase 6.4c camera/object transform gestures.
+// renderer + Phase 6.4c camera/object transform gestures + Phase 6.4b
+// stage 2 GLB mesh load (DamagedHelmet) under the splat overlay.
 //
 // Below the "PocketWorld" title we render a 256×256 Flutter Texture widget
-// fed by an IOSurface-backed Dawn-rendered splat scene (Phase 6.4a). The
-// widget is wrapped in a GestureDetector that drives 4 transforms:
+// fed by an IOSurface-backed Dawn-rendered scene (mesh PBR + splat
+// overlay). The widget is wrapped in a GestureDetector that drives 4
+// transforms:
 //   single-finger drag        → camera orbit (OrbitControls)
 //   two-finger pinch          → camera dolly (OrbitControls)
 //   two-finger same-direction → object pan (ObjectTransform)
@@ -13,8 +15,14 @@
 // On every gesture event the new view + model matrices are pushed to the
 // native plugin via `setMatrices` method-channel call. The plugin's
 // CADisplayLink loop reads the latest matrices on every frame.
+//
+// Phase 6.4b stage 2 caveat: the mesh DOES respond to view+model
+// matrices through Filament-style PBR. The splat overlay is still
+// hardcoded screen-space (Phase 6.4f tracks Brush full-pipeline
+// integration → splat world-space + gesture-responsive).
 
-import 'dart:typed_data';
+import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -55,6 +63,12 @@ class _HomeScreenState extends State<HomeScreen> {
   int? _textureId;
   String? _textureError;
   bool _isRetrying = false;
+
+  // Phase 6.4b stage 2: status of the GLB load, surfaced as a small
+  // overlay above the texture (success "mesh: DamagedHelmet" or failure
+  // "mesh: <error>"). The texture widget keeps working either way — a
+  // failed loadGlb just leaves the renderer in splat-overlay-only mode.
+  String? _glbStatus;
 
   // Phase 6.4c: camera + object transform state. State changes on gesture
   // events; matrices are pushed to native plugin via setMatrices method
@@ -97,6 +111,22 @@ class _HomeScreenState extends State<HomeScreen> {
         _textureId = id;
         _isRetrying = false;
       });
+      if (id != null) {
+        // Phase 6.4b stage 2: push the initial OrbitControls + object
+        // matrices BEFORE any gesture happens. Without this, the
+        // renderer's per-frame matrices stay at identity (Swift's
+        // default), which puts the camera AT the helmet's origin → no
+        // visible mesh. _pushMatrices() makes the very first frame use
+        // distance=5 / polar=π/2 / azimuth=0 lookAt so the helmet
+        // appears in frame.
+        _pushMatrices();
+        // Kick off the default GLB load. We do this AFTER the texture is
+        // registered (so the displayLink already ticking renders splat-
+        // only frames during the parse/upload, not a black screen). The
+        // renderer handles GLB-replace gracefully (drops old mesh
+        // resources before installing new ones).
+        unawaited(_loadDefaultGlb(id));
+      }
     } on MissingPluginException {
       if (!mounted) return;
       setState(() {
@@ -125,6 +155,58 @@ class _HomeScreenState extends State<HomeScreen> {
           .catchError((_) {});
     }
     super.dispose();
+  }
+
+  /// Phase 6.4b stage 2 — locate DamagedHelmet.glb and ask the native
+  /// plugin to load it. Search candidates mirror the dylib search in
+  /// MainFlutterWindow.swift (relative to flutter run's cwd). On
+  /// success we set _glbStatus to a green "mesh: …" label; on failure
+  /// the user sees the platform-error message so the failure isn't
+  /// silent (Phase 6.3a catastrophe rule).
+  Future<void> _loadDefaultGlb(int textureId) async {
+    const filename = 'DamagedHelmet.glb';
+    final cwd = Directory.current.path;
+    final candidates = <String>[
+      '$cwd/aether_cpp/build/test_assets/$filename',
+      '$cwd/../aether_cpp/build/test_assets/$filename',
+      '$cwd/../../aether_cpp/build/test_assets/$filename',
+      // Last-ditch absolute path for this dev tree.
+      '/Users/kaidongwang/Documents/Aether3D-cross/aether_cpp/build/test_assets/$filename',
+    ];
+    String? found;
+    for (final c in candidates) {
+      try {
+        if (await File(c).exists()) {
+          found = c;
+          break;
+        }
+      } catch (_) {
+        // Permission / IO issues — try the next candidate.
+      }
+    }
+    if (found == null) {
+      if (!mounted) return;
+      setState(() {
+        _glbStatus =
+            'mesh: $filename not found (looked in cwd / ../ / ../../ / dev abspath)';
+      });
+      return;
+    }
+    try {
+      await _channel.invokeMethod('loadGlb', {
+        'textureId': textureId,
+        'path': found,
+      });
+      if (!mounted) return;
+      setState(() {
+        _glbStatus = 'mesh: $filename';
+      });
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _glbStatus = 'mesh: ${e.code} — ${e.message ?? "(no message)"}';
+      });
+    }
   }
 
   /// Push the current orbit + object matrices to the native plugin.
@@ -171,34 +253,51 @@ class _HomeScreenState extends State<HomeScreen> {
                   // SizedBox keeps the texture at its native 256×256 size
                   // — _textureWidgetSize is kept in sync for the gesture
                   // math's screen→world projection.
+                  if (_glbStatus != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      _glbStatus!,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: _glbStatus!.startsWith('mesh: DamagedHelmet')
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.error,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                  ],
                   SizedBox(
                     width: _textureWidgetSize.width,
                     height: _textureWidgetSize.height,
                     child: _textureId != null
                         ? GestureDetector(
-                            // Single-finger drag → camera orbit.
-                            onPanUpdate: (d) {
-                              setState(() {
-                                _orbit.rotate(
-                                    d.delta.dx, d.delta.dy, _textureWidgetSize);
-                              });
-                              _pushMatrices();
-                            },
-                            // Two-finger gestures: pinch + pan + rotate
-                            // arrive as a single ScaleUpdateDetails.
-                            // Flutter's gesture arena auto-disambiguates
-                            // single-vs-double touch — no manual handling
-                            // required (decision pin 11: zero tutorial).
+                            // Flutter API constraint: onScaleUpdate is a
+                            // SUPERSET of onPanUpdate (a 1-pointer scale
+                            // event has scale=1, rotation=0, with the
+                            // pointer's drag in focalPointDelta). Using
+                            // both raises FlutterError "Incorrect
+                            // GestureDetector arguments". So we route
+                            // both gesture branches through one handler
+                            // and dispatch on pointerCount.
                             onScaleUpdate: (d) {
                               setState(() {
-                                _orbit.dolly(d.scale);
-                                _object.pan(
-                                    d.focalPointDelta,
-                                    _orbit.viewMatrix(),
-                                    _fovYRadians,
-                                    _orbit.distance,
-                                    _textureWidgetSize);
-                                _object.rotate(d.rotation);
+                                if (d.pointerCount <= 1) {
+                                  // Single-finger drag → camera orbit.
+                                  // focalPointDelta IS the drag delta.
+                                  _orbit.rotate(
+                                      d.focalPointDelta.dx,
+                                      d.focalPointDelta.dy,
+                                      _textureWidgetSize);
+                                } else {
+                                  // Two-finger: pinch + pan + rotate.
+                                  _orbit.dolly(d.scale);
+                                  _object.pan(
+                                      d.focalPointDelta,
+                                      _orbit.viewMatrix(),
+                                      _fovYRadians,
+                                      _orbit.distance,
+                                      _textureWidgetSize);
+                                  _object.rotate(d.rotation);
+                                }
                               });
                               _pushMatrices();
                             },

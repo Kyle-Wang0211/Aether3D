@@ -166,6 +166,51 @@ the item shouldn't be here.
 
 ---
 
+## Phase 6.4f — Brush full pipeline → splat world-space + gesture-responsive
+
+- **What**: Replace the hardcoded screen-space `kBaselineSplats` in
+  `aether_cpp/src/pocketworld/splat_iosurface_renderer.cpp:90-112` (or its
+  Phase 6.4b stage 2 successor `scene_iosurface_renderer.cpp`) with a
+  per-frame run of the full Brush pipeline:
+    `project_forward → project_visible → sort_count/reduce/scan/scan_add/scatter
+     → map_gaussian_to_intersects → splat_render`
+  driven by world-space Gaussian primitives (means, log_scales, quats, opacities,
+  SH coeffs) and the caller-supplied view+model matrices (already in the FFI).
+- **Why it's not cosmetic**: 6.4c shipped the gesture FFI chain (Dart →
+  MethodChannel → Swift → C ABI → GPU uniforms) end-to-end, verified by
+  setMatrices NSLogs (`distance` mutated 5.0 → 0.50 → 9.26 in real time).
+  But `splat_render.wgsl` reads `xy_x, xy_y` as PRE-projected screen
+  coordinates, so the view matrix is uploaded but ignored — splats stay
+  pinned at (128, 128) regardless of camera state. Phase 6.4b stage 2
+  makes the **mesh** path gesture-responsive (PBR works fully through
+  view+model); the **splat** path still pins the 4 hardcoded gray dots
+  to the screen center while the mesh orbits around them. Visually wrong —
+  splats should orbit with the mesh as if sharing one world. 6.4f fixes that.
+- **Why it's deferred**: scope hygiene. 6.4b stage 2's SceneRenderer is
+  a focused 2-pass mesh+splat-overlay design; bolting Brush full-pipeline
+  into it would 60% the work + risk surface. 6.4f is a clean follow-up
+  with its own SceneRenderer extension (per-frame compute pass chain
+  before the render passes).
+- **Why it's necessary anyway**: Phase 6.5 / 6.6 / 7 all require real
+  `.ply` / `.spz` splat scenes loaded at runtime. Real splats are
+  world-space primitives — there's no path forward without the full
+  Brush pipeline. 6.4f is the moment that lands.
+- **Trigger to do**: immediately after Phase 6.4b stage 2 lands AND
+  before Phase 6.4d (WCG / DRS / 8K). Reason: 6.4d's DRS measures frame
+  time and adapts resolution; the splat path needs to be the production
+  pipeline (not 4 hardcoded dots) before DRS measurements are
+  representative of real scenes.
+- **Shape**: ~3-4h, single commit (or a 2-step split if compute pass
+  scheduling has surprises). One new SceneRenderer method
+  `set_splat_scene(ply_data)` that uploads world-space Gaussian
+  primitives, then per-frame `render_full` runs the 8-9 kernel chain.
+  Dart/Swift unchanged (decision pin 19: FFI ABI locked).
+- **Decision pin reference**: ties into pin 1 (vertex+frag viewer
+  rasterizer) and pin 2 (Brush 14 WGSL retained as algorithm base).
+- **Upstream**: not applicable.
+
+---
+
 ## Phase 1 polish (deferred, non-blocking)
 
 ### device-lost callback on all 3 Dawn hello binaries
