@@ -223,6 +223,17 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             disposeTexture(id: id)
             result(nil)
 
+        case "pauseRendering":
+            pauseAnimation(reason: "dart lifecycle")
+            result(nil)
+
+        case "resumeRendering":
+            applyThermalPolicy(ProcessInfo.processInfo.thermalState, sourceLog: "dart lifecycle")
+            if !isCriticalThermal(ProcessInfo.processInfo.thermalState) {
+                resumeAnimation(reason: "dart lifecycle")
+            }
+            result(nil)
+
         default:
             result(FlutterMethodNotImplemented)
         }

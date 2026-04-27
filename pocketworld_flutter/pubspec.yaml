@@ -38,6 +38,7 @@ dependencies:
   # P3.4: dart:ffi binding to aether_cpp's C ABI (aether_version_string).
   # Provides Pointer<Utf8>.toDartString() and friends.
   ffi: ^2.1.4
+  shared_preferences: ^2.5.5
 
 dev_dependencies:
   flutter_test:

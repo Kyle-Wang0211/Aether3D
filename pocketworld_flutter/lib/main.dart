@@ -28,6 +28,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'aether_ffi.dart';
+import 'lifecycle_observer.dart';
 import 'orbit_controls.dart';
 import 'object_transform.dart';
 
@@ -75,6 +76,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // channel. The plugin's displayLink reads the latest matrices each frame.
   final OrbitControls _orbit = OrbitControls();
   final ObjectTransform _object = ObjectTransform();
+  LifecycleObserver? _lifecycle;
   // Vertical FOV used for object pan unprojection. Phase 6.4d may make
   // this device-tier dependent; for now it matches the C++ pipeline's
   // 60° default.
@@ -87,6 +89,15 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _lifecycle = LifecycleObserver(
+      orbit: _orbit,
+      obj: _object,
+      onStateChanged: () {
+        if (!mounted) return;
+        setState(() {});
+        _pushMatrices();
+      },
+    );
     _requestTexture();
   }
 
@@ -145,6 +156,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _lifecycle?.dispose();
     final id = _textureId;
     if (id != null) {
       // Fire-and-forget: widget is going away, no point awaiting. Native

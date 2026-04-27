@@ -414,6 +414,8 @@ target_link_libraries(aether_version_test PRIVATE aether3d_core)
 # ============================================================================
 set(AETHER_FFI_SOURCES
     src/core/version.cpp
+    src/pocketworld/background_download.cpp
+    src/pocketworld/training_checkpoint.cpp
 )
 
 # Phase 6.4b: PocketWorld scene IOSurface renderer (mesh PBR + splat

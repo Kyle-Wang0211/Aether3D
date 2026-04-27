@@ -888,6 +888,14 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             }
             result(nil)
 
+        case "pauseRendering":
+            pauseRendering()
+            result(nil)
+
+        case "resumeRendering":
+            resumeRendering()
+            result(nil)
+
         case "getDeviceCapabilities":
             let caps = detectMacDisplayCapabilities()
             let scale = NSScreen.main?.backingScaleFactor ?? 1.0
@@ -917,6 +925,20 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         textures.unregisterTexture(id)
         registered.removeValue(forKey: id)
         // SharedNativeTexture's deinit calls aether_scene_renderer_destroy.
+    }
+
+    private func pauseRendering() {
+        if #available(macOS 14.0, *) {
+            (displayLink as? CADisplayLink)?.isPaused = true
+        }
+        NSLog("[AetherTexturePlugin] paused")
+    }
+
+    private func resumeRendering() {
+        if #available(macOS 14.0, *) {
+            (displayLink as? CADisplayLink)?.isPaused = false
+        }
+        NSLog("[AetherTexturePlugin] resumed")
     }
 
     private func startAnimation(textureId: Int64, texture: SharedNativeTexture) {

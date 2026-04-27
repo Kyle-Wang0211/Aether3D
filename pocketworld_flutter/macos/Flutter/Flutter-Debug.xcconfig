@@ -1,3 +1,4 @@
+#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
 #include "ephemeral/Flutter-Generated.xcconfig"
 
 // Disable codesign for desktop dev builds. macOS 14+ adds the kernel-protected
