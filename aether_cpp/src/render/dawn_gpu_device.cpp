@@ -883,10 +883,51 @@ public:
             return GPUTextureHandle{0};
         }
 
-        // CreateTexture with NULL descriptor uses the SharedTextureMemory's
-        // inherent properties (matched to the IOSurface format).
+        const WGPUTextureFormat requested_format = map_texture_format(format);
+        if (requested_format == WGPUTextureFormat_Undefined) {
+            dawn_log("import_iosurface: requested format %d is unsupported",
+                     static_cast<int>(format));
+            wgpuSharedTextureMemoryRelease(mem);
+            return GPUTextureHandle{0};
+        }
+
+        WGPUSharedTextureMemoryProperties props =
+            WGPU_SHARED_TEXTURE_MEMORY_PROPERTIES_INIT;
+        const WGPUStatus props_status =
+            wgpuSharedTextureMemoryGetProperties(mem, &props);
+        if (props_status != WGPUStatus_Success) {
+            dawn_log("import_iosurface: sharedTextureMemoryGetProperties failed "
+                     "(status=%d)", static_cast<int>(props_status));
+            wgpuSharedTextureMemoryRelease(mem);
+            return GPUTextureHandle{0};
+        }
+
+        if (props.size.width != width || props.size.height != height) {
+            dawn_log("import_iosurface: size mismatch sharedMemory=(%u,%u) "
+                     "requested=(%u,%u)",
+                     props.size.width, props.size.height, width, height);
+            wgpuSharedTextureMemoryRelease(mem);
+            return GPUTextureHandle{0};
+        }
+        if (props.format != requested_format) {
+            dawn_log("import_iosurface: format mismatch sharedMemory=%d "
+                     "requested=%d",
+                     static_cast<int>(props.format),
+                     static_cast<int>(requested_format));
+            wgpuSharedTextureMemoryRelease(mem);
+            return GPUTextureHandle{0};
+        }
+
+        WGPUTextureDescriptor texture_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
+        texture_desc.usage = props.usage;
+        texture_desc.dimension = WGPUTextureDimension_2D;
+        texture_desc.size = props.size;
+        texture_desc.format = props.format;
+        texture_desc.mipLevelCount = 1;
+        texture_desc.sampleCount = 1;
+
         WGPUTexture texture =
-            wgpuSharedTextureMemoryCreateTexture(mem, /*descriptor=*/nullptr);
+            wgpuSharedTextureMemoryCreateTexture(mem, &texture_desc);
         if (!texture) {
             dawn_log("import_iosurface: CreateTexture NULL");
             wgpuSharedTextureMemoryRelease(mem);

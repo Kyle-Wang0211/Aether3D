@@ -175,6 +175,8 @@ if(APPLE)
         "-framework Foundation"
         "-framework Metal"
         "-framework CoreML"
+        "-framework CoreVideo"
+        "-framework IOSurface"
     )
     set_source_files_properties(
         src/pipeline/depth_inference_coreml.mm
@@ -375,6 +377,11 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     # Phase 6.4b smoke — Filament-style PBR shader compile via Tint.
     aether_dawn_device_smoke(aether_mesh_render_compile_smoke
                              tools/aether_mesh_render_compile_smoke.cpp)
+
+    if(APPLE)
+        aether_dawn_device_smoke(aether_dawn_iosurface_rgba16f_smoke
+                                 tools/aether_dawn_iosurface_rgba16f_smoke.mm)
+    endif()
 
     # Phase 6.4a smoke (aether_splat_iosurface_renderer_smoke) was deleted
     # in the Phase 6.4 cleanup along with the legacy splat-only renderer

@@ -3,6 +3,7 @@ import FlutterMacOS
 import IOSurface
 import QuartzCore
 import CoreVideo  // CVPixelBuffer
+import Darwin
 
 // ─── Phase 6.4b stage 2 — Scene IOSurface bridge (mesh + splat) ────────
 //
@@ -97,6 +98,120 @@ private final class FFI {
 
 // ─── Texture creation error codes ─────────────────────────────────────
 
+private enum SurfacePixelConfig: String {
+    case bgra8 = "BGRA8"
+    case rgba16Half = "RGBA16F"
+
+    var cvPixelFormat: OSType {
+        switch self {
+        case .bgra8:
+            return kCVPixelFormatType_32BGRA
+        case .rgba16Half:
+            return kCVPixelFormatType_64RGBAHalf
+        }
+    }
+
+    var bytesPerElement: Int {
+        switch self {
+        case .bgra8:
+            return 4
+        case .rgba16Half:
+            return 8
+        }
+    }
+}
+
+private enum MacDeviceTier: String {
+    case flagship
+    case high
+    case mid
+}
+
+private struct MacDisplayCapabilities {
+    let tier: MacDeviceTier
+    let hardwareModel: String
+    let preferredSurfaceConfig: SurfacePixelConfig
+    let supportsEDR: Bool
+}
+
+private func currentHardwareModel() -> String {
+    var size = 0
+    guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 1 else {
+        return "unknown"
+    }
+    var model = [CChar](repeating: 0, count: size)
+    guard sysctlbyname("hw.model", &model, &size, nil, 0) == 0 else {
+        return "unknown"
+    }
+    return String(cString: model)
+}
+
+private func detectMacDeviceTier(model: String) -> MacDeviceTier {
+    if model.contains("Mac15") || model.contains("Mac16") {
+        return .flagship
+    }
+    if model.contains("Mac14") || model.contains("MacBookPro18") {
+        return .high
+    }
+    return .mid
+}
+
+private func detectMacDisplayCapabilities() -> MacDisplayCapabilities {
+    let model = currentHardwareModel()
+    let tier = detectMacDeviceTier(model: model)
+    let preferredSurfaceConfig: SurfacePixelConfig = (tier == .mid) ? .bgra8 : .rgba16Half
+    let edrHeadroom =
+        NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
+    return MacDisplayCapabilities(
+        tier: tier,
+        hardwareModel: model,
+        preferredSurfaceConfig: preferredSurfaceConfig,
+        supportsEDR: edrHeadroom > 1.0
+    )
+}
+
+private func firstMetalLayer(in layer: CALayer?) -> CAMetalLayer? {
+    guard let layer else { return nil }
+    if let metalLayer = layer as? CAMetalLayer {
+        return metalLayer
+    }
+    for sublayer in layer.sublayers ?? [] {
+        if let found = firstMetalLayer(in: sublayer) {
+            return found
+        }
+    }
+    return nil
+}
+
+private func firstMetalLayer(in view: NSView) -> CAMetalLayer? {
+    if let layer = firstMetalLayer(in: view.layer) {
+        return layer
+    }
+    for subview in view.subviews {
+        if let layer = firstMetalLayer(in: subview) {
+            return layer
+        }
+    }
+    return nil
+}
+
+private func configureWideColorOutput(for view: NSView) {
+    let caps = detectMacDisplayCapabilities()
+    guard let metalLayer = firstMetalLayer(in: view) else {
+        NSLog("[AetherTexture] WCG layer config skipped — CAMetalLayer not found")
+        return
+    }
+    metalLayer.colorspace = CGColorSpace(name: CGColorSpace.displayP3)
+    if caps.supportsEDR {
+        metalLayer.wantsExtendedDynamicRangeContent = true
+    }
+    NSLog("[AetherTexture] output tier=%@ model=%@ surface=%@ edr=%@",
+          caps.tier.rawValue,
+          caps.hardwareModel,
+          caps.preferredSurfaceConfig.rawValue,
+          caps.supportsEDR.description)
+}
+
 enum TextureCreateError: Error {
     case ffiUnavailable              // dylib not found or symbols missing
     case iosurfaceCreate
@@ -104,7 +219,7 @@ enum TextureCreateError: Error {
     case rendererCreate              // C ABI returned NULL
 }
 
-/// 256×256 BGRA8 IOSurface-backed texture, exposed to Flutter through
+/// 256×256 IOSurface-backed texture, exposed to Flutter through
 /// FlutterTexture protocol. Phase 4-5 rendered a rotating triangle via
 /// MTLRenderPipelineState; Phase 6.4a renders 4 Gaussian splats via the
 /// Aether3D production pipeline (DawnGPUDevice → splat_render.wgsl);
@@ -115,6 +230,7 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     private let pixelBuffer: CVPixelBuffer
     private let ioSurface: IOSurfaceRef
     private let rendererHandle: OpaquePointer
+    private let surfaceConfig: SurfacePixelConfig
     private var hasRenderedOnce = false
 
     // Phase 6.4c: latest gesture-derived matrices, pushed by Dart via
@@ -138,25 +254,24 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         ]
     }
 
-    init(width: Int = 256, height: Int = 256) throws {
-        guard let ffi = FFI.shared else {
-            throw TextureCreateError.ffiUnavailable
-        }
-
-        // 1. IOSurface (BGRA8, the IOSurface-canonical pixel format).
+    private static func makeBackingResources(
+        width: Int,
+        height: Int,
+        ffi: FFI,
+        config: SurfacePixelConfig
+    ) throws -> (CVPixelBuffer, IOSurfaceRef, OpaquePointer) {
         let ioProps: [IOSurfacePropertyKey: Any] = [
             .width:           width,
             .height:          height,
-            .pixelFormat:     Int(kCVPixelFormatType_32BGRA),
-            .bytesPerElement: 4,
-            .bytesPerRow:     width * 4,
+            .pixelFormat:     Int(config.cvPixelFormat),
+            .bytesPerElement: config.bytesPerElement,
+            .bytesPerRow:     width * config.bytesPerElement,
         ]
         guard let surface = IOSurface(properties: ioProps) else {
             throw TextureCreateError.iosurfaceCreate
         }
         let surfaceRef = surface as IOSurfaceRef
 
-        // 2. CVPixelBuffer wrapping the IOSurface (Flutter compositor reads).
         var pbUnmanaged: Unmanaged<CVPixelBuffer>?
         let cvStatus = CVPixelBufferCreateWithIOSurface(
             kCFAllocatorDefault, surfaceRef, nil, &pbUnmanaged
@@ -166,19 +281,63 @@ class SharedNativeTexture: NSObject, FlutterTexture {
             throw TextureCreateError.cvpixelbufferCreate(cvStatus)
         }
 
-        // 3. Aether3D splat renderer over the same IOSurface (Dawn writes).
-        // IOSurfaceRef cast to void* — Dawn internally CFRetains for the
-        // lifetime of the renderer.
         let surfaceVoidPtr = unsafeBitCast(surfaceRef, to: UnsafeMutableRawPointer.self)
         guard let handle = ffi.create(surfaceVoidPtr, UInt32(width), UInt32(height)) else {
             throw TextureCreateError.rendererCreate
         }
 
-        self.pixelBuffer    = buffer
-        self.ioSurface      = surfaceRef
-        self.rendererHandle = handle
-        self.ffi            = ffi
+        return (buffer, surfaceRef, handle)
+    }
+
+    init(width: Int = 256, height: Int = 256) throws {
+        guard let ffi = FFI.shared else {
+            throw TextureCreateError.ffiUnavailable
+        }
+
+        let caps = detectMacDisplayCapabilities()
+        let configs: [SurfacePixelConfig] =
+            (caps.preferredSurfaceConfig == .bgra8) ? [.bgra8] : [.rgba16Half, .bgra8]
+
+        var selected: (CVPixelBuffer, IOSurfaceRef, OpaquePointer, SurfacePixelConfig)?
+        var lastError: Error?
+        for config in configs {
+            do {
+                let resources = try SharedNativeTexture.makeBackingResources(
+                    width: width,
+                    height: height,
+                    ffi: ffi,
+                    config: config
+                )
+                selected = (resources.0, resources.1, resources.2, config)
+                break
+            } catch {
+                lastError = error
+                if config != configs.last {
+                    NSLog("[SharedNativeTexture] %@ init failed on tier=%@ model=%@; "
+                          + "falling back to BGRA8. Error=%@",
+                          config.rawValue,
+                          caps.tier.rawValue,
+                          caps.hardwareModel,
+                          String(describing: error))
+                }
+            }
+        }
+
+        guard let selected else {
+            throw lastError ?? TextureCreateError.rendererCreate
+        }
+
+        self.pixelBuffer = selected.0
+        self.ioSurface = selected.1
+        self.rendererHandle = selected.2
+        self.surfaceConfig = selected.3
+        self.ffi = ffi
         super.init()
+        NSLog("[SharedNativeTexture] created tier=%@ model=%@ surface=%@ edr=%@",
+              caps.tier.rawValue,
+              caps.hardwareModel,
+              surfaceConfig.rawValue,
+              caps.supportsEDR.description)
     }
 
     deinit {
@@ -505,6 +664,10 @@ class MainFlutterWindow: NSWindow {
     AetherTexturePlugin.register(
       with: flutterViewController.registrar(forPlugin: "AetherTexturePlugin")
     )
+
+    DispatchQueue.main.async {
+      configureWideColorOutput(for: flutterViewController.view)
+    }
 
     super.awakeFromNib()
   }

@@ -44,6 +44,11 @@
 
 #include <webgpu/webgpu.h>
 
+#if defined(__APPLE__)
+#include <CoreVideo/CoreVideo.h>
+#include <IOSurface/IOSurface.h>
+#endif
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -87,6 +92,67 @@ namespace dawn_int = ::aether::render::internal;
 bool is_dawn(GPUDevice* d) noexcept {
     return d && d->backend() == ::aether::render::GraphicsBackend::kDawn;
 }
+
+const char* gpu_texture_format_name(GPUTextureFormat format) {
+    switch (format) {
+        case GPUTextureFormat::kBGRA8Unorm: return "BGRA8Unorm";
+        case GPUTextureFormat::kRGBA16Float: return "RGBA16Float";
+        case GPUTextureFormat::kRGBA8Unorm: return "RGBA8Unorm";
+        case GPUTextureFormat::kDepth32Float: return "Depth32Float";
+        case GPUTextureFormat::kDepth32Float_Stencil8: return "Depth32Float_Stencil8";
+        case GPUTextureFormat::kInvalid: return "Invalid";
+        default: return "Other";
+    }
+}
+
+WGPUTextureFormat to_wgpu_color_format(GPUTextureFormat format) {
+    switch (format) {
+        case GPUTextureFormat::kBGRA8Unorm: return WGPUTextureFormat_BGRA8Unorm;
+        case GPUTextureFormat::kRGBA16Float: return WGPUTextureFormat_RGBA16Float;
+        default: return WGPUTextureFormat_Undefined;
+    }
+}
+
+#if defined(__APPLE__)
+const char* iosurface_pixel_format_name(OSType format) {
+    switch (format) {
+        case kCVPixelFormatType_32BGRA: return "kCVPixelFormatType_32BGRA";
+        case kCVPixelFormatType_64RGBAHalf: return "kCVPixelFormatType_64RGBAHalf";
+        default: return "unsupported";
+    }
+}
+
+std::optional<GPUTextureFormat> detect_iosurface_color_format(void* iosurface,
+                                                              std::uint32_t width,
+                                                              std::uint32_t height) {
+    auto surface = static_cast<IOSurfaceRef>(iosurface);
+    if (!surface) {
+        scene_log("create: IOSurfaceRef cast failed");
+        return std::nullopt;
+    }
+
+    const std::uint32_t actual_width = static_cast<std::uint32_t>(IOSurfaceGetWidth(surface));
+    const std::uint32_t actual_height = static_cast<std::uint32_t>(IOSurfaceGetHeight(surface));
+    if (actual_width != width || actual_height != height) {
+        scene_log("create: IOSurface dim mismatch actual=(%u,%u) requested=(%u,%u)",
+                  actual_width, actual_height, width, height);
+        return std::nullopt;
+    }
+
+    const OSType pixel_format = IOSurfaceGetPixelFormat(surface);
+    switch (pixel_format) {
+        case kCVPixelFormatType_32BGRA:
+            return GPUTextureFormat::kBGRA8Unorm;
+        case kCVPixelFormatType_64RGBAHalf:
+            return GPUTextureFormat::kRGBA16Float;
+        default:
+            scene_log("create: unsupported IOSurface pixel format 0x%08x (%s)",
+                      static_cast<unsigned int>(pixel_format),
+                      iosurface_pixel_format_name(pixel_format));
+            return std::nullopt;
+    }
+}
+#endif
 
 // ─── Splat scene baseline (cross_validate-aligned 4-splat fixture) ─────
 
@@ -272,7 +338,8 @@ GPUTextureHandle create_1x1_texture(GPUDevice& device,
 
 WGPURenderPipeline create_mesh_pipeline(WGPUDevice wd,
                                          WGPUShaderModule vs,
-                                         WGPUShaderModule fs) {
+                                         WGPUShaderModule fs,
+                                         WGPUTextureFormat color_format) {
     // ─── Vertex buffer layout (matches glb_loader::MeshVertex 48 bytes) ───
     static const WGPUVertexAttribute kAttrs[4] = {
         // position
@@ -301,7 +368,7 @@ WGPURenderPipeline create_mesh_pipeline(WGPUDevice wd,
 
     // ─── Color target + blend (no blending; mesh writes opaque) ────────
     WGPUColorTargetState color_target = WGPU_COLOR_TARGET_STATE_INIT;
-    color_target.format = WGPUTextureFormat_BGRA8Unorm;  // matches IOSurface
+    color_target.format = color_format;
     color_target.writeMask = WGPUColorWriteMask_All;
     // blend = nullptr → no blending (opaque mesh on top of cleared color)
 
@@ -335,7 +402,8 @@ WGPURenderPipeline create_mesh_pipeline(WGPUDevice wd,
 // but with depth-test enabled (read from pass 1) + no depth write.
 WGPURenderPipeline create_splat_overlay_pipeline(WGPUDevice wd,
                                                   WGPUShaderModule vs,
-                                                  WGPUShaderModule fs) {
+                                                  WGPUShaderModule fs,
+                                                  WGPUTextureFormat color_format) {
     WGPUBlendState blend = WGPU_BLEND_STATE_INIT;
     blend.color.operation = WGPUBlendOperation_Add;
     blend.color.srcFactor = WGPUBlendFactor_One;
@@ -345,7 +413,7 @@ WGPURenderPipeline create_splat_overlay_pipeline(WGPUDevice wd,
     blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
 
     WGPUColorTargetState color_target = WGPU_COLOR_TARGET_STATE_INIT;
-    color_target.format = WGPUTextureFormat_BGRA8Unorm;
+    color_target.format = color_format;
     color_target.blend = &blend;
     color_target.writeMask = WGPUColorWriteMask_All;
 
@@ -404,6 +472,7 @@ WGPUSampler create_default_sampler(WGPUDevice wd) {
 struct AetherSceneRenderer {
     GPUDevice* device{nullptr};
     std::uint32_t width{0}, height{0};
+    GPUTextureFormat color_format{GPUTextureFormat::kInvalid};
 
     // Render targets
     GPUTextureHandle iosurface_tex;
@@ -641,6 +710,10 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
                   iosurface, width, height);
         return nullptr;
     }
+#if !defined(__APPLE__)
+    scene_log("create: IOSurface renderer is Apple-only");
+    return nullptr;
+#else
     using namespace ::aether::render;
 
     GPUDevice* device = ::aether::pocketworld::dawn_singleton_acquire();
@@ -655,6 +728,21 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
     r->device = device;
     r->width = width;
     r->height = height;
+    auto color_format = detect_iosurface_color_format(iosurface, width, height);
+    if (!color_format.has_value()) {
+        delete r;
+        ::aether::pocketworld::dawn_singleton_release();
+        return nullptr;
+    }
+    r->color_format = *color_format;
+    const WGPUTextureFormat wgpu_color_format = to_wgpu_color_format(r->color_format);
+    if (wgpu_color_format == WGPUTextureFormat_Undefined) {
+        scene_log("create: unsupported WGPU color format mapping for %s",
+                  gpu_texture_format_name(r->color_format));
+        delete r;
+        ::aether::pocketworld::dawn_singleton_release();
+        return nullptr;
+    }
 
     auto fail = [&](const char* msg) -> AetherSceneRenderer* {
         scene_log("create: %s", msg);
@@ -685,8 +773,10 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
 
     // 1. Render targets: IOSurface color + depth.
     r->iosurface_tex = dawn_import_iosurface_texture(
-        *device, iosurface, width, height, GPUTextureFormat::kBGRA8Unorm);
+        *device, iosurface, width, height, r->color_format);
     if (!r->iosurface_tex.valid()) return fail("import_iosurface_texture failed");
+    scene_log("create: IOSurface %ux%u format=%s",
+              width, height, gpu_texture_format_name(r->color_format));
 
     GPUTextureDesc depth_desc{};
     depth_desc.width = width;
@@ -730,7 +820,8 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
     r->splat_pipe = create_splat_overlay_pipeline(
         dawn_int::dawn_internal_wgpu_device(dev),
         dawn_int::dawn_internal_get_shader_module(dev, r->splat_vs, ep_unused),
-        dawn_int::dawn_internal_get_shader_module(dev, r->splat_fs, ep_unused));
+        dawn_int::dawn_internal_get_shader_module(dev, r->splat_fs, ep_unused),
+        wgpu_color_format);
     if (!r->splat_pipe) return fail("splat pipeline create failed");
 
     // 3. Mesh path: shaders + pipeline + uniforms + sampler + fallback textures.
@@ -741,7 +832,8 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
     r->mesh_pipe = create_mesh_pipeline(
         dawn_int::dawn_internal_wgpu_device(dev),
         dawn_int::dawn_internal_get_shader_module(dev, r->mesh_vs, ep_unused),
-        dawn_int::dawn_internal_get_shader_module(dev, r->mesh_fs, ep_unused));
+        dawn_int::dawn_internal_get_shader_module(dev, r->mesh_fs, ep_unused),
+        wgpu_color_format);
     if (!r->mesh_pipe) return fail("mesh pipeline create failed");
 
     r->mesh_camera_buf = make_buf(sizeof(CameraUniforms),
@@ -779,6 +871,7 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
         return fail("fallback texture create failed");
 
     return r;
+#endif
 }
 
 extern "C" void aether_scene_renderer_destroy(AetherSceneRenderer* r) {
