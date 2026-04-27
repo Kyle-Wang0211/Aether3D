@@ -59,7 +59,9 @@ class OrbitControls {
   /// Dragging from one edge to the other = full revolution at rotateSpeed=1.
   void rotate(double dxPixels, double dyPixels, Size viewSize) {
     azimuth -= 2 * math.pi * dxPixels / viewSize.width * rotateSpeed;
-    polar -= 2 * math.pi * dyPixels / viewSize.height * rotateSpeed;
+    // Flutter's dy is positive downward; adding it keeps vertical orbit
+    // aligned with direct-manipulation feel (drag up => look over top).
+    polar += 2 * math.pi * dyPixels / viewSize.height * rotateSpeed;
     polar = polar.clamp(minPolar, maxPolar);
   }
 
@@ -69,8 +71,10 @@ class OrbitControls {
   /// so distance shrinks on zoom-in.
   void dolly(double scaleFactor) {
     if (scaleFactor <= 0.0) return; // defensive — Flutter sometimes emits 0
-    distance =
-        (distance / math.pow(scaleFactor, zoomSpeed)).clamp(minDistance, maxDistance);
+    distance = (distance / math.pow(scaleFactor, zoomSpeed)).clamp(
+      minDistance,
+      maxDistance,
+    );
   }
 
   /// 16-float column-major view matrix for FFI upload. Eye position is
