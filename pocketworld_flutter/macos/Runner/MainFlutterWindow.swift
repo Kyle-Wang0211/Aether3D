@@ -266,6 +266,17 @@ private func configureWideColorOutput(for view: NSView) {
           caps.supportsEDR.description)
 }
 
+private func flutterTextureDisplayConfigs(
+    caps: MacDisplayCapabilities
+) -> [SurfacePixelConfig] {
+    if caps.preferredSurfaceConfig == .rgba16Half {
+        NSLog("[SharedNativeTexture] FlutterMacOS rejects %@ CVPixelBuffer textures; "
+              + "using BGRA8 display surface until the Phase 6.4d.2 render/display split lands.",
+              SurfacePixelConfig.rgba16Half.rawValue)
+    }
+    return [.bgra8]
+}
+
 enum TextureCreateError: Error {
     case ffiUnavailable              // dylib not found or symbols missing
     case iosurfaceCreate
@@ -349,8 +360,7 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         }
 
         let caps = detectMacDisplayCapabilities()
-        let configs: [SurfacePixelConfig] =
-            (caps.preferredSurfaceConfig == .bgra8) ? [.bgra8] : [.rgba16Half, .bgra8]
+        let configs = flutterTextureDisplayConfigs(caps: caps)
 
         var selected: (CVPixelBuffer, IOSurfaceRef, OpaquePointer, SurfacePixelConfig)?
         var lastError: Error?
