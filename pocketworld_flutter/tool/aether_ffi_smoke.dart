@@ -1,4 +1,5 @@
 // Phase 3.4 macOS Dart CLI smoke test for the aether_cpp FFI binding.
+// ignore_for_file: avoid_print
 //
 // Validates that dart:ffi can:
 //   1. Open libaether3d_ffi.dylib via DynamicLibrary.open

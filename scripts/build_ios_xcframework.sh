@@ -4,33 +4,24 @@
 #
 # Output: dist/aether3d_ffi.xcframework
 #
-# Phase 3 scope: deliberately ships only aether3d_ffi (version.cpp only). The
-# heavier aether3d_core target is NOT included on iOS yet — it pulls in
-# metal_gpu_device.mm + depth_inference_coreml.mm which fail on iOS toolchain
-# (CoreML / Metal API differences). Re-enabling those for iOS is a Phase 4
-# task, see PHASE_BACKLOG.md "iOS aether3d_core" entry.
+# Final iOS port (2026-04-27): device builds now ship the Dawn scene
+# renderer so iPhone can display DamagedHelmet through the same C ABI as
+# macOS. We intentionally do NOT link all of aether3d_core on iOS; the
+# aether3d_ffi target compiles only the viewer subset (scene renderer,
+# DawnGPUDevice, GLB loader, baked WGSL).
 #
-# Phase 6.0 (2026-04-26): Dawn iOS unblocked at the cmake-build level (proven
-# by direct `cmake --build aether_cpp/build-ios-device --target webgpu_dawn`
-# producing libwebgpu_dawn_objects.a for arm64-device + arm64-simulator).
-# But this xcframework script keeps AETHER_ENABLE_DAWN=OFF: when Dawn is in
-# the iOS dep tree, Abseil's CMake compile-feature probe fails on the
-# iphonesimulator sysroot ("C++ >= 17 required") even though the project
-# sets CMAKE_CXX_STANDARD=20 globally — Abseil's probe doesn't pick up
-# inherited standard from a parent scope. Phase 5 vendored_libraries deploy
-# path depends on this script's aether3d_ffi-only build staying green.
-# Phase 6.2+ (DawnGPUDevice + WGSL shaders) builds via direct cmake
-# invocation (host) which works fine; the iOS Dawn-link path lights up
-# in 6.4 when Dawn is wired into the iOS Pod via a separate route.
-# Tracking BACKLOG: "Dawn iOS Abseil C++17 probe regression — fix before
-# Phase 6.4 wires Dawn into iOS Pod chain".
+# The arm64 simulator still cannot configure Dawn because Abseil's
+# compile-feature probe fails on the iphonesimulator sysroot ("C++ >= 17
+# required"). Simulator therefore builds Dawn OFF but still includes the
+# scene renderer's loud no-op C ABI, so the app links cleanly and surfaces
+# "renderer unavailable" instead of missing symbols.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-DEVICE_BUILD="aether_cpp/build-ios-device"
+DEVICE_BUILD="aether_cpp/build-ios-device-dawn"
 SIM_BUILD="aether_cpp/build-ios-sim"
 DIST_DIR="dist"
 
@@ -40,17 +31,18 @@ COMMON_ARGS=(
     -DCMAKE_SYSTEM_NAME=iOS
     -DCMAKE_OSX_ARCHITECTURES=arm64
     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
-    -DAETHER_ENABLE_DAWN=OFF
     -DAETHER_FFI_BUILD_STATIC=ON
 )
 
 echo "==> Configuring iOS device build..."
 rm -rf "$DEVICE_BUILD"
-cmake -S aether_cpp -B "$DEVICE_BUILD" "${COMMON_ARGS[@]}"
+cmake -S aether_cpp -B "$DEVICE_BUILD" "${COMMON_ARGS[@]}" \
+    -DAETHER_ENABLE_DAWN=ON
 
 echo "==> Configuring iOS simulator build..."
 rm -rf "$SIM_BUILD"
 cmake -S aether_cpp -B "$SIM_BUILD" "${COMMON_ARGS[@]}" \
+    -DAETHER_ENABLE_DAWN=OFF \
     -DCMAKE_OSX_SYSROOT=iphonesimulator
 
 echo "==> Building aether3d_ffi for iOS device (arm64)..."
@@ -59,11 +51,22 @@ cmake --build "$DEVICE_BUILD" --config Debug --target aether3d_ffi
 echo "==> Building aether3d_ffi for iOS simulator (arm64)..."
 cmake --build "$SIM_BUILD" --config Debug --target aether3d_ffi
 
-DEVICE_LIB="$DEVICE_BUILD/Debug-iphoneos/libaether3d_ffi.a"
+DEVICE_LIB_RAW="$DEVICE_BUILD/Debug-iphoneos/libaether3d_ffi.a"
+DEVICE_MERGED_DIR="$DEVICE_BUILD/merged"
+DEVICE_LIB="$DEVICE_MERGED_DIR/libaether3d_ffi.a"
 SIM_LIB="$SIM_BUILD/Debug-iphonesimulator/libaether3d_ffi.a"
 
-[ -f "$DEVICE_LIB" ] || { echo "ERROR: device lib missing: $DEVICE_LIB" >&2; exit 1; }
+[ -f "$DEVICE_LIB_RAW" ] || { echo "ERROR: device lib missing: $DEVICE_LIB_RAW" >&2; exit 1; }
 [ -f "$SIM_LIB" ] || { echo "ERROR: sim lib missing: $SIM_LIB" >&2; exit 1; }
+
+# CMake static-library dependencies are not folded into libaether3d_ffi.a.
+# Merge the viewer archive with Dawn/Tint/Abseil static deps so CocoaPods
+# still consumes exactly one vendored library on iPhoneOS.
+echo "==> Merging iOS device static dependencies into one archive..."
+rm -rf "$DEVICE_MERGED_DIR"
+mkdir -p "$DEVICE_MERGED_DIR"
+find "$DEVICE_BUILD" -name "*.a" -type f ! -path "$DEVICE_MERGED_DIR/*" -print0 \
+    | xargs -0 xcrun libtool -static -o "$DEVICE_LIB"
 
 # Verify each was built for the right arch + platform
 echo "==> Device lib:"
@@ -106,6 +109,11 @@ for slice in ios-arm64 ios-arm64-simulator; do
     if ! nm "$LIBS_DIR/$slice/libaether3d_ffi.a" 2>/dev/null \
         | grep -q "T _aether_version_string"; then
         echo "ERROR: _aether_version_string missing from $slice slice" >&2
+        exit 1
+    fi
+    if ! nm "$LIBS_DIR/$slice/libaether3d_ffi.a" 2>/dev/null \
+        | grep -q "T _aether_scene_renderer_create"; then
+        echo "ERROR: _aether_scene_renderer_create missing from $slice slice" >&2
         exit 1
     fi
 done

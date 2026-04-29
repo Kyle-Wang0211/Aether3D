@@ -25,6 +25,12 @@ Pod::Spec.new do |s|
   s.source_files        = 'include/aether/aether_version.h'
   s.public_header_files = 'include/aether/aether_version.h'
 
+  # Final iOS scene renderer links Dawn/Metal/IOSurface objects into the
+  # vendored archive. Keep the platform frameworks explicit so Runner's
+  # final link is deterministic instead of relying on Swift module autolink.
+  s.frameworks = 'Foundation', 'Metal', 'CoreVideo', 'IOSurface', 'QuartzCore'
+  s.libraries  = 'c++', 'z'
+
   # Per-arch .a files live at <repo>/dist/libs/{ios-arm64,ios-arm64-simulator}/.
   # Path is relative to podspec dir → '../dist/libs/...'. preserve_paths keeps
   # them around in Pods/aether3d_ffi/ so the linker can find them via
@@ -43,8 +49,8 @@ Pod::Spec.new do |s|
   # CocoaPods pattern is per-sdk LIBRARY_SEARCH_PATHS + a single -laether3d_ffi
   # in OTHER_LDFLAGS, so each SDK build only sees its own slice.
   s.pod_target_xcconfig = {
-    'LIBRARY_SEARCH_PATHS[sdk=iphoneos*]'        => '$(PODS_TARGET_SRCROOT)/../dist/libs/ios-arm64',
-    'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '$(PODS_TARGET_SRCROOT)/../dist/libs/ios-arm64-simulator',
+    'LIBRARY_SEARCH_PATHS[sdk=iphoneos*]'        => '$(inherited) $(PODS_TARGET_SRCROOT)/../dist/libs/ios-arm64',
+    'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '$(inherited) $(PODS_TARGET_SRCROOT)/../dist/libs/ios-arm64-simulator',
     'OTHER_LDFLAGS'                              => '-laether3d_ffi',
     # Keep arch matrix tight — both slices are arm64-only on purpose.
     'VALID_ARCHS[sdk=iphoneos*]'                 => 'arm64',
@@ -65,8 +71,8 @@ Pod::Spec.new do |s|
   # PODS_ROOT resolves to <ios>/Pods at build time, so '../../../dist' goes
   # up to repo root then into dist/.
   s.user_target_xcconfig = {
-    'LIBRARY_SEARCH_PATHS[sdk=iphoneos*]'        => '$(PODS_ROOT)/../../../dist/libs/ios-arm64',
-    'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '$(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator',
+    'LIBRARY_SEARCH_PATHS[sdk=iphoneos*]'        => '$(inherited) $(PODS_ROOT)/../../../dist/libs/ios-arm64',
+    'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '$(inherited) $(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator',
     # Constrain Runner target's archs to match the .a slices we ship.
     # Both slices are arm64-only (sim slice dropped x86_64 to match Apple
     # Silicon-only sim runtime); without this, Flutter's default builds

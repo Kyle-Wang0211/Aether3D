@@ -8,6 +8,15 @@
 #include <new>
 
 namespace aether::pocketworld {
+
+constexpr float DrsController::kTargetMs;
+constexpr float DrsController::kMinScale;
+constexpr float DrsController::kMaxScale;
+constexpr float DrsController::kDecayRate;
+constexpr float DrsController::kRecoveryRate;
+constexpr float DrsController::kHysteresisHigh;
+constexpr float DrsController::kHysteresisLow;
+
 namespace {
 
 bool contains(const char* haystack, const char* needle) {

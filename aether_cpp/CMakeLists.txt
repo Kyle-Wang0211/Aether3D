@@ -435,6 +435,22 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     list(APPEND AETHER_FFI_SOURCES
         src/pocketworld/dawn_device_singleton.cpp
         src/pocketworld/scene_iosurface_renderer.cpp)
+else()
+    # Keep the scene-renderer C ABI link-stable on Dawn-disabled slices
+    # (notably the arm64 iOS simulator while Dawn's Abseil probe is still
+    # blocked there). The source has loud no-op implementations under
+    # !AETHER_ENABLE_DAWN, so callers get an explicit renderer failure
+    # instead of a missing-symbol link/runtime failure.
+    list(APPEND AETHER_FFI_SOURCES
+        src/pocketworld/scene_iosurface_renderer.cpp)
+endif()
+
+set(AETHER_FFI_IOS_VIEWER_ONLY FALSE)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS"
+        AND AETHER_FFI_BUILD_STATIC
+        AND AETHER_ENABLE_DAWN
+        AND TARGET dawn::webgpu_dawn)
+    set(AETHER_FFI_IOS_VIEWER_ONLY TRUE)
 endif()
 
 if(AETHER_FFI_BUILD_STATIC)
@@ -447,7 +463,26 @@ target_include_directories(aether3d_ffi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # (the import_iosurface free function is in aether3d_core, plus the
 # narrow internal:: accessors declared in src/render/dawn_gpu_device_internal.h).
 if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
-    target_link_libraries(aether3d_ffi PRIVATE aether3d_core)
+    if(AETHER_FFI_IOS_VIEWER_ONLY)
+        # Final iOS port: the iPhone viewer needs the scene renderer, GLB
+        # loader and DawnGPUDevice, but not the older training/depth pipeline
+        # that lives in aether3d_core. Linking the whole core static library
+        # drags CoreML sources into the iOS 14 build and trips availability
+        # warnings-as-errors. Keep this archive viewer-scoped until the
+        # cross-platform core is split into smaller libraries.
+        target_sources(aether3d_ffi PRIVATE
+            src/render/dawn_gpu_device.cpp
+            src/pocketworld/glb_loader.cpp
+            ${AETHER_WGSL_GENERATED_CPPS}
+        )
+        target_include_directories(aether3d_ffi PRIVATE
+            third_party/cgltf
+            third_party/stb)
+        target_link_libraries(aether3d_ffi PRIVATE dawn::webgpu_dawn ZLIB::ZLIB)
+        add_dependencies(aether3d_ffi aether_bake_wgsl)
+    else()
+        target_link_libraries(aether3d_ffi PRIVATE aether3d_core)
+    endif()
     target_compile_definitions(aether3d_ffi PRIVATE AETHER_ENABLE_DAWN=1)
 endif()
 # cxx_std_20 inherited from top-level CMAKE_CXX_STANDARD.

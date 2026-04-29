@@ -76,9 +76,9 @@ class ObjectTransform {
   /// 16-float column-major model matrix: T(position) * R_y(rotation) * S(scale).
   Float32List modelMatrix() {
     final m = v.Matrix4.identity()
-      ..translate(position.x, position.y, position.z)
+      ..translateByDouble(position.x, position.y, position.z, 1.0)
       ..rotateY(rotationY)
-      ..scale(scale.x, scale.y, scale.z);
+      ..scaleByDouble(scale.x, scale.y, scale.z, 1.0);
     final out = Float32List(16);
     for (int i = 0; i < 16; ++i) {
       out[i] = m.storage[i];

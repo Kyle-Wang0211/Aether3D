@@ -1,14 +1,12 @@
 import UIKit
 import Flutter
-import Metal
 
-// ─── Phase 5.1 — iOS port of Phase 4 macOS Flutter Texture plugin ──────
+// ─── Final iOS port — Flutter Texture plugin glue ─────────────────────
 //
 // This file is the FlutterPlugin glue: method-channel routing, lifecycle
-// hooks, CADisplayLink ticking. The Metal-specific render code (shaders,
-// MTLTexture creation, command-buffer building) was extracted to
-// MetalRenderer.swift in Phase 5.3 architectural prep — see that file's
-// header for the rationale and the future Dawn-iOS swap path.
+// hooks, CADisplayLink ticking. The renderer implementation lives in
+// MetalRenderer.swift, which now wraps the shared C++ scene IOSurface
+// renderer instead of the old Phase 5 triangle.
 //
 // 1:1 port of pocketworld_flutter/macos/Runner/MainFlutterWindow.swift
 // (plugin parts) with these iOS API substitutions:
@@ -22,12 +20,12 @@ import Metal
 //                          → registrar.messenger() / registrar.textures()
 //                            (methods on iOS)
 //
-// Lifecycle / sync / errors / observability fixes from chore commit
-// 3370eb54 carry over verbatim — they're API-agnostic:
+// Lifecycle / sync / errors / observability fixes carry over — they're
+// API-agnostic:
 //   #1 disposeTexture clean tear-down
-//   #2 waitUntilCompleted only on first render (in MetalRenderer.swift)
-//   #4 specific error codes per init failure point (TextureCreateError)
-//   #5 GPU command-buffer completion handler (in MetalRenderer.swift)
+//   #2 pause/resume through CADisplayLink
+//   #4 specific error codes per init/load failure point
+//   #5 loud native diagnostics instead of silent blank texture
 //
 // Phase 5.3 also added 4 NotificationCenter lifecycle hooks (background,
 // foreground, memory warning, thermal) + thermal-aware fps targeting.
@@ -35,8 +33,6 @@ import Metal
 
 class AetherTexturePlugin: NSObject, FlutterPlugin {
     private let textures: FlutterTextureRegistry
-    private let device: MTLDevice?
-    private let commandQueue: MTLCommandQueue?
     // Hold strong refs so the textures aren't deallocated while Flutter
     // is consuming them. Keyed by textureId.
     private var registered: [Int64: SharedNativeTexture] = [:]
@@ -82,24 +78,16 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             name: "aether_texture/warning",
             binaryMessenger: registrar.messenger()
         )
-        let device = MTLCreateSystemDefaultDevice()
-        let queue  = device?.makeCommandQueue()
         let instance = AetherTexturePlugin(
             textures: registrar.textures(),
-            device:   device,
-            commandQueue: queue,
             warningChannel: warningChannel
         )
         registrar.addMethodCallDelegate(instance, channel: channel)
     }
 
     init(textures: FlutterTextureRegistry,
-         device: MTLDevice?,
-         commandQueue: MTLCommandQueue?,
          warningChannel: FlutterMethodChannel? = nil) {
         self.textures = textures
-        self.device = device
-        self.commandQueue = commandQueue
         self.warningChannel = warningChannel
         super.init()
 
@@ -151,14 +139,6 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         switch call.method {
 
         case "createSharedNativeTexture":
-            guard let device = device, let queue = commandQueue else {
-                result(FlutterError(
-                    code: "NO_METAL",
-                    message: "MTLCreateSystemDefaultDevice returned nil",
-                    details: nil
-                ))
-                return
-            }
             // Phase 4 polish #9: parametrize 256×256 hardcoded size. Dart
             // can pass {width, height} args derived from MediaQuery and
             // device pixel ratio; if absent or invalid, fall back to the
@@ -167,10 +147,10 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             let width  = parseTextureDimension(args["width"],  default: 256)
             let height = parseTextureDimension(args["height"], default: 256)
             do {
-                let texture = try SharedNativeTexture(device: device, width: width, height: height)
+                let texture = try SharedNativeTexture(width: width, height: height)
                 let id = textures.register(texture)
                 registered[id] = texture
-                texture.render(commandQueue: queue, angle: 0)
+                texture.render()
                 textures.textureFrameAvailable(id)
                 startAnimation(textureId: id, texture: texture)
                 result(NSNumber(value: id))
@@ -184,25 +164,10 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                     code: "CVPIXELBUFFER_FAILED",
                     message: "CVPixelBufferCreateWithIOSurface returned CVReturn=\(cvret)",
                     details: nil))
-            } catch TextureCreateError.mtlTextureCreate {
+            } catch TextureCreateError.rendererCreate {
                 result(FlutterError(
-                    code: "MTLTEXTURE_FAILED",
-                    message: "device.makeTexture(descriptor:iosurface:plane:) returned nil",
-                    details: nil))
-            } catch TextureCreateError.shaderCompile(let err) {
-                result(FlutterError(
-                    code: "SHADER_COMPILE_FAILED",
-                    message: "device.makeLibrary(source:options:) threw: \(err)",
-                    details: nil))
-            } catch TextureCreateError.shaderFunctionMissing(let name) {
-                result(FlutterError(
-                    code: "SHADER_FUNCTION_MISSING",
-                    message: "library.makeFunction(name: \"\(name)\") returned nil",
-                    details: nil))
-            } catch TextureCreateError.renderPipelineCreate(let err) {
-                result(FlutterError(
-                    code: "PIPELINE_FAILED",
-                    message: "device.makeRenderPipelineState threw: \(err)",
+                    code: "RENDERER_FAILED",
+                    message: "aether_scene_renderer_create returned NULL — see Xcode Console for [Aether3D][scene_renderer] diagnostic",
                     details: nil))
             } catch {
                 result(FlutterError(
@@ -221,6 +186,55 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 return
             }
             disposeTexture(id: id)
+            result(nil)
+
+        case "loadGlb":
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value,
+                  let path = args["path"] as? String else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "loadGlb requires {textureId: int, path: String}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                result(FlutterError(
+                    code: "NO_SUCH_TEXTURE",
+                    message: "loadGlb called with textureId=\(id) which is not registered",
+                    details: nil))
+                return
+            }
+            guard texture.loadGlb(path: path) else {
+                result(FlutterError(
+                    code: "GLB_LOAD_FAILED",
+                    message: "aether_scene_renderer_load_glb returned false for path=\(path)",
+                    details: nil))
+                return
+            }
+            NSLog("[AetherTexture iOS] loadGlb succeeded: %@", path)
+            result(nil)
+
+        case "setMatrices":
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value,
+                  let viewData = args["view"] as? FlutterStandardTypedData,
+                  let modelData = args["model"] as? FlutterStandardTypedData else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "setMatrices requires {textureId: int, view: Float32List(16), model: Float32List(16)}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                // Late gesture after dispose; safe no-op.
+                result(nil)
+                return
+            }
+            texture.setMatrices(
+                view: viewData.data.toFloatArray(),
+                model: modelData.data.toFloatArray()
+            )
             result(nil)
 
         case "pauseRendering":
@@ -390,13 +404,10 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     }
 
     @objc private func displayLinkTick() {
-        guard let queue = commandQueue,
-              let id = animatedTextureId,
+        guard let id = animatedTextureId,
               let texture = animatedTexture else { return }
         let now     = CACurrentMediaTime()
-        let elapsed = Float(now - animationStart)
-        // ~1 rad/sec rotation; full revolution every ~6.28 s.
-        texture.render(commandQueue: queue, angle: elapsed)
+        let renderMs = texture.render()
         textures.textureFrameAvailable(id)
 
         // 1 Hz fps log. On iOS NSLog routes to os_log → Console.app /
@@ -406,9 +417,23 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         let dt = now - frameStatsLogTime
         if dt >= 1.0 {
             let fps = Double(frameCount) / dt
-            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f)", fps, frameCount, dt)
+            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f, renderMs=%.2f)",
+                  fps,
+                  frameCount,
+                  dt,
+                  renderMs)
             frameStatsLogTime = now
             frameCount = 0
+        }
+    }
+}
+
+private extension Data {
+    func toFloatArray() -> [Float] {
+        let count = self.count / MemoryLayout<Float>.size
+        return self.withUnsafeBytes { raw -> [Float] in
+            let base = raw.bindMemory(to: Float.self)
+            return Array(UnsafeBufferPointer(start: base.baseAddress, count: count))
         }
     }
 }

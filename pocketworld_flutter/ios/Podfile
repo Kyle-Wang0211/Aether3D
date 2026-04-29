@@ -28,20 +28,40 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_ios_podfile_setup
 
 target 'Runner' do
-  # use_frameworks! intentionally NOT enabled — pocketworld_flutter has 0
-  # Flutter plugins, and use_frameworks! + vendored static xcframework hits
-  # a CocoaPods 1.16 quirk where the .a doesn't get extracted/linked. Static
-  # linking via vendored_frameworks works without it.
+  # 2026-04-27 (evening): direct-launch crash on iPhone 14 Pro / iOS
+  # 26.3.1. Crash log pinpointed `swift_getObjectType +40` inside
+  # `SharedPreferencesPlugin.register(with:)` — Swift class metadata
+  # couldn't be resolved at cold-launch when LLDB wasn't attached.
+  # Standard Flutter + Firebase + iOS 26 fix is to flip Pods to use
+  # frameworks with static linkage: CocoaPods produces .framework
+  # bundles (which correctly export Swift class metadata) but links
+  # them statically into the Runner binary (avoiding runtime dylib
+  # issues).
+  #
+  # `:linkage => :static` preserves the zero-dylib distribution
+  # profile the pre-Firebase Podfile comment cared about; it's how
+  # Firebase-using Flutter apps are expected to configure today.
+  #
+  # use_modular_headers! stays — still needed by Firebase's Swift
+  # pods to import their non-modular Objective-C deps.
+  # EXP 3 (2026-04-28): Exp 2 ruled out aether3d_ffi / Dawn. Now test if
+  # `use_frameworks! :linkage => :static` + `use_modular_headers!` combo
+  # is the culprit (classic static-framework double-initialization / symbol
+  # clash pattern). Comment both out and fall back to the stock default
+  # (no `use_frameworks!` at all → plugins ship as static libraries;
+  # Firebase pods that *require* modular headers will install them on a
+  # per-pod basis via :modular_headers => true inside the pod() call).
+  # use_frameworks! :linkage => :static   ← static linkage removed (Exp 3)
+  use_modular_headers!                     # required by Firebase Swift pods
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
     inherit! :search_paths
   end
 
-  # Phase 5.0 (D2): re-enabled. The vendored_frameworks-of-static-xcframework
-  # path that broke in P3.2 is replaced in the podspec by per-arch
-  # vendored .a files + LIBRARY_SEARCH_PATHS[sdk=…] xcconfig. The xcframework
-  # itself is still produced by scripts/build_ios_xcframework.sh for non-Pod
-  # consumers; the Pod just consumes a flat-laid-out copy under dist/libs/.
+  # Restored 2026-04-28: Exp 2 ruled this pod out. The real root cause of
+  # the black-screen was missing UIApplicationSceneManifest + SceneDelegate
+  # (see ios/Runner/SceneDelegate.swift). Re-enabling Dawn-backed scene
+  # renderer.
   pod 'aether3d_ffi', :path => '../../aether_cpp'
 end
 

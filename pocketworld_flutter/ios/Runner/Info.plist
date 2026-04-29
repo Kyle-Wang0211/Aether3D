@@ -4,10 +4,18 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- 2026-04-28 (Exp 5): FLTEnableImpeller=false was the self-inflicted
+	     bug. Earlier diagnosis blamed Impeller's "fopen failed for data file:
+	     errno = 2" for the black screen, but Exp 1 (hello_ios26) proved
+	     Impeller works fine on iOS 26.3.1 and that fopen warning is harmless
+	     (Impeller invalidates cache and keeps going). Removing this key so
+	     Flutter falls back to its default Impeller-on-iOS behaviour. -->
+	<!-- <key>FLTEnableImpeller</key>
+	<false/> -->
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Pocketworld Flutter</string>
+	<string>PocketWorld</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -26,6 +34,18 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Firebase SDK (especially FirebaseAuth / Firestore) performs mDNS
+	     probing on first launch; iOS 14+ gates that behind a user
+	     consent dialog. Providing a clear rationale avoids the launch
+	     freezing while Firebase.initializeApp() is blocked waiting for
+	     the user's choice. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Aether3D 使用本地网络以便和云端服务（登录、同步、上传训练任务）进行快速连接。</string>
+	<!-- EXP 9 (2026-04-28): Flutter stable 3.41.8 on iOS 26 requires
+	     Scene-based lifecycle. Without this manifest the Flutter engine
+	     never attaches its FlutterView to a window — raster thread stays
+	     parked in mach_msg_receive and the first frame never flips.
+	     Shape copied verbatim from /tmp/hello_stable (which paints). -->
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

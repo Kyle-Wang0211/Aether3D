@@ -30,6 +30,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  # ARB-based localization. lib/l10n/app_{en,zh}.arb get codegen'd via
+  # `flutter gen-l10n` (triggered by `flutter pub get` because of
+  # `flutter.generate: true` below) into AppLocalizations.
+  intl: any
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -38,7 +44,22 @@ dependencies:
   # P3.4: dart:ffi binding to aether_cpp's C ABI (aether_version_string).
   # Provides Pointer<Utf8>.toDartString() and friends.
   ffi: ^2.1.4
-  shared_preferences: ^2.5.5
+  # shared_preferences removed 2026-04-27 — iOS 26.3.1 direct-launch
+  # crash in SharedPreferencesPlugin.register(with:) metadata race.
+  # Replaced by lib/aether_prefs.dart + ios/Runner/AetherPrefsPlugin.swift.
+  vector_math: ^2.2.0
+
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+
+  # Pipeline / upload broker HTTP client.
+  dio: ^5.7.0
+
+  # SHA256 for ArtifactManifest integrity checks.
+  crypto: ^3.0.6
+
+  # Temp path for video preparer, artifact download cache.
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
@@ -56,11 +77,23 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  # Codegen the ARB files in lib/l10n/ into AppLocalizations on
+  # `flutter pub get`. l10n.yaml at project root configures input dir,
+  # template language, and output class name.
+  generate: true
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/models/DamagedHelmet.glb
+    - assets/models/Avocado.glb
+    - assets/models/BoomBox.glb
+    - assets/models/WaterBottle.glb
+    - assets/models/Duck.glb
+    - assets/models/Lantern.glb
 
   # To add assets to your application, add an assets section, like this:
   # assets:

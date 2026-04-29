@@ -46,7 +46,14 @@
 
 #if defined(__APPLE__)
 #include <CoreVideo/CoreVideo.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <IOSurface/IOSurfaceRef.h>
+#elif __has_include(<IOSurface/IOSurface.h>)
 #include <IOSurface/IOSurface.h>
+#else
+#include <IOSurface/IOSurfaceRef.h>
+#endif
 #endif
 
 #include <cmath>
