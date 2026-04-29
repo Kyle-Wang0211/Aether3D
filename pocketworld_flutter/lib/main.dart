@@ -21,13 +21,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'aether_ffi.dart';
 import 'auth/auth_scope.dart';
 import 'auth/current_user.dart';
-import 'auth/firebase_auth_service.dart';
-import 'auth/firebase_bootstrap.dart';
 import 'auth/mock_auth_service.dart';
+import 'auth/supabase_auth_service.dart';
 import 'i18n/locale_notifier.dart';
 import 'l10n/app_localizations.dart';
 import 'lifecycle_observer.dart';
@@ -95,17 +95,36 @@ Future<void> main() async {
     });
 
     unawaited(() async {
-      const firebaseInitTimeout = Duration(seconds: 10);
-      final firebaseReady = await initializeFirebaseSafely()
-          .timeout(firebaseInitTimeout, onTimeout: () {
+      // Initialize Supabase with the published anon key + project URL
+      // for our PocketWorld dev project. The anon key is intentionally
+      // public — RLS policies on each table do the actual access
+      // control. Replace with --dart-define overrides for prod.
+      const supabaseUrl = String.fromEnvironment(
+        'SUPABASE_URL',
+        defaultValue: 'https://tzvwkqmgaourwqrmxbyb.supabase.co',
+      );
+      const supabaseAnonKey = String.fromEnvironment(
+        'SUPABASE_ANON_KEY',
+        defaultValue:
+            'sb_publishable_ur4tTV2iXSV4NsL3YYttyw_SIjFAMST',
+      );
+      const initTimeout = Duration(seconds: 10);
+      bool supabaseReady = false;
+      try {
+        await Supabase.initialize(
+          url: supabaseUrl,
+          anonKey: supabaseAnonKey,
+          debug: false,
+        ).timeout(initTimeout);
+        supabaseReady = true;
+      } catch (e) {
         debugPrint(
-          '[main] Firebase.initializeApp timed out after '
-          '${firebaseInitTimeout.inSeconds}s — continuing with mock auth.',
+          '[main] Supabase.initialize failed/timeout: $e — '
+          'continuing with mock auth.',
         );
-        return false;
-      });
-      if (firebaseReady) {
-        currentUser.swapService(FirebaseAuthServiceImpl());
+      }
+      if (supabaseReady) {
+        currentUser.swapService(SupabaseAuthServiceImpl());
       }
       await currentUser.bootstrap();
     }());

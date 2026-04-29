@@ -49,8 +49,11 @@ dependencies:
   # Replaced by lib/aether_prefs.dart + ios/Runner/AetherPrefsPlugin.swift.
   vector_math: ^2.2.0
 
-  firebase_core: ^3.6.0
-  firebase_auth: ^5.3.1
+  # 2026-04-28: replaced firebase_core / firebase_auth with Supabase
+  # Auth + Postgres. We keep the same lib/auth/ AuthService protocol so
+  # the UI layer is provider-agnostic — Firebase services / options /
+  # GoogleService-Info.plist all removed.
+  supabase_flutter: ^2.8.0
 
   # Pipeline / upload broker HTTP client.
   dio: ^5.7.0
