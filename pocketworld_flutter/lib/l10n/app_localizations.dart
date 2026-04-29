@@ -509,6 +509,102 @@ abstract class AppL10n {
   /// **'Something went wrong'**
   String get authErrorDialogTitle;
 
+  /// No description provided for @otpVerifyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify your email'**
+  String get otpVerifyTitle;
+
+  /// No description provided for @otpVerifySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'We sent a 6-digit code to {email}. Enter it below to finish signing up.'**
+  String otpVerifySubtitle(String email);
+
+  /// No description provided for @otpInputHint.
+  ///
+  /// In en, this message translates to:
+  /// **'6-digit code'**
+  String get otpInputHint;
+
+  /// No description provided for @otpVerify.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify'**
+  String get otpVerify;
+
+  /// No description provided for @otpVerifying.
+  ///
+  /// In en, this message translates to:
+  /// **'Verifying…'**
+  String get otpVerifying;
+
+  /// No description provided for @otpResend.
+  ///
+  /// In en, this message translates to:
+  /// **'Resend code'**
+  String get otpResend;
+
+  /// No description provided for @otpResendCooldown.
+  ///
+  /// In en, this message translates to:
+  /// **'Resend in {seconds}s'**
+  String otpResendCooldown(int seconds);
+
+  /// No description provided for @otpResendSent.
+  ///
+  /// In en, this message translates to:
+  /// **'Code re-sent'**
+  String get otpResendSent;
+
+  /// No description provided for @otpInvalidCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Invalid or expired code'**
+  String get otpInvalidCode;
+
+  /// No description provided for @otpUseAnotherEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'Use a different email'**
+  String get otpUseAnotherEmail;
+
+  /// No description provided for @resetTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset password'**
+  String get resetTitle;
+
+  /// No description provided for @resetSubtitleEnterEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter your email and we\'ll send you a 6-digit verification code.'**
+  String get resetSubtitleEnterEmail;
+
+  /// No description provided for @resetSubtitleEnterCode.
+  ///
+  /// In en, this message translates to:
+  /// **'We sent a 6-digit code to {email}. Enter it together with your new password.'**
+  String resetSubtitleEnterCode(String email);
+
+  /// No description provided for @resetSendCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Send code'**
+  String get resetSendCode;
+
+  /// No description provided for @resetNewPasswordHint.
+  ///
+  /// In en, this message translates to:
+  /// **'New password (min 8 chars)'**
+  String get resetNewPasswordHint;
+
+  /// No description provided for @resetConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset password'**
+  String get resetConfirm;
+
   /// No description provided for @captureRecording.
   ///
   /// In en, this message translates to:

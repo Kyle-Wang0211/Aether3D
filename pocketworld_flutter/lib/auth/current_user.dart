@@ -120,7 +120,93 @@ class CurrentUser extends ChangeNotifier {
   }
 
   Future<void> signUp(SignUpRequest request) async {
-    await _runAuthAction(() => _service.signUp(request));
+    // Inline (instead of _runAuthAction) so we can surface
+    // EmailVerificationPending to the UI: the email/password sign-up
+    // form catches it and pushes the OTP verification page.
+    _isPerformingAuthAction = true;
+    _lastError = null;
+    notifyListeners();
+    try {
+      final user = await _service.signUp(request);
+      await _touchIdleTimestamp();
+      await _persistUserID(user.id.rawValue);
+      _state = CurrentUserSignedIn(user);
+    } on EmailVerificationPending {
+      rethrow;
+    } on AuthException catch (e) {
+      _lastError = e;
+    } catch (e) {
+      _lastError = AuthException(AuthErrorKind.unknown, e.toString());
+    } finally {
+      _isPerformingAuthAction = false;
+      notifyListeners();
+    }
+  }
+
+  /// Re-issue the 6-digit signup OTP for a pending email account.
+  /// Returns true on success; populates `lastError` on failure (so the
+  /// OTP page can show "频率太高，稍后再试" / similar).
+  ///
+  /// Requires the password the user typed at signup. In the strict-
+  /// confirmation backend the resend goes through the same Edge
+  /// Function as initial signup, which writes (still-unverified) into
+  /// pending_signups.
+  Future<bool> resendSignupOtp({
+    required String email,
+    required String password,
+  }) async {
+    _isPerformingAuthAction = true;
+    _lastError = null;
+    notifyListeners();
+    try {
+      await _service.resendEmailOtp(email: email, password: password);
+      return true;
+    } on AuthException catch (e) {
+      _lastError = e;
+      return false;
+    } catch (e) {
+      _lastError = AuthException(AuthErrorKind.unknown, e.toString());
+      return false;
+    } finally {
+      _isPerformingAuthAction = false;
+      notifyListeners();
+    }
+  }
+
+  /// Verify a 6-digit signup OTP. Promotes state to CurrentUserSignedIn
+  /// on success. Sets lastError on failure (caller's UI shows it).
+  ///
+  /// Requires the password the user typed at signup. The Edge Function
+  /// creates the auth.users row server-side, then this method calls
+  /// signInWithPassword to obtain the session.
+  Future<bool> verifySignupOtp({
+    required String email,
+    required String token,
+    required String password,
+  }) async {
+    _isPerformingAuthAction = true;
+    _lastError = null;
+    notifyListeners();
+    try {
+      final user = await _service.verifyEmailSignupOtp(
+        email: email,
+        token: token,
+        password: password,
+      );
+      await _touchIdleTimestamp();
+      await _persistUserID(user.id.rawValue);
+      _state = CurrentUserSignedIn(user);
+      return true;
+    } on AuthException catch (e) {
+      _lastError = e;
+      return false;
+    } catch (e) {
+      _lastError = AuthException(AuthErrorKind.unknown, e.toString());
+      return false;
+    } finally {
+      _isPerformingAuthAction = false;
+      notifyListeners();
+    }
   }
 
   Future<PhoneVerificationChallenge?> startPhoneVerification(
@@ -148,6 +234,40 @@ class CurrentUser extends ChangeNotifier {
     notifyListeners();
     try {
       await _service.sendPasswordReset(email);
+      return true;
+    } on AuthException catch (e) {
+      _lastError = e;
+      return false;
+    } catch (e) {
+      _lastError = AuthException(AuthErrorKind.unknown, e.toString());
+      return false;
+    } finally {
+      _isPerformingAuthAction = false;
+      notifyListeners();
+    }
+  }
+
+  /// Verify the password-reset OTP and rotate to a new password in a
+  /// single round trip. On success, the user is signed in (Supabase
+  /// recovery verifyOTP issues a session) and we promote state to
+  /// CurrentUserSignedIn so AuthGate routes to HomeScreen.
+  Future<bool> resetPasswordWithOtp({
+    required String email,
+    required String token,
+    required String newPassword,
+  }) async {
+    _isPerformingAuthAction = true;
+    _lastError = null;
+    notifyListeners();
+    try {
+      final user = await _service.resetPasswordWithOtp(
+        email: email,
+        token: token,
+        newPassword: newPassword,
+      );
+      await _touchIdleTimestamp();
+      await _persistUserID(user.id.rawValue);
+      _state = CurrentUserSignedIn(user);
       return true;
     } on AuthException catch (e) {
       _lastError = e;

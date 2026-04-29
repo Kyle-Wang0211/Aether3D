@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import '../../auth/auth_error.dart';
 import '../../auth/current_user.dart';
+import '../../i18n/locale_notifier.dart';
 import '../../l10n/app_localizations.dart';
 import '../design_system.dart';
 import 'email_sign_in_view.dart';
@@ -106,7 +107,12 @@ class _AuthRootViewState extends State<AuthRootView> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const SizedBox(height: AetherSpacing.huge),
+              const SizedBox(height: AetherSpacing.md),
+              const Align(
+                alignment: Alignment.centerRight,
+                child: _LanguageToggle(),
+              ),
+              const SizedBox(height: AetherSpacing.xl),
               _Header(mode: _mode),
               const SizedBox(height: AetherSpacing.xl),
               _ModePicker(
@@ -152,6 +158,70 @@ class _Header extends StatelessWidget {
         const SizedBox(height: 6),
         Text(mode.localizedHeroTagline(l), style: AetherTextStyles.bodySm),
       ],
+    );
+  }
+}
+
+class _LanguageToggle extends StatelessWidget {
+  const _LanguageToggle();
+
+  @override
+  Widget build(BuildContext context) {
+    final notifier = LocaleScope.of(context);
+    final isZh = notifier.isChinese;
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: AetherColors.bgElevated,
+        borderRadius: BorderRadius.circular(AetherRadii.pill),
+        border: Border.all(color: AetherColors.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _segment(
+            label: '中',
+            selected: isZh,
+            onTap: () {
+              if (!isZh) notifier.set(const Locale('zh'));
+            },
+          ),
+          _segment(
+            label: 'EN',
+            selected: !isZh,
+            onTap: () {
+              if (isZh) notifier.set(const Locale('en'));
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _segment({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? AetherColors.primary : Colors.transparent,
+          borderRadius: BorderRadius.circular(AetherRadii.pill),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: selected ? Colors.white : AetherColors.textSecondary,
+          ),
+        ),
+      ),
     );
   }
 }

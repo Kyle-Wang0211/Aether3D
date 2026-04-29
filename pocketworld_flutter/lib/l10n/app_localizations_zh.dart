@@ -237,6 +237,60 @@ class AppL10nZh extends AppL10n {
   String get authErrorDialogTitle => '出错了';
 
   @override
+  String get otpVerifyTitle => '验证邮箱';
+
+  @override
+  String otpVerifySubtitle(String email) {
+    return '我们已向 $email 发送 6 位验证码，请在下方输入完成注册。';
+  }
+
+  @override
+  String get otpInputHint => '6 位验证码';
+
+  @override
+  String get otpVerify => '验证';
+
+  @override
+  String get otpVerifying => '验证中…';
+
+  @override
+  String get otpResend => '重新发送';
+
+  @override
+  String otpResendCooldown(int seconds) {
+    return '$seconds 秒后可重发';
+  }
+
+  @override
+  String get otpResendSent => '已重新发送';
+
+  @override
+  String get otpInvalidCode => '验证码错误或已过期';
+
+  @override
+  String get otpUseAnotherEmail => '换一个邮箱';
+
+  @override
+  String get resetTitle => '重置密码';
+
+  @override
+  String get resetSubtitleEnterEmail => '输入你的邮箱，我们会发送 6 位验证码';
+
+  @override
+  String resetSubtitleEnterCode(String email) {
+    return '我们已向 $email 发送 6 位验证码，请连同新密码一起输入';
+  }
+
+  @override
+  String get resetSendCode => '发送验证码';
+
+  @override
+  String get resetNewPasswordHint => '新密码（至少 8 位）';
+
+  @override
+  String get resetConfirm => '重置密码';
+
+  @override
   String get captureRecording => '正在采集';
 
   @override

@@ -1,0 +1,8 @@
+# Supabase CLI runtime cache — created automatically on `supabase link`,
+# contains machine-specific paths and project metadata (pooler URL,
+# detected service versions, etc). Not portable across developers.
+.temp/
+
+# Local dev artifacts that some `supabase ...` subcommands drop here.
+.env.local
+config.toml.bak

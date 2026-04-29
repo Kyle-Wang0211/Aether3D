@@ -124,7 +124,9 @@ Future<void> main() async {
         );
       }
       if (supabaseReady) {
-        currentUser.swapService(SupabaseAuthServiceImpl());
+        currentUser.swapService(
+          SupabaseAuthServiceImpl(localeNotifier: localeNotifier),
+        );
       }
       await currentUser.bootstrap();
     }());

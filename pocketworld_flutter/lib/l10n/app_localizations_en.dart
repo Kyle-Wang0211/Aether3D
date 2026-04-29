@@ -240,6 +240,61 @@ class AppL10nEn extends AppL10n {
   String get authErrorDialogTitle => 'Something went wrong';
 
   @override
+  String get otpVerifyTitle => 'Verify your email';
+
+  @override
+  String otpVerifySubtitle(String email) {
+    return 'We sent a 6-digit code to $email. Enter it below to finish signing up.';
+  }
+
+  @override
+  String get otpInputHint => '6-digit code';
+
+  @override
+  String get otpVerify => 'Verify';
+
+  @override
+  String get otpVerifying => 'Verifying…';
+
+  @override
+  String get otpResend => 'Resend code';
+
+  @override
+  String otpResendCooldown(int seconds) {
+    return 'Resend in ${seconds}s';
+  }
+
+  @override
+  String get otpResendSent => 'Code re-sent';
+
+  @override
+  String get otpInvalidCode => 'Invalid or expired code';
+
+  @override
+  String get otpUseAnotherEmail => 'Use a different email';
+
+  @override
+  String get resetTitle => 'Reset password';
+
+  @override
+  String get resetSubtitleEnterEmail =>
+      'Enter your email and we\'ll send you a 6-digit verification code.';
+
+  @override
+  String resetSubtitleEnterCode(String email) {
+    return 'We sent a 6-digit code to $email. Enter it together with your new password.';
+  }
+
+  @override
+  String get resetSendCode => 'Send code';
+
+  @override
+  String get resetNewPasswordHint => 'New password (min 8 chars)';
+
+  @override
+  String get resetConfirm => 'Reset password';
+
+  @override
   String get captureRecording => 'Recording';
 
   @override

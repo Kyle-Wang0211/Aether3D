@@ -102,6 +102,33 @@
   "authTermsAcceptance": "By signing up you agree to PocketWorld's Terms of Service and Privacy Policy.",
   "authErrorDialogTitle": "Something went wrong",
 
+  "otpVerifyTitle": "Verify your email",
+  "otpVerifySubtitle": "We sent a 6-digit code to {email}. Enter it below to finish signing up.",
+  "@otpVerifySubtitle": {
+    "placeholders": { "email": { "type": "String" } }
+  },
+  "otpInputHint": "6-digit code",
+  "otpVerify": "Verify",
+  "otpVerifying": "Verifying…",
+  "otpResend": "Resend code",
+  "otpResendCooldown": "Resend in {seconds}s",
+  "@otpResendCooldown": {
+    "placeholders": { "seconds": { "type": "int" } }
+  },
+  "otpResendSent": "Code re-sent",
+  "otpInvalidCode": "Invalid or expired code",
+  "otpUseAnotherEmail": "Use a different email",
+
+  "resetTitle": "Reset password",
+  "resetSubtitleEnterEmail": "Enter your email and we'll send you a 6-digit verification code.",
+  "resetSubtitleEnterCode": "We sent a 6-digit code to {email}. Enter it together with your new password.",
+  "@resetSubtitleEnterCode": {
+    "placeholders": { "email": { "type": "String" } }
+  },
+  "resetSendCode": "Send code",
+  "resetNewPasswordHint": "New password (min 8 chars)",
+  "resetConfirm": "Reset password",
+
   "captureRecording": "Recording",
   "captureRecBadge": "REC",
   "captureViewerTitleFallback": "Viewer",
