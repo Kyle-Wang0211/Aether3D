@@ -12,6 +12,8 @@
 // code, no platform conditionals — same UI on iOS / Android / HarmonyOS
 // / Web.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart' hide View;
 // thermion_flutter re-declares `VoidCallback` as an ffi pointer typedef,
 // which clashes with Flutter's `void Function()` typedef of the same
@@ -22,6 +24,8 @@ import 'package:vector_math/vector_math_64.dart' as v64;
 import '../community/anchor_viewer.dart';
 import '../community/community_service.dart';
 import '../community/feed_models.dart';
+import '../community/glb_asset_cache.dart';
+import '../community/glb_cache.dart';
 import '../l10n/app_localizations.dart';
 import 'community/post_card.dart';
 import 'community/work_detail_page.dart';
@@ -145,6 +149,21 @@ class _VaultPageState extends State<VaultPage> {
     // hoist feed state into a ChangeNotifier.
   }
 
+  /// Fire-and-forget bytes-only prefetch for an upcoming card. We
+  /// dedupe via GlbCache.fetch's in-flight + memory + disk layers, so
+  /// calling this on every visibility change is cheap once a URL has
+  /// been seen. catchError swallows network blips so they don't bubble
+  /// up — we'll just naturally re-attempt when the user actually
+  /// scrolls there.
+  void _kickPrefetch(FeedWork work) {
+    final path = work.modelStoragePath;
+    if (path == null) return;
+    final url = _service.modelUrlFor(path);
+    unawaited(GlbCache.instance.fetch(url).catchError((Object _) {
+      return Uint8List(0);
+    }));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -244,8 +263,27 @@ class _VaultPageState extends State<VaultPage> {
               work: w,
               service: _service,
               isFocused: _focusedWorkId == w.id,
-              onVisibilityChanged: (fraction) =>
-                  _onCardVisibilityChanged(w.id, fraction),
+              onVisibilityChanged: (fraction) {
+                _onCardVisibilityChanged(w.id, fraction);
+                // Predictive byte-prefetch (Reels / TikTok pattern):
+                // as soon as a card peeks in, kick off bytes-only
+                // downloads for the next 1–2 cards through the same
+                // GlbCache the actual viewer will read from. By the
+                // time the user scrolls there, the GLB is already on
+                // disk — no perceptible load wait. Bytes-only is
+                // intentional: GlbAssetCache.getOrLoad would also
+                // allocate Filament GPU resources, which is wasteful
+                // for cards the user may swipe past without ever
+                // looking at.
+                if (fraction > 0.05) {
+                  for (int j = 1; j <= 2; j++) {
+                    final nextIdx = i + j;
+                    if (nextIdx < works.length) {
+                      _kickPrefetch(works[nextIdx]);
+                    }
+                  }
+                }
+              },
               onWorkUpdated: (updated) => _onWorkUpdated(i, updated),
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -411,9 +449,14 @@ class _CommunityTabPill extends StatelessWidget {
 /// IgnorePointer in VaultPage's Stack, so it doesn't show or steal hit
 /// tests, but the underlying Filament viewer stays alive for as long as
 /// the community feed page is on the route stack.
-class _AnchorHost extends StatelessWidget {
+class _AnchorHost extends StatefulWidget {
   const _AnchorHost();
 
+  @override
+  State<_AnchorHost> createState() => _AnchorHostState();
+}
+
+class _AnchorHostState extends State<_AnchorHost> {
   @override
   Widget build(BuildContext context) {
     return ViewerWidget(
@@ -428,6 +471,23 @@ class _AnchorHost extends StatelessWidget {
         AnchorViewer.set(v);
       },
     );
+  }
+
+  @override
+  void dispose() {
+    // The ViewerWidget below us tears down its Filament viewer on
+    // unmount. Two singletons hold references that survive that
+    // tear-down and would point at freed Filament objects on the next
+    // mount (typically: user signs out → AuthGate swaps HomeScreen for
+    // AuthRootView → VaultPage unmounts → THIS dispose runs → user
+    // signs back in → fresh HomeScreen → fresh per-card LiveModelView
+    // calls GlbAssetCache.getOrLoad → cache returns the cached asset
+    // whose Filament pointers are stale → addToScene() crashes the
+    // RenderThread with "Object doesn't exist (double free?)").
+    // Reset both so the next sign-in starts clean.
+    GlbAssetCache.instance.clear();
+    AnchorViewer.clear();
+    super.dispose();
   }
 }
 
