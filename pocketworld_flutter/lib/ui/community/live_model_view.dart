@@ -165,6 +165,18 @@ class _LiveModelViewState extends State<LiveModelView>
   // as "the whole thing" instead of "a top-down peek at the chassis".
   late double _orbitElevation = 0.05;
   late double _orbitRadius = widget.cameraDistance;
+
+  // ─── Auto-fit ────────────────────────────────────────────────────────
+  // `widget.cameraDistance` is only the initial / fallback value. After
+  // the asset lands in the scene we ask thermion for its bounding box,
+  // grab Filament's actual FOV, and compute the distance that frames
+  // the post-transform unit sphere (transformToUnitCube=true scales the
+  // longest axis to 1, so the model's bounding sphere has radius
+  // halfExtents.length / max(halfExtents)). Standard three.js fit
+  // formula: distance = radius / sin(fov/2) × padding.
+  double? _fittedDistance;
+  double get _autoRotateDistance =>
+      _fittedDistance ?? widget.cameraDistance;
   double _pinchStartRadius = 0.0;
 
   // ≈5× Thermion's stock 0.001/event so a half-screen drag rotates
@@ -231,6 +243,14 @@ class _LiveModelViewState extends State<LiveModelView>
             '(probably viewer disposed mid-load): $e\n$st');
         return;
       }
+
+      // Auto-fit: thermion knows the asset's local-space AABB; the
+      // unit-cube transform scales the longest axis to 1; combine with
+      // Filament's FOV to land on a distance that frames the model
+      // regardless of its proportions. Failures fall back to
+      // widget.cameraDistance.
+      await _computeFit(_asset!, _camera!);
+      if (_disposed) return;
 
       if (widget.interactive) {
         await _applyOrbit();
@@ -307,7 +327,7 @@ class _LiveModelViewState extends State<LiveModelView>
         if (_disposed) return;
         _camera = cam;
       }
-      final r = widget.cameraDistance;
+      final r = _autoRotateDistance;
       // Near-horizontal eye (~3° tilt) on the orbit plane. Keeps wide
       // models like ToyCar fully in frame as the camera spins. Focus
       // is the unit-cube center (transformToUnitCube re-centers any
@@ -362,6 +382,45 @@ class _LiveModelViewState extends State<LiveModelView>
       await cam.lookAt(eye, focus: v64.Vector3.zero());
     } catch (_) {
       _camera = null;
+    }
+  }
+
+  /// Three.js-style fit-to-bounds. Reads the asset's local AABB from
+  /// thermion, derives the post-`transformToUnitCube` bounding-sphere
+  /// radius, fetches Filament's tighter FOV, and lands on the distance
+  /// that just contains the model with a small padding multiplier. On
+  /// any failure we silently keep `widget.cameraDistance` so the UI
+  /// never breaks — bad framing is preferable to no model.
+  Future<void> _computeFit(ThermionAsset asset, Camera camera) async {
+    try {
+      final aabb = await asset.getBoundingBox();
+      if (_disposed) return;
+      // vector_math's Aabb3 exposes min/max only; derive half-extents.
+      final hx = (aabb.max.x - aabb.min.x) * 0.5;
+      final hy = (aabb.max.y - aabb.min.y) * 0.5;
+      final hz = (aabb.max.z - aabb.min.z) * 0.5;
+      final maxAxis = math.max(hx, math.max(hy, hz));
+      if (!maxAxis.isFinite || maxAxis <= 0) return;
+      // transformToUnitCube scales the longest axis to length 2 (so
+      // halfExtent on that axis becomes 1.0). The post-transform
+      // bounding sphere radius is therefore |halfExtents| / maxAxis.
+      final radius =
+          math.sqrt(hx * hx + hy * hy + hz * hz) / maxAxis;
+      final fovV = await camera.getVerticalFieldOfView();
+      final fovH = await camera.getHorizontalFieldOfView();
+      if (_disposed) return;
+      final fov = math.min(fovV, fovH);
+      if (!fov.isFinite || fov <= 0) return;
+      const padding = 1.20; // 20% breathing room around the sphere
+      final dist = (radius / math.sin(fov / 2)) * padding;
+      if (!dist.isFinite || dist <= 0) return;
+      _fittedDistance = dist;
+      _orbitRadius = dist;
+      if (mounted && !_disposed) {
+        setState(() {});
+      }
+    } catch (e, s) {
+      debugPrint('[LiveModelView] _computeFit failed: $e\n$s');
     }
   }
 
