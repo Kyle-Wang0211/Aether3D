@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local-only seed assets pulled in via tool scripts (Khronos sample
+# GLBs, etc.). Don't commit the raw downloads — they're large and
+# fetched on demand.
+/tool/sample_imports/
