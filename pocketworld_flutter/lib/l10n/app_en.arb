@@ -74,6 +74,10 @@
   "@relativeMonthsAgo": { "placeholders": { "n": { "type": "int" } } },
 
   "meSettingsTitle": "Settings",
+  "meSyncAddedWorks": "Synced {n} new work(s)",
+  "@meSyncAddedWorks": { "placeholders": { "n": { "type": "int" } } },
+  "meSyncUpToDate": "Already up to date",
+  "meSyncFailed": "Sync failed",
   "meEdit": "Edit",
   "meWorks": "Works",
   "meRunning": "Running",

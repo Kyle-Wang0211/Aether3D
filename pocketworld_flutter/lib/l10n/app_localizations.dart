@@ -365,6 +365,24 @@ abstract class AppL10n {
   /// **'Settings'**
   String get meSettingsTitle;
 
+  /// No description provided for @meSyncAddedWorks.
+  ///
+  /// In en, this message translates to:
+  /// **'Synced {n} new work(s)'**
+  String meSyncAddedWorks(int n);
+
+  /// No description provided for @meSyncUpToDate.
+  ///
+  /// In en, this message translates to:
+  /// **'Already up to date'**
+  String get meSyncUpToDate;
+
+  /// No description provided for @meSyncFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Sync failed'**
+  String get meSyncFailed;
+
   /// No description provided for @meEdit.
   ///
   /// In en, this message translates to:

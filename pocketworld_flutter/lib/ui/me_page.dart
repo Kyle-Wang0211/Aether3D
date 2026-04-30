@@ -9,6 +9,7 @@ import '../auth/auth_models.dart';
 import '../auth/auth_scope.dart';
 import '../i18n/relative_time.dart';
 import '../l10n/app_localizations.dart';
+import '../me/my_works_sync_service.dart';
 import '../me/scan_record_store.dart';
 import 'design_system.dart';
 import 'home_view_model.dart';
@@ -49,6 +50,30 @@ class _MePageState extends State<MePage> {
     ));
   }
 
+  Future<void> _onRefresh() async {
+    final l = AppL10n.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final added = await MyWorksSyncService.instance.refreshFromCloud();
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(
+        content: Text(added > 0
+            ? l.meSyncAddedWorks(added)
+            : l.meSyncUpToDate),
+        behavior: SnackBarBehavior.floating,
+      ));
+      // While we're at it, refresh notif/privacy too — cheap and keeps
+      // the settings page consistent.
+      await _stats.load();
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(
+        content: Text('${l.meSyncFailed}: $e'),
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // 2026-04-28: defensive — in release builds, AuthScope.of's null assert
@@ -78,14 +103,21 @@ class _MePageState extends State<MePage> {
       backgroundColor: AetherColors.bg,
       body: SafeArea(
         bottom: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(
-            AetherSpacing.lg,
-            AetherSpacing.md,
-            AetherSpacing.lg,
-            140,
-          ),
-          children: [
+        child: RefreshIndicator(
+          onRefresh: _onRefresh,
+          color: AetherColors.primary,
+          backgroundColor: AetherColors.bgCanvas,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(
+              parent: BouncingScrollPhysics(),
+            ),
+            padding: const EdgeInsets.fromLTRB(
+              AetherSpacing.lg,
+              AetherSpacing.md,
+              AetherSpacing.lg,
+              140,
+            ),
+            children: [
             SizedBox(
               height: 56,
               child: Stack(
@@ -117,6 +149,7 @@ class _MePageState extends State<MePage> {
               child: _MyWorksSection(),
             ),
           ],
+          ),
         ),
       ),
     );

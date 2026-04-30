@@ -162,6 +162,17 @@ class AppL10nEn extends AppL10n {
   String get meSettingsTitle => 'Settings';
 
   @override
+  String meSyncAddedWorks(int n) {
+    return 'Synced $n new work(s)';
+  }
+
+  @override
+  String get meSyncUpToDate => 'Already up to date';
+
+  @override
+  String get meSyncFailed => 'Sync failed';
+
+  @override
   String get meEdit => 'Edit';
 
   @override

@@ -52,6 +52,9 @@
   "relativeMonthsAgo": "{n} 个月前",
 
   "meSettingsTitle": "设置",
+  "meSyncAddedWorks": "已同步 {n} 件新作品",
+  "meSyncUpToDate": "已是最新",
+  "meSyncFailed": "同步失败",
   "meEdit": "编辑",
   "meWorks": "作品",
   "meRunning": "进行中",

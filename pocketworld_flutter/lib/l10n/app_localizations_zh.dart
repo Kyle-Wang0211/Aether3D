@@ -161,6 +161,17 @@ class AppL10nZh extends AppL10n {
   String get meSettingsTitle => '设置';
 
   @override
+  String meSyncAddedWorks(int n) {
+    return '已同步 $n 件新作品';
+  }
+
+  @override
+  String get meSyncUpToDate => '已是最新';
+
+  @override
+  String get meSyncFailed => '同步失败';
+
+  @override
   String get meEdit => '编辑';
 
   @override
