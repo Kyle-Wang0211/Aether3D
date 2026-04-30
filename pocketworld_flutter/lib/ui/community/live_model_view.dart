@@ -82,10 +82,14 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart' hide View;
 import 'package:flutter/scheduler.dart';
-import 'package:thermion_flutter/thermion_flutter.dart';
+// thermion_flutter re-declares VoidCallback as an ffi pointer typedef
+// that clashes with Flutter's `void Function()` of the same name. We
+// don't use thermion's, so hide it.
+import 'package:thermion_flutter/thermion_flutter.dart' hide VoidCallback;
 import 'package:vector_math/vector_math_64.dart' as v64;
 
 import '../../community/glb_asset_cache.dart';
+import '../design_system.dart';
 
 class LiveModelView extends StatefulWidget {
   final String modelUrl;
@@ -126,7 +130,6 @@ class LiveModelView extends StatefulWidget {
 class _LiveModelViewState extends State<LiveModelView>
     with SingleTickerProviderStateMixin {
   ThermionViewer? _viewer;
-  ThermionAsset? _asset;
   // Cached at onViewerReady so the tick / gesture handlers don't FFI-
   // call viewer.getActiveCamera() per event AND so we have a stable
   // handle that can't get yanked out from under us mid-tick.
@@ -193,10 +196,15 @@ class _LiveModelViewState extends State<LiveModelView>
   static const double _maxRadius = 20.0;
 
   // ─── Load gating ─────────────────────────────────────────────────────
-  // Stays false until the asset is in the scene; while false, the build
-  // overlays an opaque cover so the user never sees Thermion's red
-  // texture-allocation fallback.
+  // _modelReady stays false until the asset is in the scene + the first
+  // textured frame has rendered. _loadFailed flips when the bytes /
+  // parse / addToScene step gives up. The cover layer reads both: not-
+  // ready shows a thumbnail + spinner; failed shows a tap-to-retry
+  // affordance. Without _loadFailed the cover stays opaque forever on
+  // any error and the user sees a permanently white card — that's the
+  // "the feed never loads any model" complaint.
   bool _modelReady = false;
+  bool _loadFailed = false;
   bool _disposed = false;
 
   Future<void> _onViewerReady(ThermionViewer viewer) async {
@@ -217,15 +225,39 @@ class _LiveModelViewState extends State<LiveModelView>
       if (_disposed) return;
       _camera = await viewer.getActiveCamera();
       if (_disposed) return;
+      await _loadAsset();
+    } catch (e, st) {
+      debugPrint('[LiveModelView] viewer init failed for ${widget.modelUrl}: '
+          '$e\n$st');
+      _markLoadFailed();
+    }
+  }
 
+  /// Asset-only load step, factored out of _onViewerReady so retry
+  /// (the failure-state tap target) can re-run it without redoing the
+  /// expensive viewer setup.
+  Future<void> _loadAsset() async {
+    final viewer = _viewer;
+    final camera = _camera;
+    if (viewer == null || camera == null || _disposed) return;
+    if (mounted) {
+      setState(() {
+        _loadFailed = false;
+        _modelReady = false;
+      });
+    }
+    try {
       // Asset is owned by the anchor viewer (lib/community/anchor_viewer.dart),
       // not by us — so when this card's viewer disposes, the asset stays
       // alive in GPU memory. First request for a URL pays the parse +
       // upload (~200ms); every subsequent mount, including detail-page
       // push and feed return, is just a scene-list bookkeeping op (~5ms).
       final asset = await _fetchAsset();
-      if (_disposed || asset == null) return;
-      _asset = asset;
+      if (_disposed) return;
+      if (asset == null) {
+        _markLoadFailed();
+        return;
+      }
       // Defensive: between this widget mounting and the asset coming
       // back from cache, Filament's underlying engine could have been
       // torn down (race during fast nav out + back). The FFI call
@@ -234,13 +266,14 @@ class _LiveModelViewState extends State<LiveModelView>
       // leaves iOS stuck on the launch screen. A try/catch around the
       // FFI calls converts that into a recoverable failure.
       try {
-        await viewer.addToScene(_asset!);
+        await viewer.addToScene(asset);
         if (_disposed) return;
-        await _asset!.setCastShadows(false);
+        await asset.setCastShadows(false);
       } catch (e, st) {
         debugPrint(
             '[LiveModelView] addToScene failed for ${widget.modelUrl} '
             '(probably viewer disposed mid-load): $e\n$st');
+        _markLoadFailed();
         return;
       }
 
@@ -249,7 +282,7 @@ class _LiveModelViewState extends State<LiveModelView>
       // Filament's FOV to land on a distance that frames the model
       // regardless of its proportions. Failures fall back to
       // widget.cameraDistance.
-      await _computeFit(_asset!, _camera!);
+      await _computeFit(asset, camera);
       if (_disposed) return;
 
       if (widget.interactive) {
@@ -268,11 +301,28 @@ class _LiveModelViewState extends State<LiveModelView>
       if (_disposed || !mounted) return;
       await Future<void>.delayed(const Duration(milliseconds: 80));
       if (_disposed || !mounted) return;
-      setState(() => _modelReady = true);
+      setState(() {
+        _modelReady = true;
+        _loadFailed = false;
+      });
     } catch (e, st) {
       debugPrint(
           '[LiveModelView] load failed for ${widget.modelUrl}: $e\n$st');
+      _markLoadFailed();
     }
+  }
+
+  void _markLoadFailed() {
+    if (_disposed || !mounted) return;
+    setState(() {
+      _loadFailed = true;
+      _modelReady = false;
+    });
+  }
+
+  void _retryLoad() {
+    if (_disposed) return;
+    unawaited(_loadAsset());
   }
 
   Future<ThermionAsset?> _fetchAsset() async {
@@ -452,7 +502,6 @@ class _LiveModelViewState extends State<LiveModelView>
     // on SceneAsset destruction → EXC_BAD_ACCESS in
     // thermion_dart`SceneAsset_destroy.
     _viewer = null;
-    _asset = null;
     _camera = null;
     super.dispose();
   }
@@ -492,26 +541,97 @@ class _LiveModelViewState extends State<LiveModelView>
         fit: StackFit.expand,
         children: [
           viewer,
-          // Opaque cover that hides the texture-allocation red flash.
-          // Stays in the tree the whole time but fades from opaque to
-          // transparent once _modelReady flips. Crossfade (300ms) is
-          // long enough to cover the small race between "asset added
-          // to scene" and "Filament has actually rendered a textured
-          // frame", which a hard switch sometimes leaks as a red
-          // flash for one or two frames. IgnorePointer flips off once
-          // we're transparent so any underlying GestureDetector (in
-          // interactive mode) takes hits as soon as the cover starts
-          // fading.
+          // Cover layer. Stays in the tree the whole time, fading from
+          // opaque to transparent once _modelReady flips. The 300ms
+          // crossfade covers the race between "asset added to scene"
+          // and "Filament has rendered a textured frame", which a
+          // hard switch occasionally leaks as a red ThermionTexture
+          // flash for a frame or two. IgnorePointer flips off as soon
+          // as we're ready so the underlying GestureDetector (in
+          // interactive mode) gets hits.
+          //
+          // The cover's CONTENT depends on state:
+          //   • loading (default): subtle gradient + small spinner so
+          //     the user has a "something is happening" signal during
+          //     the seconds-scale download of bigger GLBs.
+          //   • failed: same gradient + a tap-to-retry affordance so
+          //     a transient network blip doesn't leave a permanently
+          //     blank card. Without this branch, an exception in
+          //     _loadAsset leaves _modelReady=false forever and the
+          //     user just sees a white card forever — that's the
+          //     "feed never loads any model" symptom.
           IgnorePointer(
             ignoring: _modelReady,
             child: AnimatedOpacity(
               opacity: _modelReady ? 0.0 : 1.0,
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeOut,
-              child: ColoredBox(color: widget.background),
+              child: _LoadCover(
+                failed: _loadFailed,
+                onRetry: _retryLoad,
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _LoadCover extends StatelessWidget {
+  final bool failed;
+  final VoidCallback onRetry;
+
+  const _LoadCover({required this.failed, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    final gradient = LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [Colors.grey.shade100, Colors.grey.shade200],
+    );
+    if (failed) {
+      return GestureDetector(
+        onTap: onRetry,
+        behavior: HitTestBehavior.opaque,
+        child: DecoratedBox(
+          decoration: BoxDecoration(gradient: gradient),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                Icon(
+                  Icons.refresh_rounded,
+                  size: 32,
+                  color: AetherColors.textTertiary,
+                ),
+                SizedBox(height: 6),
+                Text(
+                  'Tap to retry',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AetherColors.textTertiary,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(gradient: gradient),
+      child: const Center(
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(AetherColors.primary),
+          ),
+        ),
       ),
     );
   }

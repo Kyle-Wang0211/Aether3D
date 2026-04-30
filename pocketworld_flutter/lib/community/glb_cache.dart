@@ -28,7 +28,12 @@ class GlbCache {
   final Dio _dio = Dio(BaseOptions(
     responseType: ResponseType.bytes,
     connectTimeout: const Duration(seconds: 15),
-    receiveTimeout: const Duration(seconds: 60),
+    // 17MB+ GLBs (e.g. AntiqueCamera Khronos sample) need more than the
+    // old 60s ceiling on slower mobile networks — a typical 2-3 Mbps
+    // cellular link takes 50-70s alone, then add backoff/jitter and
+    // we'd reliably time out. 180s gives comfortable headroom; the
+    // user can still kill the request by scrolling away.
+    receiveTimeout: const Duration(seconds: 180),
   ));
 
   final Map<String, Uint8List> _mem = <String, Uint8List>{};
