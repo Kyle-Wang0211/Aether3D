@@ -1,250 +1,432 @@
-// VaultPage — "仓库" tab. Port of HomePage.swift.
+// VaultPage — community feed (the "社区 / Community" tab).
 //
-// Layout:
-//   • AETHER3D wordmark (big, centered)
-//   • optional summary strip: "进行中 × N  待处理 × N" pills, only
-//     shown when there are running / attention records.
-//   • waterfall gallery: two columns, even-index records left, odd-
-//     index right, deterministic height pattern per column.
-//   • floating camera FAB at bottom-right → opens the capture mode
-//     selection page (the "拍摄入口 先随便放一下" from today's spec;
-//     final placement / affordance to be decided in a later round).
+// 2026-04-30 redesign:
+//   • Sticky top: search bar + 3-tab segmented control (热门 / 附近 /
+//     发现). Tapping a tab refetches the feed with a different sort key;
+//     "附近 / Nearby" is a coming-soon stub since profiles.location is
+//     plain text and we have no geo schema yet.
+//   • Below: the same vertical PostCard list as before, sourced from
+//     CommunityService.fetchPublicFeed(sortBy, query).
+//
+// Cross-platform: pure Flutter widgets + supabase_flutter. No native
+// code, no platform conditionals — same UI on iOS / Android / HarmonyOS
+// / Web.
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide View;
+// thermion_flutter re-declares `VoidCallback` as an ffi pointer typedef,
+// which clashes with Flutter's `void Function()` typedef of the same
+// name. We don't use thermion's version here, so hide it.
+import 'package:thermion_flutter/thermion_flutter.dart' hide VoidCallback;
+import 'package:vector_math/vector_math_64.dart' as v64;
 
-import '../i18n/relative_time.dart';
+import '../community/anchor_viewer.dart';
+import '../community/community_service.dart';
+import '../community/feed_models.dart';
 import '../l10n/app_localizations.dart';
-import 'capture_mode_selection_page.dart';
-import 'capture_page.dart' show CapturePageBuilder;
+import 'community/post_card.dart';
+import 'community/work_detail_page.dart';
 import 'design_system.dart';
-import 'home_view_model.dart';
-import 'scan_record.dart';
-import 'scan_record_cell.dart';
+
+enum _CommunityTab { hot, nearby, discover }
 
 class VaultPage extends StatefulWidget {
-  /// Carries the in-progress 3D Texture viewer state down into the
-  /// capture page (wired through the mode selection page).
-  final CapturePageBuilder capturePageBuilder;
-
-  const VaultPage({super.key, required this.capturePageBuilder});
+  const VaultPage({super.key});
 
   @override
   State<VaultPage> createState() => _VaultPageState();
 }
 
 class _VaultPageState extends State<VaultPage> {
-  final HomeViewModel _vm = HomeViewModel();
+  final CommunityService _service = CommunityService();
+  final TextEditingController _searchController = TextEditingController();
+  late Future<List<FeedWork>> _feed;
+  _CommunityTab _tab = _CommunityTab.discover;
+  String _query = '';
+
+  // Per-card visibility tracking. PostCards report their visibility
+  // fraction via onVisibilityChanged; we pick the highest-visibility
+  // work as the "focused" one (Polycam-style — the most-centered card
+  // is the one whose 3D model auto-rotates).
+  final Map<String, double> _visibilityByWorkId = {};
+  String? _focusedWorkId;
+  static const double _focusThreshold = 0.55;
 
   @override
   void initState() {
     super.initState();
-    _vm.addListener(_onVmChanged);
-    _vm.loadRecords();
+    _feed = _loadFeed();
   }
 
   @override
   void dispose() {
-    _vm.removeListener(_onVmChanged);
-    _vm.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
-  void _onVmChanged() {
-    if (mounted) setState(() {});
+  Future<List<FeedWork>> _loadFeed() {
+    if (_tab == _CommunityTab.nearby) {
+      // Geo schema isn't in place yet; return empty so the coming-soon
+      // state takes over without burning a query.
+      return Future.value(const <FeedWork>[]);
+    }
+    return _service.fetchPublicFeed(
+      limit: 20,
+      sortBy: _tab == _CommunityTab.hot ? FeedSort.hot : FeedSort.recent,
+      query: _query.isEmpty ? null : _query,
+    );
   }
 
-  void _openCapture() async {
-    final chosen = await Navigator.of(context).push<CaptureMode>(
-      MaterialPageRoute(
-        builder: (_) => CaptureModeSelectionPage(
-          capturePageBuilder: widget.capturePageBuilder,
-        ),
-        fullscreenDialog: false,
-      ),
-    );
-    if (!mounted || chosen == null) return;
-    // Nothing to persist for now — the mode selection page pushes the
-    // capture page itself. Leaving this hook so the "last selected
-    // mode" AppStorage shortcut from the prototype can be wired later.
+  Future<void> _refresh() async {
+    final next = _loadFeed();
+    setState(() {
+      _feed = next;
+      _visibilityByWorkId.clear();
+      _focusedWorkId = null;
+    });
+    await next;
+  }
+
+  void _onTabChanged(_CommunityTab next) {
+    if (next == _tab) return;
+    setState(() {
+      _tab = next;
+      _feed = _loadFeed();
+      _visibilityByWorkId.clear();
+      _focusedWorkId = null;
+    });
+  }
+
+  void _onQuerySubmitted(String value) {
+    final trimmed = value.trim();
+    if (trimmed == _query) return;
+    setState(() {
+      _query = trimmed;
+      _feed = _loadFeed();
+      _visibilityByWorkId.clear();
+      _focusedWorkId = null;
+    });
+  }
+
+  void _onClearQuery() {
+    if (_query.isEmpty && _searchController.text.isEmpty) return;
+    _searchController.clear();
+    setState(() {
+      _query = '';
+      _feed = _loadFeed();
+      _visibilityByWorkId.clear();
+      _focusedWorkId = null;
+    });
+  }
+
+  /// Recompute which card should rotate. Picks the card with the highest
+  /// visibility fraction above the focus threshold.
+  void _recomputeFocus() {
+    String? next;
+    double bestVisibility = _focusThreshold;
+    for (final entry in _visibilityByWorkId.entries) {
+      if (entry.value > bestVisibility) {
+        bestVisibility = entry.value;
+        next = entry.key;
+      }
+    }
+    if (next != _focusedWorkId) {
+      setState(() => _focusedWorkId = next);
+    }
+  }
+
+  void _onCardVisibilityChanged(String workId, double fraction) {
+    _visibilityByWorkId[workId] = fraction;
+    _recomputeFocus();
+  }
+
+  void _onWorkUpdated(int index, FeedWork updated) {
+    // PostCard already keeps its own copy in State so the parent doesn't
+    // need to rebuild on a like toggle. Hook left in for the day we
+    // hoist feed state into a ChangeNotifier.
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AetherColors.bg,
-      body: Stack(
-        children: [
-          SafeArea(
-            bottom: false,
-            child: CustomScrollView(
-              slivers: [
-                SliverToBoxAdapter(
-                  child: DesignBox(
-                    kind: DesignKind.customizable,
-                    label: 'Wordmark',
-                    child: _Header(),
-                  ),
-                ),
-                // Community feed shouldn't expose authoring/processing
-                // state (Running / Attention pills moved to the owner-
-                // facing "我的作品" section under Me).
-                SliverPadding(
+      backgroundColor: AetherColors.bgCanvas,
+      body: SafeArea(
+        bottom: false,
+        child: Stack(
+          children: [
+            Column(
+              children: [
+                Padding(
                   padding: const EdgeInsets.fromLTRB(
                     AetherSpacing.lg,
+                    AetherSpacing.md,
                     AetherSpacing.lg,
-                    AetherSpacing.lg,
-                    140,
+                    AetherSpacing.sm,
                   ),
-                  sliver: _vm.isLoading
-                      ? const SliverFillRemaining(
-                          hasScrollBody: false,
-                          child: _LoadingState(),
-                        )
-                      : _vm.scanRecords.isEmpty
-                          ? const SliverFillRemaining(
-                              hasScrollBody: false,
-                              child: _EmptyState(),
-                            )
-                          : SliverToBoxAdapter(
-                              child: DesignBox(
-                                kind: DesignKind.backendNeeded,
-                                label: '作品瀑布流',
-                                child: _Waterfall(
-                                  vm: _vm,
-                                  capturePageBuilder: widget.capturePageBuilder,
-                                ),
-                              ),
-                            ),
+                  child: _SearchBar(
+                    controller: _searchController,
+                    hasQuery: _query.isNotEmpty,
+                    onSubmitted: _onQuerySubmitted,
+                    onClear: _onClearQuery,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AetherSpacing.lg,
+                    0,
+                    AetherSpacing.lg,
+                    AetherSpacing.sm,
+                  ),
+                  child: _CommunityTabBar(
+                    selected: _tab,
+                    onChanged: _onTabChanged,
+                  ),
+                ),
+                Expanded(
+                  child: RefreshIndicator(
+                    onRefresh: _refresh,
+                    child: _buildFeed(),
+                  ),
                 ),
               ],
             ),
+            // 1×1 invisible "anchor" Filament viewer. Stays mounted for
+            // the lifetime of VaultPage; every shared .glb asset is
+            // loaded through it (lib/community/glb_asset_cache.dart).
+            const Positioned(
+              left: 0,
+              top: 0,
+              width: 1,
+              height: 1,
+              child: IgnorePointer(child: _AnchorHost()),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFeed() {
+    return FutureBuilder<List<FeedWork>>(
+      future: _feed,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) {
+          return const _LoadingState();
+        }
+        if (snap.hasError) {
+          return _ErrorState(
+            message: snap.error.toString(),
+            onRetry: _refresh,
+          );
+        }
+        final works = snap.data ?? const <FeedWork>[];
+        if (_tab == _CommunityTab.nearby) {
+          return const _NearbyComingSoonState();
+        }
+        if (works.isEmpty) {
+          return const _EmptyState();
+        }
+        return ListView.separated(
+          physics: const AlwaysScrollableScrollPhysics(
+            parent: BouncingScrollPhysics(),
           ),
-          Positioned(
-            right: AetherSpacing.xl,
-            bottom: AetherSpacing.xl,
-            child: DesignBox(
-              kind: DesignKind.customizable,
-              label: '拍摄入口',
-              child: _CaptureFab(onTap: _openCapture),
+          padding: const EdgeInsets.fromLTRB(
+            AetherSpacing.lg,
+            AetherSpacing.md,
+            AetherSpacing.lg,
+            140,
+          ),
+          itemCount: works.length,
+          separatorBuilder: (_, _) =>
+              const SizedBox(height: AetherSpacing.lg),
+          itemBuilder: (ctx, i) {
+            final w = works[i];
+            return PostCard(
+              work: w,
+              service: _service,
+              isFocused: _focusedWorkId == w.id,
+              onVisibilityChanged: (fraction) =>
+                  _onCardVisibilityChanged(w.id, fraction),
+              onWorkUpdated: (updated) => _onWorkUpdated(i, updated),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) =>
+                      WorkDetailPage(work: w, service: _service),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _SearchBar extends StatelessWidget {
+  final TextEditingController controller;
+  final bool hasQuery;
+  final ValueChanged<String> onSubmitted;
+  final VoidCallback onClear;
+
+  const _SearchBar({
+    required this.controller,
+    required this.hasQuery,
+    required this.onSubmitted,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppL10n.of(context);
+    return Container(
+      height: 44,
+      decoration: BoxDecoration(
+        color: AetherColors.bgElevated,
+        borderRadius: BorderRadius.circular(AetherRadii.pill),
+        border: Border.all(color: AetherColors.border),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(width: AetherSpacing.md),
+          const Icon(
+            Icons.search_rounded,
+            size: 18,
+            color: AetherColors.textTertiary,
+          ),
+          const SizedBox(width: AetherSpacing.sm),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              textInputAction: TextInputAction.search,
+              onSubmitted: onSubmitted,
+              style: AetherTextStyles.body,
+              decoration: InputDecoration(
+                hintText: l.communitySearchHint,
+                hintStyle: AetherTextStyles.body.copyWith(
+                  color: AetherColors.textTertiary,
+                ),
+                isDense: true,
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+              ),
             ),
           ),
+          if (hasQuery)
+            GestureDetector(
+              onTap: onClear,
+              behavior: HitTestBehavior.opaque,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: AetherSpacing.md,
+                ),
+                child: Icon(
+                  Icons.close_rounded,
+                  size: 18,
+                  color: AetherColors.textTertiary,
+                ),
+              ),
+            )
+          else
+            const SizedBox(width: AetherSpacing.md),
         ],
       ),
     );
   }
 }
 
-class _Header extends StatelessWidget {
+class _CommunityTabBar extends StatelessWidget {
+  final _CommunityTab selected;
+  final ValueChanged<_CommunityTab> onChanged;
+
+  const _CommunityTabBar({required this.selected, required this.onChanged});
+
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AetherSpacing.lg,
-        AetherSpacing.md,
-        AetherSpacing.lg,
-        AetherSpacing.md,
-      ),
-      child: SizedBox(
-        height: 56,
-        child: Center(
-          child: Text(AppL10n.of(context).appBrand,
-              style: AetherTextStyles.wordmark),
+    final l = AppL10n.of(context);
+    final tabs = <(_CommunityTab, String)>[
+      (_CommunityTab.hot, l.communityTabHot),
+      (_CommunityTab.nearby, l.communityTabNearby),
+      (_CommunityTab.discover, l.communityTabDiscover),
+    ];
+    return Row(
+      children: [
+        for (int i = 0; i < tabs.length; i++) ...[
+          Expanded(
+            child: _CommunityTabPill(
+              label: tabs[i].$2,
+              selected: tabs[i].$1 == selected,
+              onTap: () => onChanged(tabs[i].$1),
+            ),
+          ),
+          if (i < tabs.length - 1) const SizedBox(width: AetherSpacing.sm),
+        ],
+      ],
+    );
+  }
+}
+
+class _CommunityTabPill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _CommunityTabPill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        height: 36,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? AetherColors.primary : AetherColors.bgElevated,
+          borderRadius: BorderRadius.circular(AetherRadii.pill),
+          border: Border.all(
+            color: selected ? AetherColors.primary : AetherColors.border,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: selected
+                ? AetherColors.bgCanvas
+                : AetherColors.textPrimary,
+          ),
         ),
       ),
     );
   }
 }
 
-class _SummaryStrip extends StatelessWidget {
-  final int running;
-  final int attention;
-
-  const _SummaryStrip({required this.running, required this.attention});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AetherSpacing.lg,
-        0,
-        AetherSpacing.lg,
-        AetherSpacing.md,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _SummaryPill(
-              title: AppL10n.of(context).communitySummaryRunning,
-              value: running,
-              dot: AetherColors.primary,
-            ),
-          ),
-          const SizedBox(width: AetherSpacing.md),
-          Expanded(
-            child: _SummaryPill(
-              title: AppL10n.of(context).communitySummaryAttention,
-              value: attention,
-              dot: AetherColors.danger,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SummaryPill extends StatelessWidget {
-  final String title;
-  final int value;
-  final Color dot;
-
-  const _SummaryPill({
-    required this.title,
-    required this.value,
-    required this.dot,
-  });
+/// Mounts the long-lived "anchor" Filament viewer that owns every shared
+/// .glb asset in this session. Its ViewerWidget is sized 1×1 inside an
+/// IgnorePointer in VaultPage's Stack, so it doesn't show or steal hit
+/// tests, but the underlying Filament viewer stays alive for as long as
+/// the community feed page is on the route stack.
+class _AnchorHost extends StatelessWidget {
+  const _AnchorHost();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AetherSpacing.lg,
-        vertical: AetherSpacing.md,
-      ),
-      decoration: BoxDecoration(
-        color: AetherColors.bgCanvas,
-        borderRadius: BorderRadius.circular(AetherRadii.pill),
-        border: Border.all(color: AetherColors.border),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: AetherSpacing.sm),
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: AetherColors.textPrimary,
-            ),
-          ),
-          const Spacer(),
-          Text(
-            '$value',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: dot == AetherColors.danger
-                  ? AetherColors.danger
-                  : AetherColors.primary,
-            ),
-          ),
-        ],
-      ),
+    return ViewerWidget(
+      initial: const SizedBox.shrink(),
+      background: const Color(0x00000000),
+      manipulatorType: ManipulatorType.NONE,
+      transformToUnitCube: false,
+      postProcessing: false,
+      destroyEngineOnUnload: false,
+      initialCameraPosition: v64.Vector3(0, 0, 5),
+      onViewerAvailable: (v) async {
+        AnchorViewer.set(v);
+      },
     );
   }
 }
@@ -254,20 +436,22 @@ class _LoadingState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        const SizedBox(
-          width: 28,
-          height: 28,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation<Color>(AetherColors.primary),
+    return ListView(
+      // Has to be scrollable so RefreshIndicator works above an empty
+      // initial state.
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: const [
+        SizedBox(height: 200),
+        Center(
+          child: SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(AetherColors.primary),
+            ),
           ),
         ),
-        const SizedBox(height: AetherSpacing.md),
-        Text(AppL10n.of(context).communityLoading,
-            style: AetherTextStyles.bodySm),
       ],
     );
   }
@@ -278,40 +462,29 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
+    final l = AppL10n.of(context);
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       children: [
-        Container(
-          width: 120,
-          height: 120,
-          decoration: BoxDecoration(
-            color: AetherColors.bgCanvas,
-            borderRadius: BorderRadius.circular(AetherRadii.xl),
-            boxShadow: [
-              BoxShadow(
-                color: AetherColors.shadow,
-                blurRadius: 16,
-                offset: const Offset(0, 6),
-              ),
-            ],
-          ),
-          alignment: Alignment.center,
-          child: const Icon(
-            Icons.view_in_ar_outlined,
-            size: 38,
-            color: AetherColors.primary,
-          ),
+        const SizedBox(height: 160),
+        const Icon(
+          Icons.view_in_ar_rounded,
+          size: 56,
+          color: AetherColors.textTertiary,
         ),
         const SizedBox(height: AetherSpacing.lg),
-        Text(AppL10n.of(context).communityEmptyTitle,
-            style: AetherTextStyles.h2),
-        const SizedBox(height: AetherSpacing.sm),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: AetherSpacing.xxl),
-          child: Text(
-            '点击右下角的相机按钮，选择采集方案，开始你的第一次扫描。',
-            textAlign: TextAlign.center,
-            style: AetherTextStyles.bodySm,
+        Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40),
+            child: Text(
+              l.communityEmptyTitle,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 14,
+                color: AetherColors.textSecondary,
+                height: 1.5,
+              ),
+            ),
           ),
         ),
       ],
@@ -319,148 +492,74 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-class _Waterfall extends StatelessWidget {
-  final HomeViewModel vm;
-  final CapturePageBuilder capturePageBuilder;
-
-  const _Waterfall({required this.vm, required this.capturePageBuilder});
-
-  @override
-  Widget build(BuildContext context) {
-    // 2026-04-28: community switched to a single-column feed (per user
-    // direction). The owner-facing "我的作品" grid under Me keeps the
-    // two-column waterfall — visitors see one card per row, full
-    // width, IG-feed style.
-    return _Column(
-      records: vm.scanRecords,
-      isLeft: true,
-      vm: vm,
-      capturePageBuilder: capturePageBuilder,
-    );
-  }
-}
-
-class _Column extends StatelessWidget {
-  final List<ScanRecord> records;
-  final bool isLeft;
-  final HomeViewModel vm;
-  final CapturePageBuilder capturePageBuilder;
-
-  const _Column({
-    required this.records,
-    required this.isLeft,
-    required this.vm,
-    required this.capturePageBuilder,
-  });
+class _NearbyComingSoonState extends StatelessWidget {
+  const _NearbyComingSoonState();
 
   @override
   Widget build(BuildContext context) {
     final l = AppL10n.of(context);
-    return Column(
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       children: [
-        for (int i = 0; i < records.length; i++) ...[
-          ScanRecordCell(
-            record: records[i],
-            subtitle: _subtitleFor(l, records[i]),
-            // Community feed = single column → cards span the full
-            // width, so the thumbnail is taller than in the two-column
-            // "我的作品" grid (which keeps the prototype's variable
-            // height pattern for waterfall feel).
-            imageHeight: 360,
-            onTap: () => _openRecord(context, records[i]),
-            // Community feed stays clean — no per-card authoring or
-            // processing badges. Owner-facing state lives only in the
-            // "我的作品" grid under Me.
-            showStatusBadge: false,
+        const SizedBox(height: 160),
+        const Icon(
+          Icons.near_me_outlined,
+          size: 56,
+          color: AetherColors.textTertiary,
+        ),
+        const SizedBox(height: AetherSpacing.lg),
+        Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40),
+            child: Text(
+              l.communityNearbyComingSoon,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 14,
+                color: AetherColors.textSecondary,
+                height: 1.5,
+              ),
+            ),
           ),
-          if (i < records.length - 1)
-            const SizedBox(height: AetherSpacing.lg),
-        ],
+        ),
       ],
-    );
-  }
-
-  String _subtitleFor(AppL10n l, ScanRecord r) {
-    // Per user direction: handles / titles / captions are user content
-    // and don't get translated. Fall back to "You" for records without
-    // an author (own scans).
-    final owner = r.authorHandle ?? 'You';
-    final relative = formatRelativeTime(l, r.createdAt);
-    if (r.jobStatus != null) {
-      return l.communityRecordSubtitleWithStatus(
-        owner,
-        relative,
-        r.localizedLifecycleTitle(l),
-      );
-    }
-    return l.communityRecordSubtitle(owner, relative);
-  }
-
-  void _openRecord(BuildContext context, ScanRecord record) {
-    // Sample DamagedHelmet card re-uses the capturePageBuilder (which in
-    // production mounts CapturePage with the shared Dawn texture and
-    // orbit controller from HomeScreen's state). That gives us a fully
-    // rendered PBR mesh + gestures without wiring a separate viewer yet.
-    // CaptureMode.local is the no-upload path, suitable for read-only
-    // inspection of an already-loaded GLB.
-    // Any record with a bundled GLB asset is viewable on-device. The
-    // builder hot-swaps the running Dawn scene to the requested GLB
-    // before mounting the viewer-mode CapturePage.
-    if (record.bundledGlbAsset != null) {
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (ctx) => capturePageBuilder(
-            ctx,
-            CaptureMode.local,
-            viewerMode: true,
-            viewerTitle: record.name,
-            viewerGlbAsset: record.bundledGlbAsset,
-          ),
-        ),
-      );
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          AppL10n.of(context).scanRecordOpenPlaceholder(record.name),
-        ),
-        behavior: SnackBarBehavior.floating,
-      ),
     );
   }
 }
 
-class _CaptureFab extends StatelessWidget {
-  final VoidCallback onTap;
-
-  const _CaptureFab({required this.onTap});
+class _ErrorState extends StatelessWidget {
+  final String message;
+  final Future<void> Function() onRetry;
+  const _ErrorState({required this.message, required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 62,
-        height: 62,
-        decoration: BoxDecoration(
-          color: AetherColors.primary,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.18),
-              blurRadius: 18,
-              offset: const Offset(0, 8),
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [
+        const SizedBox(height: 160),
+        const Icon(Icons.error_outline_rounded,
+            size: 48, color: AetherColors.danger),
+        const SizedBox(height: AetherSpacing.md),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 12,
+              color: AetherColors.textTertiary,
             ),
-          ],
+          ),
         ),
-        alignment: Alignment.center,
-        child: const Icon(
-          Icons.camera_alt_rounded,
-          color: Colors.white,
-          size: 24,
+        const SizedBox(height: AetherSpacing.lg),
+        Center(
+          child: TextButton(
+            onPressed: onRetry,
+            child: const Text('Retry'),
+          ),
         ),
-      ),
+      ],
     );
   }
 }

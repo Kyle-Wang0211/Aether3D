@@ -51,6 +51,21 @@ class AppL10nZh extends AppL10n {
   String get communityEmptyTitle => '社区还没有作品';
 
   @override
+  String get communitySearchHint => '搜索作品';
+
+  @override
+  String get communityTabHot => '热门';
+
+  @override
+  String get communityTabNearby => '附近';
+
+  @override
+  String get communityTabDiscover => '发现';
+
+  @override
+  String get communityNearbyComingSoon => '附近功能即将上线，敬请期待。';
+
+  @override
   String get meMyWorks => '我的作品';
 
   @override

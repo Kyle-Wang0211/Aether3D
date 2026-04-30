@@ -51,6 +51,21 @@ class AppL10nEn extends AppL10n {
   String get communityEmptyTitle => 'No works yet';
 
   @override
+  String get communitySearchHint => 'Search works';
+
+  @override
+  String get communityTabHot => 'Hot';
+
+  @override
+  String get communityTabNearby => 'Nearby';
+
+  @override
+  String get communityTabDiscover => 'Discover';
+
+  @override
+  String get communityNearbyComingSoon => 'Nearby is coming soon — stay tuned.';
+
+  @override
   String get meMyWorks => 'My works';
 
   @override

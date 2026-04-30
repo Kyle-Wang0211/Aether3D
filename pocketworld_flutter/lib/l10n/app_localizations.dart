@@ -181,6 +181,36 @@ abstract class AppL10n {
   /// **'No works yet'**
   String get communityEmptyTitle;
 
+  /// No description provided for @communitySearchHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Search works'**
+  String get communitySearchHint;
+
+  /// No description provided for @communityTabHot.
+  ///
+  /// In en, this message translates to:
+  /// **'Hot'**
+  String get communityTabHot;
+
+  /// No description provided for @communityTabNearby.
+  ///
+  /// In en, this message translates to:
+  /// **'Nearby'**
+  String get communityTabNearby;
+
+  /// No description provided for @communityTabDiscover.
+  ///
+  /// In en, this message translates to:
+  /// **'Discover'**
+  String get communityTabDiscover;
+
+  /// No description provided for @communityNearbyComingSoon.
+  ///
+  /// In en, this message translates to:
+  /// **'Nearby is coming soon — stay tuned.'**
+  String get communityNearbyComingSoon;
+
   /// No description provided for @meMyWorks.
   ///
   /// In en, this message translates to:
