@@ -55,9 +55,12 @@ class MyWorksSyncService {
       throw StateError('Not signed in.');
     }
     await _store.ensureLoaded();
-    final knownWorkIds = <String>{
+    // Index by publishedWorkId so we can both check "do we already know
+    // about this work" AND inspect the prior record's artifactPath when
+    // we need to verify the local file is still present.
+    final priorByWorkId = <String, ScanRecord>{
       for (final r in _store.records)
-        if (r.publishedWorkId != null) r.publishedWorkId!,
+        if (r.publishedWorkId != null) r.publishedWorkId!: r,
     };
 
     final res = await _client
@@ -75,7 +78,26 @@ class MyWorksSyncService {
       final workId = w['id'] as String?;
       final modelPath = w['model_storage_path'] as String?;
       if (workId == null || modelPath == null) continue;
-      if (knownWorkIds.contains(workId)) continue;
+      // Skip only if the prior record actually has its GLB on disk.
+      // iOS occasionally migrates the app's container UUID across
+      // reinstalls; the persisted ScanRecord's artifactPath is an
+      // absolute file:// URL pointing at the OLD container, so the
+      // record looks "known" while the underlying file is gone. Without
+      // this check, LiveModelView would later throw "Local .glb missing"
+      // and that error has been observed propagating into runZonedGuarded
+      // and triggering the disaster-recovery fallback runApp() that
+      // strands the user on AuthRootView. Re-download instead.
+      final prior = priorByWorkId[workId];
+      if (prior != null) {
+        final priorPath = prior.artifactPath;
+        if (priorPath != null && priorPath.startsWith('file://')) {
+          try {
+            if (await File(Uri.parse(priorPath).toFilePath()).exists()) {
+              continue;
+            }
+          } catch (_) {/* fall through and re-download */}
+        }
+      }
       try {
         final dest = await _store.glbFileFor(workId);
         final url = _client.storage.from('works').getPublicUrl(modelPath);
