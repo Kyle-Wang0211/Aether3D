@@ -23,7 +23,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import 'aether_ffi.dart';
 import 'auth/auth_scope.dart';
 import 'auth/current_user.dart';
 import 'auth/mock_auth_service.dart';
@@ -31,13 +30,12 @@ import 'auth/supabase_auth_service.dart';
 import 'i18n/locale_notifier.dart';
 import 'l10n/app_localizations.dart';
 import 'lifecycle_observer.dart';
+import 'me/job_status_watcher.dart';
 import 'object_transform.dart';
 import 'orbit_controls.dart';
 import 'ui/app_shell.dart';
 import 'ui/auth/auth_root_view.dart';
-import 'ui/capture_page.dart';
 import 'ui/design_system.dart';
-import 'ui/scan_record.dart';
 import 'ui/splash_overlay.dart';
 
 Future<void> main() async {
@@ -124,11 +122,42 @@ Future<void> main() async {
         );
       }
       if (supabaseReady) {
+        // ignore: avoid_print
+        print('[AUTH-DEBUG] Supabase.initialize done. '
+            'currentSession exists: '
+            '${Supabase.instance.client.auth.currentSession != null} '
+            'currentUser: '
+            '${Supabase.instance.client.auth.currentUser?.email ?? "null"}');
         currentUser.swapService(
           SupabaseAuthServiceImpl(localeNotifier: localeNotifier),
         );
       }
       await currentUser.bootstrap();
+      // Belt-and-braces: kick a session refresh on cold start. Even
+      // though supabase_flutter has autoRefreshToken=true and runs a
+      // proactive ~10s-before-expiry refresh in the foreground, that
+      // timer doesn't help if the app just woke from being killed and
+      // the persisted access_token is already past its exp. The
+      // AetherApiClient's 401-retry would catch this anyway, but doing
+      // it here saves the first request from doing the dance and means
+      // the server logs don't show spurious 401s on app launch.
+      // Failure is silent — refreshSession throws if the refresh
+      // token's also dead, and that's the same "session_expired" path
+      // the rest of the code handles already.
+      if (supabaseReady) {
+        unawaited(
+          Supabase.instance.client.auth
+              .refreshSession()
+              .then<void>((_) {})
+              .catchError((Object e) {
+            debugPrint('[main] cold-start refreshSession skipped: $e');
+          }),
+        );
+      }
+      // Resume any in-flight job polls after Supabase is ready (the
+      // watcher needs the JWT to be loaded before it can call
+      // /v1/mobile-jobs/{id} for the still-running scans).
+      unawaited(JobStatusWatcher.instance.resume());
     }());
   }, (error, stack) {
     // ignore: avoid_print
@@ -182,9 +211,24 @@ class PocketWorldApp extends StatelessWidget {
             locale: localeNotifier.locale,
             localizationsDelegates: AppL10n.localizationsDelegates,
             supportedLocales: AppL10n.supportedLocales,
-            home: AuthScope(
+            home: const _AuthGate(),
+            // AuthScope wraps the *route content* via builder rather than
+            // sitting inside `home`. Why: `home` is only the FIRST route on
+            // the Navigator. When MePage does `Navigator.push(MaterialPageRoute(
+            // builder: (_) => MeSettingsPage()))`, the pushed route lives
+            // as a sibling of the home route inside the Navigator's overlay
+            // — its BuildContext does NOT walk up through `home`'s subtree,
+            // so `context.getInheritedWidgetOfExactType<AuthScope>()` from
+            // MeSettingsPage's button used to come back null and the
+            // `notifier!` assertion in AuthScope.read crashed the sign-out
+            // gesture (see crash 2026-04-30 in the log:
+            // `AuthScope.read … _SignOutButton.build`). The `builder`
+            // callback is invoked for every route MaterialApp shows, so
+            // wrapping `child` here makes AuthScope available to home AND
+            // every pushed route uniformly.
+            builder: (context, child) => AuthScope(
               currentUser: currentUser,
-              child: const _AuthGate(),
+              child: child!,
             ),
           );
         },
@@ -207,6 +251,13 @@ class _AuthGate extends StatefulWidget {
 class _AuthGateState extends State<_AuthGate> {
   bool _splashMinElapsed = false;
   Timer? _splashMinTimer;
+  // Tracks the previous CurrentUserState so we can detect a signedIn →
+  // signedOut transition and tear down any pushed routes that were
+  // sitting on top of HomeScreen (MyWorkDetailPage, MeSettingsPage,
+  // …). Without this, swiping back from a stale detail page after a
+  // background-kill / cold-start session-restore race reveals the auth
+  // page underneath, which is jarring.
+  bool _wasSignedIn = false;
 
   @override
   void initState() {
@@ -229,6 +280,19 @@ class _AuthGateState extends State<_AuthGate> {
   Widget build(BuildContext context) {
     final user = AuthScope.of(context);
     final state = user.state;
+
+    // signedIn → signedOut transition: pop any routes pushed on top of
+    // home so the user isn't left with a stale detail / settings page
+    // hovering over AuthRootView. addPostFrameCallback so this runs
+    // outside of build() (Navigator.popUntil during build asserts).
+    if (_wasSignedIn && state is CurrentUserSignedOut) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final navigator = Navigator.maybeOf(context);
+        navigator?.popUntil((r) => r.isFirst);
+      });
+    }
+    _wasSignedIn = state is CurrentUserSignedIn;
 
     // During bootstrap OR until min-splash elapsed, show the splash.
     final splashVisible =
@@ -292,9 +356,6 @@ class _HomeScreenState extends State<HomeScreen> {
   final OrbitControls _orbit = OrbitControls();
   final ObjectTransform _object = ObjectTransform();
   LifecycleObserver? _lifecycle;
-
-  static const double _fovYRadians = 60.0 * 3.14159265 / 180.0;
-  static const Size _textureWidgetSize = Size(256, 256);
 
   @override
   void initState() {
@@ -462,27 +523,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Switches the running viewer scene to a different bundled GLB without
-  /// recreating the IOSurface. Called from VaultPage taps on sample
-  /// cards; idempotent against re-loads of the same file.
-  String? _currentlyLoadedGlbAsset;
-  Future<void> _loadGlbAsset(String filename) async {
-    final id = _textureId;
-    if (id == null) return;
-    if (_currentlyLoadedGlbAsset == filename) return;
-    _currentlyLoadedGlbAsset = filename;
-    final found = await _materializeBundledGlb(filename);
-    if (found == null) return;
-    try {
-      await _channel.invokeMethod('loadGlb', {
-        'textureId': id,
-        'path': found,
-      });
-    } catch (_) {
-      _currentlyLoadedGlbAsset = null; // allow retry on next tap
-    }
-  }
-
   Future<String?> _materializeBundledGlb(String filename) async {
     final assetPath = 'assets/models/$filename';
     try {
@@ -529,91 +569,34 @@ class _HomeScreenState extends State<HomeScreen> {
         .catchError((_) {});
   }
 
-  void _handleScaleUpdate(
-    double scale,
-    Offset focalDelta,
-    double rotation,
-    int pointerCount,
-    Size widgetSize,
-  ) {
-    setState(() {
-      if (pointerCount <= 1) {
-        _orbit.rotate(focalDelta.dx, focalDelta.dy, widgetSize);
-      } else {
-        _orbit.dolly(scale);
-        _object.pan(
-          focalDelta,
-          _orbit.viewMatrix(),
-          _fovYRadians,
-          _orbit.distance,
-          widgetSize,
-        );
-        _object.rotate(rotation);
-        _orbit.target.setFrom(_object.position);
-      }
-    });
-    _pushMatrices();
-  }
-
-  Widget _buildCapturePage(
-    BuildContext ctx,
-    CaptureMode mode, {
-    bool viewerMode = false,
-    String? viewerTitle,
-    String? viewerGlbAsset,
-  }) {
-    // Side-effect: when a viewer wants a different GLB than what the
-    // shared scene renderer currently has loaded, fire a loadGlb on the
-    // method channel before mounting the CapturePage. The native side
-    // re-uploads the new mesh into the existing IOSurface, so we don't
-    // need to recreate the texture or restart the orbit controls.
-    if (viewerMode && viewerGlbAsset != null) {
-      unawaited(_loadGlbAsset(viewerGlbAsset));
-    }
-    return CapturePage(
-      mode: mode,
-      textureId: _textureId,
-      textureError: _textureError,
-      isRetrying: _isRetrying,
-      onRetryTexture: () => _requestTexture(isManualRetry: true),
-      meshStatus: _meshStatus,
-      meshStatusBusy: _meshStatusBusy,
-      meshStatusError: _meshStatusError,
-      orbit: _orbit,
-      textureWidgetSize: _textureWidgetSize,
-      onScaleUpdate: _handleScaleUpdate,
-      resolveVersionFooter: _resolveVersionFooter,
-      viewerMode: viewerMode,
-      viewerTitle: viewerTitle,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    return DesignInspectorHost(
-      child: Stack(
-        children: [
-          AetherAppShell(capturePageBuilder: _buildCapturePage),
-          Positioned.fill(
-            child: AetherSplashOverlay(
-              visible: _splashVisible,
-              progressMessage: _splashMessage(context),
-            ),
+    // DesignInspectorHost wrapper removed 2026-04-29 — the floating ✨
+    // toggle, the dashed-border DesignBox overlays, and the bottom
+    // legend were dev affordances that are no longer wanted in the
+    // shipped UI. The DesignBox call sites stay (they pass through
+    // their child when no DesignInspector ancestor exists), so we don't
+    // have to surgically remove every one.
+    //
+    // _buildCapturePage / capture-page state plumbing removed 2026-04-29
+    // — the old Dawn-backed CapturePage + CaptureModeSelectionPage are
+    // gone, awaiting the Aether3D capture-pipeline port (ARKit + dome
+    // + FrameAnalyzer + A100 remote pipeline). The "_textureId / _orbit
+    // / _meshStatus" state on this State class is now dead code; left
+    // in place for the moment because the texture acquisition path
+    // (_requestTexture, _loadGlbAsset, _handleScaleUpdate) is what the
+    // ported capture flow will reattach to.
+    return Stack(
+      children: [
+        const AetherAppShell(),
+        Positioned.fill(
+          child: AetherSplashOverlay(
+            visible: _splashVisible,
+            progressMessage: _splashMessage(context),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
 
-String _resolveVersionFooter() {
-  try {
-    return AetherFfi.versionString();
-  } on FfiResolutionError catch (e) {
-    return 'FFI miss: ${e.message}';
-  } on ArgumentError catch (e) {
-    return 'FFI miss: ${e.message ?? e.toString()}';
-  } catch (e) {
-    return 'FFI error: ${e.runtimeType}';
-  }
-}
