@@ -141,7 +141,8 @@ class _AetherSplashOverlayState extends State<AetherSplashOverlay>
                   ),
                   const SizedBox(height: AetherSpacing.md),
                   Text(
-                    widget.progressMessage ?? '正在启动 3D 引擎…',
+                    widget.progressMessage ??
+                        AppL10n.of(context).splashStartingEngine,
                     style: AetherTextStyles.caption,
                   ),
                   const SizedBox(height: AetherSpacing.xxl),

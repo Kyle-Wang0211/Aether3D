@@ -232,14 +232,15 @@ class _CompletedBadge extends StatelessWidget {
         color: Colors.white.withValues(alpha: 0.92),
         borderRadius: BorderRadius.circular(AetherRadii.pill),
       ),
-      child: const Row(
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.check_rounded, size: 12, color: AetherColors.primary),
-          SizedBox(width: 4),
+          const Icon(Icons.check_rounded,
+              size: 12, color: AetherColors.primary),
+          const SizedBox(width: 4),
           Text(
-            '已完成',
-            style: TextStyle(
+            AppL10n.of(context).scanLifecycleCompleted,
+            style: const TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w600,
               color: AetherColors.primary,

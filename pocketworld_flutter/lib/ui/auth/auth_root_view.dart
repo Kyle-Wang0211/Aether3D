@@ -1,39 +1,32 @@
-// Dart port of App/Auth/AuthRootView.swift, simplified per user
-// direction 2026-04-27: **email only** — phone sign-in removed from
-// the UI because the product doesn't support phone auth yet. The
-// Phone-number Dart view stays in the repo (phone_sign_in_view.dart)
-// so MFA can be re-enabled later without re-scaffolding.
+// AuthRootView — the sign-in page (entry point of the auth stack).
+//
+// Visual direction (per Figma 2026-04-29 "Login (Ultra-Minimal)"):
+//   • Single column on white. No tabs, no card chrome.
+//   • Top bar: brand wordmark (centered) + 中/EN toggle (right). Root
+//     page so no leading widget. Sign-up + reset-password sub-pages
+//     get a back-chevron leading via AuthTopBarBack.
+//   • Heading "登录 / SIGN IN" + subtitle "欢迎回来 / WELCOME BACK"
+//     in upper third, lots of breathing room.
+//   • Two underline-only inputs (label above, no border box).
+//   • Primary CTA "登录 → / SIGN IN →" rendered as bold caps text.
+//   • Secondary "注册 / SIGN UP" link → pushes EmailSignUpPage.
+//   • Tertiary "忘记密码？/ FORGOT PASSWORD" link → pushes
+//     ResetPasswordView.
+//
+// Design widgets live in auth_minimal_widgets.dart so the sign-up and
+// reset-password pages share the same look-and-feel.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../auth/auth_error.dart';
+import '../../auth/auth_models.dart';
 import '../../auth/current_user.dart';
-import '../../i18n/locale_notifier.dart';
 import '../../l10n/app_localizations.dart';
 import '../design_system.dart';
+import 'auth_minimal_widgets.dart';
 import 'email_sign_in_view.dart';
-
-enum AuthMode { signIn, signUp }
-
-extension AuthModeLabel on AuthMode {
-  String localizedTitle(AppL10n l) {
-    switch (this) {
-      case AuthMode.signIn:
-        return l.authSignIn;
-      case AuthMode.signUp:
-        return l.authSignUp;
-    }
-  }
-
-  String localizedHeroTagline(AppL10n l) {
-    switch (this) {
-      case AuthMode.signIn:
-        return l.authWelcomeBack;
-      case AuthMode.signUp:
-        return l.authSignUp;
-    }
-  }
-}
+import 'reset_password_view.dart';
 
 class AuthRootView extends StatefulWidget {
   final CurrentUser currentUser;
@@ -45,7 +38,8 @@ class AuthRootView extends StatefulWidget {
 }
 
 class _AuthRootViewState extends State<AuthRootView> {
-  AuthMode _mode = AuthMode.signIn;
+  final _email = TextEditingController();
+  final _password = TextEditingController();
 
   @override
   void initState() {
@@ -56,6 +50,8 @@ class _AuthRootViewState extends State<AuthRootView> {
   @override
   void dispose() {
     widget.currentUser.removeListener(_onUserChanged);
+    _email.dispose();
+    _password.dispose();
     super.dispose();
   }
 
@@ -78,18 +74,18 @@ class _AuthRootViewState extends State<AuthRootView> {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AetherRadii.lg),
         ),
-        title: Text(AppL10n.of(context).authErrorDialogTitle,
-            style: AetherTextStyles.h2),
+        title: Text(
+          AppL10n.of(context).authErrorDialogTitle,
+          style: AetherTextStyles.h2,
+        ),
         content: Text(message, style: AetherTextStyles.body),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            style: TextButton.styleFrom(
-              foregroundColor: AetherColors.primary,
-            ),
-            child: const Text(
-              '好的',
-              style: TextStyle(fontWeight: FontWeight.w600),
+            style: TextButton.styleFrom(foregroundColor: AetherColors.primary),
+            child: Text(
+              AppL10n.of(context).commonOk,
+              style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           ),
         ],
@@ -97,180 +93,111 @@ class _AuthRootViewState extends State<AuthRootView> {
     );
   }
 
+  String get _normalizedEmail => _email.text.trim().toLowerCase();
+  bool get _canSubmit =>
+      _normalizedEmail.isNotEmpty && _password.text.length >= 6;
+
+  Future<void> _submit() async {
+    await widget.currentUser.signIn(
+      SignInRequest.email(email: _normalizedEmail, password: _password.text),
+    );
+    TextInput.finishAutofillContext();
+  }
+
+  void _pushSignUp() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => EmailSignUpPage(currentUser: widget.currentUser),
+      ),
+    );
+  }
+
+  void _pushReset() {
+    // Plain push (no fullscreenDialog) so iOS edge-swipe-back works,
+    // matching the sign-up page's behavior. The previous fullscreenDialog
+    // presented this as a modal sheet from the bottom which iOS
+    // intentionally disables swipe-back for.
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ResetPasswordView(currentUser: widget.currentUser),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final l = AppL10n.of(context);
+    final working = widget.currentUser.isPerformingAuthAction;
     return Scaffold(
-      backgroundColor: AetherColors.bg,
+      backgroundColor: AetherColors.bgCanvas,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: AetherSpacing.xl),
+        child: AutofillGroup(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const SizedBox(height: AetherSpacing.md),
-              const Align(
-                alignment: Alignment.centerRight,
-                child: _LanguageToggle(),
-              ),
-              const SizedBox(height: AetherSpacing.xl),
-              _Header(mode: _mode),
-              const SizedBox(height: AetherSpacing.xl),
-              _ModePicker(
-                mode: _mode,
-                onChange: (m) => setState(() => _mode = m),
-              ),
-              const SizedBox(height: AetherSpacing.xl),
+              const AuthTopBar(),
               Expanded(
                 child: SingleChildScrollView(
                   physics: const BouncingScrollPhysics(),
-                  child: _mode == AuthMode.signIn
-                      ? EmailSignInView(currentUser: widget.currentUser)
-                      : EmailSignUpView(currentUser: widget.currentUser),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AetherSpacing.xl,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: 80),
+                      AuthHeading(
+                        title: l.authSignIn,
+                        subtitle: l.authWelcomeBack,
+                      ),
+                      const SizedBox(height: 64),
+                      LabeledField(
+                        label: l.authEmailHint,
+                        controller: _email,
+                        keyboardType: TextInputType.emailAddress,
+                        textInputAction: TextInputAction.next,
+                        autofillHints: const [AutofillHints.username],
+                        onChanged: (_) => setState(() {}),
+                      ),
+                      const SizedBox(height: AetherSpacing.xl),
+                      LabeledField(
+                        label: l.authPasswordHint,
+                        controller: _password,
+                        isSecure: true,
+                        textInputAction: TextInputAction.done,
+                        autofillHints: const [AutofillHints.password],
+                        onChanged: (_) => setState(() {}),
+                        onSubmitted: (_) {
+                          if (_canSubmit && !working) _submit();
+                        },
+                      ),
+                      const SizedBox(height: 56),
+                      MinimalCta(
+                        title: l.authSignIn,
+                        enabled: _canSubmit && !working,
+                        working: working,
+                        onTap: _submit,
+                      ),
+                      const SizedBox(height: AetherSpacing.xxl),
+                      MinimalLink(
+                        title: l.authSignUp,
+                        emphasis: MinimalLinkEmphasis.medium,
+                        onTap: working ? null : _pushSignUp,
+                      ),
+                      const SizedBox(height: AetherSpacing.xl),
+                      MinimalLink(
+                        title: l.authForgotPassword,
+                        emphasis: MinimalLinkEmphasis.faint,
+                        onTap: working ? null : _pushReset,
+                      ),
+                      const SizedBox(height: AetherSpacing.xl),
+                    ],
+                  ),
                 ),
               ),
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  final AuthMode mode;
-
-  const _Header({required this.mode});
-
-  @override
-  Widget build(BuildContext context) {
-    final l = AppL10n.of(context);
-    return Column(
-      children: [
-        Text(
-          l.appBrand,
-          style: const TextStyle(
-            fontSize: 30,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.6,
-            color: AetherColors.primary,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(mode.localizedHeroTagline(l), style: AetherTextStyles.bodySm),
-      ],
-    );
-  }
-}
-
-class _LanguageToggle extends StatelessWidget {
-  const _LanguageToggle();
-
-  @override
-  Widget build(BuildContext context) {
-    final notifier = LocaleScope.of(context);
-    final isZh = notifier.isChinese;
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: AetherColors.bgElevated,
-        borderRadius: BorderRadius.circular(AetherRadii.pill),
-        border: Border.all(color: AetherColors.border),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _segment(
-            label: '中',
-            selected: isZh,
-            onTap: () {
-              if (!isZh) notifier.set(const Locale('zh'));
-            },
-          ),
-          _segment(
-            label: 'EN',
-            selected: !isZh,
-            onTap: () {
-              if (isZh) notifier.set(const Locale('en'));
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _segment({
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: selected ? AetherColors.primary : Colors.transparent,
-          borderRadius: BorderRadius.circular(AetherRadii.pill),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: selected ? Colors.white : AetherColors.textSecondary,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ModePicker extends StatelessWidget {
-  final AuthMode mode;
-  final ValueChanged<AuthMode> onChange;
-
-  const _ModePicker({required this.mode, required this.onChange});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: AetherColors.bgElevated,
-        borderRadius: BorderRadius.circular(AetherRadii.pill),
-        border: Border.all(color: AetherColors.border),
-      ),
-      child: Row(
-        children: [
-          for (final m in AuthMode.values)
-            Expanded(
-              child: GestureDetector(
-                onTap: () => onChange(m),
-                behavior: HitTestBehavior.opaque,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  decoration: BoxDecoration(
-                    color:
-                        m == mode ? AetherColors.primary : Colors.transparent,
-                    borderRadius: BorderRadius.circular(AetherRadii.pill),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    m.localizedTitle(AppL10n.of(context)),
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: m == mode
-                          ? Colors.white
-                          : AetherColors.textSecondary,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
       ),
     );
   }

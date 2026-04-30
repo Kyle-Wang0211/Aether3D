@@ -109,6 +109,12 @@ abstract class AppL10n {
   /// **'3D capture · minimalist workbench'**
   String get splashSubtitle;
 
+  /// No description provided for @splashStartingEngine.
+  ///
+  /// In en, this message translates to:
+  /// **'Starting 3D engine…'**
+  String get splashStartingEngine;
+
   /// No description provided for @splashRestoringSession.
   ///
   /// In en, this message translates to:
@@ -532,6 +538,144 @@ abstract class AppL10n {
   /// In en, this message translates to:
   /// **'You\'ll need to sign in again to access cloud works.'**
   String get meSignOutConfirmBody;
+
+  /// No description provided for @meDetailVisibilityPrivate.
+  ///
+  /// In en, this message translates to:
+  /// **'Private · Only you'**
+  String get meDetailVisibilityPrivate;
+
+  /// No description provided for @meDetailPublishedBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'Published to community'**
+  String get meDetailPublishedBadge;
+
+  /// No description provided for @meDetailActionPublish.
+  ///
+  /// In en, this message translates to:
+  /// **'Publish'**
+  String get meDetailActionPublish;
+
+  /// No description provided for @meDetailActionEdit.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit'**
+  String get meDetailActionEdit;
+
+  /// No description provided for @meDetailToastPublished.
+  ///
+  /// In en, this message translates to:
+  /// **'Published to community'**
+  String get meDetailToastPublished;
+
+  /// No description provided for @meDetailToastUpdated.
+  ///
+  /// In en, this message translates to:
+  /// **'Work info updated'**
+  String get meDetailToastUpdated;
+
+  /// No description provided for @meDetailToastPublishFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Publish failed: {detail}'**
+  String meDetailToastPublishFailed(String detail);
+
+  /// No description provided for @meDetailSheetTitlePublish.
+  ///
+  /// In en, this message translates to:
+  /// **'Publish to community'**
+  String get meDetailSheetTitlePublish;
+
+  /// No description provided for @meDetailSheetTitleEdit.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit work'**
+  String get meDetailSheetTitleEdit;
+
+  /// No description provided for @meDetailSheetSubtitlePublish.
+  ///
+  /// In en, this message translates to:
+  /// **'Let the community see what you scanned.'**
+  String get meDetailSheetSubtitlePublish;
+
+  /// No description provided for @meDetailSheetSubtitleEdit.
+  ///
+  /// In en, this message translates to:
+  /// **'Update title or description; everyone sees the latest version.'**
+  String get meDetailSheetSubtitleEdit;
+
+  /// No description provided for @meDetailLabelTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Title'**
+  String get meDetailLabelTitle;
+
+  /// No description provided for @meDetailHintTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Name this scan (1–100 chars)'**
+  String get meDetailHintTitle;
+
+  /// No description provided for @meDetailValidationTitleEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'Title is required'**
+  String get meDetailValidationTitleEmpty;
+
+  /// No description provided for @meDetailValidationTitleTooLong.
+  ///
+  /// In en, this message translates to:
+  /// **'Title can\'t exceed {max} chars'**
+  String meDetailValidationTitleTooLong(int max);
+
+  /// No description provided for @meDetailLabelDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Description (optional)'**
+  String get meDetailLabelDescription;
+
+  /// No description provided for @meDetailHintDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Notes about the capture, usage, highlights. Max {max} chars.'**
+  String meDetailHintDescription(int max);
+
+  /// No description provided for @meDetailValidationDescriptionTooLong.
+  ///
+  /// In en, this message translates to:
+  /// **'Description can\'t exceed {max} chars'**
+  String meDetailValidationDescriptionTooLong(int max);
+
+  /// No description provided for @meDetailButtonPublish.
+  ///
+  /// In en, this message translates to:
+  /// **'Publish'**
+  String get meDetailButtonPublish;
+
+  /// No description provided for @meDetailButtonSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get meDetailButtonSave;
+
+  /// No description provided for @meDetailRunningProcessing.
+  ///
+  /// In en, this message translates to:
+  /// **'Processing'**
+  String get meDetailRunningProcessing;
+
+  /// No description provided for @meDetailFailedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Processing failed'**
+  String get meDetailFailedTitle;
+
+  /// No description provided for @meDetailRecordNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'Record not found'**
+  String get meDetailRecordNotFound;
 
   /// No description provided for @authWelcomeBack.
   ///

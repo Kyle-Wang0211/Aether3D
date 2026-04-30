@@ -15,6 +15,9 @@ class AppL10nZh extends AppL10n {
   String get splashSubtitle => '三维捕捉 · 极简工作台';
 
   @override
+  String get splashStartingEngine => '正在启动 3D 引擎…';
+
+  @override
   String get splashRestoringSession => '正在恢复会话…';
 
   @override
@@ -249,6 +252,83 @@ class AppL10nZh extends AppL10n {
 
   @override
   String get meSignOutConfirmBody => '退出后需要重新登录才能访问云端作品。';
+
+  @override
+  String get meDetailVisibilityPrivate => '私密 · 仅你可见';
+
+  @override
+  String get meDetailPublishedBadge => '已发布到社区';
+
+  @override
+  String get meDetailActionPublish => '发布到社区';
+
+  @override
+  String get meDetailActionEdit => '编辑';
+
+  @override
+  String get meDetailToastPublished => '已发布到社区';
+
+  @override
+  String get meDetailToastUpdated => '作品信息已更新';
+
+  @override
+  String meDetailToastPublishFailed(String detail) {
+    return '发布失败：$detail';
+  }
+
+  @override
+  String get meDetailSheetTitlePublish => '发布到社区';
+
+  @override
+  String get meDetailSheetTitleEdit => '编辑作品';
+
+  @override
+  String get meDetailSheetSubtitlePublish => '让社区里的人也能看到你扫到的东西。';
+
+  @override
+  String get meDetailSheetSubtitleEdit => '更新标题或简介；其他人会看到最新版本。';
+
+  @override
+  String get meDetailLabelTitle => '标题';
+
+  @override
+  String get meDetailHintTitle => '给这个扫描起个名字（1–100 字）';
+
+  @override
+  String get meDetailValidationTitleEmpty => '标题不能为空';
+
+  @override
+  String meDetailValidationTitleTooLong(int max) {
+    return '标题不能超过 $max 字';
+  }
+
+  @override
+  String get meDetailLabelDescription => '简介（可选）';
+
+  @override
+  String meDetailHintDescription(int max) {
+    return '可以写写拍摄背景、用途、看点等。最多 $max 字。';
+  }
+
+  @override
+  String meDetailValidationDescriptionTooLong(int max) {
+    return '简介不能超过 $max 字';
+  }
+
+  @override
+  String get meDetailButtonPublish => '发布';
+
+  @override
+  String get meDetailButtonSave => '保存';
+
+  @override
+  String get meDetailRunningProcessing => '处理中';
+
+  @override
+  String get meDetailFailedTitle => '处理失败';
+
+  @override
+  String get meDetailRecordNotFound => '找不到这条作品';
 
   @override
   String get authWelcomeBack => '欢迎回来';

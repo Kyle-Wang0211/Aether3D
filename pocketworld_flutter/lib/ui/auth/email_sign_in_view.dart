@@ -1,140 +1,93 @@
-// Dart port of App/Auth/EmailSignInView.swift — email+password flow.
+// EmailSignUpPage — Ultra-Minimal sign-up flow.
+//
+// Pushed by AuthRootView when the user taps "REQUEST NEW ACCESS / 注册".
+// Visual conventions identical to AuthRootView (top bar with back
+// chevron + wordmark + 中/EN, big caps heading, underline-only inputs,
+// caps text CTA). Differs only in copy and the post-submit handler:
+// when the strict-confirmation backend returns EmailVerificationPending,
+// we push OtpVerificationView (carrying the password forward so the
+// OTP page can signInWithPassword once the user is created).
+//
+// Filename note: this used to also host the sign-IN form. Sign-in
+// moved to auth_root_view.dart in the 2026-04-29 redesign. Renaming
+// the file would churn git history more than it's worth right now.
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../auth/auth_error.dart';
 import '../../auth/auth_models.dart';
 import '../../auth/current_user.dart';
 import '../../l10n/app_localizations.dart';
 import '../design_system.dart';
-import 'auth_shared_widgets.dart';
+import 'auth_minimal_widgets.dart';
 import 'otp_verification_view.dart';
-import 'reset_password_view.dart';
 
-class EmailSignInView extends StatefulWidget {
+class EmailSignUpPage extends StatefulWidget {
   final CurrentUser currentUser;
 
-  const EmailSignInView({super.key, required this.currentUser});
+  const EmailSignUpPage({super.key, required this.currentUser});
 
   @override
-  State<EmailSignInView> createState() => _EmailSignInViewState();
+  State<EmailSignUpPage> createState() => _EmailSignUpPageState();
 }
 
-class _EmailSignInViewState extends State<EmailSignInView> {
+class _EmailSignUpPageState extends State<EmailSignUpPage> {
   final _email = TextEditingController();
   final _password = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    widget.currentUser.addListener(_onUserChanged);
+  }
+
+  @override
   void dispose() {
+    widget.currentUser.removeListener(_onUserChanged);
     _email.dispose();
     _password.dispose();
     super.dispose();
   }
 
-  String get _normalizedEmail => _email.text.trim().toLowerCase();
-
-  bool get _canSubmit =>
-      _normalizedEmail.isNotEmpty && _password.text.length >= 6;
-
-  Future<void> _submit() async {
-    await widget.currentUser.signIn(
-      SignInRequest.email(email: _normalizedEmail, password: _password.text),
-    );
-    // Static call, mounted check unnecessary. Triggers the iOS
-    // "Save Password to Keychain?" prompt on success. iOS internally
-    // suppresses the prompt if it can tell the credential was wrong
-    // (e.g. user immediately retyped a different password).
-    TextInput.finishAutofillContext();
+  void _onUserChanged() {
+    final err = widget.currentUser.lastError;
+    if (err != null && mounted) {
+      _showErrorDialog(err);
+    }
+    if (mounted) setState(() {});
   }
 
-  void _forgotPassword() {
-    // Push the dedicated reset flow (email → OTP + new password). The
-    // legacy "fire-and-forget recover email" pattern doesn't work on a
-    // mobile-only app — clicking the link in mail opens a browser with
-    // nowhere good to land.
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ResetPasswordView(currentUser: widget.currentUser),
-        fullscreenDialog: true,
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final working = widget.currentUser.isPerformingAuthAction;
-    final l = AppL10n.of(context);
-    return AutofillGroup(
-      child: Column(
-        children: [
-          AuthField(
-            title: l.authEmailHint,
-            controller: _email,
-            keyboard: AuthFieldKeyboard.email,
-            onChanged: (_) => setState(() {}),
-            textInputAction: TextInputAction.next,
-            autofillHints: const [AutofillHints.username],
-          ),
-          const SizedBox(height: AetherSpacing.md),
-          AuthField(
-            title: l.authPasswordHint,
-            controller: _password,
-            isSecure: true,
-            onChanged: (_) => setState(() {}),
-            textInputAction: TextInputAction.done,
-            autofillHints: const [AutofillHints.password],
-          ),
-          const SizedBox(height: AetherSpacing.lg),
-          AuthPrimaryButton(
-            title: l.authSignIn,
-            isWorking: working,
-            isEnabled: _canSubmit,
-            onTap: _submit,
-          ),
-          const SizedBox(height: AetherSpacing.md),
-          GestureDetector(
-            onTap: working ? null : _forgotPassword,
+  Future<void> _showErrorDialog(AuthException err) async {
+    final message = err.message;
+    widget.currentUser.clearLastError();
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => AlertDialog(
+        backgroundColor: AetherColors.bgCanvas,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AetherRadii.lg),
+        ),
+        title: Text(
+          AppL10n.of(context).authErrorDialogTitle,
+          style: AetherTextStyles.h2,
+        ),
+        content: Text(message, style: AetherTextStyles.body),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: TextButton.styleFrom(foregroundColor: AetherColors.primary),
             child: Text(
-              l.authForgotPassword,
-              style: const TextStyle(
-                fontSize: 14,
-                color: AetherColors.textSecondary,
-                decoration: TextDecoration.underline,
-                decorationColor: AetherColors.textSecondary,
-              ),
+              AppL10n.of(context).commonOk,
+              style: const TextStyle(fontWeight: FontWeight.w600),
             ),
           ),
         ],
       ),
     );
   }
-}
-
-class EmailSignUpView extends StatefulWidget {
-  final CurrentUser currentUser;
-
-  const EmailSignUpView({super.key, required this.currentUser});
-
-  @override
-  State<EmailSignUpView> createState() => _EmailSignUpViewState();
-}
-
-class _EmailSignUpViewState extends State<EmailSignUpView> {
-  final _displayName = TextEditingController();
-  final _email = TextEditingController();
-  final _password = TextEditingController();
-
-  @override
-  void dispose() {
-    _displayName.dispose();
-    _email.dispose();
-    _password.dispose();
-    super.dispose();
-  }
 
   String get _normalizedEmail => _email.text.trim().toLowerCase();
-
   bool get _canSubmit =>
       _normalizedEmail.isNotEmpty && _password.text.length >= 8;
 
@@ -144,9 +97,6 @@ class _EmailSignUpViewState extends State<EmailSignUpView> {
         SignUpRequest.email(
           email: _normalizedEmail,
           password: _password.text,
-          displayName: _displayName.text.trim().isEmpty
-              ? null
-              : _displayName.text.trim(),
         ),
       );
     } on EmailVerificationPending catch (e) {
@@ -170,46 +120,80 @@ class _EmailSignUpViewState extends State<EmailSignUpView> {
 
   @override
   Widget build(BuildContext context) {
-    final working = widget.currentUser.isPerformingAuthAction;
     final l = AppL10n.of(context);
-    return AutofillGroup(
-      child: Column(
-        children: [
-          AuthField(
-            title: l.authEmailHint,
-            controller: _email,
-            keyboard: AuthFieldKeyboard.email,
-            onChanged: (_) => setState(() {}),
-            textInputAction: TextInputAction.next,
-            autofillHints: const [AutofillHints.username],
+    final working = widget.currentUser.isPerformingAuthAction;
+    return Scaffold(
+      backgroundColor: AetherColors.bgCanvas,
+      body: SafeArea(
+        child: AutofillGroup(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const AuthTopBar(leading: AuthTopBarBack()),
+              Expanded(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AetherSpacing.xl,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: 80),
+                      AuthHeading(
+                        title: l.authSignUp,
+                        subtitle: l.authCreateAccount,
+                      ),
+                      const SizedBox(height: 64),
+                      LabeledField(
+                        label: l.authEmailHint,
+                        controller: _email,
+                        keyboardType: TextInputType.emailAddress,
+                        textInputAction: TextInputAction.next,
+                        autofillHints: const [AutofillHints.username],
+                        onChanged: (_) => setState(() {}),
+                      ),
+                      const SizedBox(height: AetherSpacing.xl),
+                      LabeledField(
+                        label: l.authPasswordHintMin,
+                        controller: _password,
+                        isSecure: true,
+                        textInputAction: TextInputAction.done,
+                        autofillHints: const [AutofillHints.newPassword],
+                        onChanged: (_) => setState(() {}),
+                        onSubmitted: (_) {
+                          if (_canSubmit && !working) _submit();
+                        },
+                      ),
+                      const SizedBox(height: 56),
+                      MinimalCta(
+                        title: l.authSignUp,
+                        enabled: _canSubmit && !working,
+                        working: working,
+                        onTap: _submit,
+                      ),
+                      const SizedBox(height: AetherSpacing.xxl),
+                      // Tiny terms / privacy reminder. Plain (not link)
+                      // for now — when we ship a real privacy policy
+                      // page, this can become two MinimalLinks.
+                      Text(
+                        l.authTermsAcceptance,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AetherColors.textTertiary,
+                          height: 1.5,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                      const SizedBox(height: AetherSpacing.xl),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: AetherSpacing.md),
-          AuthField(
-            title: l.authPasswordHint,
-            controller: _password,
-            isSecure: true,
-            onChanged: (_) => setState(() {}),
-            textInputAction: TextInputAction.done,
-            autofillHints: const [AutofillHints.newPassword],
-          ),
-          const SizedBox(height: AetherSpacing.lg),
-          AuthPrimaryButton(
-            title: l.authSignUp,
-            isWorking: working,
-            isEnabled: _canSubmit,
-            onTap: _submit,
-          ),
-          const SizedBox(height: AetherSpacing.md),
-          Text(
-            l.authTermsAcceptance,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 12,
-              color: AetherColors.textTertiary,
-              height: 1.4,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

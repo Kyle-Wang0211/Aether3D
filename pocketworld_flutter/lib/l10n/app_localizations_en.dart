@@ -15,6 +15,9 @@ class AppL10nEn extends AppL10n {
   String get splashSubtitle => '3D capture · minimalist workbench';
 
   @override
+  String get splashStartingEngine => 'Starting 3D engine…';
+
+  @override
   String get splashRestoringSession => 'Restoring session…';
 
   @override
@@ -251,6 +254,85 @@ class AppL10nEn extends AppL10n {
   @override
   String get meSignOutConfirmBody =>
       'You\'ll need to sign in again to access cloud works.';
+
+  @override
+  String get meDetailVisibilityPrivate => 'Private · Only you';
+
+  @override
+  String get meDetailPublishedBadge => 'Published to community';
+
+  @override
+  String get meDetailActionPublish => 'Publish';
+
+  @override
+  String get meDetailActionEdit => 'Edit';
+
+  @override
+  String get meDetailToastPublished => 'Published to community';
+
+  @override
+  String get meDetailToastUpdated => 'Work info updated';
+
+  @override
+  String meDetailToastPublishFailed(String detail) {
+    return 'Publish failed: $detail';
+  }
+
+  @override
+  String get meDetailSheetTitlePublish => 'Publish to community';
+
+  @override
+  String get meDetailSheetTitleEdit => 'Edit work';
+
+  @override
+  String get meDetailSheetSubtitlePublish =>
+      'Let the community see what you scanned.';
+
+  @override
+  String get meDetailSheetSubtitleEdit =>
+      'Update title or description; everyone sees the latest version.';
+
+  @override
+  String get meDetailLabelTitle => 'Title';
+
+  @override
+  String get meDetailHintTitle => 'Name this scan (1–100 chars)';
+
+  @override
+  String get meDetailValidationTitleEmpty => 'Title is required';
+
+  @override
+  String meDetailValidationTitleTooLong(int max) {
+    return 'Title can\'t exceed $max chars';
+  }
+
+  @override
+  String get meDetailLabelDescription => 'Description (optional)';
+
+  @override
+  String meDetailHintDescription(int max) {
+    return 'Notes about the capture, usage, highlights. Max $max chars.';
+  }
+
+  @override
+  String meDetailValidationDescriptionTooLong(int max) {
+    return 'Description can\'t exceed $max chars';
+  }
+
+  @override
+  String get meDetailButtonPublish => 'Publish';
+
+  @override
+  String get meDetailButtonSave => 'Save';
+
+  @override
+  String get meDetailRunningProcessing => 'Processing';
+
+  @override
+  String get meDetailFailedTitle => 'Processing failed';
+
+  @override
+  String get meDetailRecordNotFound => 'Record not found';
 
   @override
   String get authWelcomeBack => 'Welcome back';
