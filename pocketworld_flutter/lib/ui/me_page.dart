@@ -3,6 +3,8 @@
 // privacy, language, about, sign-out) sits behind the gear icon at the
 // top-left, which pushes MeSettingsPage.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../auth/auth_models.dart';
@@ -36,6 +38,18 @@ class _MePageState extends State<MePage> {
   void initState() {
     super.initState();
     _stats.load();
+    // Fire-and-forget: pull whatever the user has published from the
+    // cloud into the local store on first paint of the Me tab. Without
+    // this, accounts that published from another device (or had works
+    // seeded into Supabase by tooling) show an empty grid until the
+    // user discovers the pull-to-refresh gesture. Failures are silent —
+    // the user can still pull-to-refresh manually for a snackbar.
+    unawaited(MyWorksSyncService.instance.refreshFromCloud().catchError(
+      (Object e, StackTrace s) {
+        debugPrint('[MePage] auto-sync failed: $e\n$s');
+        return 0;
+      },
+    ));
   }
 
   @override
