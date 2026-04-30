@@ -68,6 +68,7 @@
   "relativeMonthsAgo": "{n} mo ago",
   "@relativeMonthsAgo": { "placeholders": { "n": { "type": "int" } } },
 
+  "meSettingsTitle": "Settings",
   "meEdit": "Edit",
   "meWorks": "Works",
   "meRunning": "Running",
@@ -82,6 +83,12 @@
   "meNotificationsOn": "On",
   "mePrivacy": "Privacy",
   "mePrivacyFollowersOnly": "Followers only",
+  "meCloudSyncNever": "Not synced",
+  "meCloudTrainingNotEnabled": "Not enabled",
+  "meNotificationsOff": "Off",
+  "mePrivacyPublic": "Public",
+  "mePrivacyPrivate": "Private",
+  "meSettingNotConfigured": "Not configured",
   "meLanguage": "Language",
   "meLanguageZh": "简体中文",
   "meLanguageEn": "English",
@@ -153,6 +160,54 @@
   "captureNotImplemented": "{feature} is not connected yet (placeholder)",
   "@captureNotImplemented": {
     "placeholders": { "feature": { "type": "String" } }
+  },
+
+  "captureErrorNoCamera": "No camera available on this device",
+  "captureErrorPermissionDenied": "Camera permission denied. Please enable it in Settings.",
+  "captureErrorInitFailedCode": "Camera initialization failed: {code}",
+  "@captureErrorInitFailedCode": {
+    "placeholders": { "code": { "type": "String" } }
+  },
+  "captureErrorInitFailedGeneric": "Camera initialization failed: {error}",
+  "@captureErrorInitFailedGeneric": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "captureSnackFootageTooShort": "Too little footage — keep recording a bit longer before stopping.",
+  "captureSnackStartFailed": "Couldn't start recording: {error}",
+  "@captureSnackStartFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+
+  "captureUploadErrorNoConcurrentRecording": "This device can't record video while scanning — nothing to upload.",
+  "captureUploadOverlayTooShortTitle": "Footage too short",
+  "captureUploadOverlayTooShortSubtitle": "Keep recording a bit longer next time.",
+  "captureUploadOverlayFailedTitle": "Upload failed",
+  "captureUploadOverlayDoneTitle": "Uploaded",
+  "captureUploadOverlayJobSubtitle": "jobId · {jobId}",
+  "@captureUploadOverlayJobSubtitle": {
+    "placeholders": { "jobId": { "type": "String" } }
+  },
+  "captureUploadPhasePreparingTitle": "Preparing",
+  "captureUploadPhaseCreatingJobTitle": "Registering job",
+  "captureUploadPhaseUploadingVideoTitle": "Uploading video",
+  "captureUploadPhaseUploadingCuratedTitle": "Uploading manifest",
+  "captureUploadPhaseGenericTitle": "Uploading",
+  "captureUploadDetailPreparing": "Preparing upload…",
+  "captureUploadDetailPickingFrames": "Picking the best frames to upload",
+  "captureUploadDetailRegisteringJob": "Registering with the cloud ({frames} frames)",
+  "@captureUploadDetailRegisteringJob": {
+    "placeholders": { "frames": { "type": "int" } }
+  },
+  "captureUploadDetailUploadingVideo": "{sentMb} MB / {totalMb} MB",
+  "@captureUploadDetailUploadingVideo": {
+    "placeholders": {
+      "sentMb": { "type": "String" },
+      "totalMb": { "type": "String" }
+    }
+  },
+  "captureUploadDetailUploadingCurated": "{bytes} B",
+  "@captureUploadDetailUploadingCurated": {
+    "placeholders": { "bytes": { "type": "int" } }
   },
 
   "captureModePageTitle": "Capture mode",

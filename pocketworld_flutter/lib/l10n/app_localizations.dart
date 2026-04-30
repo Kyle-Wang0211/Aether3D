@@ -329,6 +329,12 @@ abstract class AppL10n {
   /// **'{n} mo ago'**
   String relativeMonthsAgo(int n);
 
+  /// No description provided for @meSettingsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Settings'**
+  String get meSettingsTitle;
+
   /// No description provided for @meEdit.
   ///
   /// In en, this message translates to:
@@ -400,6 +406,42 @@ abstract class AppL10n {
   /// In en, this message translates to:
   /// **'Followers only'**
   String get mePrivacyFollowersOnly;
+
+  /// No description provided for @meCloudSyncNever.
+  ///
+  /// In en, this message translates to:
+  /// **'Not synced'**
+  String get meCloudSyncNever;
+
+  /// No description provided for @meCloudTrainingNotEnabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Not enabled'**
+  String get meCloudTrainingNotEnabled;
+
+  /// No description provided for @meNotificationsOff.
+  ///
+  /// In en, this message translates to:
+  /// **'Off'**
+  String get meNotificationsOff;
+
+  /// No description provided for @mePrivacyPublic.
+  ///
+  /// In en, this message translates to:
+  /// **'Public'**
+  String get mePrivacyPublic;
+
+  /// No description provided for @mePrivacyPrivate.
+  ///
+  /// In en, this message translates to:
+  /// **'Private'**
+  String get mePrivacyPrivate;
+
+  /// No description provided for @meSettingNotConfigured.
+  ///
+  /// In en, this message translates to:
+  /// **'Not configured'**
+  String get meSettingNotConfigured;
 
   /// No description provided for @meLanguage.
   ///
@@ -736,6 +778,138 @@ abstract class AppL10n {
   /// In en, this message translates to:
   /// **'{feature} is not connected yet (placeholder)'**
   String captureNotImplemented(String feature);
+
+  /// No description provided for @captureErrorNoCamera.
+  ///
+  /// In en, this message translates to:
+  /// **'No camera available on this device'**
+  String get captureErrorNoCamera;
+
+  /// No description provided for @captureErrorPermissionDenied.
+  ///
+  /// In en, this message translates to:
+  /// **'Camera permission denied. Please enable it in Settings.'**
+  String get captureErrorPermissionDenied;
+
+  /// No description provided for @captureErrorInitFailedCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Camera initialization failed: {code}'**
+  String captureErrorInitFailedCode(String code);
+
+  /// No description provided for @captureErrorInitFailedGeneric.
+  ///
+  /// In en, this message translates to:
+  /// **'Camera initialization failed: {error}'**
+  String captureErrorInitFailedGeneric(String error);
+
+  /// No description provided for @captureSnackFootageTooShort.
+  ///
+  /// In en, this message translates to:
+  /// **'Too little footage — keep recording a bit longer before stopping.'**
+  String get captureSnackFootageTooShort;
+
+  /// No description provided for @captureSnackStartFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t start recording: {error}'**
+  String captureSnackStartFailed(String error);
+
+  /// No description provided for @captureUploadErrorNoConcurrentRecording.
+  ///
+  /// In en, this message translates to:
+  /// **'This device can\'t record video while scanning — nothing to upload.'**
+  String get captureUploadErrorNoConcurrentRecording;
+
+  /// No description provided for @captureUploadOverlayTooShortTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Footage too short'**
+  String get captureUploadOverlayTooShortTitle;
+
+  /// No description provided for @captureUploadOverlayTooShortSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep recording a bit longer next time.'**
+  String get captureUploadOverlayTooShortSubtitle;
+
+  /// No description provided for @captureUploadOverlayFailedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Upload failed'**
+  String get captureUploadOverlayFailedTitle;
+
+  /// No description provided for @captureUploadOverlayDoneTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploaded'**
+  String get captureUploadOverlayDoneTitle;
+
+  /// No description provided for @captureUploadOverlayJobSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'jobId · {jobId}'**
+  String captureUploadOverlayJobSubtitle(String jobId);
+
+  /// No description provided for @captureUploadPhasePreparingTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Preparing'**
+  String get captureUploadPhasePreparingTitle;
+
+  /// No description provided for @captureUploadPhaseCreatingJobTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Registering job'**
+  String get captureUploadPhaseCreatingJobTitle;
+
+  /// No description provided for @captureUploadPhaseUploadingVideoTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading video'**
+  String get captureUploadPhaseUploadingVideoTitle;
+
+  /// No description provided for @captureUploadPhaseUploadingCuratedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading manifest'**
+  String get captureUploadPhaseUploadingCuratedTitle;
+
+  /// No description provided for @captureUploadPhaseGenericTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading'**
+  String get captureUploadPhaseGenericTitle;
+
+  /// No description provided for @captureUploadDetailPreparing.
+  ///
+  /// In en, this message translates to:
+  /// **'Preparing upload…'**
+  String get captureUploadDetailPreparing;
+
+  /// No description provided for @captureUploadDetailPickingFrames.
+  ///
+  /// In en, this message translates to:
+  /// **'Picking the best frames to upload'**
+  String get captureUploadDetailPickingFrames;
+
+  /// No description provided for @captureUploadDetailRegisteringJob.
+  ///
+  /// In en, this message translates to:
+  /// **'Registering with the cloud ({frames} frames)'**
+  String captureUploadDetailRegisteringJob(int frames);
+
+  /// No description provided for @captureUploadDetailUploadingVideo.
+  ///
+  /// In en, this message translates to:
+  /// **'{sentMb} MB / {totalMb} MB'**
+  String captureUploadDetailUploadingVideo(String sentMb, String totalMb);
+
+  /// No description provided for @captureUploadDetailUploadingCurated.
+  ///
+  /// In en, this message translates to:
+  /// **'{bytes} B'**
+  String captureUploadDetailUploadingCurated(int bytes);
 
   /// No description provided for @captureModePageTitle.
   ///

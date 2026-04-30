@@ -144,6 +144,9 @@ class AppL10nEn extends AppL10n {
   }
 
   @override
+  String get meSettingsTitle => 'Settings';
+
+  @override
   String get meEdit => 'Edit';
 
   @override
@@ -182,6 +185,24 @@ class AppL10nEn extends AppL10n {
 
   @override
   String get mePrivacyFollowersOnly => 'Followers only';
+
+  @override
+  String get meCloudSyncNever => 'Not synced';
+
+  @override
+  String get meCloudTrainingNotEnabled => 'Not enabled';
+
+  @override
+  String get meNotificationsOff => 'Off';
+
+  @override
+  String get mePrivacyPublic => 'Public';
+
+  @override
+  String get mePrivacyPrivate => 'Private';
+
+  @override
+  String get meSettingNotConfigured => 'Not configured';
 
   @override
   String get meLanguage => 'Language';
@@ -361,6 +382,91 @@ class AppL10nEn extends AppL10n {
   @override
   String captureNotImplemented(String feature) {
     return '$feature is not connected yet (placeholder)';
+  }
+
+  @override
+  String get captureErrorNoCamera => 'No camera available on this device';
+
+  @override
+  String get captureErrorPermissionDenied =>
+      'Camera permission denied. Please enable it in Settings.';
+
+  @override
+  String captureErrorInitFailedCode(String code) {
+    return 'Camera initialization failed: $code';
+  }
+
+  @override
+  String captureErrorInitFailedGeneric(String error) {
+    return 'Camera initialization failed: $error';
+  }
+
+  @override
+  String get captureSnackFootageTooShort =>
+      'Too little footage — keep recording a bit longer before stopping.';
+
+  @override
+  String captureSnackStartFailed(String error) {
+    return 'Couldn\'t start recording: $error';
+  }
+
+  @override
+  String get captureUploadErrorNoConcurrentRecording =>
+      'This device can\'t record video while scanning — nothing to upload.';
+
+  @override
+  String get captureUploadOverlayTooShortTitle => 'Footage too short';
+
+  @override
+  String get captureUploadOverlayTooShortSubtitle =>
+      'Keep recording a bit longer next time.';
+
+  @override
+  String get captureUploadOverlayFailedTitle => 'Upload failed';
+
+  @override
+  String get captureUploadOverlayDoneTitle => 'Uploaded';
+
+  @override
+  String captureUploadOverlayJobSubtitle(String jobId) {
+    return 'jobId · $jobId';
+  }
+
+  @override
+  String get captureUploadPhasePreparingTitle => 'Preparing';
+
+  @override
+  String get captureUploadPhaseCreatingJobTitle => 'Registering job';
+
+  @override
+  String get captureUploadPhaseUploadingVideoTitle => 'Uploading video';
+
+  @override
+  String get captureUploadPhaseUploadingCuratedTitle => 'Uploading manifest';
+
+  @override
+  String get captureUploadPhaseGenericTitle => 'Uploading';
+
+  @override
+  String get captureUploadDetailPreparing => 'Preparing upload…';
+
+  @override
+  String get captureUploadDetailPickingFrames =>
+      'Picking the best frames to upload';
+
+  @override
+  String captureUploadDetailRegisteringJob(int frames) {
+    return 'Registering with the cloud ($frames frames)';
+  }
+
+  @override
+  String captureUploadDetailUploadingVideo(String sentMb, String totalMb) {
+    return '$sentMb MB / $totalMb MB';
+  }
+
+  @override
+  String captureUploadDetailUploadingCurated(int bytes) {
+    return '$bytes B';
   }
 
   @override
