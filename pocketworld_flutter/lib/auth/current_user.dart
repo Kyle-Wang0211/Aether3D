@@ -51,6 +51,17 @@ class CurrentUser extends ChangeNotifier {
 
   CurrentUser({required AuthService service}) : _service = service;
 
+  /// Debug-only: logs every SignedOut state mutation with a stack trace
+  /// so we can answer "who flipped me to SignedOut?" when a stale
+  /// detail / settings page surfaces AuthRootView underneath. Wired in
+  /// front of every `_state = const CurrentUserSignedOut()` site
+  /// (bootstrap / signOut / deleteAccount). Keep cheap in release —
+  /// debugPrint is a no-op outside debug.
+  void _logSignedOut(String reason) {
+    debugPrint('[CurrentUser] → SignedOut ($reason)\n'
+        '${StackTrace.current}');
+  }
+
   /// Swap the concrete auth backend at runtime. main() uses this to
   /// launch the app on a mock service (so runApp doesn't block on
   /// Firebase.initializeApp) and upgrade to the Firebase-backed
@@ -79,18 +90,26 @@ class CurrentUser extends ChangeNotifier {
   Future<void> bootstrap() async {
     try {
       final user = await _service.currentUser();
+      // ignore: avoid_print
+      print('[AUTH-DEBUG] CurrentUser.bootstrap: _service.currentUser() '
+          '→ ${user == null ? "null (will go to signedOut)" : "user=${user.email ?? user.id.rawValue}"}');
       if (user == null) {
         await _clearPersistedUserID();
+        _logSignedOut('bootstrap: currentUser==null');
         _state = const CurrentUserSignedOut();
         notifyListeners();
         return;
       }
-      if (await _isIdleExpired()) {
+      final idleExpired = await _isIdleExpired();
+      // ignore: avoid_print
+      print('[AUTH-DEBUG] CurrentUser.bootstrap: isIdleExpired=$idleExpired');
+      if (idleExpired) {
         try {
           await _service.signOut();
         } catch (_) {/* best effort */}
         await _clearIdleTimestamp();
         await _clearPersistedUserID();
+        _logSignedOut('bootstrap: idle expired');
         _state = const CurrentUserSignedOut();
         notifyListeners();
         return;
@@ -99,7 +118,8 @@ class CurrentUser extends ChangeNotifier {
       await _persistUserID(user.id.rawValue);
       _state = CurrentUserSignedIn(user);
       notifyListeners();
-    } catch (_) {
+    } catch (e) {
+      _logSignedOut('bootstrap: caught exception: $e');
       _state = const CurrentUserSignedOut();
       notifyListeners();
     }
@@ -287,6 +307,7 @@ class CurrentUser extends ChangeNotifier {
     } catch (_) {/* best effort */}
     await _clearIdleTimestamp();
     await _clearPersistedUserID();
+    _logSignedOut('signOut() called');
     _state = const CurrentUserSignedOut();
     _lastError = null;
     notifyListeners();
@@ -299,6 +320,7 @@ class CurrentUser extends ChangeNotifier {
       await _service.deleteAccount();
       await _clearIdleTimestamp();
       await _clearPersistedUserID();
+      _logSignedOut('deleteAccount() succeeded');
       _state = const CurrentUserSignedOut();
       _lastError = null;
       return true;
