@@ -335,6 +335,21 @@ class _LiveModelViewState extends State<LiveModelView>
         await _applyOrbit();
       } else {
         _restartRotateTicker();
+        // Force one immediate camera placement at the fitted distance.
+        // Without this the Ticker's first tick is baseline-only (no
+        // camera write) and the SECOND tick (~16ms later) is what
+        // actually applies _fittedDistance — so for one or two
+        // frames the model renders at the ViewerWidget's
+        // initialCameraPosition (widget.cameraDistance = 5.5), which
+        // is much further out than the fitted distance for typical
+        // assets (Corset = 0.21, A Beautiful Game = 2.70). The cover
+        // crossfade then reveals the tiny-faraway model right before
+        // the second tick snaps it to the right size, producing
+        // "starts tiny then jumps to normal" the user reported.
+        // _applyAutoRotate uses _autoRotateDistance = _fittedDistance
+        // ?? widget.cameraDistance, so calling it here lands the
+        // camera at the fitted spot synchronously.
+        await _applyAutoRotate();
       }
 
       // Wait until the current Flutter frame finishes rasterizing, then
