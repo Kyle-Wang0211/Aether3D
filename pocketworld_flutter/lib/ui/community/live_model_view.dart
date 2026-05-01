@@ -180,25 +180,33 @@ class _LiveModelViewState extends State<LiveModelView>
   late double _orbitRadius = widget.cameraDistance;
 
   // ─── Auto-fit ────────────────────────────────────────────────────────
-  // `widget.cameraDistance` is only the initial / fallback value. After
-  // the asset lands in the scene we ask thermion for its bounding box
-  // and compute the distance that frames the model's post-transform
-  // AABB given a KNOWN field of view we pin via setLensProjection.
+  // After the asset lands in the scene we ask thermion for its LOCAL
+  // AABB and project it through the camera's actual projection matrix
+  // to land at a distance that frames it.
   //
-  // Background: thermion 0.3.4's Camera.getVerticalFieldOfView()
-  // returned 46.4 in our test (≈ 2658° if interpreted as radians) —
-  // that's clearly the focal length in mm, not a FOV. Whatever the
-  // actual unit is, we don't trust it, so we set our own known focal
-  // length and back the FOV out from sensor-height / 2 / focalLength,
-  // which is the classic 35mm-equivalent definition Filament uses.
-  // Pinned focal length we attempt to install on the camera; the
-  // actual fit math reads the projection matrix directly so it's
-  // resilient to setLensProjection no-oping.
+  // Two key decisions:
+  //
+  // 1. We deliberately set `transformToUnitCube: false` on the
+  //    ViewerWidget so the asset stays in its own units. thermion
+  //    0.3.4's transformToUnitCube produces a scale that doesn't
+  //    always agree with the documented "longest axis maps to
+  //    [-1, 1]" — in our reproduction a model with hyLocal=1 ended
+  //    up rendering at ~10% of viewport instead of the predicted
+  //    ~80%, suggesting an ~8x scale mismatch. Skipping
+  //    transformToUnitCube and computing in the model's own units
+  //    makes the math match what's actually on screen.
+  //
+  // 2. We cache the model's local AABB center and use it as the
+  //    lookAt focus everywhere — local AABBs are NOT necessarily
+  //    centered at origin (especially for re-exported scan GLBs),
+  //    and lookAt(focus: zero) on an off-center model just stares
+  //    past it.
   static const double _kFocalLengthMM = 50.0;
 
   double? _fittedDistance;
   double get _autoRotateDistance =>
       _fittedDistance ?? widget.cameraDistance;
+  v64.Vector3 _modelCenter = v64.Vector3.zero();
   double _pinchStartRadius = 0.0;
 
   // ≈5× Thermion's stock 0.001/event so a half-screen drag rotates
@@ -416,17 +424,17 @@ class _LiveModelViewState extends State<LiveModelView>
         _camera = cam;
       }
       final r = _autoRotateDistance;
-      // Near-horizontal eye (~3° tilt) on the orbit plane. Keeps wide
-      // models like ToyCar fully in frame as the camera spins. Focus
-      // is the unit-cube center (transformToUnitCube re-centers any
-      // model there).
+      // Near-horizontal eye (~3° tilt) on the orbit plane. Centered
+      // at _modelCenter (the AABB center of the loaded model) — NOT
+      // origin, because we no longer transformToUnitCube and the
+      // model's own coordinate system may have its center elsewhere.
       final eye = v64.Vector3(
-        r * math.sin(_angle),
-        r * 0.05,
-        r * math.cos(_angle),
+        _modelCenter.x + r * math.sin(_angle),
+        _modelCenter.y + r * 0.05,
+        _modelCenter.z + r * math.cos(_angle),
       );
       if (_disposed) return;
-      await cam.lookAt(eye, focus: v64.Vector3.zero());
+      await cam.lookAt(eye, focus: _modelCenter);
     } catch (_) {
       // Drop cached camera so the next tick re-fetches; KEEP the
       // ticker running so rotation auto-recovers.
@@ -462,98 +470,83 @@ class _LiveModelViewState extends State<LiveModelView>
     if (cam == null || _disposed) return;
     final cosE = math.cos(_orbitElevation);
     final eye = v64.Vector3(
-      _orbitRadius * cosE * math.sin(_orbitAzimuth),
-      _orbitRadius * math.sin(_orbitElevation),
-      _orbitRadius * cosE * math.cos(_orbitAzimuth),
+      _modelCenter.x + _orbitRadius * cosE * math.sin(_orbitAzimuth),
+      _modelCenter.y + _orbitRadius * math.sin(_orbitElevation),
+      _modelCenter.z + _orbitRadius * cosE * math.cos(_orbitAzimuth),
     );
     try {
-      await cam.lookAt(eye, focus: v64.Vector3.zero());
+      await cam.lookAt(eye, focus: _modelCenter);
     } catch (_) {
       _camera = null;
     }
   }
 
-  /// Fit-to-bounds using post-transform AABB extents (NOT bounding
-  /// sphere). The previous sphere-radius formula `sqrt(hx²+hy²+hz²) /
-  /// maxAxis` always produced ~1.0 because transformToUnitCube
-  /// normalizes the longest axis to 1, so every model — fat or thin —
-  /// got framed at the same distance. That's wrong for elongated
-  /// models like Corset (Y-axis dominant): the screen projection
-  /// height = hy / distance × focal-factor, so a thin tall model
-  /// actually overflows when the distance is tuned for an isotropic
-  /// cube.
+  /// Fit algorithm ported from google/model-viewer's
+  /// `ModelScene.idealCameraDistance()`:
+  ///   distance = boundingSphere.radius / sin(fovV / 2)
   ///
-  /// New formula:
-  ///   verticalRequired   = hy   / tan(fovV / 2)          // Y stays
-  ///                                                       // fixed during
-  ///                                                       // Y-axis spin
-  ///   horizontalRequired = √(hx²+hz²) / tan(fovH / 2)    // worst-case
-  ///                                                       // diagonal
-  ///                                                       // during spin
-  ///   distance = max(verticalRequired, horizontalRequired) × padding
+  /// Two key choices match model-viewer:
+  ///   1. We do NOT transformToUnitCube. The asset stays in its own
+  ///      units; the bounding sphere radius is computed from the
+  ///      asset's RAW local AABB. Mixing transform + fit math leads
+  ///      to scale mismatches we can't easily reason about.
+  ///   2. lookAt focus = AABB center, NOT origin. Many GLBs have
+  ///      bounding boxes that aren't centered at the local-space
+  ///      origin (re-exported scans, multi-mesh scenes); pointing
+  ///      the camera at origin would just stare past the model.
   ///
-  /// Padding bumped from 1.20 → 1.30 to leave a comfortable margin
-  /// around the model's silhouette in the 1:1 PostCard frame.
+  /// Difference vs. model-viewer: they iterate every vertex to get
+  /// the tightest possible sphere; thermion only exposes AABB, so
+  /// we use the AABB-diagonal sphere (`sqrt(hx²+hy²+hz²)`), which
+  /// is a slightly conservative upper bound. Padding 1.25 lands
+  /// the silhouette at ~80% of the frustum, matching the user's
+  /// "10% margin top + bottom" spec.
+  ///
+  /// Source:
+  ///   https://github.com/google/model-viewer
+  ///   packages/model-viewer/src/three-components/ModelScene.ts
+  ///   methods updateFraming() and idealCameraDistance()
   Future<void> _computeFit(ThermionAsset asset, Camera camera) async {
     try {
       final aabb = await asset.getBoundingBox();
       if (_disposed) return;
-      // Local AABB half-extents (pre-transformToUnitCube).
-      final hxLocal = (aabb.max.x - aabb.min.x) * 0.5;
-      final hyLocal = (aabb.max.y - aabb.min.y) * 0.5;
-      final hzLocal = (aabb.max.z - aabb.min.z) * 0.5;
-      final maxAxis =
-          math.max(hxLocal, math.max(hyLocal, hzLocal));
-      if (!maxAxis.isFinite || maxAxis <= 0) return;
-      // transformToUnitCube scales the longest axis to span [-1, 1].
-      // Post-transform half-extents:
-      final hxN = hxLocal / maxAxis;
-      final hyN = hyLocal / maxAxis;
-      final hzN = hzLocal / maxAxis;
-      // Spin axis is Y, so horizontal silhouette swings between
-      // max(hxN,hzN) (face on) and √(hxN²+hzN²) (corner on). Take the
-      // diagonal as the worst case.
-      final horizDiag = math.sqrt(hxN * hxN + hzN * hzN);
-      // Read the projection matrix DIRECTLY rather than going through
-      // setLensProjection + computed fov. setLensProjection in thermion
-      // 0.3.4 has been observed to no-op silently in some cases (the
-      // user reported a model still rendered ~20% of the viewport
-      // when the math expected 80%, meaning the actual FOV was much
-      // wider than our pinned 27° intent — i.e. thermion's lens was
-      // still default).
-      //
-      // For a standard symmetric perspective projection:
-      //   M[1][1] = cot(fovV/2) = 1 / tan(fovV/2)
-      //   M[0][0] = cot(fovH/2)
-      // The half-extent's NDC y projection at distance d is
-      //   ndc_y = halfHeight × M[1][1] / d
-      // We want ndc_y = 1.0 / padding (so the model fills 1/padding of
-      // the visible NDC range), which gives:
-      //   d = halfHeight × M[1][1] × padding
-      // Same on the horizontal axis with M[0][0].
+      // RAW local AABB — no transformToUnitCube assumption.
+      final hx = (aabb.max.x - aabb.min.x) * 0.5;
+      final hy = (aabb.max.y - aabb.min.y) * 0.5;
+      final hz = (aabb.max.z - aabb.min.z) * 0.5;
+      // AABB center; cached so _applyAutoRotate / _applyOrbit can
+      // lookAt() the right point. Defaults to origin if the loader
+      // hasn't centered the model itself.
+      final cx = (aabb.max.x + aabb.min.x) * 0.5;
+      final cy = (aabb.max.y + aabb.min.y) * 0.5;
+      final cz = (aabb.max.z + aabb.min.z) * 0.5;
+      _modelCenter = v64.Vector3(cx, cy, cz);
+      // Bounding sphere radius: AABB-diagonal half-length.
+      final r = math.sqrt(hx * hx + hy * hy + hz * hz);
+      if (!r.isFinite || r <= 0) return;
+      // Real fov from the projection matrix the camera is actually
+      // using right now. M[1][1] = cot(fovV/2).
       final proj = await camera.getProjectionMatrix();
       if (_disposed) return;
-      // vector_math Matrix4 is column-major: m[col * 4 + row].
-      // entry(row, col) gives the math-textbook indexing.
-      final m00 = proj.entry(0, 0);
       final m11 = proj.entry(1, 1);
-      if (!m00.isFinite || m00 <= 0 || !m11.isFinite || m11 <= 0) return;
+      if (!m11.isFinite || m11 <= 0) return;
+      final tanHalfFovV = 1.0 / m11;
+      final halfFovV = math.atan(tanHalfFovV);
+      final sinHalfFovV = math.sin(halfFovV);
+      if (!sinHalfFovV.isFinite || sinHalfFovV <= 0) return;
       const padding = 1.25; // 80% silhouette → 10% top + 10% bottom
-      final dV = hyN * m11 * padding;
-      final dH = horizDiag * m00 * padding;
-      final dist = math.max(dV, dH);
+      // model-viewer formula: r / sin(fov/2). Padding pulls the
+      // camera back further to leave the requested margin.
+      final dist = (r / sinHalfFovV) * padding;
       if (!dist.isFinite || dist <= 0) return;
-      // Equivalent fov for the log only (NOT used in the math): so we
-      // can spot when thermion's projection is wider/narrower than
-      // expected without having to dump the whole matrix.
-      final fovVdeg = 2 * math.atan(1.0 / m11) * 180 / math.pi;
+      final fovVdeg = halfFovV * 2 * 180 / math.pi;
       debugPrint('[LiveModelView] fit ${widget.modelUrl}: '
-          'he=(${hxN.toStringAsFixed(2)}, ${hyN.toStringAsFixed(2)}, '
-          '${hzN.toStringAsFixed(2)}) '
-          'projM00=${m00.toStringAsFixed(2)} M11=${m11.toStringAsFixed(2)} '
-          '(actual fovV≈${fovVdeg.toStringAsFixed(1)}°) '
-          'dV=${dV.toStringAsFixed(2)} dH=${dH.toStringAsFixed(2)} '
-          '→ ${dist.toStringAsFixed(2)}');
+          'aabb=([${aabb.min.x.toStringAsFixed(2)}..${aabb.max.x.toStringAsFixed(2)}], '
+          '[${aabb.min.y.toStringAsFixed(2)}..${aabb.max.y.toStringAsFixed(2)}], '
+          '[${aabb.min.z.toStringAsFixed(2)}..${aabb.max.z.toStringAsFixed(2)}]) '
+          'center=(${cx.toStringAsFixed(2)},${cy.toStringAsFixed(2)},${cz.toStringAsFixed(2)}) '
+          'sphereR=${r.toStringAsFixed(2)} fovV=${fovVdeg.toStringAsFixed(1)}° '
+          '→ dist=${dist.toStringAsFixed(2)}');
       _fittedDistance = dist;
       _orbitRadius = dist;
       if (mounted && !_disposed) {
@@ -606,7 +599,9 @@ class _LiveModelViewState extends State<LiveModelView>
       // Transparent → outer ColoredBox shows through; matches the cover.
       background: const Color(0x00000000),
       manipulatorType: ManipulatorType.NONE,
-      transformToUnitCube: true,
+      // See _modelCenter / _kFocalLengthMM doc — we DELIBERATELY don't
+      // unit-cube the asset, computing the fit in local units instead.
+      transformToUnitCube: false,
       postProcessing: true,
       destroyEngineOnUnload: false,
       // Match the eye in _applyAutoRotate / _applyOrbit so the very first
