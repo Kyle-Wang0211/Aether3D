@@ -6,12 +6,18 @@
 // the concrete class behind a feature flag. See
 // aether_cpp/PHASE_FLUTTER_VIEWER_PLAN.md for the staged plan.
 //
-// G2 ships only the interface + two empty concrete classes. G3+ fill
-// in the actual rendering paths.
+// G3 (this file): AetherCppViewerImpl is wired to lib/aether_view/
+// scene_bridge.dart's MethodChannel API (the same plugin home-screen
+// uses since Phase 6.4e). ThermionViewerImpl is still a stub — its
+// fill-in lands in G4 once we move the existing inline thermion code
+// out of LiveModelView.
 
-import 'dart:ui' show Color;
+import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:vector_math/vector_math_64.dart' as v64;
+
+import '../../aether_view/scene_bridge.dart';
 
 /// Loaded-model bounds the caller uses to drive its own camera fit
 /// math (the model-viewer-derived `r / sin(fov/2)` formula in
@@ -34,124 +40,172 @@ class ModelBounds {
 /// create → load → many render(...) calls → dispose.
 abstract class ViewerImpl {
   /// Allocate the underlying renderer. Returns the Flutter texture id
-  /// the caller should hand to a `Texture(textureId: ...)` widget.
-  /// Background color is what shows behind the model and during the
-  /// load-in cover (see `_LoadCover` in live_model_view.dart).
-  Future<int> create({
+  /// the caller should hand to a `Texture(textureId: ...)` widget,
+  /// OR null if this impl doesn't use a Flutter Texture (in which
+  /// case the caller mounts the impl's own widget — thermion's
+  /// `ViewerWidget` is its own thing).
+  Future<int?> create({
     required double width,
     required double height,
-    required Color background,
   });
 
-  /// Fetch + parse the model at [url]. Format is detected internally
-  /// (see `format_detect.dart`) and routed to the appropriate
-  /// underlying engine (mesh PBR for GLB, splat engine for PLY/SPZ).
-  /// Returns the model's local-space bounds for camera fit.
-  Future<ModelBounds> load(String url);
+  /// Fetch + parse the model at [url]. Format detection happens
+  /// inside (see `format_detect.dart`); GLB → mesh path, PLY/SPZ/
+  /// SPLAT → splat engine. Returns the model's local-space bounds
+  /// for camera fit. May return `null` if the impl doesn't surface
+  /// bounds (legacy thermion path keeps doing its own bounding-box
+  /// query inside).
+  Future<ModelBounds?> load(String url);
 
-  /// One frame. View + projection matrices are 4×4 column-major
-  /// (matches both `vector_math_64.Matrix4.storage` and Filament).
+  /// One frame. View + model matrices are 4×4 column-major. Note
+  /// that aether_cpp's API takes view + MODEL — projection is
+  /// derived from the texture's width/height aspect ratio inside
+  /// scene_iosurface_renderer.cpp (Filament-style). Callers that
+  /// already compute their own projection can ignore the projection
+  /// matrix.
   Future<void> render({
     required v64.Matrix4 viewMatrix,
-    required v64.Matrix4 projMatrix,
+    required v64.Matrix4 modelMatrix,
   });
 
   Future<void> dispose();
 }
 
-/// Thermion-backed implementation. This is the CURRENT behaviour —
-/// G2 shipped as a stub that the existing LiveModelView wiring will
-/// be migrated INTO in G3. Until G3 lands, LiveModelView still holds
-/// the thermion calls inline; this class just reserves the type
-/// shape so callers can program against `ViewerImpl`.
+/// Thermion-backed implementation. Stub until G4 moves the existing
+/// inline `_LiveModelViewState._onViewerReady` / `_loadAsset` /
+/// camera-tick code from live_model_view.dart into here. Until then,
+/// LiveModelView keeps driving thermion directly — this class is just
+/// a placeholder so the type system is ready.
 class ThermionViewerImpl implements ViewerImpl {
   @override
-  Future<int> create({
-    required double width,
-    required double height,
-    required Color background,
-  }) async {
+  Future<int?> create({required double width, required double height}) async {
     throw UnimplementedError(
-      'G3: move the existing ViewerWidget setup from '
-      '_LiveModelViewState._onViewerReady into here.',
+      'G4: move the existing ViewerWidget setup from '
+      '_LiveModelViewState._onViewerReady into here. Until then '
+      'LiveModelView ignores ViewerImpl and keeps driving thermion '
+      'inline.',
     );
   }
 
   @override
-  Future<ModelBounds> load(String url) async {
+  Future<ModelBounds?> load(String url) async {
     throw UnimplementedError(
-        'G3: move existing GlbAssetCache.getOrLoad + addToScene here.');
+        'G4: move existing GlbAssetCache.getOrLoad + addToScene here.');
   }
 
   @override
   Future<void> render({
     required v64.Matrix4 viewMatrix,
-    required v64.Matrix4 projMatrix,
+    required v64.Matrix4 modelMatrix,
   }) async {
-    throw UnimplementedError('G3: move existing camera.lookAt here.');
+    throw UnimplementedError('G4: move existing camera.lookAt here.');
   }
 
   @override
   Future<void> dispose() async {
     throw UnimplementedError(
-        'G3: move existing dispose ordering (flag → ticker → null fields) here.');
+        'G4: move existing dispose ordering (flag → ticker → null fields) here.');
   }
 }
 
-/// aether_cpp-backed implementation. This is the TARGET — once G3+
-/// fill it in, flipping `kAetherCppViewerEnabled` to true on a
-/// PostCard / detail page swaps from thermion to aether_cpp without
-/// touching any UI code.
+/// aether_cpp-backed implementation. G3 shipped — uses SceneBridge
+/// (the existing `aether_texture` MethodChannel that home-screen
+/// already runs through). Per-PostCard texture instance; load_glb
+/// path is the canonical scene_iosurface_renderer.cpp 2-pass mesh +
+/// splat overlay rendering.
+///
+/// Limitations as of G3:
+///   • iOS only (Android stub lands in G6, Web in G8).
+///   • GLB only (PLY / SPZ / SPLAT in G5 once native side adds the
+///     load_ply / load_spz method-channel methods).
+///   • The native displayLink currently animates one texture at a
+///     time (single-renderer home-screen pattern). Multi-card feed
+///     animation is a G4 follow-up — for now, render() invocations
+///     from the Dart Ticker drive each card explicitly via
+///     setMatrices, which the native side renders synchronously on
+///     receipt.
 class AetherCppViewerImpl implements ViewerImpl {
+  int? _textureId;
+  bool _loaded = false;
+
   @override
-  Future<int> create({
+  Future<int?> create({
     required double width,
     required double height,
-    required Color background,
   }) async {
-    throw UnimplementedError(
-      'G4: SceneRendererBindings.create(...) → return Flutter '
-      'texture id allocated by AetherTexturePlugin (iOS) / '
-      'platform-equivalent (Android/Web).',
+    if (_textureId != null) return _textureId;
+    final id = await SceneBridge.instance.createTexture(
+      width: width.round().clamp(1, 4096),
+      height: height.round().clamp(1, 4096),
     );
+    _textureId = id;
+    return id;
   }
 
   @override
-  Future<ModelBounds> load(String url) async {
-    throw UnimplementedError(
-      'G4 (GLB) / G5 (PLY,SPZ): FormatDetector.detect(bytes) → '
-      'aether_scene_renderer_load_glb OR aether_splat_load_ply.',
-    );
+  Future<ModelBounds?> load(String url) async {
+    final id = _textureId;
+    if (id == null) {
+      throw StateError('AetherCppViewerImpl.load called before create');
+    }
+    // Strip the file:// scheme; native side opens with fopen().
+    final path =
+        url.startsWith('file://') ? Uri.parse(url).toFilePath() : url;
+    await SceneBridge.instance.loadGlb(textureId: id, path: path);
+    _loaded = true;
+    // TODO(G4): native side already returns `bounds` in its
+    // [Aether3D][scene_renderer] log line ("bounds [-0.95..0.94]");
+    // surface that through the MethodChannel as a return value so
+    // the camera fit math has real data. For now we return null and
+    // the caller falls back to its widget.cameraDistance default.
+    return null;
   }
 
   @override
   Future<void> render({
     required v64.Matrix4 viewMatrix,
-    required v64.Matrix4 projMatrix,
+    required v64.Matrix4 modelMatrix,
   }) async {
-    throw UnimplementedError(
-      'G4: pin Float buffers for the two 4×4 matrices, call '
-      'SceneRendererBindings.renderFull(handle, view, proj).',
+    final id = _textureId;
+    if (id == null || !_loaded) return;
+    // vector_math's Matrix4.storage is Float64List; native side
+    // wants Float32List (matches WGSL's f32 mat4x4). Down-cast in
+    // place — 16-element copies are negligible.
+    final viewF32 = Float32List.fromList(viewMatrix.storage);
+    final modelF32 = Float32List.fromList(modelMatrix.storage);
+    await SceneBridge.instance.setMatrices(
+      textureId: id,
+      view: viewF32,
+      model: modelF32,
     );
   }
 
   @override
   Future<void> dispose() async {
-    throw UnimplementedError(
-      'G4: SceneRendererBindings.destroy(handle) + free pinned '
-      'matrix buffers.',
-    );
+    final id = _textureId;
+    _textureId = null;
+    _loaded = false;
+    if (id != null) {
+      try {
+        await SceneBridge.instance.destroyTexture(id);
+      } catch (e, s) {
+        debugPrint('[AetherCppViewerImpl] destroyTexture($id) failed: $e\n$s');
+      }
+    }
   }
 }
 
 /// Master switch the LiveModelView consults to pick which impl to
-/// instantiate. Default false during the migration; flipped per-call-site
-/// in G4 (community feed first, detail page later) and globally in G9
-/// once thermion is removed.
+/// instantiate. Default false during the migration; flipped per-call-
+/// site in G4 (community feed first, detail page later) and globally
+/// in G9 once thermion is removed.
 const bool kAetherCppViewerEnabled = false;
 
-/// Picks the impl. Replace LiveModelView's direct ViewerWidget usage
-/// with `ViewerImpl impl = createViewerImpl(); ...`.
+/// Picks the impl. G4+ sites replace LiveModelView's direct
+/// ViewerWidget usage with `ViewerImpl impl = createViewerImpl();
+/// ...`.
 ViewerImpl createViewerImpl() {
-  return kAetherCppViewerEnabled ? AetherCppViewerImpl() : ThermionViewerImpl();
+  return kAetherCppViewerEnabled
+      ? AetherCppViewerImpl()
+      : ThermionViewerImpl();
 }

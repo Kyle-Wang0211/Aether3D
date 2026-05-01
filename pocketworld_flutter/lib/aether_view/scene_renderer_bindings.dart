@@ -2,6 +2,24 @@
 // overlay 2-pass IOSurface renderer, shipped in aether_cpp Phase 6.4b
 // stage 2 / 6.4e).
 //
+// ⚠️ NOT used by the community feed viewer.
+//
+// G3 picked the MethodChannel pattern over Dart FFI for the texture
+// rendering path — see lib/aether_view/scene_bridge.dart and
+// aether_cpp/PHASE_FLUTTER_VIEWER_PLAN.md. The reason is FlutterTexture
+// registration MUST happen on the native side; the existing
+// AetherTexturePlugin.swift already does multi-instance management
+// keyed by textureId, so reusing that channel was much simpler than
+// rebuilding it via FFI.
+//
+// This file STAYS as a deliberate stub for FUTURE non-texture compute
+// paths that don't need a Flutter Texture:
+//   • headless splat training kernels (Phase 7 freemium local tier)
+//   • golden-image regression tests
+//   • batch processing tools
+// G3 leaves the typedefs in place so future fillers don't have to
+// rebuild the surface from scratch.
+//
 // C API surface (verbatim from
 //   aether_cpp/include/aether/pocketworld/scene_iosurface_renderer.h):
 //
