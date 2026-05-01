@@ -181,12 +181,24 @@ class _LiveModelViewState extends State<LiveModelView>
 
   // ─── Auto-fit ────────────────────────────────────────────────────────
   // `widget.cameraDistance` is only the initial / fallback value. After
-  // the asset lands in the scene we ask thermion for its bounding box,
-  // grab Filament's actual FOV, and compute the distance that frames
-  // the post-transform unit sphere (transformToUnitCube=true scales the
-  // longest axis to 1, so the model's bounding sphere has radius
-  // halfExtents.length / max(halfExtents)). Standard three.js fit
-  // formula: distance = radius / sin(fov/2) × padding.
+  // the asset lands in the scene we ask thermion for its bounding box
+  // and compute the distance that frames the model's post-transform
+  // AABB given a KNOWN field of view we pin via setLensProjection.
+  //
+  // Background: thermion 0.3.4's Camera.getVerticalFieldOfView()
+  // returned 46.4 in our test (≈ 2658° if interpreted as radians) —
+  // that's clearly the focal length in mm, not a FOV. Whatever the
+  // actual unit is, we don't trust it, so we set our own known focal
+  // length and back the FOV out from sensor-height / 2 / focalLength,
+  // which is the classic 35mm-equivalent definition Filament uses.
+  static const double _kFocalLengthMM = 50.0;
+  static const double _kSensorHeightMM = 24.0;
+  static final double _kFovV =
+      2 * math.atan(_kSensorHeightMM / (2 * _kFocalLengthMM));
+  // 1:1 viewport (PostCard AspectRatio + detail page is also square-ish
+  // in practice), so horizontal FOV equals vertical when aspect=1.
+  static final double _kFovH = _kFovV;
+
   double? _fittedDistance;
   double get _autoRotateDistance =>
       _fittedDistance ?? widget.cameraDistance;
@@ -240,6 +252,20 @@ class _LiveModelViewState extends State<LiveModelView>
       if (_disposed) return;
       _camera = await viewer.getActiveCamera();
       if (_disposed) return;
+      // Pin the lens to a known portrait focal length so _computeFit's
+      // tan() math is grounded. Without this, thermion's default lens
+      // produces FOVs that disagree with the getter's reported value
+      // (the getter returned 46.4 in testing — clearly the focal length
+      // in mm, not radians or degrees), which scaled the fit distance
+      // down by ~10x and overshot every model into the camera.
+      try {
+        await _camera!.setLensProjection(
+          focalLength: _kFocalLengthMM,
+          aspect: 1.0,
+        );
+      } catch (e) {
+        debugPrint('[LiveModelView] setLensProjection failed: $e');
+      }
       await _loadAsset();
     } catch (e, st) {
       debugPrint('[LiveModelView] viewer init failed for ${widget.modelUrl}: '
@@ -491,25 +517,20 @@ class _LiveModelViewState extends State<LiveModelView>
       // max(hxN,hzN) (face on) and √(hxN²+hzN²) (corner on). Take the
       // diagonal as the worst case.
       final horizDiag = math.sqrt(hxN * hxN + hzN * hzN);
-      final fovV = await camera.getVerticalFieldOfView();
-      final fovH = await camera.getHorizontalFieldOfView();
-      if (_disposed) return;
-      if (!fovV.isFinite || fovV <= 0) return;
-      if (!fovH.isFinite || fovH <= 0) return;
+      // Use OUR pinned FOV, not thermion's getter (see _kFovV doc).
+      final fovV = _kFovV;
+      final fovH = _kFovH;
       final dV = hyN / math.tan(fovV / 2);
       final dH = horizDiag / math.tan(fovH / 2);
-      const padding = 1.30;
+      // 80% silhouette → 10% top + 10% bottom margin. Padding 1.25
+      // because (1 / 0.80) = 1.25.
+      const padding = 1.25;
       final dist = math.max(dV, dH) * padding;
       if (!dist.isFinite || dist <= 0) return;
-      // Visible from the console: confirms FOV unit (radians vs
-      // degrees) and lets us spot-check that the formula's output
-      // matches what we see on screen. Keep on at least until the
-      // framing complaint stops landing.
       debugPrint('[LiveModelView] fit ${widget.modelUrl}: '
           'he=(${hxN.toStringAsFixed(2)}, ${hyN.toStringAsFixed(2)}, '
           '${hzN.toStringAsFixed(2)}) '
-          'fov=(V:${(fovV * 180 / math.pi).toStringAsFixed(1)}° '
-          'H:${(fovH * 180 / math.pi).toStringAsFixed(1)}°) '
+          'pinned fov=${(fovV * 180 / math.pi).toStringAsFixed(1)}° '
           'dV=${dV.toStringAsFixed(2)} dH=${dH.toStringAsFixed(2)} '
           '→ ${dist.toStringAsFixed(2)}');
       _fittedDistance = dist;
