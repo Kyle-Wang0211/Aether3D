@@ -39,6 +39,14 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
 
     // Animation state. CADisplayLink is the canonical type on iOS (no
     // availability gate needed unlike the macOS port which guards macOS 14+).
+    //
+    // G4 NOTE: prior to this commit the displayLink rendered a single
+    // `animatedTexture` per tick (Phase 6.4e single-renderer home-screen
+    // pattern). The community feed needs every PostCard's texture to
+    // render every frame, so the tick now iterates `registered`. The
+    // animatedTextureId / animatedTexture fields are kept for
+    // backward-compat of pause/resume + log lines but no longer gate
+    // rendering.
     private var displayLink: CADisplayLink?
     private var animationStart: CFTimeInterval = 0
     private var animatedTextureId: Int64?
@@ -253,16 +261,23 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         }
     }
 
-    /// Tear down a texture's lifecycle. Stops the display-link loop if
-    /// it was animating this texture, unregisters from the
+    /// Tear down a texture's lifecycle. Unregisters from the
     /// FlutterTextureRegistry, drops our strong ref. Safe to call on an
     /// unknown id (no-op).
+    ///
+    /// G4: only stop the display-link loop when EVERY registered
+    /// texture is gone. The feed runs many textures concurrently —
+    /// disposing one card mustn't pause the other cards' animation.
     private func disposeTexture(id: Int64) {
-        if animatedTextureId == id {
-            stopAnimation()
-        }
         textures.unregisterTexture(id)
         registered.removeValue(forKey: id)
+        if animatedTextureId == id {
+            animatedTextureId = nil
+            animatedTexture = nil
+        }
+        if registered.isEmpty {
+            stopAnimation()
+        }
     }
 
     private func startAnimation(textureId: Int64, texture: SharedNativeTexture) {
@@ -404,11 +419,20 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     }
 
     @objc private func displayLinkTick() {
-        guard let id = animatedTextureId,
-              let texture = animatedTexture else { return }
-        let now     = CACurrentMediaTime()
-        let renderMs = texture.render()
-        textures.textureFrameAvailable(id)
+        // G4: render every registered texture, not just animatedTexture.
+        // The community feed mounts one renderer per PostCard; each
+        // needs to advance every frame. Iteration order is whatever the
+        // dictionary returns — order doesn't matter because each
+        // texture is independent (no shared GPU state across them
+        // beyond what aether_cpp's shared anchor manages internally).
+        if registered.isEmpty { return }
+        let now = CACurrentMediaTime()
+        var totalRenderMs: Double = 0
+        let count = registered.count
+        for (id, texture) in registered {
+            totalRenderMs += texture.render()
+            textures.textureFrameAvailable(id)
+        }
 
         // 1 Hz fps log. On iOS NSLog routes to os_log → Console.app /
         // Xcode debug console. (On macOS the Flutter GUI launch path
@@ -417,11 +441,12 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         let dt = now - frameStatsLogTime
         if dt >= 1.0 {
             let fps = Double(frameCount) / dt
-            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f, renderMs=%.2f)",
+            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f, totalRenderMs=%.2f, textures=%d)",
                   fps,
                   frameCount,
                   dt,
-                  renderMs)
+                  totalRenderMs,
+                  count)
             frameStatsLogTime = now
             frameCount = 0
         }

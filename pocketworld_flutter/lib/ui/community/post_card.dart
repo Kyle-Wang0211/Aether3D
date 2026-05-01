@@ -29,7 +29,15 @@ import 'package:visibility_detector/visibility_detector.dart';
 import '../../community/community_service.dart';
 import '../../community/feed_models.dart';
 import '../design_system.dart';
+import 'aether_cpp_card_demo.dart';
 import 'live_model_view.dart';
+
+/// G4 toggle: when true, PostCards render their 3D model through the
+/// aether_cpp scene renderer (via SceneBridge MethodChannel) instead
+/// of thermion. Default false during the migration. Flip per-build to
+/// validate per-card; once stable, G9 removes the thermion branch
+/// entirely.
+const bool kPostCardUseAetherCppViewer = false;
 
 class PostCard extends StatefulWidget {
   final FeedWork work;
@@ -243,17 +251,30 @@ class _PostCardState extends State<PostCard> {
               fit: StackFit.expand,
               children: [
                 if (shouldMountLive)
-                  // LiveModelView with manipulatorType: NONE has no
-                  // built-in gestures, so the parent GestureDetector
-                  // (single-tap → detail page) wins on its own. No
-                  // IgnorePointer needed here — Thermion writes to a
-                  // Texture, not a WKWebView, so iOS long-press/text-
-                  // select can't latch onto it.
-                  LiveModelView(
-                    key: ValueKey('mv-${_work.id}'),
-                    modelUrl: modelUrl,
-                    autoRotate: widget.isFocused,
-                  )
+                  // G4 toggle: when kPostCardUseAetherCppViewer flips
+                  // to true, this card switches from thermion to the
+                  // aether_cpp scene renderer (via SceneBridge
+                  // MethodChannel). Default false during the migration
+                  // — flipping it is the per-card validation path
+                  // before we replace LiveModelView entirely (G9).
+                  // ignore: dead_code
+                  kPostCardUseAetherCppViewer
+                      ? AetherCppCardDemo(
+                          key: ValueKey('mv-aether-${_work.id}'),
+                          modelUrl: modelUrl,
+                        )
+                      : LiveModelView(
+                          // LiveModelView with manipulatorType: NONE has
+                          // no built-in gestures, so the parent
+                          // GestureDetector (single-tap → detail page)
+                          // wins on its own. No IgnorePointer needed
+                          // here — Thermion writes to a Texture, not a
+                          // WKWebView, so iOS long-press / text-select
+                          // can't latch onto it.
+                          key: ValueKey('mv-${_work.id}'),
+                          modelUrl: modelUrl,
+                          autoRotate: widget.isFocused,
+                        )
                 else
                   const _ThumbnailPlaceholder(),
                 // Inset from the card edges so the plate reads as a
