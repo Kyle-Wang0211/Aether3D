@@ -119,6 +119,9 @@ class _MyWorkDetailPageState extends State<MyWorkDetailPage> {
       modelUrl: url,
       interactive: true,
       cameraDistance: 5.0,
+      // Captured scans ship baked lighting in their baseColor — adding
+      // an environment IBL on top would double-light them.
+      useEnvironmentLighting: false,
     );
   }
 

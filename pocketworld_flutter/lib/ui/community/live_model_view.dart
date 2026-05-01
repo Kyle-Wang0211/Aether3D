@@ -114,6 +114,15 @@ class LiveModelView extends StatefulWidget {
   /// out of frame) we need ~5.5 distance with a near-horizontal eye.
   final double cameraDistance;
 
+  /// Whether to load the neutral environment IBL (Image-Based Lighting)
+  /// cube into the Filament scene. Off by default on the detail page —
+  /// captured GLBs are expected to ship baked lighting in their
+  /// baseColor textures, and stacking IBL on top double-lights the
+  /// model. Feed cards (small thumbnails) keep IBL on so generic
+  /// PBR sample assets without baked lighting still read as material,
+  /// not flat colour.
+  final bool useEnvironmentLighting;
+
   const LiveModelView({
     super.key,
     required this.modelUrl,
@@ -121,6 +130,7 @@ class LiveModelView extends StatefulWidget {
     this.interactive = false,
     this.background = Colors.white,
     this.cameraDistance = 5.5,
+    this.useEnvironmentLighting = true,
   });
 
   @override
@@ -218,9 +228,14 @@ class _LiveModelViewState extends State<LiveModelView>
       await viewer.setBackgroundColor(0.0, 0.0, 0.0, 0.0);
       // IBL-only ("Polycam style" — no directional lights). See file
       // header for the rationale; in short, double-lighting baked
-      // scan textures looks wrong.
-      await viewer.loadIbl('assets/ibl/default_env_ibl.ktx',
-          intensity: 30000);
+      // scan textures looks wrong. Skipped when the caller has flagged
+      // useEnvironmentLighting=false (typically the detail page on
+      // a captured scan, where the baseColor already carries the
+      // baked lighting from the original capture).
+      if (widget.useEnvironmentLighting) {
+        await viewer.loadIbl('assets/ibl/default_env_ibl.ktx',
+            intensity: 30000);
+      }
 
       if (_disposed) return;
       _camera = await viewer.getActiveCamera();
@@ -435,35 +450,68 @@ class _LiveModelViewState extends State<LiveModelView>
     }
   }
 
-  /// Three.js-style fit-to-bounds. Reads the asset's local AABB from
-  /// thermion, derives the post-`transformToUnitCube` bounding-sphere
-  /// radius, fetches Filament's tighter FOV, and lands on the distance
-  /// that just contains the model with a small padding multiplier. On
-  /// any failure we silently keep `widget.cameraDistance` so the UI
-  /// never breaks — bad framing is preferable to no model.
+  /// Fit-to-bounds using post-transform AABB extents (NOT bounding
+  /// sphere). The previous sphere-radius formula `sqrt(hx²+hy²+hz²) /
+  /// maxAxis` always produced ~1.0 because transformToUnitCube
+  /// normalizes the longest axis to 1, so every model — fat or thin —
+  /// got framed at the same distance. That's wrong for elongated
+  /// models like Corset (Y-axis dominant): the screen projection
+  /// height = hy / distance × focal-factor, so a thin tall model
+  /// actually overflows when the distance is tuned for an isotropic
+  /// cube.
+  ///
+  /// New formula:
+  ///   verticalRequired   = hy   / tan(fovV / 2)          // Y stays
+  ///                                                       // fixed during
+  ///                                                       // Y-axis spin
+  ///   horizontalRequired = √(hx²+hz²) / tan(fovH / 2)    // worst-case
+  ///                                                       // diagonal
+  ///                                                       // during spin
+  ///   distance = max(verticalRequired, horizontalRequired) × padding
+  ///
+  /// Padding bumped from 1.20 → 1.30 to leave a comfortable margin
+  /// around the model's silhouette in the 1:1 PostCard frame.
   Future<void> _computeFit(ThermionAsset asset, Camera camera) async {
     try {
       final aabb = await asset.getBoundingBox();
       if (_disposed) return;
-      // vector_math's Aabb3 exposes min/max only; derive half-extents.
-      final hx = (aabb.max.x - aabb.min.x) * 0.5;
-      final hy = (aabb.max.y - aabb.min.y) * 0.5;
-      final hz = (aabb.max.z - aabb.min.z) * 0.5;
-      final maxAxis = math.max(hx, math.max(hy, hz));
+      // Local AABB half-extents (pre-transformToUnitCube).
+      final hxLocal = (aabb.max.x - aabb.min.x) * 0.5;
+      final hyLocal = (aabb.max.y - aabb.min.y) * 0.5;
+      final hzLocal = (aabb.max.z - aabb.min.z) * 0.5;
+      final maxAxis =
+          math.max(hxLocal, math.max(hyLocal, hzLocal));
       if (!maxAxis.isFinite || maxAxis <= 0) return;
-      // transformToUnitCube scales the longest axis to length 2 (so
-      // halfExtent on that axis becomes 1.0). The post-transform
-      // bounding sphere radius is therefore |halfExtents| / maxAxis.
-      final radius =
-          math.sqrt(hx * hx + hy * hy + hz * hz) / maxAxis;
+      // transformToUnitCube scales the longest axis to span [-1, 1].
+      // Post-transform half-extents:
+      final hxN = hxLocal / maxAxis;
+      final hyN = hyLocal / maxAxis;
+      final hzN = hzLocal / maxAxis;
+      // Spin axis is Y, so horizontal silhouette swings between
+      // max(hxN,hzN) (face on) and √(hxN²+hzN²) (corner on). Take the
+      // diagonal as the worst case.
+      final horizDiag = math.sqrt(hxN * hxN + hzN * hzN);
       final fovV = await camera.getVerticalFieldOfView();
       final fovH = await camera.getHorizontalFieldOfView();
       if (_disposed) return;
-      final fov = math.min(fovV, fovH);
-      if (!fov.isFinite || fov <= 0) return;
-      const padding = 1.20; // 20% breathing room around the sphere
-      final dist = (radius / math.sin(fov / 2)) * padding;
+      if (!fovV.isFinite || fovV <= 0) return;
+      if (!fovH.isFinite || fovH <= 0) return;
+      final dV = hyN / math.tan(fovV / 2);
+      final dH = horizDiag / math.tan(fovH / 2);
+      const padding = 1.30;
+      final dist = math.max(dV, dH) * padding;
       if (!dist.isFinite || dist <= 0) return;
+      // Visible from the console: confirms FOV unit (radians vs
+      // degrees) and lets us spot-check that the formula's output
+      // matches what we see on screen. Keep on at least until the
+      // framing complaint stops landing.
+      debugPrint('[LiveModelView] fit ${widget.modelUrl}: '
+          'he=(${hxN.toStringAsFixed(2)}, ${hyN.toStringAsFixed(2)}, '
+          '${hzN.toStringAsFixed(2)}) '
+          'fov=(V:${(fovV * 180 / math.pi).toStringAsFixed(1)}° '
+          'H:${(fovH * 180 / math.pi).toStringAsFixed(1)}°) '
+          'dV=${dV.toStringAsFixed(2)} dH=${dH.toStringAsFixed(2)} '
+          '→ ${dist.toStringAsFixed(2)}');
       _fittedDistance = dist;
       _orbitRadius = dist;
       if (mounted && !_disposed) {
