@@ -87,7 +87,16 @@ class _PostCardState extends State<PostCard> {
   // the feed doesn't grow unbounded GPU memory over a long session.
   bool _isLive = false;
   Timer? _unmountTimer;
-  static const Duration _unmountDelay = Duration(seconds: 5);
+  // Long enough that a card almost never unmounts during a normal
+  // session. We used to keep this at 5s — fine on paper, but each
+  // unmount disposes a thermion ViewerWidget, and thermion 0.3.4's
+  // Engine_destroySwapChain has a known double-free bug ("Object
+  // doesn't exist (double free?)" RenderThread panic) that scrambles
+  // subsequent renders, leaving cards permanently white when the user
+  // scrolls back. With ≤ a few dozen feed entries we'd rather hold
+  // mounted viewers in memory than touch that bug. The L3 instance
+  // cap (_LiveInstanceRegistry, 5) still bounds total alive viewers.
+  static const Duration _unmountDelay = Duration(minutes: 5);
 
   // Memoized so register/unregister see the same callback identity.
   // Without `late final`, every `_forceUnmount` tear-off would be a
@@ -151,6 +160,11 @@ class _PostCardState extends State<PostCard> {
   }
 
   void _onVisibilityChanged(VisibilityInfo info) {
+    // visibility_detector fires at least one final callback after the
+    // widget has been removed from the tree (visibleFraction = 0). At
+    // that point `mounted` is false and `setState` would assert; we
+    // also can't change live state on a dead widget. Bail early.
+    if (!mounted) return;
     final next = info.visibleFraction;
     if ((next - _visibility).abs() > 0.02) {
       setState(() => _visibility = next);
@@ -178,6 +192,7 @@ class _PostCardState extends State<PostCard> {
   /// Going live → register, may evict the LRU peer (which calls back
   /// into _forceUnmount on the victim). Going dead → unregister.
   void _setLive(bool next) {
+    if (!mounted) return;
     if (next == _isLive) return;
     if (next) {
       _LiveInstanceRegistry.register(_forceUnmountCallback);

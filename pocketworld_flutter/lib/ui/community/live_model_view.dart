@@ -191,13 +191,10 @@ class _LiveModelViewState extends State<LiveModelView>
   // actual unit is, we don't trust it, so we set our own known focal
   // length and back the FOV out from sensor-height / 2 / focalLength,
   // which is the classic 35mm-equivalent definition Filament uses.
+  // Pinned focal length we attempt to install on the camera; the
+  // actual fit math reads the projection matrix directly so it's
+  // resilient to setLensProjection no-oping.
   static const double _kFocalLengthMM = 50.0;
-  static const double _kSensorHeightMM = 24.0;
-  static final double _kFovV =
-      2 * math.atan(_kSensorHeightMM / (2 * _kFocalLengthMM));
-  // 1:1 viewport (PostCard AspectRatio + detail page is also square-ish
-  // in practice), so horizontal FOV equals vertical when aspect=1.
-  static final double _kFovH = _kFovV;
 
   double? _fittedDistance;
   double get _autoRotateDistance =>
@@ -517,20 +514,44 @@ class _LiveModelViewState extends State<LiveModelView>
       // max(hxN,hzN) (face on) and √(hxN²+hzN²) (corner on). Take the
       // diagonal as the worst case.
       final horizDiag = math.sqrt(hxN * hxN + hzN * hzN);
-      // Use OUR pinned FOV, not thermion's getter (see _kFovV doc).
-      final fovV = _kFovV;
-      final fovH = _kFovH;
-      final dV = hyN / math.tan(fovV / 2);
-      final dH = horizDiag / math.tan(fovH / 2);
-      // 80% silhouette → 10% top + 10% bottom margin. Padding 1.25
-      // because (1 / 0.80) = 1.25.
-      const padding = 1.25;
-      final dist = math.max(dV, dH) * padding;
+      // Read the projection matrix DIRECTLY rather than going through
+      // setLensProjection + computed fov. setLensProjection in thermion
+      // 0.3.4 has been observed to no-op silently in some cases (the
+      // user reported a model still rendered ~20% of the viewport
+      // when the math expected 80%, meaning the actual FOV was much
+      // wider than our pinned 27° intent — i.e. thermion's lens was
+      // still default).
+      //
+      // For a standard symmetric perspective projection:
+      //   M[1][1] = cot(fovV/2) = 1 / tan(fovV/2)
+      //   M[0][0] = cot(fovH/2)
+      // The half-extent's NDC y projection at distance d is
+      //   ndc_y = halfHeight × M[1][1] / d
+      // We want ndc_y = 1.0 / padding (so the model fills 1/padding of
+      // the visible NDC range), which gives:
+      //   d = halfHeight × M[1][1] × padding
+      // Same on the horizontal axis with M[0][0].
+      final proj = await camera.getProjectionMatrix();
+      if (_disposed) return;
+      // vector_math Matrix4 is column-major: m[col * 4 + row].
+      // entry(row, col) gives the math-textbook indexing.
+      final m00 = proj.entry(0, 0);
+      final m11 = proj.entry(1, 1);
+      if (!m00.isFinite || m00 <= 0 || !m11.isFinite || m11 <= 0) return;
+      const padding = 1.25; // 80% silhouette → 10% top + 10% bottom
+      final dV = hyN * m11 * padding;
+      final dH = horizDiag * m00 * padding;
+      final dist = math.max(dV, dH);
       if (!dist.isFinite || dist <= 0) return;
+      // Equivalent fov for the log only (NOT used in the math): so we
+      // can spot when thermion's projection is wider/narrower than
+      // expected without having to dump the whole matrix.
+      final fovVdeg = 2 * math.atan(1.0 / m11) * 180 / math.pi;
       debugPrint('[LiveModelView] fit ${widget.modelUrl}: '
           'he=(${hxN.toStringAsFixed(2)}, ${hyN.toStringAsFixed(2)}, '
           '${hzN.toStringAsFixed(2)}) '
-          'pinned fov=${(fovV * 180 / math.pi).toStringAsFixed(1)}° '
+          'projM00=${m00.toStringAsFixed(2)} M11=${m11.toStringAsFixed(2)} '
+          '(actual fovV≈${fovVdeg.toStringAsFixed(1)}°) '
           'dV=${dV.toStringAsFixed(2)} dH=${dH.toStringAsFixed(2)} '
           '→ ${dist.toStringAsFixed(2)}');
       _fittedDistance = dist;
