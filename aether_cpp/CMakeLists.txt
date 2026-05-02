@@ -381,6 +381,40 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     if(APPLE)
         aether_dawn_device_smoke(aether_dawn_iosurface_rgba16f_smoke
                                  tools/aether_dawn_iosurface_rgba16f_smoke.mm)
+
+        # Phase 6.4f smoke — full PLY → AetherSceneRenderer → IOSurface
+        # round-trip. Verifies the new C ABI (load_ply + render_full
+        # splat branch) end-to-end on macOS, surfacing any GPU
+        # validation / kernel-binding regression before they hit iOS.
+        # Needs scene_iosurface_renderer.cpp + dawn_device_singleton.cpp
+        # + glb_loader.cpp + spz_decoder.cpp on top of aether3d_core (the
+        # FFI .dylib link path on macOS would also work, but compiling
+        # the sources directly into the smoke keeps it standalone).
+        add_executable(aether_dawn_scene_splat_smoke
+                       tools/aether_dawn_scene_splat_smoke.mm
+                       src/pocketworld/scene_iosurface_renderer.cpp
+                       src/pocketworld/dawn_device_singleton.cpp
+                       src/pocketworld/glb_loader.cpp)
+        target_link_libraries(aether_dawn_scene_splat_smoke PRIVATE
+                              aether3d_core dawn::webgpu_dawn ZLIB::ZLIB)
+        target_include_directories(aether_dawn_scene_splat_smoke PRIVATE
+                                    ${CMAKE_CURRENT_SOURCE_DIR}/tools
+                                    third_party/cgltf
+                                    third_party/stb)
+        target_compile_definitions(aether_dawn_scene_splat_smoke PRIVATE
+                                    AETHER_ENABLE_DAWN=1)
+        set_source_files_properties(src/pocketworld/glb_loader.cpp
+            PROPERTIES COMPILE_OPTIONS
+            "-Wno-unused-function;-Wno-missing-prototypes;-Wno-double-promotion"
+            DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set_target_properties(aether_dawn_scene_splat_smoke PROPERTIES
+                MACOSX_BUNDLE TRUE
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER
+                    "com.kyle.aether.aether_dawn_scene_splat_smoke"
+                XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
+                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "26AH7V448L")
+        endif()
     endif()
 
     # Phase 6.4a smoke (aether_splat_iosurface_renderer_smoke) was deleted
@@ -470,9 +504,14 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
         # drags CoreML sources into the iOS 14 build and trips availability
         # warnings-as-errors. Keep this archive viewer-scoped until the
         # cross-platform core is split into smaller libraries.
+        # Phase 6.4f: spz_decoder.cpp added so SPZ load works in the
+        # iOS .a (it provides the out-of-line gzip wrapper around the
+        # header-only decode_spz_raw). PLY load is fully header-only
+        # via aether/splat/ply_loader.h and needs no extra TU.
         target_sources(aether3d_ffi PRIVATE
             src/render/dawn_gpu_device.cpp
             src/pocketworld/glb_loader.cpp
+            src/splat/spz_decoder.cpp
             ${AETHER_WGSL_GENERATED_CPPS}
         )
         target_include_directories(aether3d_ffi PRIVATE

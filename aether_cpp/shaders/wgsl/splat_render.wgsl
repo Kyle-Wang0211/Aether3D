@@ -69,6 +69,23 @@ fn vs_main(@builtin(vertex_index) vi: u32,
     let conic = vec3f(s.conic_x, s.conic_y, s.conic_z);
     let center = vec2f(s.xy_x, s.xy_y);
 
+    // Phase 6.4f: invalid / unwritten projected splat (e.g. project_visible
+    // never wrote to this slot because the index ≥ num_visible — see
+    // scene_iosurface_renderer's per-frame clearBuffer of the projected
+    // buffer). Without this early-out, conic.x = 0 → inverseSqrt(1e-6) ≈
+    // 1000 → r = 3000 pixels; every invalid instance would rasterize a
+    // viewport-covering quad. Emit a clip-culled degenerate point so all
+    // 6 vertices collapse to the same outside-clip-space position and
+    // generate zero fragments.
+    if (s.color_a <= 0.0 || (conic.x <= 0.0 && conic.z <= 0.0)) {
+        var o_skip: VsOut;
+        o_skip.clip_pos = vec4f(2.0, 2.0, 2.0, 1.0);  // NDC z = 2 → far-clip
+        o_skip.delta = vec2f(0.0);
+        o_skip.conic = vec3f(0.0);
+        o_skip.color = vec4f(0.0);
+        return o_skip;
+    }
+
     // 3-sigma radius from conic eigenvalues. For diagonal-dominant conic
     // (most splats post-EVD), 1/sqrt(conic_x) ≈ X-stddev; bound the quad
     // by the larger of X/Y stddev. Mild over-coverage (≤4×) is harmless
