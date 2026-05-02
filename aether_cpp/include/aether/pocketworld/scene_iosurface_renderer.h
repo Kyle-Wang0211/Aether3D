@@ -86,6 +86,32 @@ bool aether_scene_renderer_load_ply(AetherSceneRenderer* r, const char* ply_path
 /// @return same contract as load_ply.
 bool aether_scene_renderer_load_spz(AetherSceneRenderer* r, const char* spz_path);
 
+/// Phase 6.4f.3.b — Memory-capped variants of load_ply / load_spz.
+///
+/// `max_splats=0` means no splat-count cap. `max_sh_degree` clamps
+/// the loaded SH degree (0 = DC only — saves ~12 B per loaded basis
+/// per splat at sh_degree=3, ie ~540 B/splat going from 3→0). For
+/// PocketWorld feed thumbnails where the splat fits in <= 256 px the
+/// extra SH bands are imperceptible; passing max_sh_degree=0 saves
+/// ~25× SH-buffer memory at zero visual cost.
+///
+/// `max_splats > 0` evicts gaussians via deterministic stride
+/// subsample (every k-th gaussian where k = ceil(N/max_splats)), so
+/// the same SPZ always reduces to the same coarse representation.
+///
+/// Returns true on success, false on parse / GPU upload failure.
+bool aether_scene_renderer_load_ply_capped(
+    AetherSceneRenderer* r,
+    const char* ply_path,
+    uint32_t max_splats,
+    uint8_t max_sh_degree);
+
+bool aether_scene_renderer_load_spz_capped(
+    AetherSceneRenderer* r,
+    const char* spz_path,
+    uint32_t max_splats,
+    uint8_t max_sh_degree);
+
 /// Per-frame render. View and model matrices are 16-float column-major
 /// arrays. The mesh applies BOTH matrices through its full PBR shader;
 /// the splat overlay currently ignores them visually (Phase 6.4f).

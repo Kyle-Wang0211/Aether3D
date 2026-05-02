@@ -38,6 +38,7 @@
 #include "aether/render/gpu_device.h"
 #include "aether/render/gpu_resource.h"
 #include "aether/shaders/wgsl_sources.h"
+#include "aether/splat/packed_splats.h"
 #include "aether/splat/ply_loader.h"
 #include "aether/splat/spz_decoder.h"
 
@@ -63,7 +64,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <sys/stat.h>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -604,18 +610,93 @@ inline std::uint32_t sh_coeff_count(std::uint32_t degree) noexcept {
     return (degree + 1u) * (degree + 1u);
 }
 
-struct SplatScene {
+// ─── Phase 6.4f.3.c — refcount-shared splat data ───────────────────────
+//
+// The packed_splats_buf + coeffs_non_dc_buf hold every splat's
+// position/rotation/scale/color/opacity/SH-non-DC. Those bytes are
+// *load-time invariant*: once we've packed the file, multiple cards
+// rendering the same scene (feed thumbnail + detail-page modal,
+// repeated cards in a viewport) want to share the same GPU bytes
+// rather than re-packing and re-uploading.
+//
+// `SplatData` owns the GPU buffers and a back-pointer to the device so
+// the destructor can free them when the last reference goes away.
+// `SplatScene` holds a `shared_ptr<SplatData>` plus per-renderer state
+// (bind groups bound to a specific renderer's uniforms_buf, sort
+// scratch buffers — those CANNOT be shared because their contents
+// are per-frame dynamic).
+//
+// `SplatDataCache` is a process-wide weak_ptr cache keyed on
+// "path|max_splats|max_sh_degree". When a renderer asks to load a
+// scene that's already in flight elsewhere, it gets back the existing
+// `shared_ptr` and skips the entire pack-and-upload phase. The cache
+// uses weak_ptrs so freed scenes auto-evict; a periodic dead-entry
+// sweep keeps the table from growing unbounded.
+struct SplatData {
+    ::aether::render::GPUDevice* device{nullptr};
+    GPUBufferHandle packed_splats_buf;
+    GPUBufferHandle coeffs_non_dc_buf;
     std::uint32_t num_splats{0};
     std::uint32_t sh_degree{0};
     float bounds_min[3]{0.0f, 0.0f, 0.0f};
     float bounds_max[3]{0.0f, 0.0f, 0.0f};
 
-    // Source data (uploaded once at load time; not touched per-frame).
-    GPUBufferHandle means_buf;            // PackedVec3[N], 12 bytes/splat
-    GPUBufferHandle log_scales_buf;       // PackedVec3[N]
-    GPUBufferHandle quats_buf;            // vec4<f32>[N], 16 bytes/splat (xyzw)
-    GPUBufferHandle raw_opacities_buf;    // f32[N]
-    GPUBufferHandle coeffs_buf;           // PackedVec3[N * num_sh_coeffs]
+    SplatData() = default;
+    SplatData(const SplatData&) = delete;
+    SplatData& operator=(const SplatData&) = delete;
+    ~SplatData() {
+        if (device) {
+            if (coeffs_non_dc_buf.valid()) device->destroy_buffer(coeffs_non_dc_buf);
+            if (packed_splats_buf.valid()) device->destroy_buffer(packed_splats_buf);
+        }
+    }
+};
+
+class SplatDataCache {
+public:
+    std::shared_ptr<SplatData> get(const std::string& key) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(key);
+        if (it == entries_.end()) return nullptr;
+        if (auto sp = it->second.lock()) return sp;
+        entries_.erase(it);
+        return nullptr;
+    }
+    void put(const std::string& key, std::shared_ptr<SplatData> data) {
+        std::lock_guard<std::mutex> lk(mu_);
+        entries_[key] = data;
+        // Sweep expired weak refs when the table grows; cheap O(N) walk
+        // amortized across loads. 64 is arbitrary — picked so the sweep
+        // runs once per ~screen of cards, not on every reload.
+        if (entries_.size() > 64u) {
+            for (auto i = entries_.begin(); i != entries_.end();) {
+                if (i->second.expired()) i = entries_.erase(i);
+                else ++i;
+            }
+        }
+    }
+    static SplatDataCache& instance() {
+        static SplatDataCache s;
+        return s;
+    }
+private:
+    std::mutex mu_;
+    std::unordered_map<std::string, std::weak_ptr<SplatData>> entries_;
+};
+
+struct SplatScene {
+    std::shared_ptr<SplatData> data;      // shared GPU data buffers (Phase 6.4f.3.c)
+    std::uint32_t num_splats{0};          // mirror of data->num_splats
+    std::uint32_t sh_degree{0};           // mirror of data->sh_degree
+    float bounds_min[3]{0.0f, 0.0f, 0.0f};
+    float bounds_max[3]{0.0f, 0.0f, 0.0f};
+
+    // ─── Phase 6.4f.3.a — packed 16-byte splat buffer ──────────────────
+    // Mirrored from `data->packed_splats_buf` so the bind-group / encode
+    // paths don't need to dereference `data` on every access. Same handle
+    // value, but the lifetime is owned by `data`.
+    GPUBufferHandle packed_splats_buf;
+    GPUBufferHandle coeffs_non_dc_buf;
 
     // Per-frame intermediate (written by project_forward, read by project_visible).
     GPUBufferHandle global_from_compact_gid_buf;  // u32[N]
@@ -690,16 +771,13 @@ struct SplatScene {
 
 // ─── BindGroupLayout builders for the 2 compute kernels ────────────────
 //
-// project_forward.wgsl bind group:
+// project_forward.wgsl bind group (Phase 6.4f.3.a — packed format):
 //   0: storage,read_write RenderUniforms (atomic num_visible)
-//   1: storage,read       means
-//   2: storage,read       quats
-//   3: storage,read       log_scales
-//   4: storage,read       raw_opacities
-//   5: storage,read_write global_from_compact_gid
-//   6: storage,read_write depths
+//   1: storage,read       packed_splats (vec4<u32>[N] = 16 B/splat)
+//   2: storage,read_write global_from_compact_gid
+//   3: storage,read_write depths
 WGPUBindGroupLayout create_project_forward_bgl(WGPUDevice wd) {
-    WGPUBindGroupLayoutEntry entries[7] = {};
+    WGPUBindGroupLayoutEntry entries[4] = {};
     auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
                    WGPUBufferBindingType type) {
         e.binding = binding;
@@ -709,29 +787,24 @@ WGPUBindGroupLayout create_project_forward_bgl(WGPUDevice wd) {
         e.buffer.minBindingSize = 0;
     };
     fill(entries[0], 0, WGPUBufferBindingType_Storage);            // uniforms (atomic)
-    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);    // means
-    fill(entries[2], 2, WGPUBufferBindingType_ReadOnlyStorage);    // quats
-    fill(entries[3], 3, WGPUBufferBindingType_ReadOnlyStorage);    // log_scales
-    fill(entries[4], 4, WGPUBufferBindingType_ReadOnlyStorage);    // opacities
-    fill(entries[5], 5, WGPUBufferBindingType_Storage);            // gid out
-    fill(entries[6], 6, WGPUBufferBindingType_Storage);            // depths out
+    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);    // packed_splats
+    fill(entries[2], 2, WGPUBufferBindingType_Storage);            // gid out
+    fill(entries[3], 3, WGPUBufferBindingType_Storage);            // depths out
     WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
-    desc.entryCount = 7;
+    desc.entryCount = 4;
     desc.entries = entries;
     return wgpuDeviceCreateBindGroupLayout(wd, &desc);
 }
 
-// project_visible.wgsl bind group:
+// project_visible.wgsl bind group (Phase 6.4f.3.a — packed format):
 //   0: storage,read_write RenderUniforms (atomic load only)
-//   1: storage,read       means
-//   2: storage,read       log_scales
-//   3: storage,read       quats
-//   4: storage,read       coeffs (SH)
-//   5: storage,read       raw_opacities
-//   6: storage,read       global_from_compact_gid
-//   7: storage,read_write projected
+//   1: storage,read       packed_splats (vec4<u32>[N])
+//   2: storage,read       coeffs_non_dc (PackedVec3[N * num_non_dc] for SH degree 1+)
+//                         Bound to a 1-element placeholder buffer when degree=0.
+//   3: storage,read       global_from_compact_gid
+//   4: storage,read_write projected
 WGPUBindGroupLayout create_project_visible_bgl(WGPUDevice wd) {
-    WGPUBindGroupLayoutEntry entries[8] = {};
+    WGPUBindGroupLayoutEntry entries[5] = {};
     auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
                    WGPUBufferBindingType type) {
         e.binding = binding;
@@ -741,15 +814,12 @@ WGPUBindGroupLayout create_project_visible_bgl(WGPUDevice wd) {
         e.buffer.minBindingSize = 0;
     };
     fill(entries[0], 0, WGPUBufferBindingType_Storage);            // uniforms (atomicLoad)
-    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);    // means
-    fill(entries[2], 2, WGPUBufferBindingType_ReadOnlyStorage);    // log_scales
-    fill(entries[3], 3, WGPUBufferBindingType_ReadOnlyStorage);    // quats
-    fill(entries[4], 4, WGPUBufferBindingType_ReadOnlyStorage);    // coeffs
-    fill(entries[5], 5, WGPUBufferBindingType_ReadOnlyStorage);    // opacities
-    fill(entries[6], 6, WGPUBufferBindingType_ReadOnlyStorage);    // gid in
-    fill(entries[7], 7, WGPUBufferBindingType_Storage);            // projected out
+    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);    // packed_splats
+    fill(entries[2], 2, WGPUBufferBindingType_ReadOnlyStorage);    // coeffs_non_dc
+    fill(entries[3], 3, WGPUBufferBindingType_ReadOnlyStorage);    // gid in
+    fill(entries[4], 4, WGPUBufferBindingType_Storage);            // projected out
     WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
-    desc.entryCount = 8;
+    desc.entryCount = 5;
     desc.entries = entries;
     return wgpuDeviceCreateBindGroupLayout(wd, &desc);
 }
@@ -1545,12 +1615,10 @@ static void free_splat_scene(AetherSceneRenderer* r) {
         if (s.sort_values_buf.valid())        r->device->destroy_buffer(s.sort_values_buf);
         if (s.sort_keys_alt_buf.valid())      r->device->destroy_buffer(s.sort_keys_alt_buf);
         if (s.sort_keys_buf.valid())          r->device->destroy_buffer(s.sort_keys_buf);
-        // ─── Source / projection buffers ───────────────────────────────
-        if (s.coeffs_buf.valid())                  r->device->destroy_buffer(s.coeffs_buf);
-        if (s.raw_opacities_buf.valid())           r->device->destroy_buffer(s.raw_opacities_buf);
-        if (s.quats_buf.valid())                   r->device->destroy_buffer(s.quats_buf);
-        if (s.log_scales_buf.valid())              r->device->destroy_buffer(s.log_scales_buf);
-        if (s.means_buf.valid())                   r->device->destroy_buffer(s.means_buf);
+        // ─── Source buffers (Phase 6.4f.3.c — shared via SplatData) ────
+        // packed_splats_buf + coeffs_non_dc_buf are owned by SplatData;
+        // dropping `s.data` (via SplatScene destructor) frees them when
+        // the last shared_ptr reference goes away.
         if (s.depths_buf.valid())                  r->device->destroy_buffer(s.depths_buf);
         if (s.global_from_compact_gid_buf.valid()) r->device->destroy_buffer(s.global_from_compact_gid_buf);
     }
@@ -1796,7 +1864,8 @@ static bool build_splat_scene_from_gaussians(
     AetherSceneRenderer* r,
     const std::vector<::aether::splat::GaussianParams>& gaussians,
     std::uint32_t sh_degree,
-    const float* sh_rest) {
+    const float* sh_rest,
+    const std::string& cache_key = std::string{}) {
     if (!r || !r->device || gaussians.empty()) return false;
     using namespace ::aether::render;
     auto& dev = *(r->device);
@@ -1814,93 +1883,37 @@ static bool build_splat_scene_from_gaussians(
     SplatScene s;
     s.num_splats = N;
     s.sh_degree = sh_degree;
-    const std::uint32_t coeffs_per_splat = sh_coeff_count(s.sh_degree);
-    // num_basis_non_dc per channel: 0,3,8,15 for deg 0,1,2,3
-    const std::uint32_t non_dc_basis = (coeffs_per_splat > 0u)
-        ? coeffs_per_splat - 1u : 0u;
+    // num_basis_non_dc per channel: 0,3,8,15 for deg 0,1,2,3.
+    // (Total basis = 1 (DC) + non_dc; the DC slot is folded into
+    // packed_splats_buf's rgba field.)
+    const std::uint32_t non_dc_basis = (sh_degree == 0u) ? 0u
+                                       : (sh_degree == 1u) ? 3u
+                                       : (sh_degree == 2u) ? 8u
+                                       : 15u;
 
-    // ─── Compute AABB + repack into Brush WGSL layouts ─────────────────
-    std::vector<float> means(N * 3);
-    std::vector<float> log_scales(N * 3);
-    std::vector<float> quats(N * 4);          // xyzw
-    std::vector<float> raw_opacities(N);
-    std::vector<float> coeffs(N * coeffs_per_splat * 3);  // PackedVec3[]
-
-    s.bounds_min[0] = s.bounds_max[0] = gaussians[0].position[0];
-    s.bounds_min[1] = s.bounds_max[1] = gaussians[0].position[1];
-    s.bounds_min[2] = s.bounds_max[2] = gaussians[0].position[2];
-
-    for (std::uint32_t i = 0; i < N; ++i) {
-        const auto& g = gaussians[i];
-
-        // Position → means + AABB tracking.
-        means[i * 3 + 0] = g.position[0];
-        means[i * 3 + 1] = g.position[1];
-        means[i * 3 + 2] = g.position[2];
-        for (int c = 0; c < 3; ++c) {
-            if (g.position[c] < s.bounds_min[c]) s.bounds_min[c] = g.position[c];
-            if (g.position[c] > s.bounds_max[c]) s.bounds_max[c] = g.position[c];
-        }
-
-        // Scale (linear, positive) → log_scale (project_forward exp's it back).
-        // Guard tiny scales so log doesn't go to -inf.
-        for (int c = 0; c < 3; ++c) {
-            const float sc = (g.scale[c] > 1e-12f) ? g.scale[c] : 1e-12f;
-            log_scales[i * 3 + c] = std::log(sc);
-        }
-
-        // Quaternion: aether GaussianParams stores (w, x, y, z); WGSL
-        // expects (x, y, z, w) per the project_forward `quat.x = w` line —
-        // wait, that's the Brush convention where quat.x IS w. Let me
-        // re-check: project_forward.wgsl:
-        //   let w = quat_1.x;   ← quat.x is W
-        //   let x_1 = quat_1.y; ← quat.y is X
-        //   let y = quat_1.z;
-        //   let z = quat_1.w;
-        // So Brush's quat layout IS (w, x, y, z). PLY's GaussianParams
-        // is also (w, x, y, z). Match: copy as-is, no reorder.
-        quats[i * 4 + 0] = g.rotation[0];
-        quats[i * 4 + 1] = g.rotation[1];
-        quats[i * 4 + 2] = g.rotation[2];
-        quats[i * 4 + 3] = g.rotation[3];
-
-        // Opacity: GaussianParams stores POST-sigmoid linear [0,1].
-        // project_forward applies sigmoid again → invert to logit space:
-        //   raw = log(o / (1 - o))
-        // Clamp away from 0/1 so log stays finite.
-        float op = g.opacity;
-        if (op < 1e-6f) op = 1e-6f;
-        if (op > 1.0f - 1e-6f) op = 1.0f - 1e-6f;
-        raw_opacities[i] = std::log(op / (1.0f - op));
-
-        // SH DC: GaussianParams stores LINEAR color ([0,1]); project_visible
-        // reapplies `c = SH_C0 * sh0 + 0.5` so we invert that:
-        //   sh0 = (c - 0.5) / SH_C0
-        const std::size_t coeff_base = static_cast<std::size_t>(i) * coeffs_per_splat * 3;
-        coeffs[coeff_base + 0] = (g.color[0] - 0.5f) * kInvSH_C0;
-        coeffs[coeff_base + 1] = (g.color[1] - 0.5f) * kInvSH_C0;
-        coeffs[coeff_base + 2] = (g.color[2] - 0.5f) * kInvSH_C0;
-
-        // ─── Phase 6.4f.2.b/c — higher-order SH repack ─────────────────
-        //
-        // Source layout (PLY-native, channel-major basis-major):
-        //   sh_rest[i * (3 * non_dc_basis) +
-        //           channel * non_dc_basis + basis]
-        // Brush GPU layout (PackedVec3 stream, basis-major-vec3):
-        //   coeffs[base + (1 + basis)] = vec3<f32>(R, G, B)
-        // Where `base = i * coeffs_per_splat`. Each PackedVec3 is 3
-        // contiguous f32s, so the C++ array index is
-        //   coeffs[(base + 1 + basis) * 3 + channel].
-        if (non_dc_basis > 0u && sh_rest != nullptr) {
-            const std::size_t src_base = static_cast<std::size_t>(i) *
-                                         3u * non_dc_basis;
-            for (std::uint32_t b = 0; b < non_dc_basis; ++b) {
-                const std::size_t dst = (static_cast<std::size_t>(i) *
-                                          coeffs_per_splat + 1u + b) * 3u;
-                coeffs[dst + 0] = sh_rest[src_base + 0u * non_dc_basis + b];
-                coeffs[dst + 1] = sh_rest[src_base + 1u * non_dc_basis + b];
-                coeffs[dst + 2] = sh_rest[src_base + 2u * non_dc_basis + b];
-            }
+    // ─── Phase 6.4f.3.c — cache-hit fast path ──────────────────────────
+    //
+    // If a SplatData with this key is already alive (another renderer is
+    // currently rendering the same scene), grab a strong ref and skip
+    // the entire pack / upload / mtime-walk. Per-renderer state (sort
+    // scratch, gid/depths, bind groups) is still rebuilt below — only
+    // the splat-data buffers themselves are shared.
+    std::shared_ptr<SplatData> shared_data;
+    if (!cache_key.empty()) {
+        shared_data = SplatDataCache::instance().get(cache_key);
+        if (shared_data) {
+            s.data = shared_data;
+            s.packed_splats_buf = shared_data->packed_splats_buf;
+            s.coeffs_non_dc_buf = shared_data->coeffs_non_dc_buf;
+            s.bounds_min[0] = shared_data->bounds_min[0];
+            s.bounds_min[1] = shared_data->bounds_min[1];
+            s.bounds_min[2] = shared_data->bounds_min[2];
+            s.bounds_max[0] = shared_data->bounds_max[0];
+            s.bounds_max[1] = shared_data->bounds_max[1];
+            s.bounds_max[2] = shared_data->bounds_max[2];
+            scene_log("build_splat_scene: cache HIT key='%s' (refcount=%ld)",
+                      cache_key.c_str(),
+                      static_cast<long>(shared_data.use_count()));
         }
     }
 
@@ -1914,38 +1927,105 @@ static bool build_splat_scene_from_gaussians(
         return dev.create_buffer(d);
     };
 
-    s.means_buf         = make_buf(N * sizeof(float) * 3, "splat.means");
-    s.log_scales_buf    = make_buf(N * sizeof(float) * 3, "splat.log_scales");
-    s.quats_buf         = make_buf(N * sizeof(float) * 4, "splat.quats");
-    s.raw_opacities_buf = make_buf(N * sizeof(float),     "splat.raw_opacities");
-    s.coeffs_buf        = make_buf(N * coeffs_per_splat * sizeof(float) * 3,
-                                    "splat.coeffs");
-    s.global_from_compact_gid_buf = make_buf(N * sizeof(std::uint32_t),
-                                              "splat.global_from_compact_gid");
-    s.depths_buf        = make_buf(N * sizeof(float),     "splat.depths");
+    if (!shared_data) {
+        // ─── Phase 6.4f.3.a — pack splats into 16-byte format ──────────
+        //
+        // Each gaussian gets packed via aether::splat::pack_gaussian
+        // (encodes color → sRGB rgba (4B), position → fp16 xyz (6B),
+        // rotation → octahedral axis + angle (3B), scale → log byte xyz
+        // (3B)). The packing assumes:
+        //   - g.color is linear RGB in [0,1]   (PLY contract)
+        //   - g.opacity is linear [0,1]         (both PLY + SPZ)
+        //   - g.rotation is normalized (w,x,y,z)
+        //   - g.scale is positive linear
+        // SPZ's `g.color` is actually SH DC (out-of-range); SPZ scenes
+        // inherit the same color quantization issue main has — tracked
+        // separately, not introduced or fixed by this phase.
+        std::vector<::aether::splat::PackedSplat> packed(N);
+        std::vector<float> coeffs_non_dc(static_cast<std::size_t>(N) *
+                                          non_dc_basis * 3u);  // PackedVec3[]
 
-    if (!s.means_buf.valid() || !s.log_scales_buf.valid() ||
-        !s.quats_buf.valid() || !s.raw_opacities_buf.valid() ||
-        !s.coeffs_buf.valid() ||
-        !s.global_from_compact_gid_buf.valid() || !s.depths_buf.valid()) {
-        scene_log("build_splat_scene: buffer alloc failed");
-        // Manually destroy what we did allocate (we haven't put `s` into
-        // r->splat_scene yet, so free_splat_scene can't help).
-        if (s.depths_buf.valid())                  dev.destroy_buffer(s.depths_buf);
-        if (s.global_from_compact_gid_buf.valid()) dev.destroy_buffer(s.global_from_compact_gid_buf);
-        if (s.coeffs_buf.valid())                  dev.destroy_buffer(s.coeffs_buf);
-        if (s.raw_opacities_buf.valid())           dev.destroy_buffer(s.raw_opacities_buf);
-        if (s.quats_buf.valid())                   dev.destroy_buffer(s.quats_buf);
-        if (s.log_scales_buf.valid())              dev.destroy_buffer(s.log_scales_buf);
-        if (s.means_buf.valid())                   dev.destroy_buffer(s.means_buf);
-        return false;
+        s.bounds_min[0] = s.bounds_max[0] = gaussians[0].position[0];
+        s.bounds_min[1] = s.bounds_max[1] = gaussians[0].position[1];
+        s.bounds_min[2] = s.bounds_max[2] = gaussians[0].position[2];
+
+        for (std::uint32_t i = 0; i < N; ++i) {
+            const auto& g = gaussians[i];
+            for (int c = 0; c < 3; ++c) {
+                if (g.position[c] < s.bounds_min[c]) s.bounds_min[c] = g.position[c];
+                if (g.position[c] > s.bounds_max[c]) s.bounds_max[c] = g.position[c];
+            }
+            ::aether::splat::GaussianParams adapted = g;
+            for (int c = 0; c < 3; ++c) {
+                if (adapted.scale[c] < 1e-12f) adapted.scale[c] = 1e-12f;
+            }
+            packed[i] = ::aether::splat::pack_gaussian(adapted);
+
+            // SH non-DC repack (PLY-native channel-major-basis-major →
+            // GPU PackedVec3[] indexed slot-then-vec3, no DC slot).
+            if (non_dc_basis > 0u && sh_rest != nullptr) {
+                const std::size_t src_base = static_cast<std::size_t>(i) *
+                                             3u * non_dc_basis;
+                for (std::uint32_t b = 0; b < non_dc_basis; ++b) {
+                    const std::size_t dst = (static_cast<std::size_t>(i) *
+                                              non_dc_basis + b) * 3u;
+                    coeffs_non_dc[dst + 0] = sh_rest[src_base + 0u * non_dc_basis + b];
+                    coeffs_non_dc[dst + 1] = sh_rest[src_base + 1u * non_dc_basis + b];
+                    coeffs_non_dc[dst + 2] = sh_rest[src_base + 2u * non_dc_basis + b];
+                }
+            }
+        }
+
+        // Build a fresh SplatData; the destructor will release any
+        // partially-allocated buffers if we early-return mid-setup.
+        auto data = std::make_shared<SplatData>();
+        data->device = &dev;
+        data->num_splats = N;
+        data->sh_degree = sh_degree;
+        std::memcpy(data->bounds_min, s.bounds_min, sizeof(float) * 3);
+        std::memcpy(data->bounds_max, s.bounds_max, sizeof(float) * 3);
+        data->packed_splats_buf = make_buf(
+            N * sizeof(::aether::splat::PackedSplat), "splat.packed");
+        // coeffs_non_dc bound even when degree=0 — WGSL requires the
+        // binding to point at a real buffer ≥ minBindingSize. 16-byte
+        // placeholder when there are no SH coefficients.
+        const std::size_t coeffs_bytes = (non_dc_basis == 0u)
+            ? 16u
+            : (static_cast<std::size_t>(N) * non_dc_basis * sizeof(float) * 3u);
+        data->coeffs_non_dc_buf = make_buf(coeffs_bytes, "splat.coeffs_non_dc");
+
+        if (!data->packed_splats_buf.valid() || !data->coeffs_non_dc_buf.valid()) {
+            scene_log("build_splat_scene: data buffer alloc failed");
+            return false;  // ~SplatData frees whatever did alloc
+        }
+        dev.update_buffer(data->packed_splats_buf, packed.data(), 0,
+                          packed.size() * sizeof(::aether::splat::PackedSplat));
+        if (non_dc_basis > 0u) {
+            dev.update_buffer(data->coeffs_non_dc_buf, coeffs_non_dc.data(), 0,
+                              coeffs_non_dc.size() * sizeof(float));
+        }
+        shared_data = std::move(data);
+        s.data = shared_data;
+        s.packed_splats_buf = shared_data->packed_splats_buf;
+        s.coeffs_non_dc_buf = shared_data->coeffs_non_dc_buf;
+        if (!cache_key.empty()) {
+            SplatDataCache::instance().put(cache_key, shared_data);
+            scene_log("build_splat_scene: cache MISS key='%s' (uploaded %u splats, %u non_dc_basis)",
+                      cache_key.c_str(), N, non_dc_basis);
+        }
     }
 
-    dev.update_buffer(s.means_buf,         means.data(),         0, means.size() * sizeof(float));
-    dev.update_buffer(s.log_scales_buf,    log_scales.data(),    0, log_scales.size() * sizeof(float));
-    dev.update_buffer(s.quats_buf,         quats.data(),         0, quats.size() * sizeof(float));
-    dev.update_buffer(s.raw_opacities_buf, raw_opacities.data(), 0, raw_opacities.size() * sizeof(float));
-    dev.update_buffer(s.coeffs_buf,        coeffs.data(),        0, coeffs.size() * sizeof(float));
+    // Per-renderer scratch buffers — never shared, rebuilt every load.
+    s.global_from_compact_gid_buf = make_buf(N * sizeof(std::uint32_t),
+                                              "splat.global_from_compact_gid");
+    s.depths_buf = make_buf(N * sizeof(float), "splat.depths");
+    if (!s.global_from_compact_gid_buf.valid() || !s.depths_buf.valid()) {
+        scene_log("build_splat_scene: scratch buffer alloc failed");
+        if (s.depths_buf.valid())                  dev.destroy_buffer(s.depths_buf);
+        if (s.global_from_compact_gid_buf.valid()) dev.destroy_buffer(s.global_from_compact_gid_buf);
+        // s.data goes out of scope — shared_ptr handles cleanup.
+        return false;
+    }
 
     // Reallocate the projected_splats output (replaces the 1-slot placeholder
     // created in aether_scene_renderer_create) sized to N * 36 bytes.
@@ -1955,11 +2035,7 @@ static bool build_splat_scene_from_gaussians(
         scene_log("build_splat_scene: projected_splats buffer alloc failed");
         if (s.depths_buf.valid())                  dev.destroy_buffer(s.depths_buf);
         if (s.global_from_compact_gid_buf.valid()) dev.destroy_buffer(s.global_from_compact_gid_buf);
-        if (s.coeffs_buf.valid())                  dev.destroy_buffer(s.coeffs_buf);
-        if (s.raw_opacities_buf.valid())           dev.destroy_buffer(s.raw_opacities_buf);
-        if (s.quats_buf.valid())                   dev.destroy_buffer(s.quats_buf);
-        if (s.log_scales_buf.valid())              dev.destroy_buffer(s.log_scales_buf);
-        if (s.means_buf.valid())                   dev.destroy_buffer(s.means_buf);
+        // s.data shared_ptr handles packed_splats / coeffs_non_dc cleanup.
         return false;
     }
 
@@ -1973,11 +2049,7 @@ static bool build_splat_scene_from_gaussians(
         if (r->splats_buf.valid()) dev.destroy_buffer(r->splats_buf);
         if (s.depths_buf.valid())                  dev.destroy_buffer(s.depths_buf);
         if (s.global_from_compact_gid_buf.valid()) dev.destroy_buffer(s.global_from_compact_gid_buf);
-        if (s.coeffs_buf.valid())                  dev.destroy_buffer(s.coeffs_buf);
-        if (s.raw_opacities_buf.valid())           dev.destroy_buffer(s.raw_opacities_buf);
-        if (s.quats_buf.valid())                   dev.destroy_buffer(s.quats_buf);
-        if (s.log_scales_buf.valid())              dev.destroy_buffer(s.log_scales_buf);
-        if (s.means_buf.valid())                   dev.destroy_buffer(s.means_buf);
+        // s.data shared_ptr handles packed_splats / coeffs_non_dc cleanup.
         return false;
     }
 
@@ -2143,35 +2215,32 @@ static bool build_splat_scene_from_gaussians(
     };
 
     {
-        WGPUBindGroupEntry entries[7] = {
+        // Phase 6.4f.3.a — packed format: 4 bindings.
+        WGPUBindGroupEntry entries[4] = {
             bind_buf(r->splat_uniforms_buf, 0),
-            bind_buf(s.means_buf, 1),
-            bind_buf(s.quats_buf, 2),
-            bind_buf(s.log_scales_buf, 3),
-            bind_buf(s.raw_opacities_buf, 4),
-            bind_buf(s.global_from_compact_gid_buf, 5),
-            bind_buf(s.depths_buf, 6),
+            bind_buf(s.packed_splats_buf, 1),
+            bind_buf(s.global_from_compact_gid_buf, 2),
+            bind_buf(s.depths_buf, 3),
         };
         WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
         bg.layout = s.project_forward_bgl;
-        bg.entryCount = 7;
+        bg.entryCount = 4;
         bg.entries = entries;
         s.project_forward_bg = wgpuDeviceCreateBindGroup(wd, &bg);
     }
     {
-        WGPUBindGroupEntry entries[8] = {
+        // Phase 6.4f.3.a — packed format: 5 bindings (DC SH folded into
+        // packed_splats; coeffs_non_dc holds the non-DC coefficients).
+        WGPUBindGroupEntry entries[5] = {
             bind_buf(r->splat_uniforms_buf, 0),
-            bind_buf(s.means_buf, 1),
-            bind_buf(s.log_scales_buf, 2),
-            bind_buf(s.quats_buf, 3),
-            bind_buf(s.coeffs_buf, 4),
-            bind_buf(s.raw_opacities_buf, 5),
-            bind_buf(s.global_from_compact_gid_buf, 6),
-            bind_buf(r->splats_buf, 7),
+            bind_buf(s.packed_splats_buf, 1),
+            bind_buf(s.coeffs_non_dc_buf, 2),
+            bind_buf(s.global_from_compact_gid_buf, 3),
+            bind_buf(r->splats_buf, 4),
         };
         WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
         bg.layout = s.project_visible_bgl;
-        bg.entryCount = 8;
+        bg.entryCount = 5;
         bg.entries = entries;
         s.project_visible_bg = wgpuDeviceCreateBindGroup(wd, &bg);
     }
@@ -2311,8 +2380,268 @@ static bool build_splat_scene_from_gaussians(
     return true;
 }
 
-extern "C" bool aether_scene_renderer_load_ply(AetherSceneRenderer* r,
-                                                 const char* ply_path) {
+// ─── Phase 6.4f.3.d — octree LOD subsample ─────────────────────────────
+//
+// Replaces the naïve stride decimation with a proper hierarchical
+// importance-weighted subsample: build an octree of the input
+// gaussians, subdivide breadth-first until the leaf count approaches
+// the target, then emit one representative splat per leaf chosen by
+// visual importance (opacity × scale-volume). This is the "load-time
+// LOD" pattern used by Spark `tiny-lod` and PlayCanvas `build-lod` —
+// it preserves dense-region detail and silhouette far better than
+// stride sampling, at the same target splat count.
+//
+// Runtime GPU LOD (per-frame node selection based on screen-space
+// projected radius — Octree-GS style) is the next step, tracked as
+// Phase 6.4f.4. The current load-time octree gives the bulk of the
+// memory + rendering perf win without needing a new GPU kernel.
+namespace {
+
+struct OctNode {
+    float aabb_min[3];
+    float aabb_max[3];
+    std::vector<std::uint32_t> splat_indices;
+};
+
+inline float visual_importance(const ::aether::splat::GaussianParams& g) noexcept {
+    // opacity × scale-volume — bigger and more opaque splats win.
+    // Use abs so flipped-handed scales still rank, take a small floor
+    // so degenerate scales don't all tie at 0.
+    const float vol = std::abs(g.scale[0] * g.scale[1] * g.scale[2]) + 1e-12f;
+    return g.opacity * vol;
+}
+
+inline std::vector<std::uint32_t> octree_subsample_indices(
+    const std::vector<::aether::splat::GaussianParams>& gaussians,
+    std::uint32_t target_count,
+    std::uint32_t max_depth = 7u,
+    std::uint32_t leaf_max = 4u)
+{
+    const std::size_t N = gaussians.size();
+    if (N == 0u || target_count >= N) {
+        std::vector<std::uint32_t> all(N);
+        for (std::size_t i = 0; i < N; ++i) all[i] = static_cast<std::uint32_t>(i);
+        return all;
+    }
+
+    OctNode root;
+    root.aabb_min[0] = root.aabb_min[1] = root.aabb_min[2] = 1e30f;
+    root.aabb_max[0] = root.aabb_max[1] = root.aabb_max[2] = -1e30f;
+    root.splat_indices.resize(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        root.splat_indices[i] = static_cast<std::uint32_t>(i);
+        for (int c = 0; c < 3; ++c) {
+            root.aabb_min[c] = std::min(root.aabb_min[c], gaussians[i].position[c]);
+            root.aabb_max[c] = std::max(root.aabb_max[c], gaussians[i].position[c]);
+        }
+    }
+
+    auto split = [&](OctNode& n) -> std::vector<OctNode> {
+        const float cx = (n.aabb_min[0] + n.aabb_max[0]) * 0.5f;
+        const float cy = (n.aabb_min[1] + n.aabb_max[1]) * 0.5f;
+        const float cz = (n.aabb_min[2] + n.aabb_max[2]) * 0.5f;
+        std::vector<OctNode> children(8);
+        for (int o = 0; o < 8; ++o) {
+            children[o].aabb_min[0] = (o & 1) ? cx : n.aabb_min[0];
+            children[o].aabb_max[0] = (o & 1) ? n.aabb_max[0] : cx;
+            children[o].aabb_min[1] = (o & 2) ? cy : n.aabb_min[1];
+            children[o].aabb_max[1] = (o & 2) ? n.aabb_max[1] : cy;
+            children[o].aabb_min[2] = (o & 4) ? cz : n.aabb_min[2];
+            children[o].aabb_max[2] = (o & 4) ? n.aabb_max[2] : cz;
+        }
+        for (auto idx : n.splat_indices) {
+            const auto& g = gaussians[idx];
+            int o = 0;
+            if (g.position[0] >= cx) o |= 1;
+            if (g.position[1] >= cy) o |= 2;
+            if (g.position[2] >= cz) o |= 4;
+            children[o].splat_indices.push_back(idx);
+        }
+        // Drop empty octants and degenerate splits (all in one octant).
+        std::vector<OctNode> kept;
+        kept.reserve(8);
+        for (auto& c : children) {
+            if (!c.splat_indices.empty()) kept.push_back(std::move(c));
+        }
+        return kept;
+    };
+
+    std::vector<OctNode> queue;
+    queue.push_back(std::move(root));
+    std::vector<OctNode> leaves;
+    leaves.reserve(target_count);
+
+    for (std::uint32_t depth = 0;
+         depth < max_depth && !queue.empty() &&
+             (leaves.size() + queue.size()) < target_count;
+         ++depth) {
+        std::vector<OctNode> next;
+        next.reserve(queue.size() * 4);
+        for (auto& n : queue) {
+            // Stop subdividing if the leaf budget is met or this node is
+            // already small.
+            if (n.splat_indices.size() <= leaf_max ||
+                (leaves.size() + next.size() + queue.size()) >= target_count) {
+                leaves.push_back(std::move(n));
+                continue;
+            }
+            auto children = split(n);
+            if (children.size() <= 1u) {
+                // Degenerate split (all splats co-located) — keep as leaf.
+                leaves.push_back(std::move(n));
+                continue;
+            }
+            for (auto& c : children) next.push_back(std::move(c));
+        }
+        queue = std::move(next);
+    }
+    for (auto& n : queue) leaves.push_back(std::move(n));
+
+    // Pick one representative splat per leaf, weighted by visual
+    // importance. This single-rep-per-leaf is the "tiny-lod" tier in
+    // Spark's terminology — for higher quality we'd emit a *merged*
+    // splat (Bhattacharyya-fit gaussian over the leaf members). That's
+    // 6.4f.4 territory; the single-rep approximation is what
+    // PlayCanvas's build-lod ships by default.
+    std::vector<std::uint32_t> selected;
+    selected.reserve(leaves.size());
+    for (auto& leaf : leaves) {
+        std::uint32_t best = leaf.splat_indices[0];
+        float best_imp = visual_importance(gaussians[best]);
+        for (auto idx : leaf.splat_indices) {
+            const float imp = visual_importance(gaussians[idx]);
+            if (imp > best_imp) { best = idx; best_imp = imp; }
+        }
+        selected.push_back(best);
+    }
+    return selected;
+}
+
+}  // namespace
+
+// ─── Phase 6.4f.3.b — load-time caps (max_splats + max_sh_degree) ──────
+//
+// Applied after the file is decoded but before GPU upload. Two effects:
+//
+//   1. max_sh_degree clamps result.sh_degree DOWN, and truncates
+//      result.sh_rest accordingly. Per channel slot count goes:
+//        deg 0 → 0 floats, deg 1 → 9, deg 2 → 24, deg 3 → 45.
+//      For PocketWorld feed thumbnails (texture longSide < 256 px) the
+//      higher-order SH is imperceptible, but it's the dominant source
+//      of GPU memory at high resolutions: 45 × 4 = 180 B/splat at deg 3
+//      vs 0 B at deg 0.
+//
+//   2. max_splats > 0 evicts gaussians via deterministic stride
+//      subsample (every k-th element where k = ceil(N / max_splats)).
+//      This is a coarse LOD baseline — per-tile / per-octree-node LOD
+//      is Phase 6.4f.3.d. Stride subsampling preserves overall scene
+//      coverage but does NOT preserve fine detail; it's intended for
+//      feed-card thumbnails where 50k splats reads "lizard-shaped" at
+//      thumbnail resolution as well as 786k does.
+static void apply_load_caps(
+    std::vector<::aether::splat::GaussianParams>& gaussians,
+    std::vector<float>& sh_rest,
+    std::uint32_t& sh_degree,
+    std::uint32_t max_splats,
+    std::uint8_t max_sh_degree)
+{
+    auto coeffs_per_basis = [](std::uint32_t d) -> std::uint32_t {
+        // non-DC basis count: 0,3,8,15 for deg 0,1,2,3.
+        if (d == 0u) return 0u;
+        if (d == 1u) return 3u;
+        if (d == 2u) return 8u;
+        return 15u;
+    };
+
+    // ── (1) Clamp SH degree ───────────────────────────────────────────
+    if (max_sh_degree < 3u && sh_degree > max_sh_degree) {
+        const std::uint32_t old_basis = coeffs_per_basis(sh_degree);
+        const std::uint32_t new_basis = coeffs_per_basis(
+            static_cast<std::uint32_t>(max_sh_degree));
+        if (new_basis == 0u) {
+            sh_rest.clear();
+        } else if (old_basis > new_basis && !sh_rest.empty()) {
+            // PLY-native SH layout: sh_rest[i * (3 * old_basis) +
+            //   channel * old_basis + basis]. To downsize, repack into
+            //   sh_rest_new[i * (3 * new_basis) + channel * new_basis + basis]
+            //   keeping basis ∈ [0, new_basis).
+            const std::size_t N = gaussians.size();
+            std::vector<float> trimmed(N * 3u * new_basis);
+            for (std::size_t i = 0; i < N; ++i) {
+                for (std::uint32_t c = 0; c < 3u; ++c) {
+                    const std::size_t src_off = i * 3u * old_basis + c * old_basis;
+                    const std::size_t dst_off = i * 3u * new_basis + c * new_basis;
+                    for (std::uint32_t b = 0; b < new_basis; ++b) {
+                        trimmed[dst_off + b] = sh_rest[src_off + b];
+                    }
+                }
+            }
+            sh_rest = std::move(trimmed);
+        }
+        sh_degree = static_cast<std::uint32_t>(max_sh_degree);
+    }
+
+    // ── (2) Octree-based importance-weighted subsample (Phase 6.4f.3.d)
+    if (max_splats > 0u && gaussians.size() > max_splats) {
+        const std::vector<std::uint32_t> indices =
+            octree_subsample_indices(gaussians, max_splats);
+        std::vector<::aether::splat::GaussianParams> kept;
+        kept.reserve(indices.size());
+        const std::uint32_t basis = coeffs_per_basis(sh_degree);
+        std::vector<float> sh_kept;
+        if (basis > 0u && !sh_rest.empty()) {
+            sh_kept.reserve(indices.size() * 3u * basis);
+        }
+        for (auto i : indices) {
+            kept.push_back(gaussians[i]);
+            if (basis > 0u && !sh_rest.empty()) {
+                const std::size_t src = static_cast<std::size_t>(i) * 3u * basis;
+                for (std::uint32_t c = 0; c < 3u; ++c) {
+                    for (std::uint32_t b = 0; b < basis; ++b) {
+                        sh_kept.push_back(sh_rest[src + c * basis + b]);
+                    }
+                }
+            }
+        }
+        gaussians = std::move(kept);
+        sh_rest = std::move(sh_kept);
+    }
+}
+
+// Phase 6.4f.3.c — build a stable per-load cache key. Same path with
+// the same caps + same on-disk mtime maps to the same SplatData. mtime
+// guards against the user re-downloading content into the same path.
+// Format: "ext|absolute_path|mtime_ns|max_splats|max_sh_degree".
+static std::string make_cache_key(const char* ext,
+                                   const char* path,
+                                   std::uint32_t max_splats,
+                                   std::uint8_t max_sh_degree) {
+    std::int64_t mtime = 0;
+    struct stat st{};
+    if (path && stat(path, &st) == 0) {
+#if defined(__APPLE__)
+        mtime = static_cast<std::int64_t>(st.st_mtimespec.tv_sec) * 1'000'000'000LL +
+                static_cast<std::int64_t>(st.st_mtimespec.tv_nsec);
+#else
+        mtime = static_cast<std::int64_t>(st.st_mtime);
+#endif
+    }
+    char buf[1024];
+    std::snprintf(buf, sizeof(buf), "%s|%s|%lld|%u|%u",
+                  ext ? ext : "?",
+                  path ? path : "",
+                  static_cast<long long>(mtime),
+                  static_cast<unsigned>(max_splats),
+                  static_cast<unsigned>(max_sh_degree));
+    return std::string(buf);
+}
+
+static bool load_ply_into_renderer(
+    AetherSceneRenderer* r,
+    const char* ply_path,
+    std::uint32_t max_splats,
+    std::uint8_t max_sh_degree)
+{
     if (!r || !ply_path) return false;
     ::aether::splat::PlyLoadResult result;
     auto status = ::aether::splat::load_ply(ply_path, result);
@@ -2325,20 +2654,30 @@ extern "C" bool aether_scene_renderer_load_ply(AetherSceneRenderer* r,
         scene_log("load_ply: no gaussians in '%s'", ply_path);
         return false;
     }
+    std::uint32_t sh_degree = result.sh_degree;
+    apply_load_caps(result.gaussians, result.sh_rest, sh_degree,
+                    max_splats, max_sh_degree);
     const float* sh_rest = result.sh_rest.empty() ? nullptr : result.sh_rest.data();
+    const std::string key = make_cache_key("ply", ply_path,
+                                            max_splats, max_sh_degree);
     if (!build_splat_scene_from_gaussians(r, result.gaussians,
-                                           result.sh_degree, sh_rest)) {
+                                           sh_degree, sh_rest, key)) {
         scene_log("load_ply: build_splat_scene failed for '%s'", ply_path);
         return false;
     }
-    scene_log("load_ply: '%s' sh_degree=%u (sh_rest %zu floats)",
-              ply_path, static_cast<unsigned>(result.sh_degree),
-              result.sh_rest.size());
+    scene_log("load_ply: '%s' kept=%zu sh_degree=%u (cap max_splats=%u max_sh=%u)",
+              ply_path, result.gaussians.size(),
+              static_cast<unsigned>(sh_degree),
+              max_splats, static_cast<unsigned>(max_sh_degree));
     return true;
 }
 
-extern "C" bool aether_scene_renderer_load_spz(AetherSceneRenderer* r,
-                                                 const char* spz_path) {
+static bool load_spz_into_renderer(
+    AetherSceneRenderer* r,
+    const char* spz_path,
+    std::uint32_t max_splats,
+    std::uint8_t max_sh_degree)
+{
     if (!r || !spz_path) return false;
     ::aether::splat::SpzDecodeResult spz_result;
     auto status = ::aether::splat::load_spz(spz_path, spz_result);
@@ -2353,12 +2692,51 @@ extern "C" bool aether_scene_renderer_load_spz(AetherSceneRenderer* r,
     }
     // SPZ decoder doesn't unpack higher-order SH today (only DC). Force
     // sh_degree=0 so project_visible doesn't read from a missing buffer.
+    // The cap helper still runs for stride-subsample side-effect.
+    std::uint32_t sh_degree = 0u;
+    std::vector<float> empty_sh;
+    apply_load_caps(spz_result.gaussians, empty_sh, sh_degree,
+                    max_splats, /*max_sh_degree=*/0u);
+    const std::string key = make_cache_key("spz", spz_path,
+                                            max_splats, max_sh_degree);
     if (!build_splat_scene_from_gaussians(r, spz_result.gaussians,
-                                           /*sh_degree=*/0u, /*sh_rest=*/nullptr)) {
+                                           /*sh_degree=*/0u, /*sh_rest=*/nullptr,
+                                           key)) {
         scene_log("load_spz: build_splat_scene failed for '%s'", spz_path);
         return false;
     }
+    (void)max_sh_degree;  // SPZ SH unpack is a follow-up — see PHASE_BACKLOG.
     return true;
+}
+
+extern "C" bool aether_scene_renderer_load_ply(AetherSceneRenderer* r,
+                                                 const char* ply_path) {
+    return load_ply_into_renderer(r, ply_path, /*max_splats=*/0u,
+                                   /*max_sh_degree=*/3u);
+}
+
+extern "C" bool aether_scene_renderer_load_spz(AetherSceneRenderer* r,
+                                                 const char* spz_path) {
+    return load_spz_into_renderer(r, spz_path, /*max_splats=*/0u,
+                                   /*max_sh_degree=*/3u);
+}
+
+extern "C" bool aether_scene_renderer_load_ply_capped(
+    AetherSceneRenderer* r,
+    const char* ply_path,
+    uint32_t max_splats,
+    uint8_t max_sh_degree)
+{
+    return load_ply_into_renderer(r, ply_path, max_splats, max_sh_degree);
+}
+
+extern "C" bool aether_scene_renderer_load_spz_capped(
+    AetherSceneRenderer* r,
+    const char* spz_path,
+    uint32_t max_splats,
+    uint8_t max_sh_degree)
+{
+    return load_spz_into_renderer(r, spz_path, max_splats, max_sh_degree);
 }
 
 extern "C" bool aether_scene_renderer_get_bounds(AetherSceneRenderer* r,

@@ -220,8 +220,135 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                     details: nil))
                 return
             }
-            NSLog("[AetherTexture iOS] loadGlb succeeded: %@", path)
-            result(nil)
+            // G4: surface the local-space AABB so the Flutter caller can
+            // run its model-viewer fit. nil bounds = native side failed
+            // to compute; Dart falls back to its own widget.cameraDistance.
+            let bounds = texture.getBounds()
+            if let b = bounds {
+                NSLog("[AetherTexture iOS] loadGlb succeeded: %@ bounds=([%.2f..%.2f],[%.2f..%.2f],[%.2f..%.2f])",
+                      path, b.minX, b.maxX, b.minY, b.maxY, b.minZ, b.maxZ)
+                result([
+                    "bounds": [
+                        "minX": Double(b.minX),
+                        "minY": Double(b.minY),
+                        "minZ": Double(b.minZ),
+                        "maxX": Double(b.maxX),
+                        "maxY": Double(b.maxY),
+                        "maxZ": Double(b.maxZ),
+                    ]
+                ])
+            } else {
+                NSLog("[AetherTexture iOS] loadGlb succeeded: %@ (no bounds)", path)
+                result([:])
+            }
+
+        // Phase 6.4f STUB. Native side returns false until the Brush
+        // 8-kernel pipeline lands. Dart-side catch surfaces this as
+        // "splat preview coming soon" placeholder. Both PLY and SPZ
+        // share the same routing — the file extension already routed
+        // them to the right method on the Flutter side.
+        case "loadPly":
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value,
+                  let path = args["path"] as? String else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "loadPly requires {textureId: int, path: String}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                result(FlutterError(
+                    code: "NO_SUCH_TEXTURE",
+                    message: "loadPly called with textureId=\(id) which is not registered",
+                    details: nil))
+                return
+            }
+            // Phase 6.4f.3.b — accept memory caps from Dart side.
+            let maxSplats = (args["maxSplats"] as? NSNumber)?.uint32Value ?? 0
+            let maxShDegree = (args["maxShDegree"] as? NSNumber)?.uint8Value ?? 3
+            if !texture.loadPly(path: path,
+                                maxSplats: maxSplats,
+                                maxShDegree: maxShDegree) {
+                result(FlutterError(
+                    code: "PLY_LOAD_FAILED",
+                    message: "aether_scene_renderer_load_ply returned false for path=\(path)",
+                    details: nil))
+                return
+            }
+            // Surface splat-scene AABB so AetherCppCardDemo can fit
+            // the camera. Same pattern as loadGlb / loadSpz.
+            let plyBounds = texture.getBounds()
+            if let b = plyBounds {
+                NSLog("[AetherTexture iOS] loadPly succeeded: %@ bounds=([%.2f..%.2f],[%.2f..%.2f],[%.2f..%.2f])",
+                      path, b.minX, b.maxX, b.minY, b.maxY, b.minZ, b.maxZ)
+                result([
+                    "bounds": [
+                        "minX": Double(b.minX),
+                        "minY": Double(b.minY),
+                        "minZ": Double(b.minZ),
+                        "maxX": Double(b.maxX),
+                        "maxY": Double(b.maxY),
+                        "maxZ": Double(b.maxZ),
+                    ]
+                ])
+            } else {
+                NSLog("[AetherTexture iOS] loadPly succeeded: %@ (no bounds)", path)
+                result([:])
+            }
+
+        case "loadSpz":
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value,
+                  let path = args["path"] as? String else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "loadSpz requires {textureId: int, path: String}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                result(FlutterError(
+                    code: "NO_SUCH_TEXTURE",
+                    message: "loadSpz called with textureId=\(id) which is not registered",
+                    details: nil))
+                return
+            }
+            // Phase 6.4f.3.b — accept memory caps from Dart side.
+            let maxSplats = (args["maxSplats"] as? NSNumber)?.uint32Value ?? 0
+            let maxShDegree = (args["maxShDegree"] as? NSNumber)?.uint8Value ?? 3
+            if !texture.loadSpz(path: path,
+                                maxSplats: maxSplats,
+                                maxShDegree: maxShDegree) {
+                result(FlutterError(
+                    code: "SPZ_LOAD_FAILED",
+                    message: "aether_scene_renderer_load_spz returned false for path=\(path)",
+                    details: nil))
+                return
+            }
+            // Surface splat-scene AABB so AetherCppCardDemo can fit
+            // the camera (same shape as loadGlb above). Without this,
+            // Dart falls back to widget.fallbackCameraDistance and
+            // the camera ends up INSIDE the splat cloud — see the
+            // 2026-05-02 user-reported "灰雾" / no-bounds bug.
+            let spzBounds = texture.getBounds()
+            if let b = spzBounds {
+                NSLog("[AetherTexture iOS] loadSpz succeeded: %@ bounds=([%.2f..%.2f],[%.2f..%.2f],[%.2f..%.2f])",
+                      path, b.minX, b.maxX, b.minY, b.maxY, b.minZ, b.maxZ)
+                result([
+                    "bounds": [
+                        "minX": Double(b.minX),
+                        "minY": Double(b.minY),
+                        "minZ": Double(b.minZ),
+                        "maxX": Double(b.maxX),
+                        "maxY": Double(b.maxY),
+                        "maxZ": Double(b.maxZ),
+                    ]
+                ])
+            } else {
+                NSLog("[AetherTexture iOS] loadSpz succeeded: %@ (no bounds)", path)
+                result([:])
+            }
 
         case "setMatrices":
             guard let args = call.arguments as? [String: Any],
@@ -341,15 +468,43 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     }
 
     @objc private func handleMemoryWarning() {
-        // Drop all GPU resources. Flutter's _HomeScreenState catches the
-        // MissingPluginException-style symptom on its next createSharedNativeTexture
-        // call (or repaints with the existing _textureError state).
-        NSLog("[AetherTexture] memory warning — disposing %d textures", registered.count)
+        // Selective LRU dispose: keep the most-recently-rendered
+        // texture (= the focused card the user is actively looking at)
+        // alive so they DON'T see a flash. Dispose the rest — those
+        // are static cards behind/ahead in scroll that the user can't
+        // currently see; their PostCard will lazily remount on
+        // visibility-detector signal when scrolled back.
+        //
+        // Why this matters: previous behavior disposed ALL textures
+        // including the focused one. The Dart-side warning handler
+        // would then trigger a full rebuild (create → load → fit →
+        // render), and the user saw the loading-cover crossfade as
+        // their visible model briefly disappeared. Unacceptable UX
+        // per 2026-05-02 user feedback.
+        //
+        // "Most recently rendered" = highest lastRenderTimestamp.
+        // SharedNativeTexture tracks this in its render() method.
+        // Static cards that load once + sleep have an old timestamp;
+        // the focused card (Ticker driving setMatrices each frame)
+        // has the newest.
+        let total = registered.count
+        guard total > 0 else { return }
+        var sortedByRecency = registered.sorted { lhs, rhs in
+            lhs.value.lastRenderTimestamp > rhs.value.lastRenderTimestamp
+        }
+        // Keep the most recent ONE (the focused card). Dispose the
+        // rest. Tighten this if memory pressure is severe (e.g. keep
+        // 0 in critical), but for typical iOS warnings 1 is enough.
+        let keepCount = 1
+        let disposeIds = sortedByRecency.dropFirst(keepCount).map { $0.key }
+        NSLog("[AetherTexture] memory warning — disposing %d/%d textures (keeping focused)",
+              disposeIds.count, total)
         warningChannel?.invokeMethod("warning", arguments: [
             "kind": "memory",
-            "message": "Memory warning — textures released; widget will rebuild"
+            "disposedIds": disposeIds.map { NSNumber(value: $0) },
+            "message": "Memory warning — non-focused textures released"
         ])
-        for id in Array(registered.keys) {
+        for id in disposeIds {
             disposeTexture(id: id)
         }
     }
@@ -421,17 +576,30 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
     @objc private func displayLinkTick() {
         // G4: render every registered texture, not just animatedTexture.
         // The community feed mounts one renderer per PostCard; each
-        // needs to advance every frame. Iteration order is whatever the
-        // dictionary returns — order doesn't matter because each
-        // texture is independent (no shared GPU state across them
-        // beyond what aether_cpp's shared anchor manages internally).
+        // needs to advance every frame.
+        //
+        // G4-bugfix: only render textures whose `dirty` flag is set
+        // (consumeIfDirty flips it back to false). Without this,
+        // displayLinkTick re-renders every IOSurface every tick even
+        // when matrices haven't changed — at N=5 cards × 60fps that's
+        // 300 IOSurface→MTLTexture re-imports per second, which trips
+        // an iOS 17+ Dawn assertion in dawn::native::metal::
+        // SharedTextureMemory::CreateMtlTextures (see SharedNativeTexture
+        // for the full diagnosis). The Dart Ticker on the focused
+        // (auto-rotating) card calls setMatrices every Flutter frame
+        // and stays dirty, so visually the focused card animates at
+        // ~60fps as before; static cards render exactly once after
+        // load and then stop.
         if registered.isEmpty { return }
         let now = CACurrentMediaTime()
         var totalRenderMs: Double = 0
+        var rendered = 0
         let count = registered.count
         for (id, texture) in registered {
+            if !texture.consumeIfDirty() { continue }
             totalRenderMs += texture.render()
             textures.textureFrameAvailable(id)
+            rendered += 1
         }
 
         // 1 Hz fps log. On iOS NSLog routes to os_log → Console.app /
@@ -441,12 +609,13 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         let dt = now - frameStatsLogTime
         if dt >= 1.0 {
             let fps = Double(frameCount) / dt
-            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f, totalRenderMs=%.2f, textures=%d)",
+            NSLog("[AetherTexture] %.1f fps (frames=%d, dt=%.3f, totalRenderMs=%.2f, textures=%d, rendered=%d)",
                   fps,
                   frameCount,
                   dt,
                   totalRenderMs,
-                  count)
+                  count,
+                  rendered)
             frameStatsLogTime = now
             frameCount = 0
         }
