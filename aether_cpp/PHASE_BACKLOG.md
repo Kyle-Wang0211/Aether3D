@@ -166,7 +166,32 @@ the item shouldn't be here.
 
 ---
 
-## Phase 6.4f — Brush full pipeline → splat world-space + gesture-responsive
+## Phase 6.4f — Brush full pipeline → splat world-space + gesture-responsive  ✅ shipped 2026-05-02 (initial cut)
+
+**Status**: shipped 2026-05-02. The new C ABI surface
+(`aether_scene_renderer_load_ply` / `_load_spz`) is wired through to the
+Brush kernels and produces real pixels from PLY/SPZ scenes via
+`project_forward → project_visible → splat_render`. Offline smoke
+(`tools/aether_dawn_scene_splat_smoke.mm`) renders a 1024-splat synthetic
+sphere and verifies non-empty IOSurface output.
+
+**Limitations of this initial cut** (tracked as Phase 6.4f.2 below):
+
+- No GPU depth sort. The 5 sort kernels (`sort_count → sort_reduce →
+  sort_scan → sort_scan_add → sort_scatter`) and
+  `map_gaussian_to_intersects` were not wired in this commit — splats
+  render in atomic-write order from `project_forward`, producing correct
+  silhouettes but minor transparency artifacts on heavy splat overlap.
+  Add the 6-kernel sort+tile chain in 6.4f.2.
+- SH degree 0 only. Higher-order SH coeffs are parsed by the PLY loader
+  but ignored at upload time. View-dependent shading is uniform.
+- No tile binning. The vert+frag `splat_render.wgsl` path overrenders
+  vs. Brush's compute rasterizer but is 23× faster on mobile per the
+  `splat_render.wgsl` docstring — accepted trade-off.
+
+**What was kept verbatim from the original entry below for reference.**
+
+---
 
 - **What**: Replace the hardcoded screen-space `kBaselineSplats` in
   `aether_cpp/src/pocketworld/scene_iosurface_renderer.cpp` (the

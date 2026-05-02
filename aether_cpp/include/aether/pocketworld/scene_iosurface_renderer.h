@@ -61,6 +61,31 @@ void aether_scene_renderer_destroy(AetherSceneRenderer* r);
 ///         upload / validation failure.
 bool aether_scene_renderer_load_glb(AetherSceneRenderer* r, const char* glb_path);
 
+/// Phase 6.4f: load a 3D Gaussian Splat .ply file (INRIA convention —
+/// f_dc_*, scale_*, rot_*, opacity, optional f_rest_* SH coefficients).
+/// Replaces any previously loaded splat scene. Independent of the
+/// mesh slot; a renderer can hold either a mesh OR a splat scene
+/// (or in principle both, for hybrid content), but PocketWorld feeds
+/// one-at-a-time.
+///
+/// Initial 6.4f cut renders sh_degree=0 (DC color only) without GPU
+/// depth sort — splats render in atomic-write order from
+/// project_forward, producing correct silhouettes but minor transparency
+/// artifacts on heavy splat overlap. Higher-order SH and the 5-kernel
+/// radix sort are tracked as Phase 6.4f.2 in PHASE_BACKLOG.md.
+///
+/// @return true on success, false on parse / GPU upload / validation
+///         failure (logs to stderr in failure cases).
+bool aether_scene_renderer_load_ply(AetherSceneRenderer* r, const char* ply_path);
+
+/// Phase 6.4f: load a Niantic Lightship SPZ-format compressed splat
+/// scene (https://github.com/nianticlabs/spz). 24-bit fixed-point
+/// positions + gzip compression — typically 8-12× smaller than the
+/// equivalent PLY at indistinguishable visual quality.
+///
+/// @return same contract as load_ply.
+bool aether_scene_renderer_load_spz(AetherSceneRenderer* r, const char* spz_path);
+
 /// Per-frame render. View and model matrices are 16-float column-major
 /// arrays. The mesh applies BOTH matrices through its full PBR shader;
 /// the splat overlay currently ignores them visually (Phase 6.4f).
@@ -68,6 +93,21 @@ void aether_scene_renderer_render_full(
     AetherSceneRenderer* r,
     const float* view_matrix,
     const float* model_matrix
+);
+
+/// G4: Surface the local-space AABB of the currently loaded mesh so the
+/// Flutter caller can drive its model-viewer-style camera fit
+/// (`distance = sphereR / sin(fov/2)`). Bounds are computed during
+/// load_glb (see glb_loader.cpp computing bounds_min/max from every
+/// vertex position). Returns false if no mesh is loaded; in that case
+/// out_min/out_max are left untouched.
+///
+/// @param out_min  3 floats — written with bounds_min.xyz on success.
+/// @param out_max  3 floats — written with bounds_max.xyz on success.
+bool aether_scene_renderer_get_bounds(
+    AetherSceneRenderer* r,
+    float* out_min,
+    float* out_max
 );
 
 #ifdef __cplusplus
