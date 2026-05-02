@@ -30,6 +30,8 @@ struct RenderUniforms {
     total_splats: u32,
     max_intersects: u32,
     background: vec4<f32>,
+    // Phase 6.4f.4.b — must match project_forward.wgsl layout.
+    lod_extent_min: f32,
 }
 
 struct ProjectedSplat {

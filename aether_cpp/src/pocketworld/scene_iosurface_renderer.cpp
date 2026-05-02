@@ -206,8 +206,12 @@ struct RenderArgsStorage {
     uint32_t total_splats;
     uint32_t max_intersects;
     float    background[4];
+    // Phase 6.4f.4.b — runtime LOD: min projected pixel extent for
+    // a splat to participate in the visible list. 0 = disabled.
+    float    lod_extent_min;
+    float    _lod_pad[3];  // align to vec4 for WGSL uniform layout
 };
-static_assert(sizeof(RenderArgsStorage) == 144, "matches WGSL RenderUniforms");
+static_assert(sizeof(RenderArgsStorage) == 160, "matches WGSL RenderUniforms");
 
 // Initial RenderUniforms shape with no splats loaded. Phase 6.4f's
 // load_ply / load_spz path overwrites this with the loaded scene's
@@ -1100,6 +1104,11 @@ struct AetherSceneRenderer {
     // Mirrors splat_scene.has_value() for fast per-frame branching. Kept
     // separate so the per-frame hot path doesn't pay the optional check.
     bool has_splats{false};
+
+    // Phase 6.4f.4.b — runtime LOD: minimum projected pixel extent
+    // for a splat to enter the visible list. Default 0 disables the
+    // cull (legacy behavior). Set via aether_scene_renderer_set_lod_extent_min.
+    float lod_extent_min{0.0f};
 
     // Mesh path (filled by load_glb)
     bool has_mesh{false};
@@ -2498,11 +2507,11 @@ inline std::vector<std::uint32_t> octree_subsample_indices(
     for (auto& n : queue) leaves.push_back(std::move(n));
 
     // Pick one representative splat per leaf, weighted by visual
-    // importance. This single-rep-per-leaf is the "tiny-lod" tier in
-    // Spark's terminology — for higher quality we'd emit a *merged*
-    // splat (Bhattacharyya-fit gaussian over the leaf members). That's
-    // 6.4f.4 territory; the single-rep approximation is what
-    // PlayCanvas's build-lod ships by default.
+    // importance ("tiny-lod" tier — Spark's lightest LOD method).
+    // For multi-member leaves the higher-fidelity replacement is the
+    // Bhattacharyya merge done by `octree_subsample_merged` below;
+    // this function still ships single-rep for callers that want a
+    // raw index list (e.g. when sh_rest layout doesn't permit merge).
     std::vector<std::uint32_t> selected;
     selected.reserve(leaves.size());
     for (auto& leaf : leaves) {
@@ -2515,6 +2524,230 @@ inline std::vector<std::uint32_t> octree_subsample_indices(
         selected.push_back(best);
     }
     return selected;
+}
+
+// ─── Phase 6.4f.4.c — Bhattacharyya-style leaf merge ────────────────────
+//
+// For each octree leaf containing multiple gaussians, fit ONE merged
+// gaussian using importance-weighted moment matching:
+//
+//   weight_i  = opacity_i × |scale_x · scale_y · scale_z|
+//   W         = Σ weight_i
+//   μ         = Σ w_i · pos_i              / W       (1st moment)
+//   σ²(axis)  = Σ w_i · (pos_i.axis - μ.axis)²  / W   (spatial spread)
+//   scale*    = mean(scale_i) + sqrt(σ²)             (intrinsic + spread)
+//   color*    = Σ w_i · color_i             / W
+//   opacity*  = Σ w_i · opacity_i           / W
+//   rotation* = identity quaternion                  (rotation discarded)
+//   sh_rest*  = Σ w_i · sh_rest_i           / W       (per-coefficient)
+//
+// This is the simplified Bhattacharyya — true Bhattacharyya needs a
+// full 3×3 eigendecomposition of the summed covariance matrix to
+// recover an oriented ellipsoid. For LOD use, the isotropic-axis
+// approximation captures spatial extent well enough that thumbnails
+// retain silhouette and color, which is what users see at feed scale.
+// The full oriented merge is tracked as a follow-up if visual quality
+// at mid-distance LOD turns out to need it.
+//
+// The weighted-sum SH merge is exactly correct (SH is linear); only
+// the position/scale/rotation collapse is the approximation.
+//
+// Reference: Spark's `bhatt-lod` Rust tool ships a similar
+// importance-weighted moment match. PlayCanvas SOGS uses k-means
+// clustering with an analogous representative reconstruction.
+
+struct OctreeMergedResult {
+    std::vector<::aether::splat::GaussianParams> gaussians;
+    std::vector<float> sh_rest;  // PLY-native channel-major basis-major
+};
+
+inline OctreeMergedResult octree_subsample_merged(
+    const std::vector<::aether::splat::GaussianParams>& src,
+    const std::vector<float>& src_sh_rest,
+    std::uint32_t target_count,
+    std::uint32_t sh_degree,
+    std::uint32_t max_depth = 7u,
+    std::uint32_t leaf_max = 4u)
+{
+    OctreeMergedResult out;
+    const std::size_t N = src.size();
+    if (N == 0u || target_count == 0u || target_count >= N) {
+        out.gaussians = src;
+        out.sh_rest = src_sh_rest;
+        return out;
+    }
+
+    // Build the same octree leaves the index-only subsample produces,
+    // by re-running its core walker. Inline the BFS subdivide here
+    // (DRY-violating but keeps both paths self-contained).
+    OctNode root;
+    root.aabb_min[0] = root.aabb_min[1] = root.aabb_min[2] = 1e30f;
+    root.aabb_max[0] = root.aabb_max[1] = root.aabb_max[2] = -1e30f;
+    root.splat_indices.resize(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        root.splat_indices[i] = static_cast<std::uint32_t>(i);
+        for (int c = 0; c < 3; ++c) {
+            root.aabb_min[c] = std::min(root.aabb_min[c], src[i].position[c]);
+            root.aabb_max[c] = std::max(root.aabb_max[c], src[i].position[c]);
+        }
+    }
+
+    auto split = [&](OctNode& n) -> std::vector<OctNode> {
+        const float cx = (n.aabb_min[0] + n.aabb_max[0]) * 0.5f;
+        const float cy = (n.aabb_min[1] + n.aabb_max[1]) * 0.5f;
+        const float cz = (n.aabb_min[2] + n.aabb_max[2]) * 0.5f;
+        std::vector<OctNode> children(8);
+        for (int o = 0; o < 8; ++o) {
+            children[o].aabb_min[0] = (o & 1) ? cx : n.aabb_min[0];
+            children[o].aabb_max[0] = (o & 1) ? n.aabb_max[0] : cx;
+            children[o].aabb_min[1] = (o & 2) ? cy : n.aabb_min[1];
+            children[o].aabb_max[1] = (o & 2) ? n.aabb_max[1] : cy;
+            children[o].aabb_min[2] = (o & 4) ? cz : n.aabb_min[2];
+            children[o].aabb_max[2] = (o & 4) ? n.aabb_max[2] : cz;
+        }
+        for (auto idx : n.splat_indices) {
+            const auto& g = src[idx];
+            int o = 0;
+            if (g.position[0] >= cx) o |= 1;
+            if (g.position[1] >= cy) o |= 2;
+            if (g.position[2] >= cz) o |= 4;
+            children[o].splat_indices.push_back(idx);
+        }
+        std::vector<OctNode> kept;
+        kept.reserve(8);
+        for (auto& c : children) {
+            if (!c.splat_indices.empty()) kept.push_back(std::move(c));
+        }
+        return kept;
+    };
+
+    std::vector<OctNode> queue;
+    queue.push_back(std::move(root));
+    std::vector<OctNode> leaves;
+    leaves.reserve(target_count);
+
+    for (std::uint32_t depth = 0;
+         depth < max_depth && !queue.empty() &&
+             (leaves.size() + queue.size()) < target_count;
+         ++depth) {
+        std::vector<OctNode> next;
+        next.reserve(queue.size() * 4);
+        for (auto& n : queue) {
+            if (n.splat_indices.size() <= leaf_max ||
+                (leaves.size() + next.size() + queue.size()) >= target_count) {
+                leaves.push_back(std::move(n));
+                continue;
+            }
+            auto children = split(n);
+            if (children.size() <= 1u) {
+                leaves.push_back(std::move(n));
+                continue;
+            }
+            for (auto& c : children) next.push_back(std::move(c));
+        }
+        queue = std::move(next);
+    }
+    for (auto& n : queue) leaves.push_back(std::move(n));
+
+    // Merge each leaf into a single Bhattacharyya-fit gaussian.
+    const std::uint32_t non_dc_basis = (sh_degree == 0u) ? 0u
+                                       : (sh_degree == 1u) ? 3u
+                                       : (sh_degree == 2u) ? 8u
+                                       : 15u;
+    out.gaussians.reserve(leaves.size());
+    if (non_dc_basis > 0u && !src_sh_rest.empty()) {
+        out.sh_rest.reserve(static_cast<std::size_t>(leaves.size()) * 3u * non_dc_basis);
+    }
+
+    for (auto& leaf : leaves) {
+        const auto& idx_set = leaf.splat_indices;
+        if (idx_set.size() == 1u) {
+            // Singleton leaf — copy through unchanged.
+            const std::uint32_t i = idx_set[0];
+            out.gaussians.push_back(src[i]);
+            if (non_dc_basis > 0u && !src_sh_rest.empty()) {
+                const std::size_t src_off =
+                    static_cast<std::size_t>(i) * 3u * non_dc_basis;
+                out.sh_rest.insert(out.sh_rest.end(),
+                                   src_sh_rest.begin() + src_off,
+                                   src_sh_rest.begin() + src_off + 3u * non_dc_basis);
+            }
+            continue;
+        }
+
+        // Compute total weight; fall back to equal weights if importance
+        // sums to ~0 (all-degenerate scales / opacities).
+        double total_w = 0.0;
+        for (auto i : idx_set) total_w += visual_importance(src[i]);
+        const bool degenerate = !(total_w > 1e-12);
+        if (degenerate) total_w = static_cast<double>(idx_set.size());
+
+        // Weighted mean position, color, opacity, and per-coordinate
+        // intrinsic-scale average + spatial spread.
+        double mean_pos[3] = {0.0, 0.0, 0.0};
+        double mean_col[3] = {0.0, 0.0, 0.0};
+        double mean_op    = 0.0;
+        double mean_scale[3] = {0.0, 0.0, 0.0};
+        for (auto i : idx_set) {
+            const double w = degenerate ? 1.0 : visual_importance(src[i]);
+            const double wn = w / total_w;
+            for (int c = 0; c < 3; ++c) {
+                mean_pos[c]   += wn * src[i].position[c];
+                mean_col[c]   += wn * src[i].color[c];
+                mean_scale[c] += wn * src[i].scale[c];
+            }
+            mean_op += wn * src[i].opacity;
+        }
+
+        double var_pos[3] = {0.0, 0.0, 0.0};
+        for (auto i : idx_set) {
+            const double w = degenerate ? 1.0 : visual_importance(src[i]);
+            const double wn = w / total_w;
+            for (int c = 0; c < 3; ++c) {
+                const double dp = src[i].position[c] - mean_pos[c];
+                var_pos[c] += wn * dp * dp;
+            }
+        }
+
+        ::aether::splat::GaussianParams merged{};
+        for (int c = 0; c < 3; ++c) {
+            merged.position[c] = static_cast<float>(mean_pos[c]);
+            merged.color[c]    = static_cast<float>(mean_col[c]);
+            // intrinsic scale + sqrt(spatial variance) — captures both
+            // each splat's own footprint and the cluster's spread.
+            merged.scale[c]    = static_cast<float>(mean_scale[c] +
+                                                     std::sqrt(var_pos[c]));
+        }
+        merged.opacity = static_cast<float>(mean_op);
+        // Rotation discarded by the isotropic-axis approximation — the
+        // proper oriented merge requires eigendecomposition of the
+        // summed 3×3 covariance, deferred follow-up.
+        merged.rotation[0] = 1.0f;
+        merged.rotation[1] = 0.0f;
+        merged.rotation[2] = 0.0f;
+        merged.rotation[3] = 0.0f;
+        out.gaussians.push_back(merged);
+
+        if (non_dc_basis > 0u && !src_sh_rest.empty()) {
+            // Per-coefficient weighted average — SH is linear, so this
+            // is the *exact* fit for the merged gaussian's directional
+            // emission profile.
+            std::vector<double> sh_acc(static_cast<std::size_t>(3u * non_dc_basis), 0.0);
+            for (auto i : idx_set) {
+                const double w = degenerate ? 1.0 : visual_importance(src[i]);
+                const double wn = w / total_w;
+                const std::size_t src_off =
+                    static_cast<std::size_t>(i) * 3u * non_dc_basis;
+                for (std::size_t k = 0; k < 3u * non_dc_basis; ++k) {
+                    sh_acc[k] += wn * src_sh_rest[src_off + k];
+                }
+            }
+            for (auto v : sh_acc) {
+                out.sh_rest.push_back(static_cast<float>(v));
+            }
+        }
+    }
+    return out;
 }
 
 }  // namespace
@@ -2581,30 +2814,19 @@ static void apply_load_caps(
         sh_degree = static_cast<std::uint32_t>(max_sh_degree);
     }
 
-    // ── (2) Octree-based importance-weighted subsample (Phase 6.4f.3.d)
+    // ── (2) Octree subsample with Bhattacharyya leaf-merge ────────────
+    //
+    // Phase 6.4f.3.d shipped the index-only subsample (one
+    // representative splat per leaf, picked by visual importance).
+    // 6.4f.4.c upgrades this to a moment-matched merge of every
+    // leaf's members, which preserves color + spatial extent of dense
+    // clusters far better — visible improvement on crinkled surfaces
+    // (the lizard's scaled belly, dense vegetation).
     if (max_splats > 0u && gaussians.size() > max_splats) {
-        const std::vector<std::uint32_t> indices =
-            octree_subsample_indices(gaussians, max_splats);
-        std::vector<::aether::splat::GaussianParams> kept;
-        kept.reserve(indices.size());
-        const std::uint32_t basis = coeffs_per_basis(sh_degree);
-        std::vector<float> sh_kept;
-        if (basis > 0u && !sh_rest.empty()) {
-            sh_kept.reserve(indices.size() * 3u * basis);
-        }
-        for (auto i : indices) {
-            kept.push_back(gaussians[i]);
-            if (basis > 0u && !sh_rest.empty()) {
-                const std::size_t src = static_cast<std::size_t>(i) * 3u * basis;
-                for (std::uint32_t c = 0; c < 3u; ++c) {
-                    for (std::uint32_t b = 0; b < basis; ++b) {
-                        sh_kept.push_back(sh_rest[src + c * basis + b]);
-                    }
-                }
-            }
-        }
-        gaussians = std::move(kept);
-        sh_rest = std::move(sh_kept);
+        auto merged = octree_subsample_merged(gaussians, sh_rest,
+                                               max_splats, sh_degree);
+        gaussians = std::move(merged.gaussians);
+        sh_rest   = std::move(merged.sh_rest);
     }
 }
 
@@ -2690,22 +2912,26 @@ static bool load_spz_into_renderer(
         scene_log("load_spz: no gaussians in '%s'", spz_path);
         return false;
     }
-    // SPZ decoder doesn't unpack higher-order SH today (only DC). Force
-    // sh_degree=0 so project_visible doesn't read from a missing buffer.
-    // The cap helper still runs for stride-subsample side-effect.
-    std::uint32_t sh_degree = 0u;
-    std::vector<float> empty_sh;
-    apply_load_caps(spz_result.gaussians, empty_sh, sh_degree,
-                    max_splats, /*max_sh_degree=*/0u);
+    // Phase 6.4f.4.a — SPZ now decodes higher-order SH coefficients into
+    // sh_rest (PLY-native channel-major basis-major layout). Run the
+    // shared cap path on (gaussians, sh_rest, sh_degree) just like PLY.
+    std::uint32_t sh_degree = static_cast<std::uint32_t>(spz_result.sh_degree);
+    apply_load_caps(spz_result.gaussians, spz_result.sh_rest, sh_degree,
+                    max_splats, max_sh_degree);
+    const float* sh_rest = spz_result.sh_rest.empty()
+        ? nullptr : spz_result.sh_rest.data();
     const std::string key = make_cache_key("spz", spz_path,
                                             max_splats, max_sh_degree);
     if (!build_splat_scene_from_gaussians(r, spz_result.gaussians,
-                                           /*sh_degree=*/0u, /*sh_rest=*/nullptr,
-                                           key)) {
+                                           sh_degree, sh_rest, key)) {
         scene_log("load_spz: build_splat_scene failed for '%s'", spz_path);
         return false;
     }
-    (void)max_sh_degree;  // SPZ SH unpack is a follow-up — see PHASE_BACKLOG.
+    scene_log("load_spz: '%s' kept=%zu sh_degree=%u (file_deg=%u, cap max_splats=%u max_sh=%u)",
+              spz_path, spz_result.gaussians.size(),
+              static_cast<unsigned>(sh_degree),
+              static_cast<unsigned>(spz_result.sh_degree),
+              max_splats, static_cast<unsigned>(max_sh_degree));
     return true;
 }
 
@@ -2737,6 +2963,20 @@ extern "C" bool aether_scene_renderer_load_spz_capped(
     uint8_t max_sh_degree)
 {
     return load_spz_into_renderer(r, spz_path, max_splats, max_sh_degree);
+}
+
+extern "C" void aether_scene_renderer_set_lod_extent_min(
+    AetherSceneRenderer* r,
+    float pixel_extent_min)
+{
+    if (!r) return;
+    // Clamp to reasonable range. Negative would invert the cull (skip
+    // all splats) — clamp to 0; > 256 px is "kill the entire scene"
+    // territory, clamp at the smaller-than-thumbnail boundary so a UI
+    // glitch can't disappear someone's content.
+    if (pixel_extent_min < 0.0f) pixel_extent_min = 0.0f;
+    if (pixel_extent_min > 256.0f) pixel_extent_min = 256.0f;
+    r->lod_extent_min = pixel_extent_min;
 }
 
 extern "C" bool aether_scene_renderer_get_bounds(AetherSceneRenderer* r,
@@ -2860,6 +3100,9 @@ extern "C" void aether_scene_renderer_render_full(
         splat_u.camera_position[1] = cam_y;
         splat_u.camera_position[2] = cam_z;
         splat_u.camera_position[3] = 1.0f;
+        // Phase 6.4f.4.b — propagate the configured LOD threshold each
+        // frame. Cheap (write-coalesced into the same uniform write).
+        splat_u.lod_extent_min = r->lod_extent_min;
         r->device->update_buffer(r->splat_uniforms_buf, &splat_u, 0, sizeof(splat_u));
     }
 
