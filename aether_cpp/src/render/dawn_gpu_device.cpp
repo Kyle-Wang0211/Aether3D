@@ -2222,6 +2222,8 @@ void register_baked_wgsl_into_device(GPUDevice& device) noexcept {
                          sort_scan_add_wgsl, "main");
     register_wgsl_source(device, "sort_scatter",
                          sort_scatter_wgsl, "main");
+    register_wgsl_source(device, "sort_prep_depth",
+                         sort_prep_depth_wgsl, "main");
     register_wgsl_source(device, "prefix_sum_scan",
                          prefix_sum_scan_wgsl, "main");
     register_wgsl_source(device, "prefix_sum_scan_sums",

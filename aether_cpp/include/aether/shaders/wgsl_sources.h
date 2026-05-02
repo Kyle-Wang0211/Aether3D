@@ -50,6 +50,7 @@ extern const char sort_reduce_wgsl[];
 extern const char sort_scan_wgsl[];
 extern const char sort_scan_add_wgsl[];
 extern const char sort_scatter_wgsl[];
+extern const char sort_prep_depth_wgsl[];
 extern const char prefix_sum_scan_wgsl[];
 extern const char prefix_sum_scan_sums_wgsl[];
 extern const char prefix_sum_add_scanned_sums_wgsl[];

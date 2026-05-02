@@ -24,6 +24,11 @@
 // Inputs (must match aether_cpp/tools/aether_dawn_splat_test_data.h):
 //   @group(0) @binding(0) RenderUniforms — img_size used for NDC mapping
 //   @group(0) @binding(1) array<ProjectedSplat> — output of project_visible
+//   @group(0) @binding(2) array<u32>          — back-to-front sort permutation
+//                                                produced by the 5-kernel
+//                                                radix sort (Phase 6.4f.2).
+//                                                splats[order[ii]] is the
+//                                                instance to render at slot ii.
 //
 // Output: single color attachment, RGBA8Unorm, premultiplied alpha
 //         (blend One / OneMinusSrcAlpha; harness sets this).
@@ -54,6 +59,7 @@ struct ProjectedSplat {
 
 @group(0) @binding(0) var<storage, read> uniforms: RenderUniforms;
 @group(0) @binding(1) var<storage, read> splats: array<ProjectedSplat>;
+@group(0) @binding(2) var<storage, read> order: array<u32>;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4f,
@@ -65,9 +71,33 @@ struct VsOut {
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32,
            @builtin(instance_index) ii: u32) -> VsOut {
-    let s = splats[ii];
+    // Phase 6.4f.2: back-to-front depth sort. order[ii] is the
+    // ProjectedSplat slot to render at instance ii. For ii < num_visible
+    // this gives farthest-to-nearest; for ii in [num_visible, total) the
+    // sort_prep_depth.wgsl sentinel (key = 0xFFFFFFFF, value = ii) leaves
+    // values[ii] = ii, and splats[ii] for those ii has alpha = 0 from the
+    // frame-start clearBuffer — the early-out below catches them.
+    let order_idx = order[ii];
+    let s = splats[order_idx];
     let conic = vec3f(s.conic_x, s.conic_y, s.conic_z);
     let center = vec2f(s.xy_x, s.xy_y);
+
+    // Phase 6.4f: invalid / unwritten projected splat (e.g. project_visible
+    // never wrote to this slot because the index ≥ num_visible — see
+    // scene_iosurface_renderer's per-frame clearBuffer of the projected
+    // buffer). Without this early-out, conic.x = 0 → inverseSqrt(1e-6) ≈
+    // 1000 → r = 3000 pixels; every invalid instance would rasterize a
+    // viewport-covering quad. Emit a clip-culled degenerate point so all
+    // 6 vertices collapse to the same outside-clip-space position and
+    // generate zero fragments.
+    if (s.color_a <= 0.0 || (conic.x <= 0.0 && conic.z <= 0.0)) {
+        var o_skip: VsOut;
+        o_skip.clip_pos = vec4f(2.0, 2.0, 2.0, 1.0);  // NDC z = 2 → far-clip
+        o_skip.delta = vec2f(0.0);
+        o_skip.conic = vec3f(0.0);
+        o_skip.color = vec4f(0.0);
+        return o_skip;
+    }
 
     // 3-sigma radius from conic eigenvalues. For diagonal-dominant conic
     // (most splats post-EVD), 1/sqrt(conic_x) ≈ X-stddev; bound the quad
