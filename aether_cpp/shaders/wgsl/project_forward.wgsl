@@ -39,6 +39,15 @@ struct RenderUniforms {
     total_splats: u32,
     max_intersects: u32,
     background: vec4<f32>,
+    // Phase 6.4f.4.b — runtime LOD cull threshold. Splats whose
+    // post-projection 2D bounding-box extent is below this value (in
+    // pixels) are dropped early in this kernel without ever entering
+    // the visible list. 0.0 disables the cull (legacy behavior).
+    // WGSL's host-shareable struct layout pads the struct end to the
+    // largest member alignment (16 B from the vec4 background) — so
+    // a single trailing f32 here implicitly pads to a 16-B-aligned
+    // 160-B struct, matching RenderArgsStorage on the C++ side.
+    lod_extent_min: f32,
 }
 
 const COV_BLUR: f32 = 0.3f;
@@ -234,6 +243,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let _e89 = compute_bbox_extent(_e62, log((255f * _e83)));
     if ((_e89.x < 0f) || (_e89.y < 0f)) {
+        return;
+    }
+    // Phase 6.4f.4.b — runtime LOD cull on projected extent.
+    let lod_min = uniforms.lod_extent_min;
+    if ((lod_min > 0f) && (max(_e89.x, _e89.y) < lod_min)) {
         return;
     }
     let _e108 = uniforms.img_size.x;

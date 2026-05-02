@@ -112,6 +112,27 @@ bool aether_scene_renderer_load_spz_capped(
     uint32_t max_splats,
     uint8_t max_sh_degree);
 
+/// Phase 6.4f.4.b — runtime per-splat LOD cull.
+///
+/// Set the minimum projected 2D bounding-box extent (in pixels) below
+/// which a splat is dropped before the visible list is built. 0 (the
+/// default) disables the cull and matches pre-6.4f.4 behaviour.
+///
+/// Combined with the load-time octree subsample (Phase 6.4f.3.d /
+/// 6.4f.4.c), this gives a coarse two-level LOD: dense near-camera
+/// regions render at full splat density; far-away regions get culled
+/// per-splat once their projection drops below the configured pixel
+/// threshold. A typical feed-thumbnail value is 0.5–1.0; detail pages
+/// should leave this at 0.
+///
+/// This is *not* the full Octree-GS GPU per-node selection — that
+/// would need a select_lod kernel + active_indices binding feeding
+/// project_forward. This is the lightweight subset that fits inside
+/// project_forward's existing early-exit path.
+void aether_scene_renderer_set_lod_extent_min(
+    AetherSceneRenderer* r,
+    float pixel_extent_min);
+
 /// Per-frame render. View and model matrices are 16-float column-major
 /// arrays. The mesh applies BOTH matrices through its full PBR shader;
 /// the splat overlay currently ignores them visually (Phase 6.4f).
