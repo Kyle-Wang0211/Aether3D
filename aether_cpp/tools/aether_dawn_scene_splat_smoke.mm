@@ -23,8 +23,18 @@
 //
 // What this does NOT verify:
 //   - Per-pixel correctness vs reference (gsplat / Brush / MetalSplatter).
-//   - Higher-order SH lighting (we use sh_degree=0).
-//   - Depth-correct alpha compositing (no sort yet — Phase 6.4f.2).
+//
+// Phase 6.4f.2 added two extra coverage modes:
+//   • `--mode=sort` (default) — same Fibonacci-sphere fixture as before,
+//     but the renderer now runs the 5-kernel radix sort + back-to-front
+//     instance order. Smoke is identical to the original (alpha cutoff,
+//     non-empty render).
+//   • `--mode=sh1` — synthesizes a sphere with deg-1 SH coefficients
+//     designed so the +x hemisphere is RED, +y is GREEN, +z is BLUE.
+//     Camera looks along +z; we expect the rendered output to be
+//     dominated by blue (the SH evaluator should pull the +z basis when
+//     viewdir = -z). This catches the common "SH evaluated with wrong
+//     view-direction sign" bug.
 
 #if defined(__APPLE__)
 
@@ -73,16 +83,48 @@ IOSurfaceRef create_bgra8_iosurface(std::uint32_t w, std::uint32_t h) {
     return surface;
 }
 
+// Phase 6.4f.2.b/c — write a SH-degree-1 synthetic PLY where each splat's
+// degree-1 coefficients are tuned so that:
+//   - viewdir along +x → R channel boosted (red dominant)
+//   - viewdir along +y → G channel boosted
+//   - viewdir along +z → B channel boosted
+//
+// Standard SH formula (see project_visible.wgsl sh_coeffs_to_color):
+//   color = SH_C0 * b0 + 0.4886 * (-y * b1c0 + z * b1c1 - x * b1c2) + …
+// Where b1c0/b1c1/b1c2 are the (R,G,B) vectors for the Y_1^{-1}, Y_1^{0},
+// Y_1^{+1} basis functions. To make:
+//   - viewdir.x > 0 → R↑: set b1c2 = (-K, 0, 0) (the -x*b1c2 term contributes)
+//   - viewdir.y > 0 → G↑: set b1c0 = (0, -K, 0) (the -y*b1c0 term)
+//   - viewdir.z > 0 → B↑: set b1c1 = (0, 0,  K) (the +z*b1c1 term)
+// The DC term is gray (0.5,0.5,0.5) so the deg-1 contribution is the
+// dominant color-direction signal. K = 1.0 / 0.4886 ≈ 2.047 makes the
+// peak band-1 contribution = ±1 (full saturation).
+constexpr float kBand1K = 1.0f / 0.4886025119029199f;
+// PLY's f_rest_* layout per channel: f_rest_0..2 = R for basis 0..2,
+//                                    f_rest_3..5 = G,
+//                                    f_rest_6..8 = B
+inline void fill_sh1_directional(float sh1[9]) {
+    // R channel: only b1c2 = -K (so viewdir.x positive → +R)
+    sh1[0] = 0.0f; sh1[1] = 0.0f; sh1[2] = -kBand1K;
+    // G channel: only b1c0 = -K (so viewdir.y positive → +G)
+    sh1[3] = -kBand1K; sh1[4] = 0.0f; sh1[5] = 0.0f;
+    // B channel: only b1c1 = +K (so viewdir.z positive → +B)
+    sh1[6] = 0.0f; sh1[7] = kBand1K; sh1[8] = 0.0f;
+}
+
 // Write a tiny binary 3DGS PLY at `path`. Layout matches Phase 6.4f's
 // expected INRIA convention (x, y, z, f_dc_*, opacity, scale_*, rot_*).
 // Splats are arranged on a sphere of radius `r`, all the same colour,
-// scale, and opacity.
+// scale, and opacity. When `with_sh1` is true, also emits f_rest_0..8
+// (degree-1 SH) — same coefficients on every splat per
+// fill_sh1_directional.
 bool write_synth_ply(const std::string& path,
                      std::uint32_t count,
                      float radius,
                      float color_r, float color_g, float color_b,
                      float scale_linear,
-                     float opacity_linear) {
+                     float opacity_linear,
+                     bool with_sh1 = false) {
     std::ofstream f(path, std::ios::binary);
     if (!f) return false;
 
@@ -103,8 +145,13 @@ bool write_synth_ply(const std::string& path,
       << "property float rot_0\n"
       << "property float rot_1\n"
       << "property float rot_2\n"
-      << "property float rot_3\n"
-      << "end_header\n";
+      << "property float rot_3\n";
+    if (with_sh1) {
+        for (int i = 0; i < 9; ++i) {
+            f << "property float f_rest_" << i << "\n";
+        }
+    }
+    f << "end_header\n";
 
     constexpr float kSH_C0 = 0.28209479177387814f;
     const float dc_r = (color_r - 0.5f) / kSH_C0;
@@ -120,6 +167,8 @@ bool write_synth_ply(const std::string& path,
 
     // Distribute splats on a Fibonacci sphere of radius r.
     const float golden = static_cast<float>((1.0 + std::sqrt(5.0)) / 2.0);
+    float sh1[9];
+    if (with_sh1) fill_sh1_directional(sh1);
     for (std::uint32_t i = 0; i < count; ++i) {
         const float t = static_cast<float>(i) + 0.5f;
         const float phi = std::acos(1.0f - 2.0f * t / static_cast<float>(count));
@@ -137,6 +186,9 @@ bool write_synth_ply(const std::string& path,
             1.0f, 0.0f, 0.0f, 0.0f,
         };
         f.write(reinterpret_cast<const char*>(row), sizeof(row));
+        if (with_sh1) {
+            f.write(reinterpret_cast<const char*>(sh1), sizeof(sh1));
+        }
     }
     return f.good();
 }
@@ -160,28 +212,50 @@ std::vector<std::uint8_t> read_iosurface_pixels(IOSurfaceRef surface,
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    // Allow caller to point at a real PLY file. Default: synth test.
+    // Modes:
+    //   (no args)               → synthetic Fibonacci sphere, sort path.
+    //   <ply_path>              → caller-supplied PLY.
+    //   --mode=sort | --mode=sh1 → built-in synth variants.
+    //   --mode=sh1 [<out_path>] → emits a deg-1 SH ball; pass an output
+    //                             path to keep the temp PLY around.
     std::string ply_path = "/tmp/aether_scene_splat_smoke.ply";
     bool use_synth = true;
-    if (argc >= 2) {
-        ply_path = argv[1];
-        use_synth = false;
+    bool synth_with_sh1 = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--mode=sort") {
+            // default; explicit form for symmetry
+            synth_with_sh1 = false;
+        } else if (arg == "--mode=sh1") {
+            synth_with_sh1 = true;
+            ply_path = "/tmp/aether_scene_splat_smoke_sh1.ply";
+        } else if (!arg.empty() && arg[0] != '-') {
+            ply_path = arg;
+            use_synth = false;
+        }
     }
 
     if (use_synth) {
+        // SH-1 mode uses neutral DC (gray) so the deg-1 directional
+        // signal is visible. Sort mode uses an amber DC.
+        const float dc_r = synth_with_sh1 ? 0.50f : 0.85f;
+        const float dc_g = synth_with_sh1 ? 0.50f : 0.55f;
+        const float dc_b = synth_with_sh1 ? 0.50f : 0.20f;
         if (!write_synth_ply(ply_path,
                              /*count=*/1024,
                              /*radius=*/1.0f,
-                             /*color=*/0.85f, 0.55f, 0.20f,  // amber
+                             /*color=*/dc_r, dc_g, dc_b,
                              /*scale=*/0.05f,
-                             /*opacity=*/0.85f)) {
+                             /*opacity=*/0.85f,
+                             /*with_sh1=*/synth_with_sh1)) {
             std::fprintf(stderr, "FAIL: write_synth_ply to %s\n", ply_path.c_str());
             return EXIT_FAILURE;
         }
     }
     std::printf("=== aether_dawn_scene_splat_smoke ===\n");
-    std::printf("PLY source: %s%s\n", ply_path.c_str(),
-                use_synth ? " (synthetic)" : " (caller-supplied)");
+    std::printf("PLY source: %s%s%s\n", ply_path.c_str(),
+                use_synth ? " (synthetic)" : " (caller-supplied)",
+                synth_with_sh1 ? " [sh1]" : "");
 
     IOSurfaceRef surface = create_bgra8_iosurface(kWidth, kHeight);
     if (!surface) {
@@ -270,7 +344,7 @@ int main(int argc, char* argv[]) {
     // visually present but we need a clear pass/fail).
     std::uint32_t opaque_count = 0;
     std::uint32_t max_alpha = 0;
-    std::uint64_t sum_rgb = 0;
+    std::uint64_t sum_b = 0, sum_g = 0, sum_r = 0;
     for (std::uint32_t y = 0; y < kHeight; ++y) {
         for (std::uint32_t x = 0; x < kWidth; ++x) {
             const std::uint8_t* p = pixels.data() + (y * kWidth + x) * 4;
@@ -280,19 +354,23 @@ int main(int argc, char* argv[]) {
             const std::uint8_t a = p[3];
             if (a >= 4) {
                 ++opaque_count;
-                sum_rgb += static_cast<std::uint64_t>(b) +
-                            static_cast<std::uint64_t>(g) +
-                            static_cast<std::uint64_t>(rr);
+                sum_b += b;
+                sum_g += g;
+                sum_r += rr;
             }
             if (a > max_alpha) max_alpha = a;
         }
     }
+    const std::uint64_t sum_rgb = sum_b + sum_g + sum_r;
     const double opaque_pct = 100.0 * static_cast<double>(opaque_count) /
                                 (static_cast<double>(kWidth) * kHeight);
-    std::printf("opaque pixels: %u / %u (%.2f%%), max alpha = %u, sum RGB = %llu\n",
-                opaque_count, kWidth * kHeight, opaque_pct,
-                max_alpha,
-                static_cast<unsigned long long>(sum_rgb));
+    std::printf("opaque pixels: %u / %u (%.2f%%), max alpha = %u\n",
+                opaque_count, kWidth * kHeight, opaque_pct, max_alpha);
+    std::printf("sum RGB = %llu (R=%llu G=%llu B=%llu)\n",
+                static_cast<unsigned long long>(sum_rgb),
+                static_cast<unsigned long long>(sum_r),
+                static_cast<unsigned long long>(sum_g),
+                static_cast<unsigned long long>(sum_b));
 
     aether_scene_renderer_destroy(r);
     CFRelease(surface);
@@ -311,6 +389,30 @@ int main(int argc, char* argv[]) {
     if (sum_rgb == 0) {
         std::fprintf(stderr, "FAIL: zero RGB output across the image\n");
         return EXIT_FAILURE;
+    }
+
+    // SH-1 dominance check: camera is at world (0, 0, -distance) looking
+    // along +z. project_visible computes viewdir = normalize(mean -
+    // camera_position). The visible side of the sphere has mean.z < 0
+    // (closer to camera) so mean - camera ≈ (0,0, mean.z + distance). For
+    // points near the +z hemisphere of the sphere, viewdir.z is positive
+    // → b1c1 (blue) basis dominates. For points on the front hemisphere
+    // facing the camera (−z side of sphere), viewdir is closer to (0,0,
+    // distance), making viewdir.z LARGER positive → BLUE strongest. So
+    // the rendered image should have B as the dominant channel.
+    if (use_synth && synth_with_sh1) {
+        if (sum_b <= sum_r || sum_b <= sum_g) {
+            std::fprintf(stderr,
+                "FAIL: SH-1 expected blue-dominant (R=%llu G=%llu B=%llu)\n",
+                static_cast<unsigned long long>(sum_r),
+                static_cast<unsigned long long>(sum_g),
+                static_cast<unsigned long long>(sum_b));
+            return EXIT_FAILURE;
+        }
+        std::printf("SH-1 dominance check OK: B=%llu > R=%llu, G=%llu\n",
+                    static_cast<unsigned long long>(sum_b),
+                    static_cast<unsigned long long>(sum_r),
+                    static_cast<unsigned long long>(sum_g));
     }
 
     std::printf("PASS\n");

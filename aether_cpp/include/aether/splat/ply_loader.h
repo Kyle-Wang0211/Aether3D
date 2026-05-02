@@ -37,6 +37,28 @@ namespace splat {
 struct PlyLoadResult {
     std::vector<GaussianParams> gaussians;
     std::size_t vertex_count{0};
+
+    // ─── Phase 6.4f.2.b/c — higher-order SH (deg 1, 2, 3) ──────────────
+    //
+    // Auto-detected from the f_rest_* property count in the PLY header:
+    //   degree 0 (no f_rest_*)           → DC only, sh_rest is empty
+    //   degree 1 (f_rest_0..8, 9 floats)  → 3 basis × 3 channels
+    //   degree 2 (f_rest_0..23, 24 floats) → 8 basis × 3 channels
+    //   degree 3 (f_rest_0..44, 45 floats) → 15 basis × 3 channels
+    //
+    // sh_rest layout (when sh_degree >= 1) is FLAT, per-vertex
+    // contiguous, in **PLY-native channel-major basis-major** order —
+    // i.e. for each vertex v ∈ [0, N) the sh_rest sub-range is
+    // [R_basis_0..R_basis_(M-1), G_basis_0..G_basis_(M-1),
+    //  B_basis_0..B_basis_(M-1)] where M = num_basis_non_dc =
+    //  (sh_degree+1)^2 - 1. Total size = N * 3 * M.
+    //
+    // The renderer is responsible for repacking this into Brush's
+    // basis-major-vec3 GPU layout (project_visible.wgsl reads
+    // `coeffs[base + 0]` = b0_c0_, `[base + 1]` = b1_c0_, etc.). See
+    // build_splat_scene_from_gaussians in scene_iosurface_renderer.cpp.
+    std::uint32_t sh_degree{0};
+    std::vector<float> sh_rest;  // empty if sh_degree == 0
 };
 
 /// PLY file format type.
@@ -84,6 +106,8 @@ struct PlyProperty {
 inline core::Status load_ply(const char* path, PlyLoadResult& result) noexcept {
     result.gaussians.clear();
     result.vertex_count = 0;
+    result.sh_degree = 0;
+    result.sh_rest.clear();
 
     std::FILE* file = std::fopen(path, "rb");
     if (!file) return core::Status::kInvalidArgument;
@@ -213,6 +237,44 @@ inline core::Status load_ply(const char* path, PlyLoadResult& result) noexcept {
         std::snprintf(sh_name, sizeof(sh_name), "f_rest_%d", i);
         idx_sh1[i] = find_prop(sh_name);
         if (idx_sh1[i] < 0) has_sh1 = false;
+    }
+
+    // ─── Phase 6.4f.2.b/c — higher-order SH (deg 1, 2, 3) ──────────────
+    // Walk f_rest_0..f_rest_44 contiguously; the last present index
+    // tells us the degree. Stop on the first gap so we don't pick up
+    // unrelated trailing properties. INRIA / 3DGS standard guarantees
+    // the f_rest_* indices are contiguous from 0.
+    constexpr int kMaxRestCoeffs = 45;  // 3 channels × 15 basis (deg 3)
+    int idx_rest[kMaxRestCoeffs];
+    int num_rest = 0;
+    for (int i = 0; i < kMaxRestCoeffs; ++i) {
+        char sh_name[16];
+        std::snprintf(sh_name, sizeof(sh_name), "f_rest_%d", i);
+        idx_rest[i] = find_prop(sh_name);
+        if (idx_rest[i] < 0) break;  // gap → end of run
+        num_rest = i + 1;
+    }
+    // Map count → degree. 9 → 1 (3 basis), 24 → 2 (8 basis),
+    // 45 → 3 (15 basis). Anything else falls back to the highest
+    // exact match (e.g. 18 floats from a partial deg-2 export →
+    // treat as deg 1, ignore the trailing 9 floats).
+    std::uint32_t detected_degree = 0;
+    int rest_used = 0;  // number of f_rest_* floats we actually load
+    if (num_rest >= 45) {
+        detected_degree = 3;
+        rest_used = 45;
+    } else if (num_rest >= 24) {
+        detected_degree = 2;
+        rest_used = 24;
+    } else if (num_rest >= 9) {
+        detected_degree = 1;
+        rest_used = 9;
+    }
+    result.sh_degree = detected_degree;
+    if (detected_degree > 0) {
+        result.sh_rest.assign(static_cast<std::size_t>(vertex_count) *
+                              static_cast<std::size_t>(rest_used),
+                              0.0f);
     }
 
     // Determine color source: SH DC coefficients or direct RGB
@@ -362,6 +424,19 @@ inline core::Status load_ply(const char* path, PlyLoadResult& result) noexcept {
             } else {
                 std::memset(g.sh1, 0, sizeof(g.sh1));
             }
+
+            // Higher-order SH (deg 2 + 3): copy raw f_rest_* in PLY-native
+            // channel-major basis-major order. Renderer repacks. Loaded
+            // unconditionally if the file declared the props — empty
+            // sh_rest vector skips this branch.
+            if (rest_used > 0) {
+                float* dst = result.sh_rest.data() +
+                             static_cast<std::size_t>(v) * rest_used;
+                for (int i = 0; i < rest_used; ++i) {
+                    dst[i] = read_float_prop(row, offsets[idx_rest[i]],
+                                              properties[idx_rest[i]].type);
+                }
+            }
         }
     } else {
         // ASCII format
@@ -453,6 +528,15 @@ inline core::Status load_ply(const char* path, PlyLoadResult& result) noexcept {
                 }
             } else {
                 std::memset(g.sh1, 0, sizeof(g.sh1));
+            }
+
+            // Higher-order SH (deg 2 + 3) — ASCII path mirror of binary.
+            if (rest_used > 0) {
+                float* dst = result.sh_rest.data() +
+                             static_cast<std::size_t>(v) * rest_used;
+                for (int i = 0; i < rest_used; ++i) {
+                    dst[i] = values[idx_rest[i]];
+                }
             }
         }
     }

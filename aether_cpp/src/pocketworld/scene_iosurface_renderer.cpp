@@ -624,13 +624,55 @@ struct SplatScene {
     // to N * sizeof(ProjectedSplat) at load time, written by
     // project_visible, read by splat_render.
 
+    // ─── Phase 6.4f.2.a — depth-sort buffers (5-kernel radix sort) ─────
+    //
+    // Per-splat back-to-front sort. After project_visible writes
+    // ProjectedSplat[N_visible], sort_prep_depth seeds:
+    //     keys[i]   = ~bitcast<u32>(depths[i])  for i < num_visible
+    //                 = 0xFFFFFFFFu              otherwise
+    //     values[i] = i (compact_gid)
+    // Then 8 passes (4 bits × 8 = 32-bit key) of
+    //     count → reduce → scan → scan_add → scatter
+    // ping-pong between (keys/values) and (keys_alt/values_alt). The
+    // last (8th) pass writes to keys/values, so the final ascending
+    // sort reads splats[values[ii]] for back-to-front order.
+    GPUBufferHandle sort_keys_buf;
+    GPUBufferHandle sort_keys_alt_buf;
+    GPUBufferHandle sort_values_buf;
+    GPUBufferHandle sort_values_alt_buf;
+    GPUBufferHandle sort_counts_buf;             // u32[16 * num_blocks]
+    GPUBufferHandle sort_reduced_buf;            // u32[16 * num_reduce_groups]
+    GPUBufferHandle sort_num_keys_arr_buf;       // u32[1] = num_visible
+    GPUBufferHandle sort_config_bufs[8];         // 8 × u32{shift = pass*4}
+
+    std::uint32_t sort_num_blocks{0};            // ceil(num_splats / 1024)
+    std::uint32_t sort_num_reduce_groups{0};     // ceil(num_blocks / 1024)
+
     // Compute pipelines (built once on first load).
     WGPUComputePipeline project_forward_pipe{nullptr};
     WGPUComputePipeline project_visible_pipe{nullptr};
+    WGPUComputePipeline sort_prep_pipe{nullptr};
+    WGPUComputePipeline sort_count_pipe{nullptr};
+    WGPUComputePipeline sort_reduce_pipe{nullptr};
+    WGPUComputePipeline sort_scan_pipe{nullptr};
+    WGPUComputePipeline sort_scan_add_pipe{nullptr};
+    WGPUComputePipeline sort_scatter_pipe{nullptr};
     WGPUBindGroupLayout project_forward_bgl{nullptr};
     WGPUBindGroupLayout project_visible_bgl{nullptr};
+    WGPUBindGroupLayout sort_prep_bgl{nullptr};
+    WGPUBindGroupLayout sort_count_bgl{nullptr};
+    WGPUBindGroupLayout sort_reduce_bgl{nullptr};
+    WGPUBindGroupLayout sort_scan_bgl{nullptr};
+    WGPUBindGroupLayout sort_scan_add_bgl{nullptr};
+    WGPUBindGroupLayout sort_scatter_bgl{nullptr};
     WGPUPipelineLayout project_forward_layout{nullptr};
     WGPUPipelineLayout project_visible_layout{nullptr};
+    WGPUPipelineLayout sort_prep_layout{nullptr};
+    WGPUPipelineLayout sort_count_layout{nullptr};
+    WGPUPipelineLayout sort_reduce_layout{nullptr};
+    WGPUPipelineLayout sort_scan_layout{nullptr};
+    WGPUPipelineLayout sort_scan_add_layout{nullptr};
+    WGPUPipelineLayout sort_scatter_layout{nullptr};
 
     // Bind groups (rebuilt at load — buffer handles are stable for the
     // lifetime of the SplatScene; the underlying contents change but
@@ -638,6 +680,12 @@ struct SplatScene {
     WGPUBindGroup project_forward_bg{nullptr};
     WGPUBindGroup project_visible_bg{nullptr};
     WGPUBindGroup splat_render_bg{nullptr};
+    WGPUBindGroup sort_prep_bg{nullptr};
+    WGPUBindGroup sort_count_bgs[8]{};       // index = pass; alternates src=keys/keys_alt
+    WGPUBindGroup sort_reduce_bg{nullptr};
+    WGPUBindGroup sort_scan_bg{nullptr};
+    WGPUBindGroup sort_scan_add_bg{nullptr};
+    WGPUBindGroup sort_scatter_bgs[8]{};     // index = pass; alternates src/out
 };
 
 // ─── BindGroupLayout builders for the 2 compute kernels ────────────────
@@ -709,8 +757,9 @@ WGPUBindGroupLayout create_project_visible_bgl(WGPUDevice wd) {
 // splat_render.wgsl bind group (vert+frag):
 //   0: storage,read RenderUniforms
 //   1: storage,read projected
+//   2: storage,read order  (Phase 6.4f.2 sort permutation)
 WGPUBindGroupLayout create_splat_render_bgl(WGPUDevice wd) {
-    WGPUBindGroupLayoutEntry entries[2] = {};
+    WGPUBindGroupLayoutEntry entries[3] = {};
     auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding) {
         e.binding = binding;
         e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
@@ -720,8 +769,161 @@ WGPUBindGroupLayout create_splat_render_bgl(WGPUDevice wd) {
     };
     fill(entries[0], 0);
     fill(entries[1], 1);
+    fill(entries[2], 2);
+    WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+    desc.entryCount = 3;
+    desc.entries = entries;
+    return wgpuDeviceCreateBindGroupLayout(wd, &desc);
+}
+
+// ─── Phase 6.4f.2.a — sort BGL builders (per-pass ping-pong) ───────────
+//
+// sort_prep_depth.wgsl:
+//   0: storage,read       uniforms
+//   1: storage,read       depths (f32[N])
+//   2: storage,read_write num_keys_arr (u32[1])
+//   3: storage,read_write keys (u32[N])
+//   4: storage,read_write values (u32[N])
+WGPUBindGroupLayout create_sort_prep_bgl(WGPUDevice wd) {
+    WGPUBindGroupLayoutEntry entries[5] = {};
+    auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
+                   WGPUBufferBindingType type) {
+        e.binding = binding;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = type;
+        e.buffer.hasDynamicOffset = WGPU_FALSE;
+        e.buffer.minBindingSize = 0;
+    };
+    fill(entries[0], 0, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[2], 2, WGPUBufferBindingType_Storage);
+    fill(entries[3], 3, WGPUBufferBindingType_Storage);
+    fill(entries[4], 4, WGPUBufferBindingType_Storage);
+    WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+    desc.entryCount = 5;
+    desc.entries = entries;
+    return wgpuDeviceCreateBindGroupLayout(wd, &desc);
+}
+
+// sort_count.wgsl:
+//   0: storage,read       config (shift)
+//   1: storage,read       num_keys_arr
+//   2: storage,read       src (keys, alternates)
+//   3: storage,read_write counts
+WGPUBindGroupLayout create_sort_count_bgl(WGPUDevice wd) {
+    WGPUBindGroupLayoutEntry entries[4] = {};
+    auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
+                   WGPUBufferBindingType type) {
+        e.binding = binding;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = type;
+        e.buffer.hasDynamicOffset = WGPU_FALSE;
+        e.buffer.minBindingSize = 0;
+    };
+    fill(entries[0], 0, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[2], 2, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[3], 3, WGPUBufferBindingType_Storage);
+    WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+    desc.entryCount = 4;
+    desc.entries = entries;
+    return wgpuDeviceCreateBindGroupLayout(wd, &desc);
+}
+
+// sort_reduce.wgsl:
+//   0: storage,read       num_keys_arr
+//   1: storage,read       counts
+//   2: storage,read_write reduced
+WGPUBindGroupLayout create_sort_reduce_bgl(WGPUDevice wd) {
+    WGPUBindGroupLayoutEntry entries[3] = {};
+    auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
+                   WGPUBufferBindingType type) {
+        e.binding = binding;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = type;
+        e.buffer.hasDynamicOffset = WGPU_FALSE;
+        e.buffer.minBindingSize = 0;
+    };
+    fill(entries[0], 0, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[2], 2, WGPUBufferBindingType_Storage);
+    WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+    desc.entryCount = 3;
+    desc.entries = entries;
+    return wgpuDeviceCreateBindGroupLayout(wd, &desc);
+}
+
+// sort_scan.wgsl:
+//   0: storage,read       num_keys_arr
+//   1: storage,read_write reduced
+WGPUBindGroupLayout create_sort_scan_bgl(WGPUDevice wd) {
+    WGPUBindGroupLayoutEntry entries[2] = {};
+    auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
+                   WGPUBufferBindingType type) {
+        e.binding = binding;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = type;
+        e.buffer.hasDynamicOffset = WGPU_FALSE;
+        e.buffer.minBindingSize = 0;
+    };
+    fill(entries[0], 0, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[1], 1, WGPUBufferBindingType_Storage);
     WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
     desc.entryCount = 2;
+    desc.entries = entries;
+    return wgpuDeviceCreateBindGroupLayout(wd, &desc);
+}
+
+// sort_scan_add.wgsl:
+//   0: storage,read       num_keys_arr
+//   1: storage,read       reduced
+//   2: storage,read_write counts
+WGPUBindGroupLayout create_sort_scan_add_bgl(WGPUDevice wd) {
+    WGPUBindGroupLayoutEntry entries[3] = {};
+    auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
+                   WGPUBufferBindingType type) {
+        e.binding = binding;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = type;
+        e.buffer.hasDynamicOffset = WGPU_FALSE;
+        e.buffer.minBindingSize = 0;
+    };
+    fill(entries[0], 0, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[2], 2, WGPUBufferBindingType_Storage);
+    WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+    desc.entryCount = 3;
+    desc.entries = entries;
+    return wgpuDeviceCreateBindGroupLayout(wd, &desc);
+}
+
+// sort_scatter.wgsl:
+//   0: storage,read       config (shift)
+//   1: storage,read       num_keys_arr
+//   2: storage,read       src (keys)
+//   3: storage,read       values
+//   4: storage,read       counts
+//   5: storage,read_write out
+//   6: storage,read_write out_values
+WGPUBindGroupLayout create_sort_scatter_bgl(WGPUDevice wd) {
+    WGPUBindGroupLayoutEntry entries[7] = {};
+    auto fill = [](WGPUBindGroupLayoutEntry& e, uint32_t binding,
+                   WGPUBufferBindingType type) {
+        e.binding = binding;
+        e.visibility = WGPUShaderStage_Compute;
+        e.buffer.type = type;
+        e.buffer.hasDynamicOffset = WGPU_FALSE;
+        e.buffer.minBindingSize = 0;
+    };
+    fill(entries[0], 0, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[1], 1, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[2], 2, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[3], 3, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[4], 4, WGPUBufferBindingType_ReadOnlyStorage);
+    fill(entries[5], 5, WGPUBufferBindingType_Storage);
+    fill(entries[6], 6, WGPUBufferBindingType_Storage);
+    WGPUBindGroupLayoutDescriptor desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+    desc.entryCount = 7;
     desc.entries = entries;
     return wgpuDeviceCreateBindGroupLayout(wd, &desc);
 }
@@ -809,6 +1011,13 @@ struct AetherSceneRenderer {
     GPUShaderHandle splat_vs, splat_fs;
     GPUShaderHandle project_forward_shader;  // compute kernel
     GPUShaderHandle project_visible_shader;  // compute kernel
+    // Phase 6.4f.2.a: 6 sort kernels (5 brush radix + 1 aether prep).
+    GPUShaderHandle sort_prep_shader;
+    GPUShaderHandle sort_count_shader;
+    GPUShaderHandle sort_reduce_shader;
+    GPUShaderHandle sort_scan_shader;
+    GPUShaderHandle sort_scan_add_shader;
+    GPUShaderHandle sort_scatter_shader;
     WGPURenderPipeline splat_pipe{nullptr};
     WGPUBindGroupLayout splat_render_bgl{nullptr};
     WGPUPipelineLayout splat_render_layout{nullptr};
@@ -1034,6 +1243,12 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
         if (r->mesh_camera_buf.valid())       device->destroy_buffer(r->mesh_camera_buf);
         if (r->mesh_fs.valid())               device->destroy_shader(r->mesh_fs);
         if (r->mesh_vs.valid())               device->destroy_shader(r->mesh_vs);
+        if (r->sort_scatter_shader.valid())   device->destroy_shader(r->sort_scatter_shader);
+        if (r->sort_scan_add_shader.valid())  device->destroy_shader(r->sort_scan_add_shader);
+        if (r->sort_scan_shader.valid())      device->destroy_shader(r->sort_scan_shader);
+        if (r->sort_reduce_shader.valid())    device->destroy_shader(r->sort_reduce_shader);
+        if (r->sort_count_shader.valid())     device->destroy_shader(r->sort_count_shader);
+        if (r->sort_prep_shader.valid())      device->destroy_shader(r->sort_prep_shader);
         if (r->project_visible_shader.valid()) device->destroy_shader(r->project_visible_shader);
         if (r->project_forward_shader.valid()) device->destroy_shader(r->project_forward_shader);
         if (r->splat_fs.valid())              device->destroy_shader(r->splat_fs);
@@ -1109,6 +1324,21 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
                                                      GPUShaderStage::kCompute);
     if (!r->project_forward_shader.valid() || !r->project_visible_shader.valid())
         return fail("splat compute load_shader failed");
+
+    // Phase 6.4f.2.a: load the 6 sort kernels (sort_prep_depth +
+    // 5-stage Brush radix sort: count → reduce → scan → scan_add →
+    // scatter). Pipelines are instantiated per-scene in
+    // build_splat_scene_from_gaussians; the shader modules are global.
+    r->sort_prep_shader     = device->load_shader("sort_prep_depth", GPUShaderStage::kCompute);
+    r->sort_count_shader    = device->load_shader("sort_count",      GPUShaderStage::kCompute);
+    r->sort_reduce_shader   = device->load_shader("sort_reduce",     GPUShaderStage::kCompute);
+    r->sort_scan_shader     = device->load_shader("sort_scan",       GPUShaderStage::kCompute);
+    r->sort_scan_add_shader = device->load_shader("sort_scan_add",   GPUShaderStage::kCompute);
+    r->sort_scatter_shader  = device->load_shader("sort_scatter",    GPUShaderStage::kCompute);
+    if (!r->sort_prep_shader.valid()    || !r->sort_count_shader.valid() ||
+        !r->sort_reduce_shader.valid()  || !r->sort_scan_shader.valid()  ||
+        !r->sort_scan_add_shader.valid()|| !r->sort_scatter_shader.valid())
+        return fail("sort compute load_shader failed");
 
     // splat_render: build an explicit BindGroupLayout so Phase 6.4f's
     // load_ply path can create BindGroups against it. (The auto layout
@@ -1241,6 +1471,12 @@ extern "C" void aether_scene_renderer_destroy(AetherSceneRenderer* r) {
         if (r->mesh_camera_buf.valid())  device->destroy_buffer(r->mesh_camera_buf);
         if (r->mesh_fs.valid())          device->destroy_shader(r->mesh_fs);
         if (r->mesh_vs.valid())          device->destroy_shader(r->mesh_vs);
+        if (r->sort_scatter_shader.valid())   device->destroy_shader(r->sort_scatter_shader);
+        if (r->sort_scan_add_shader.valid())  device->destroy_shader(r->sort_scan_add_shader);
+        if (r->sort_scan_shader.valid())      device->destroy_shader(r->sort_scan_shader);
+        if (r->sort_reduce_shader.valid())    device->destroy_shader(r->sort_reduce_shader);
+        if (r->sort_count_shader.valid())     device->destroy_shader(r->sort_count_shader);
+        if (r->sort_prep_shader.valid())      device->destroy_shader(r->sort_prep_shader);
         if (r->project_visible_shader.valid()) device->destroy_shader(r->project_visible_shader);
         if (r->project_forward_shader.valid()) device->destroy_shader(r->project_forward_shader);
         if (r->splat_fs.valid())         device->destroy_shader(r->splat_fs);
@@ -1260,6 +1496,34 @@ extern "C" void aether_scene_renderer_destroy(AetherSceneRenderer* r) {
 static void free_splat_scene(AetherSceneRenderer* r) {
     if (!r || !r->splat_scene) return;
     SplatScene& s = *r->splat_scene;
+    // ─── Phase 6.4f.2.a — sort BindGroups + pipelines + layouts ────────
+    for (int i = 0; i < 8; ++i) {
+        if (s.sort_scatter_bgs[i]) wgpuBindGroupRelease(s.sort_scatter_bgs[i]);
+        if (s.sort_count_bgs[i])   wgpuBindGroupRelease(s.sort_count_bgs[i]);
+    }
+    if (s.sort_scan_add_bg)        wgpuBindGroupRelease(s.sort_scan_add_bg);
+    if (s.sort_scan_bg)            wgpuBindGroupRelease(s.sort_scan_bg);
+    if (s.sort_reduce_bg)          wgpuBindGroupRelease(s.sort_reduce_bg);
+    if (s.sort_prep_bg)            wgpuBindGroupRelease(s.sort_prep_bg);
+    if (s.sort_scatter_pipe)       wgpuComputePipelineRelease(s.sort_scatter_pipe);
+    if (s.sort_scan_add_pipe)      wgpuComputePipelineRelease(s.sort_scan_add_pipe);
+    if (s.sort_scan_pipe)          wgpuComputePipelineRelease(s.sort_scan_pipe);
+    if (s.sort_reduce_pipe)        wgpuComputePipelineRelease(s.sort_reduce_pipe);
+    if (s.sort_count_pipe)         wgpuComputePipelineRelease(s.sort_count_pipe);
+    if (s.sort_prep_pipe)          wgpuComputePipelineRelease(s.sort_prep_pipe);
+    if (s.sort_scatter_layout)     wgpuPipelineLayoutRelease(s.sort_scatter_layout);
+    if (s.sort_scan_add_layout)    wgpuPipelineLayoutRelease(s.sort_scan_add_layout);
+    if (s.sort_scan_layout)        wgpuPipelineLayoutRelease(s.sort_scan_layout);
+    if (s.sort_reduce_layout)      wgpuPipelineLayoutRelease(s.sort_reduce_layout);
+    if (s.sort_count_layout)       wgpuPipelineLayoutRelease(s.sort_count_layout);
+    if (s.sort_prep_layout)        wgpuPipelineLayoutRelease(s.sort_prep_layout);
+    if (s.sort_scatter_bgl)        wgpuBindGroupLayoutRelease(s.sort_scatter_bgl);
+    if (s.sort_scan_add_bgl)       wgpuBindGroupLayoutRelease(s.sort_scan_add_bgl);
+    if (s.sort_scan_bgl)           wgpuBindGroupLayoutRelease(s.sort_scan_bgl);
+    if (s.sort_reduce_bgl)         wgpuBindGroupLayoutRelease(s.sort_reduce_bgl);
+    if (s.sort_count_bgl)          wgpuBindGroupLayoutRelease(s.sort_count_bgl);
+    if (s.sort_prep_bgl)           wgpuBindGroupLayoutRelease(s.sort_prep_bgl);
+    // ─── Phase 6.4f — projection + render BindGroups + pipelines ───────
     if (s.splat_render_bg)     wgpuBindGroupRelease(s.splat_render_bg);
     if (s.project_visible_bg)  wgpuBindGroupRelease(s.project_visible_bg);
     if (s.project_forward_bg)  wgpuBindGroupRelease(s.project_forward_bg);
@@ -1270,6 +1534,18 @@ static void free_splat_scene(AetherSceneRenderer* r) {
     if (s.project_visible_bgl) wgpuBindGroupLayoutRelease(s.project_visible_bgl);
     if (s.project_forward_bgl) wgpuBindGroupLayoutRelease(s.project_forward_bgl);
     if (r->device) {
+        // ─── Sort buffers ──────────────────────────────────────────────
+        for (int i = 0; i < 8; ++i) {
+            if (s.sort_config_bufs[i].valid()) r->device->destroy_buffer(s.sort_config_bufs[i]);
+        }
+        if (s.sort_num_keys_arr_buf.valid())  r->device->destroy_buffer(s.sort_num_keys_arr_buf);
+        if (s.sort_reduced_buf.valid())       r->device->destroy_buffer(s.sort_reduced_buf);
+        if (s.sort_counts_buf.valid())        r->device->destroy_buffer(s.sort_counts_buf);
+        if (s.sort_values_alt_buf.valid())    r->device->destroy_buffer(s.sort_values_alt_buf);
+        if (s.sort_values_buf.valid())        r->device->destroy_buffer(s.sort_values_buf);
+        if (s.sort_keys_alt_buf.valid())      r->device->destroy_buffer(s.sort_keys_alt_buf);
+        if (s.sort_keys_buf.valid())          r->device->destroy_buffer(s.sort_keys_buf);
+        // ─── Source / projection buffers ───────────────────────────────
         if (s.coeffs_buf.valid())                  r->device->destroy_buffer(s.coeffs_buf);
         if (s.raw_opacities_buf.valid())           r->device->destroy_buffer(s.raw_opacities_buf);
         if (s.quats_buf.valid())                   r->device->destroy_buffer(s.quats_buf);
@@ -1508,9 +1784,19 @@ extern "C" bool aether_scene_renderer_load_glb(AetherSceneRenderer* r,
 // allocate intermediates, build pipelines + bind groups, set has_splats.
 // Returns false (with log) on any allocation / pipeline-create failure;
 // in failure mode the renderer is left in "no splat scene" state.
+//
+// Phase 6.4f.2.b/c: `sh_degree` (0..3) and `sh_rest` (PLY-native channel-
+// major basis-major float layout — see PlyLoadResult docs) drive
+// higher-order spherical harmonics. When `sh_degree == 0`, sh_rest is
+// ignored. Repacking into Brush's basis-major-vec3 GPU layout happens
+// inline below — project_visible.wgsl reads [b0_c0_, b1_c0_, b1_c1_,
+// b1_c2_, b2_c0_, …] in that order, with each entry a vec3<f32> spanning
+// (R, G, B) for that basis function.
 static bool build_splat_scene_from_gaussians(
     AetherSceneRenderer* r,
-    const std::vector<::aether::splat::GaussianParams>& gaussians) {
+    const std::vector<::aether::splat::GaussianParams>& gaussians,
+    std::uint32_t sh_degree,
+    const float* sh_rest) {
     if (!r || !r->device || gaussians.empty()) return false;
     using namespace ::aether::render;
     auto& dev = *(r->device);
@@ -1520,11 +1806,18 @@ static bool build_splat_scene_from_gaussians(
     // Tear down any prior scene so we don't leak GPU buffers / pipelines.
     free_splat_scene(r);
 
+    if (sh_degree > 3u) sh_degree = 3u;       // clamp; project_visible
+                                               // supports up to 4, we ship 3
+    if (sh_degree > 0u && sh_rest == nullptr) sh_degree = 0u;  // safety
+
     const std::uint32_t N = static_cast<std::uint32_t>(gaussians.size());
     SplatScene s;
     s.num_splats = N;
-    s.sh_degree = 0;  // DC-only for this commit; higher-order SH is a follow-up.
-    const std::uint32_t coeffs_per_splat = sh_coeff_count(s.sh_degree);  // = 1
+    s.sh_degree = sh_degree;
+    const std::uint32_t coeffs_per_splat = sh_coeff_count(s.sh_degree);
+    // num_basis_non_dc per channel: 0,3,8,15 for deg 0,1,2,3
+    const std::uint32_t non_dc_basis = (coeffs_per_splat > 0u)
+        ? coeffs_per_splat - 1u : 0u;
 
     // ─── Compute AABB + repack into Brush WGSL layouts ─────────────────
     std::vector<float> means(N * 3);
@@ -1587,6 +1880,28 @@ static bool build_splat_scene_from_gaussians(
         coeffs[coeff_base + 0] = (g.color[0] - 0.5f) * kInvSH_C0;
         coeffs[coeff_base + 1] = (g.color[1] - 0.5f) * kInvSH_C0;
         coeffs[coeff_base + 2] = (g.color[2] - 0.5f) * kInvSH_C0;
+
+        // ─── Phase 6.4f.2.b/c — higher-order SH repack ─────────────────
+        //
+        // Source layout (PLY-native, channel-major basis-major):
+        //   sh_rest[i * (3 * non_dc_basis) +
+        //           channel * non_dc_basis + basis]
+        // Brush GPU layout (PackedVec3 stream, basis-major-vec3):
+        //   coeffs[base + (1 + basis)] = vec3<f32>(R, G, B)
+        // Where `base = i * coeffs_per_splat`. Each PackedVec3 is 3
+        // contiguous f32s, so the C++ array index is
+        //   coeffs[(base + 1 + basis) * 3 + channel].
+        if (non_dc_basis > 0u && sh_rest != nullptr) {
+            const std::size_t src_base = static_cast<std::size_t>(i) *
+                                         3u * non_dc_basis;
+            for (std::uint32_t b = 0; b < non_dc_basis; ++b) {
+                const std::size_t dst = (static_cast<std::size_t>(i) *
+                                          coeffs_per_splat + 1u + b) * 3u;
+                coeffs[dst + 0] = sh_rest[src_base + 0u * non_dc_basis + b];
+                coeffs[dst + 1] = sh_rest[src_base + 1u * non_dc_basis + b];
+                coeffs[dst + 2] = sh_rest[src_base + 2u * non_dc_basis + b];
+            }
+        }
     }
 
     // ─── Allocate + upload GPU buffers ─────────────────────────────────
@@ -1696,6 +2011,127 @@ static bool build_splat_scene_from_gaussians(
         return false;
     }
 
+    // ─── Phase 6.4f.2.a — sort buffers + pipelines + BindGroups ────────
+    //
+    // 5-kernel radix sort, 8 passes (4 bits/pass for 32-bit depth keys).
+    // We dispatch enough workgroups for `total_splats` not `num_visible`
+    // (the kernel reads num_keys_arr[0] internally and clamps), so the
+    // dispatch count is CPU-known and constant-per-load.
+    {
+        constexpr std::uint32_t kBlockSize = 1024u;  // matches sort_count.wgsl
+        constexpr std::uint32_t kBinCount  = 16u;
+        const std::uint32_t num_blocks =
+            (N + kBlockSize - 1u) / kBlockSize;
+        // sort_reduce.wgsl emits one entry per workgroup. The number of
+        // reduce workgroups is `BIN_COUNT * div_ceil(num_blocks,
+        // BLOCK_SIZE)`, which for our N≤a few million is always 16
+        // (single reduce-scan tier; brush extends to multi-tier for
+        // billions of splats — out of scope here).
+        const std::uint32_t num_reduce_groups =
+            (num_blocks + kBlockSize - 1u) / kBlockSize;
+        const std::uint32_t reduced_count =
+            kBinCount * num_reduce_groups;
+        s.sort_num_blocks        = num_blocks;
+        s.sort_num_reduce_groups = num_reduce_groups;
+
+        s.sort_keys_buf       = make_buf(N * sizeof(std::uint32_t),       "splat.sort_keys");
+        s.sort_keys_alt_buf   = make_buf(N * sizeof(std::uint32_t),       "splat.sort_keys_alt");
+        s.sort_values_buf     = make_buf(N * sizeof(std::uint32_t),       "splat.sort_values");
+        s.sort_values_alt_buf = make_buf(N * sizeof(std::uint32_t),       "splat.sort_values_alt");
+        s.sort_counts_buf     = make_buf(num_blocks * kBinCount * sizeof(std::uint32_t),
+                                         "splat.sort_counts");
+        s.sort_reduced_buf    = make_buf(reduced_count * sizeof(std::uint32_t),
+                                         "splat.sort_reduced");
+        s.sort_num_keys_arr_buf = make_buf(sizeof(std::uint32_t),
+                                            "splat.sort_num_keys");
+        if (!s.sort_keys_buf.valid() || !s.sort_keys_alt_buf.valid() ||
+            !s.sort_values_buf.valid() || !s.sort_values_alt_buf.valid() ||
+            !s.sort_counts_buf.valid() || !s.sort_reduced_buf.valid() ||
+            !s.sort_num_keys_arr_buf.valid()) {
+            scene_log("build_splat_scene: sort buffer alloc failed");
+            r->splat_scene = std::move(s);
+            free_splat_scene(r);
+            return false;
+        }
+        // 8 config buffers, one per radix pass (shift = 0,4,8,…,28).
+        for (std::uint32_t pass = 0; pass < 8u; ++pass) {
+            s.sort_config_bufs[pass] = make_buf(sizeof(std::uint32_t),
+                                                "splat.sort_config");
+            if (!s.sort_config_bufs[pass].valid()) {
+                scene_log("build_splat_scene: sort config buf %u alloc failed", pass);
+                r->splat_scene = std::move(s);
+                free_splat_scene(r);
+                return false;
+            }
+            const std::uint32_t shift = pass * 4u;
+            dev.update_buffer(s.sort_config_bufs[pass], &shift, 0, sizeof(shift));
+        }
+
+        // BGLs — one per kernel kind (sort_count + sort_scatter share
+        // their BGL across all 8 passes; the per-pass differences are
+        // limited to the bind groups themselves).
+        s.sort_prep_bgl     = create_sort_prep_bgl(wd);
+        s.sort_count_bgl    = create_sort_count_bgl(wd);
+        s.sort_reduce_bgl   = create_sort_reduce_bgl(wd);
+        s.sort_scan_bgl     = create_sort_scan_bgl(wd);
+        s.sort_scan_add_bgl = create_sort_scan_add_bgl(wd);
+        s.sort_scatter_bgl  = create_sort_scatter_bgl(wd);
+        if (!s.sort_prep_bgl    || !s.sort_count_bgl  || !s.sort_reduce_bgl ||
+            !s.sort_scan_bgl    || !s.sort_scan_add_bgl || !s.sort_scatter_bgl) {
+            scene_log("build_splat_scene: sort BGL create failed");
+            r->splat_scene = std::move(s);
+            free_splat_scene(r);
+            return false;
+        }
+        // Pipeline layouts (each is a single-BGL layout).
+        auto make_pl = [&](WGPUBindGroupLayout bgl) {
+            WGPUPipelineLayoutDescriptor pl = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
+            pl.bindGroupLayoutCount = 1;
+            pl.bindGroupLayouts = &bgl;
+            return wgpuDeviceCreatePipelineLayout(wd, &pl);
+        };
+        s.sort_prep_layout     = make_pl(s.sort_prep_bgl);
+        s.sort_count_layout    = make_pl(s.sort_count_bgl);
+        s.sort_reduce_layout   = make_pl(s.sort_reduce_bgl);
+        s.sort_scan_layout     = make_pl(s.sort_scan_bgl);
+        s.sort_scan_add_layout = make_pl(s.sort_scan_add_bgl);
+        s.sort_scatter_layout  = make_pl(s.sort_scatter_bgl);
+        if (!s.sort_prep_layout    || !s.sort_count_layout  ||
+            !s.sort_reduce_layout  || !s.sort_scan_layout   ||
+            !s.sort_scan_add_layout|| !s.sort_scatter_layout) {
+            scene_log("build_splat_scene: sort layout create failed");
+            r->splat_scene = std::move(s);
+            free_splat_scene(r);
+            return false;
+        }
+        // Compute pipelines.
+        s.sort_prep_pipe = create_compute_pipeline(wd,
+            dawn_int::dawn_internal_get_shader_module(dev, r->sort_prep_shader, ep_unused),
+            s.sort_prep_layout, "main");
+        s.sort_count_pipe = create_compute_pipeline(wd,
+            dawn_int::dawn_internal_get_shader_module(dev, r->sort_count_shader, ep_unused),
+            s.sort_count_layout, "main");
+        s.sort_reduce_pipe = create_compute_pipeline(wd,
+            dawn_int::dawn_internal_get_shader_module(dev, r->sort_reduce_shader, ep_unused),
+            s.sort_reduce_layout, "main");
+        s.sort_scan_pipe = create_compute_pipeline(wd,
+            dawn_int::dawn_internal_get_shader_module(dev, r->sort_scan_shader, ep_unused),
+            s.sort_scan_layout, "main");
+        s.sort_scan_add_pipe = create_compute_pipeline(wd,
+            dawn_int::dawn_internal_get_shader_module(dev, r->sort_scan_add_shader, ep_unused),
+            s.sort_scan_add_layout, "main");
+        s.sort_scatter_pipe = create_compute_pipeline(wd,
+            dawn_int::dawn_internal_get_shader_module(dev, r->sort_scatter_shader, ep_unused),
+            s.sort_scatter_layout, "main");
+        if (!s.sort_prep_pipe || !s.sort_count_pipe || !s.sort_reduce_pipe ||
+            !s.sort_scan_pipe || !s.sort_scan_add_pipe || !s.sort_scatter_pipe) {
+            scene_log("build_splat_scene: sort pipeline create failed");
+            r->splat_scene = std::move(s);
+            free_splat_scene(r);
+            return false;
+        }
+    }
+
     // ─── Build BindGroups (cached for the life of the loaded scene) ────
     auto bind_buf = [&](GPUBufferHandle h, std::uint32_t binding) {
         WGPUBindGroupEntry e{};
@@ -1740,17 +2176,123 @@ static bool build_splat_scene_from_gaussians(
         s.project_visible_bg = wgpuDeviceCreateBindGroup(wd, &bg);
     }
     {
-        WGPUBindGroupEntry entries[2] = {
+        // Phase 6.4f.2.a: 3rd binding = sort_values_buf (the radix sort
+        // permutation; splats[order[ii]] gives back-to-front order).
+        WGPUBindGroupEntry entries[3] = {
             bind_buf(r->splat_uniforms_buf, 0),
             bind_buf(r->splats_buf, 1),
+            bind_buf(s.sort_values_buf, 2),
         };
         WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
         bg.layout = r->splat_render_bgl;
-        bg.entryCount = 2;
+        bg.entryCount = 3;
         bg.entries = entries;
         s.splat_render_bg = wgpuDeviceCreateBindGroup(wd, &bg);
     }
-    if (!s.project_forward_bg || !s.project_visible_bg || !s.splat_render_bg) {
+
+    // ─── Phase 6.4f.2.a — sort BindGroups ──────────────────────────────
+    //
+    // sort_prep_depth, sort_reduce, sort_scan, sort_scan_add are
+    // pass-invariant: 1 BG each. sort_count and sort_scatter alternate
+    // src/out between (keys ↔ keys_alt) every pass — 8 BGs each.
+    {
+        WGPUBindGroupEntry entries[5] = {
+            bind_buf(r->splat_uniforms_buf, 0),
+            bind_buf(s.depths_buf, 1),
+            bind_buf(s.sort_num_keys_arr_buf, 2),
+            bind_buf(s.sort_keys_buf, 3),
+            bind_buf(s.sort_values_buf, 4),
+        };
+        WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        bg.layout = s.sort_prep_bgl;
+        bg.entryCount = 5;
+        bg.entries = entries;
+        s.sort_prep_bg = wgpuDeviceCreateBindGroup(wd, &bg);
+    }
+    {
+        WGPUBindGroupEntry entries[3] = {
+            bind_buf(s.sort_num_keys_arr_buf, 0),
+            bind_buf(s.sort_counts_buf, 1),
+            bind_buf(s.sort_reduced_buf, 2),
+        };
+        WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        bg.layout = s.sort_reduce_bgl;
+        bg.entryCount = 3;
+        bg.entries = entries;
+        s.sort_reduce_bg = wgpuDeviceCreateBindGroup(wd, &bg);
+    }
+    {
+        WGPUBindGroupEntry entries[2] = {
+            bind_buf(s.sort_num_keys_arr_buf, 0),
+            bind_buf(s.sort_reduced_buf, 1),
+        };
+        WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        bg.layout = s.sort_scan_bgl;
+        bg.entryCount = 2;
+        bg.entries = entries;
+        s.sort_scan_bg = wgpuDeviceCreateBindGroup(wd, &bg);
+    }
+    {
+        WGPUBindGroupEntry entries[3] = {
+            bind_buf(s.sort_num_keys_arr_buf, 0),
+            bind_buf(s.sort_reduced_buf, 1),
+            bind_buf(s.sort_counts_buf, 2),
+        };
+        WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        bg.layout = s.sort_scan_add_bgl;
+        bg.entryCount = 3;
+        bg.entries = entries;
+        s.sort_scan_add_bg = wgpuDeviceCreateBindGroup(wd, &bg);
+    }
+    // 8 sort_count BGs — even passes read keys, odd passes read keys_alt.
+    for (std::uint32_t pass = 0; pass < 8u; ++pass) {
+        const bool even = (pass % 2u) == 0u;
+        const auto src = even ? s.sort_keys_buf : s.sort_keys_alt_buf;
+        WGPUBindGroupEntry entries[4] = {
+            bind_buf(s.sort_config_bufs[pass], 0),
+            bind_buf(s.sort_num_keys_arr_buf, 1),
+            bind_buf(src, 2),
+            bind_buf(s.sort_counts_buf, 3),
+        };
+        WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        bg.layout = s.sort_count_bgl;
+        bg.entryCount = 4;
+        bg.entries = entries;
+        s.sort_count_bgs[pass] = wgpuDeviceCreateBindGroup(wd, &bg);
+    }
+    // 8 sort_scatter BGs — alternate (keys/values → keys_alt/values_alt)
+    // each pass. After 8 passes (last=odd), the sorted result is back in
+    // (keys, values), which is what splat_render_bg points at via
+    // sort_values_buf.
+    for (std::uint32_t pass = 0; pass < 8u; ++pass) {
+        const bool even = (pass % 2u) == 0u;
+        const auto src       = even ? s.sort_keys_buf       : s.sort_keys_alt_buf;
+        const auto vals      = even ? s.sort_values_buf     : s.sort_values_alt_buf;
+        const auto out       = even ? s.sort_keys_alt_buf   : s.sort_keys_buf;
+        const auto out_vals  = even ? s.sort_values_alt_buf : s.sort_values_buf;
+        WGPUBindGroupEntry entries[7] = {
+            bind_buf(s.sort_config_bufs[pass], 0),
+            bind_buf(s.sort_num_keys_arr_buf, 1),
+            bind_buf(src, 2),
+            bind_buf(vals, 3),
+            bind_buf(s.sort_counts_buf, 4),
+            bind_buf(out, 5),
+            bind_buf(out_vals, 6),
+        };
+        WGPUBindGroupDescriptor bg = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        bg.layout = s.sort_scatter_bgl;
+        bg.entryCount = 7;
+        bg.entries = entries;
+        s.sort_scatter_bgs[pass] = wgpuDeviceCreateBindGroup(wd, &bg);
+    }
+    // BindGroup validity check — one cumulative test for all sort BGs.
+    bool sort_bgs_ok = s.sort_prep_bg && s.sort_reduce_bg &&
+                       s.sort_scan_bg && s.sort_scan_add_bg;
+    for (int i = 0; i < 8 && sort_bgs_ok; ++i) {
+        sort_bgs_ok = s.sort_count_bgs[i] && s.sort_scatter_bgs[i];
+    }
+    if (!s.project_forward_bg || !s.project_visible_bg || !s.splat_render_bg ||
+        !sort_bgs_ok) {
         scene_log("build_splat_scene: BindGroup create failed");
         r->splat_scene = std::move(s);
         free_splat_scene(r);
@@ -1783,10 +2325,15 @@ extern "C" bool aether_scene_renderer_load_ply(AetherSceneRenderer* r,
         scene_log("load_ply: no gaussians in '%s'", ply_path);
         return false;
     }
-    if (!build_splat_scene_from_gaussians(r, result.gaussians)) {
+    const float* sh_rest = result.sh_rest.empty() ? nullptr : result.sh_rest.data();
+    if (!build_splat_scene_from_gaussians(r, result.gaussians,
+                                           result.sh_degree, sh_rest)) {
         scene_log("load_ply: build_splat_scene failed for '%s'", ply_path);
         return false;
     }
+    scene_log("load_ply: '%s' sh_degree=%u (sh_rest %zu floats)",
+              ply_path, static_cast<unsigned>(result.sh_degree),
+              result.sh_rest.size());
     return true;
 }
 
@@ -1804,7 +2351,10 @@ extern "C" bool aether_scene_renderer_load_spz(AetherSceneRenderer* r,
         scene_log("load_spz: no gaussians in '%s'", spz_path);
         return false;
     }
-    if (!build_splat_scene_from_gaussians(r, spz_result.gaussians)) {
+    // SPZ decoder doesn't unpack higher-order SH today (only DC). Force
+    // sh_degree=0 so project_visible doesn't read from a missing buffer.
+    if (!build_splat_scene_from_gaussians(r, spz_result.gaussians,
+                                           /*sh_degree=*/0u, /*sh_rest=*/nullptr)) {
         scene_log("load_spz: build_splat_scene failed for '%s'", spz_path);
         return false;
     }
@@ -1913,9 +2463,25 @@ extern "C" void aether_scene_renderer_render_full(
         splat_u.total_splats = r->splat_scene->num_splats;
         splat_u.num_visible = 0;
         splat_u.sh_degree = r->splat_scene->sh_degree;
-        // camera_position used only for higher-order SH (sh_degree >= 1) so
-        // we'd derive it from inverse-view here. With sh_degree = 0 the
-        // value is unused; leave (0,0,0,0).
+        // ─── Phase 6.4f.2.b/c — camera world position for SH eval ──────
+        //
+        // project_visible.wgsl evaluates view-dependent SH per-splat
+        // using viewdir = normalize(mean - camera_position). The view
+        // matrix is world→camera; camera world position is the column 3
+        // of its inverse. For a rigid (rotation + translation) view
+        // matrix VM = [R | t; 0 0 0 1] in column-major storage where
+        //   R = (vm[0..2], vm[4..6], vm[8..10]) (3 column-major basis vectors)
+        //   t = vm[12..14]
+        // the inverse is [R^T | -R^T t]. Camera world pos = -R^T * t.
+        const float* vm = view_matrix;
+        const float tx = vm[12], ty = vm[13], tz = vm[14];
+        const float cam_x = -(vm[0] * tx + vm[1] * ty + vm[2]  * tz);
+        const float cam_y = -(vm[4] * tx + vm[5] * ty + vm[6]  * tz);
+        const float cam_z = -(vm[8] * tx + vm[9] * ty + vm[10] * tz);
+        splat_u.camera_position[0] = cam_x;
+        splat_u.camera_position[1] = cam_y;
+        splat_u.camera_position[2] = cam_z;
+        splat_u.camera_position[3] = 1.0f;
         r->device->update_buffer(r->splat_uniforms_buf, &splat_u, 0, sizeof(splat_u));
     }
 
@@ -1982,6 +2548,51 @@ extern "C" void aether_scene_renderer_render_full(
         wgpuComputePassEncoderSetPipeline(cpass, s.project_visible_pipe);
         wgpuComputePassEncoderSetBindGroup(cpass, 0, s.project_visible_bg, 0, nullptr);
         wgpuComputePassEncoderDispatchWorkgroups(cpass, wg_x, 1, 1);
+
+        // ─── Phase 6.4f.2.a — depth sort (sort_prep + 8 radix passes) ──
+        //
+        // sort_prep_depth seeds keys[]/values[] from depths[]/uniforms.
+        // Then 8 ping-pong radix passes (4-bit/pass × 8 = 32-bit key)
+        // execute count → reduce → scan → scan_add → scatter. After
+        // pass 7 (last, odd-indexed), the sorted permutation lives in
+        // (sort_keys_buf, sort_values_buf), which splat_render_bg
+        // already binds at slot 2.
+        wgpuComputePassEncoderSetPipeline(cpass, s.sort_prep_pipe);
+        wgpuComputePassEncoderSetBindGroup(cpass, 0, s.sort_prep_bg, 0, nullptr);
+        wgpuComputePassEncoderDispatchWorkgroups(cpass, wg_x, 1, 1);
+
+        // Per-pass dispatch counts.
+        const std::uint32_t count_wg     = s.sort_num_blocks;       // ceil(N/1024)
+        const std::uint32_t reduce_wg    = 16u * s.sort_num_reduce_groups;
+        const std::uint32_t scan_wg      = 1u;                      // single workgroup
+        const std::uint32_t scan_add_wg  = reduce_wg;               // mirrors reduce
+        const std::uint32_t scatter_wg   = s.sort_num_blocks;
+        for (std::uint32_t pass = 0; pass < 8u; ++pass) {
+            wgpuComputePassEncoderSetPipeline(cpass, s.sort_count_pipe);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0,
+                s.sort_count_bgs[pass], 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, count_wg, 1, 1);
+
+            wgpuComputePassEncoderSetPipeline(cpass, s.sort_reduce_pipe);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0,
+                s.sort_reduce_bg, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, reduce_wg, 1, 1);
+
+            wgpuComputePassEncoderSetPipeline(cpass, s.sort_scan_pipe);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0,
+                s.sort_scan_bg, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, scan_wg, 1, 1);
+
+            wgpuComputePassEncoderSetPipeline(cpass, s.sort_scan_add_pipe);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0,
+                s.sort_scan_add_bg, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, scan_add_wg, 1, 1);
+
+            wgpuComputePassEncoderSetPipeline(cpass, s.sort_scatter_pipe);
+            wgpuComputePassEncoderSetBindGroup(cpass, 0,
+                s.sort_scatter_bgs[pass], 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cpass, scatter_wg, 1, 1);
+        }
 
         wgpuComputePassEncoderEnd(cpass);
         wgpuComputePassEncoderRelease(cpass);

@@ -177,14 +177,16 @@ sphere and verifies non-empty IOSurface output.
 
 **Limitations of this initial cut** (tracked as Phase 6.4f.2 below):
 
-- No GPU depth sort. The 5 sort kernels (`sort_count → sort_reduce →
+- ~~No GPU depth sort. The 5 sort kernels (`sort_count → sort_reduce →
   sort_scan → sort_scan_add → sort_scatter`) and
   `map_gaussian_to_intersects` were not wired in this commit — splats
   render in atomic-write order from `project_forward`, producing correct
   silhouettes but minor transparency artifacts on heavy splat overlap.
-  Add the 6-kernel sort+tile chain in 6.4f.2.
-- SH degree 0 only. Higher-order SH coeffs are parsed by the PLY loader
-  but ignored at upload time. View-dependent shading is uniform.
+  Add the 6-kernel sort+tile chain in 6.4f.2.~~ **Shipped in 6.4f.2.a
+  (per-splat radix sort, see entry below).**
+- ~~SH degree 0 only. Higher-order SH coeffs are parsed by the PLY loader
+  but ignored at upload time. View-dependent shading is uniform.~~
+  **Shipped in 6.4f.2.b/c (SH degrees 1, 2, 3 — see entry below).**
 - No tile binning. The vert+frag `splat_render.wgsl` path overrenders
   vs. Brush's compute rasterizer but is 23× faster on mobile per the
   `splat_render.wgsl` docstring — accepted trade-off.
@@ -234,6 +236,83 @@ sphere and verifies non-empty IOSurface output.
 - **Decision pin reference**: ties into pin 1 (vertex+frag viewer
   rasterizer) and pin 2 (Brush 14 WGSL retained as algorithm base).
 - **Upstream**: not applicable.
+
+---
+
+## Phase 6.4f.2 — depth sort + SH degree 1/2/3 polish  ✅ shipped 2026-05-02
+
+**Status**: shipped 2026-05-02. The two correctness gaps from the 6.4f
+initial cut (no depth sort, SH degree 0 only) are closed; the third
+("no tile binning") is intentionally left as a perf trade-off.
+
+**What shipped:**
+
+- **6.4f.2.a — GPU depth sort.** New shader
+  `shaders/wgsl/sort_prep_depth.wgsl` seeds 32-bit ascending-sort keys
+  via `~bitcast<u32>(depths[i])` so the standard 5-kernel Brush radix
+  sort (`sort_count → sort_reduce → sort_scan → sort_scan_add →
+  sort_scatter`, 8 ping-pong passes for 4-bit-at-a-time / 32-bit
+  keys) produces a back-to-front splat permutation. `splat_render.wgsl`
+  gained a 3rd binding (`order: array<u32>`) and now reads
+  `splats[order[ii]]` for hardware-blend-correct alpha compositing
+  under the existing One/OneMinusSrcAlpha OVER blend mode.
+  Per-splat sort (not per-tile) is the natural fit for our vert+frag
+  instanced-quad rasterizer; production splat viewers (Spark.js,
+  MetalSplatter, splaTV) all use this same approach. The Brush sort
+  kernels are untouched and could be reused for tile binning later.
+- **6.4f.2.b/c — SH degrees 1, 2, 3.** PLY loader (`include/aether/
+  splat/ply_loader.h`) now auto-detects f_rest_* count → degree (9 →
+  1, 24 → 2, 45 → 3) and stores raw coefficients in
+  `PlyLoadResult.sh_rest` (PLY-native channel-major basis-major
+  layout). Renderer
+  (`src/pocketworld/scene_iosurface_renderer.cpp::build_splat_scene_from_gaussians`)
+  repacks into Brush's basis-major-vec3 GPU layout matching
+  `project_visible.wgsl`'s `read_coeffs` order. `RenderUniforms.
+  camera_position` is now populated from inverse-view per-frame —
+  required for view-dependent SH evaluation. SPZ retains DC-only
+  (header-defined sh_degree is overridden to 0 because the SPZ
+  decoder doesn't unpack higher-order coeffs yet — separate
+  follow-up).
+
+**New artefacts:**
+
+- `shaders/wgsl/sort_prep_depth.wgsl` (1 new compute kernel)
+- 6 new compute pipelines (sort_prep_depth + 5 brush radix kernels)
+- 7 new GPU buffers per scene (keys×2, values×2, counts, reduced,
+  num_keys + 8 small per-pass config buffers)
+- ~20 new bind groups per scene (8 per-pass for sort_count + 8 for
+  sort_scatter + 4 pass-invariant for prep/reduce/scan/scan_add)
+- Total `libaether3d_ffi.a` size: 643MB → 676MB (+5%, mostly Brush
+  WGSL-derived .o files from the additional baked sort_prep_depth)
+
+**Validation:**
+
+- `aether_dawn_scene_splat_smoke.mm` now has two modes:
+  - `--mode=sort` (default): same 1024-Fibonacci-sphere fixture as the
+    initial-cut smoke — 7997 opaque pixels (12.20%) PASS.
+  - `--mode=sh1`: synthetic deg-1 SH ball with directional R/G/B
+    coefficients tuned so viewdir.x → R, viewdir.y → G, viewdir.z →
+    B. Camera looks at +z, expects B-dominant output. Verified
+    `B=1874074 > R=901539 = G=901539` (R=G is correct: viewdir.x and
+    .y average to 0 over the visible hemisphere, viewdir.z ≈ +1 →
+    pure b1c1 contribution).
+- Both smokes PASS, no Dawn validation errors.
+- `cmake --build . --target aether3d_ffi` clean.
+- `flutter analyze lib/aether_view/ lib/ui/community/` clean.
+- `flutter build ios --debug --no-codesign` clean.
+
+**What's deliberately deferred:**
+
+- **Tile binning** (`map_gaussian_to_intersects` + per-tile rasterize
+  loop) — same trade-off as the 6.4f initial cut. The vert+frag path
+  is 23× faster on mobile per the splat_render.wgsl docstring;
+  switching to brush's compute rasterizer would slow shipping. The
+  shader and CPU dispatch infra for tile binning are vendored; flip
+  to it when a real workload demonstrates the overdraw cost
+  outweighs the speedup.
+- **SPZ higher-order SH** — SPZ decoder skips f_rest_* streams. PLY
+  is the dominant production format; SPZ extension is a separate
+  follow-up.
 
 ---
 
