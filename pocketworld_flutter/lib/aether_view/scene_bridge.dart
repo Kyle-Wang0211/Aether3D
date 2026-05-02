@@ -50,11 +50,43 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
+// Conditional import: picks platform_check_io.dart on dart:io targets
+// (iOS, macOS, Android, Linux, Windows) and platform_check_web.dart on
+// dart:html / web. The latter just returns false unconditionally.
+import 'platform_check_io.dart'
+    if (dart.library.html) 'platform_check_web.dart';
+
 class SceneBridge {
-  SceneBridge._();
+  SceneBridge._() {
+    // Listen on the warning channel so widgets can react to native-side
+    // events (mainly iOS memory warnings, which trigger
+    // AetherTexturePlugin.handleMemoryWarning() to dispose ALL textures).
+    // Without this listener the disposed textures' Flutter Texture
+    // widgets render nothing and never recover; AetherCppCardDemo sees
+    // the broadcast on its memory-warning subscription and rebuilds.
+    _warningChannel.setMethodCallHandler(_handleWarning);
+  }
   static final SceneBridge instance = SceneBridge._();
 
   static const _channel = MethodChannel('aether_texture');
+  static const _warningChannel = MethodChannel('aether_texture/warning');
+
+  /// Broadcast stream of native-side warnings. Currently fires for
+  /// iOS memory warnings (kind="memory"); thermal events use the same
+  /// pattern when wired. Subscribers should drop GPU references and
+  /// rebuild lazily — the underlying SharedNativeTextures are GONE
+  /// when this fires, the textureIds Flutter is rendering reference
+  /// nothing.
+  Stream<String> get warnings => _warningController.stream;
+  final StreamController<String> _warningController =
+      StreamController<String>.broadcast();
+
+  Future<void> _handleWarning(MethodCall call) async {
+    if (call.method != 'warning') return;
+    final args = call.arguments;
+    final kind = (args is Map && args['kind'] is String) ? args['kind'] as String : 'unknown';
+    _warningController.add(kind);
+  }
 
   /// Create a renderer instance + return its Flutter textureId. The
   /// caller wraps the id in a `Texture(textureId: ...)` widget.
@@ -82,11 +114,84 @@ class SceneBridge {
 
   /// Load a GLB into the renderer. Throws PlatformException on parse /
   /// IO / GPU-allocation failure (caller surfaces as `_loadFailed`).
-  Future<void> loadGlb({required int textureId, required String path}) async {
-    await _channel.invokeMethod<void>(
+  ///
+  /// Returns the loaded mesh's local-space AABB as a map with keys
+  /// `minX/minY/minZ/maxX/maxY/maxZ` (all doubles), or an empty map if
+  /// the native side couldn't surface bounds. Older Runners that
+  /// pre-date G4 will return `null` (the typed result is `Map<...>?`).
+  Future<Map<String, double>?> loadGlb({
+    required int textureId,
+    required String path,
+  }) async {
+    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'loadGlb',
       <String, dynamic>{'textureId': textureId, 'path': path},
     );
+    return _decodeBounds(raw);
+  }
+
+  /// Load a 3D Gaussian Splat .ply file.
+  ///
+  /// Phase 6.4f.3.b adds two memory caps:
+  ///   • `maxSplats` — 0 means no cap. >0 strides through the file
+  ///     keeping every k-th gaussian, where k = ceil(N/maxSplats).
+  ///     Use a low cap (~50_000) for feed thumbnails.
+  ///   • `maxShDegree` — 3 = full quality (file's degree honored), 0 =
+  ///     drop higher-order spherical harmonics. The DC coefficient is
+  ///     always retained. At sh_degree=3 the higher orders cost
+  ///     ~540 B/splat — capping to 0 for a 786 k splat scene saves
+  ///     ~425 MB of GPU memory at zero perceptual cost on a thumb.
+  Future<Map<String, double>?> loadPly({
+    required int textureId,
+    required String path,
+    int maxSplats = 0,
+    int maxShDegree = 3,
+  }) async {
+    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'loadPly',
+      <String, dynamic>{
+        'textureId': textureId,
+        'path': path,
+        'maxSplats': maxSplats,
+        'maxShDegree': maxShDegree,
+      },
+    );
+    return _decodeBounds(raw);
+  }
+
+  /// Load a Niantic Lightship SPZ-format compressed splat scene.
+  /// Same cap semantics as [loadPly].
+  Future<Map<String, double>?> loadSpz({
+    required int textureId,
+    required String path,
+    int maxSplats = 0,
+    int maxShDegree = 3,
+  }) async {
+    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'loadSpz',
+      <String, dynamic>{
+        'textureId': textureId,
+        'path': path,
+        'maxSplats': maxSplats,
+        'maxShDegree': maxShDegree,
+      },
+    );
+    return _decodeBounds(raw);
+  }
+
+  /// Shared bounds-decode used by load_glb / load_ply / load_spz —
+  /// the native side surfaces bounds the same way for all three.
+  Map<String, double>? _decodeBounds(Map<dynamic, dynamic>? raw) {
+    if (raw == null) return null;
+    final bounds = raw['bounds'];
+    if (bounds is! Map) return <String, double>{};
+    final out = <String, double>{};
+    for (final key in const ['minX', 'minY', 'minZ', 'maxX', 'maxY', 'maxZ']) {
+      final v = bounds[key];
+      if (v is num) out[key] = v.toDouble();
+    }
+    if (out.length != 6) return <String, double>{};
+    return out;
   }
 
   /// Push view + model matrices for one frame. Both are 16 floats,
@@ -119,7 +224,22 @@ class SceneBridge {
       _channel.invokeMethod<void>('resumeRendering');
 }
 
-/// Banner constant the rest of the codebase references when deciding
-/// whether to attempt the AetherCpp path. iOS-first: native plugin is
-/// shipping, Android / Web stubs land in G6 / G8.
-const bool kAetherSceneBridgeAvailable = true;
+/// True iff the current platform has a registered `aether_texture`
+/// MethodChannel handler. iOS + macOS Runners do (Phase 6.4e wires
+/// AetherTexturePlugin); Android + Web don't yet (G6 / G8 lands the
+/// platform-specific Texture↔Dawn glue when those targets enter
+/// scope. The pocketworld_flutter project doesn't even have an
+/// android/ directory at the time of writing — App Store launch is
+/// iOS-only per the project plan).
+///
+/// Callers (LiveModelView, AetherCppCardDemo, AetherCppViewerImpl)
+/// gate on this and raise UnsupportedViewerFormatError on platforms
+/// where it's false, so the UI can show a "platform not supported"
+/// cover instead of crashing on the first MethodChannel call.
+///
+/// Implementation lives in platform_check_io.dart /
+/// platform_check_web.dart so this file doesn't have to import
+/// `dart:io` (which fails to compile on web). See the conditional
+/// import at the top.
+final bool kAetherSceneBridgeAvailable =
+    aetherSceneBridgeAvailableForPlatform();
