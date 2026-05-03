@@ -71,21 +71,38 @@ class SceneBridge {
   static const _channel = MethodChannel('aether_texture');
   static const _warningChannel = MethodChannel('aether_texture/warning');
 
-  /// Broadcast stream of native-side warnings. Currently fires for
-  /// iOS memory warnings (kind="memory"); thermal events use the same
-  /// pattern when wired. Subscribers should drop GPU references and
-  /// rebuild lazily — the underlying SharedNativeTextures are GONE
-  /// when this fires, the textureIds Flutter is rendering reference
-  /// nothing.
-  Stream<String> get warnings => _warningController.stream;
-  final StreamController<String> _warningController =
-      StreamController<String>.broadcast();
+  /// Broadcast stream of native-side warnings. Subscribers should
+  /// inspect [WarningEvent.kind] AND [WarningEvent.disposedIds] before
+  /// reacting:
+  ///
+  ///   * `kind == 'memory'` — native side called handleMemoryWarning
+  ///     and disposed the textures listed in `disposedIds`. ONLY
+  ///     subscribers whose own textureId is in that set need to
+  ///     rebuild; others should ignore (their texture is still alive).
+  ///   * `kind == 'thermal'` — informational only. Native did NOT
+  ///     dispose anything; just lowered the displayLink fps. Subscribers
+  ///     should NOT tear down — doing so causes a fresh
+  ///     create/load/fit cycle that wastes CPU + briefly flashes the
+  ///     loading cover, defeating the whole point of the
+  ///     thermal-throttle optimization.
+  Stream<WarningEvent> get warnings => _warningController.stream;
+  final StreamController<WarningEvent> _warningController =
+      StreamController<WarningEvent>.broadcast();
 
   Future<void> _handleWarning(MethodCall call) async {
     if (call.method != 'warning') return;
     final args = call.arguments;
-    final kind = (args is Map && args['kind'] is String) ? args['kind'] as String : 'unknown';
-    _warningController.add(kind);
+    if (args is! Map) return;
+    final kind = (args['kind'] is String) ? args['kind'] as String : 'unknown';
+    final ids = <int>{};
+    final raw = args['disposedIds'];
+    if (raw is List) {
+      for (final v in raw) {
+        if (v is int) ids.add(v);
+        if (v is num) ids.add(v.toInt());
+      }
+    }
+    _warningController.add(WarningEvent(kind: kind, disposedIds: ids));
   }
 
   /// Create a renderer instance + return its Flutter textureId. The
@@ -146,6 +163,8 @@ class SceneBridge {
     required String path,
     int maxSplats = 0,
     int maxShDegree = 3,
+    double splatScaleMultiplier = 1.0,
+    double max3dScale = 0.0,
   }) async {
     final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'loadPly',
@@ -154,6 +173,8 @@ class SceneBridge {
         'path': path,
         'maxSplats': maxSplats,
         'maxShDegree': maxShDegree,
+        'splatScaleMultiplier': splatScaleMultiplier,
+        'max3dScale': max3dScale,
       },
     );
     return _decodeBounds(raw);
@@ -166,6 +187,8 @@ class SceneBridge {
     required String path,
     int maxSplats = 0,
     int maxShDegree = 3,
+    double splatScaleMultiplier = 1.0,
+    double max3dScale = 0.0,
   }) async {
     final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'loadSpz',
@@ -174,6 +197,8 @@ class SceneBridge {
         'path': path,
         'maxSplats': maxSplats,
         'maxShDegree': maxShDegree,
+        'splatScaleMultiplier': splatScaleMultiplier,
+        'max3dScale': max3dScale,
       },
     );
     return _decodeBounds(raw);
@@ -243,3 +268,21 @@ class SceneBridge {
 /// import at the top.
 final bool kAetherSceneBridgeAvailable =
     aetherSceneBridgeAvailableForPlatform();
+
+/// Event payload for [SceneBridge.warnings]. Subscribers should react only
+/// when the event genuinely concerns them — see the doc on `warnings`.
+class WarningEvent {
+  final String kind;
+  final Set<int> disposedIds;
+  const WarningEvent({required this.kind, required this.disposedIds});
+
+  /// True when the native side actually destroyed [textureId] and the
+  /// owning Flutter widget must rebuild from scratch (create → load →
+  /// fit). Returns false for thermal warnings, for foreign-id memory
+  /// events, and for events that fire before the widget has a textureId.
+  bool affects(int? textureId) {
+    if (kind != 'memory') return false;
+    if (textureId == null) return false;
+    return disposedIds.contains(textureId);
+  }
+}

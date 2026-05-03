@@ -1,12 +1,18 @@
 // WorkDetailPage — full-screen 3D viewer for a single work.
 //
 // Pushed when the user taps a PostCard in the community feed. White
-// background, LiveModelView (Thermion / Filament) filling the safe
-// area, ORBIT manipulator on (drag to orbit, pinch to zoom). Auto-
-// rotate off — the user drives.
+// background, AetherCppCardDemo (aether_cpp scene renderer) filling
+// the safe area, auto-rotate on so the user can see the model from
+// all angles without gestures.
 //
-// Cross-platform: same Thermion-backed LiveModelView as PostCard, so
-// iOS / Android / Web all render identically.
+// Migrated from LiveModelView (thermion) to AetherCppCardDemo on
+// 2026-05-02 because thermion's GLB loader doesn't apply node
+// transforms (the cgltf scene-walk fix only lives in aether_cpp's
+// glb_loader.cpp), so e.g. the Khronos ToyCar arrived with
+// sphereR=540 and tripped thermion into "Error: invalid renderable"
+// on iOS 17+. The cost: orbit / pinch gestures are temporarily gone
+// — auto-rotate substitutes. Adding orbit to AetherCppCardDemo is a
+// follow-up tracked in PHASE_FLUTTER_VIEWER_PLAN.md G9.
 
 import 'dart:async';
 
@@ -15,7 +21,7 @@ import 'package:flutter/material.dart';
 import '../../community/community_service.dart';
 import '../../community/feed_models.dart';
 import '../design_system.dart';
-import 'live_model_view.dart';
+import 'aether_cpp_card_demo.dart';
 
 class WorkDetailPage extends StatefulWidget {
   final FeedWork work;
@@ -85,16 +91,13 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
             Expanded(
               child: modelUrl == null
                   ? const _NoModelState()
-                  : LiveModelView(
-                      key: ValueKey('detail-${widget.work.id}'),
+                  : AetherCppCardDemo(
+                      key: ValueKey('detail-aether-${widget.work.id}'),
                       modelUrl: modelUrl,
+                      // Detail page: orbit + pinch gestures, no
+                      // auto-rotate. Ported 2026-05-02 from the
+                      // LiveModelView path.
                       interactive: true,
-                      cameraDistance: 5.0,
-                      // User-captured scans ship baked lighting in
-                      // their baseColor. Stacking IBL on top double-
-                      // lights the model — see LiveModelView's
-                      // useEnvironmentLighting doc.
-                      useEnvironmentLighting: false,
                     ),
             ),
             _MetaRow(

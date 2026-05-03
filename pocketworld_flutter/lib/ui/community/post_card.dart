@@ -34,10 +34,12 @@ import 'live_model_view.dart';
 
 /// G4 toggle: when true, PostCards render their 3D model through the
 /// aether_cpp scene renderer (via SceneBridge MethodChannel) instead
-/// of thermion. Default false during the migration. Flip per-build to
-/// validate per-card; once stable, G9 removes the thermion branch
-/// entirely.
-const bool kPostCardUseAetherCppViewer = false;
+/// of thermion. Flipped to TRUE in G4 cutover — feed cards now go
+/// through the same Phase 6.4b/e infrastructure the home-screen
+/// renderer uses. The thermion branch stays in the tree for the
+/// detail page (interactive=true) until G5 lands the orbit gesture
+/// in AetherCppCardDemo. G9 removes thermion entirely.
+const bool kPostCardUseAetherCppViewer = true;
 
 class PostCard extends StatefulWidget {
   final FeedWork work;
@@ -95,6 +97,7 @@ class _PostCardState extends State<PostCard> {
   // the feed doesn't grow unbounded GPU memory over a long session.
   bool _isLive = false;
   Timer? _unmountTimer;
+  Timer? _mountTimer;
   // Long enough that a card almost never unmounts during a normal
   // session. We used to keep this at 5s — fine on paper, but each
   // unmount disposes a thermion ViewerWidget, and thermion 0.3.4's
@@ -103,8 +106,22 @@ class _PostCardState extends State<PostCard> {
   // subsequent renders, leaving cards permanently white when the user
   // scrolls back. With ≤ a few dozen feed entries we'd rather hold
   // mounted viewers in memory than touch that bug. The L3 instance
-  // cap (_LiveInstanceRegistry, 5) still bounds total alive viewers.
+  // cap (_LiveInstanceRegistry, 3) still bounds total alive viewers.
   static const Duration _unmountDelay = Duration(minutes: 5);
+  // Fast-scroll defense (added 2026-05-02): a card must be ≥
+  // _liveMountThreshold visible for [_mountDebounce] before its viewer
+  // actually mounts. Otherwise rapidly scrolling past a card mounts
+  // and immediately evicts it (via the L3 LRU cap), each cycle paying:
+  //   • 768×768 IOSurface allocation (Dawn/Metal SharedTextureMemory)
+  //   • cgltf parse + GPU upload of all primitives (49 for chess scene)
+  //   • build_mesh_draw_cache for per-primitive BindGroups
+  //   • destroy of all of the above on eviction
+  // On iPhone 14 Pro this hits thermal=serious within ~10s of fast
+  // scrolling, dropping fps to 12-15 and producing the "small black
+  // dot" — IOSurface created but render hadn't run yet when Flutter
+  // sampled it. With debounce, only cards the user pauses on (≥150ms
+  // dwell time) actually mount.
+  static const Duration _mountDebounce = Duration(milliseconds: 150);
 
   // Memoized so register/unregister see the same callback identity.
   // Without `late final`, every `_forceUnmount` tear-off would be a
@@ -179,20 +196,40 @@ class _PostCardState extends State<PostCard> {
     }
     widget.onVisibilityChanged?.call(next);
 
-    // Sticky-mount logic: rising past the threshold mounts immediately
-    // and cancels any pending unmount; falling below schedules an
-    // unmount but only after [_unmountDelay] elapses with the card
-    // still off-screen. Detail-page push/pop is well under that delay,
-    // so the model stays loaded across navigation transitions.
+    // Sticky-mount logic with fast-scroll defense:
+    //  - Rising past threshold:    cancel any pending unmount, then
+    //    debounce by [_mountDebounce] before actually mounting. If the
+    //    card scrolls back below threshold during the debounce window,
+    //    the timer fires harmlessly into a guard. Only cards the user
+    //    actually pauses on get to mount.
+    //  - Falling below threshold:  cancel any pending mount; if already
+    //    mounted, schedule an unmount after [_unmountDelay]. Detail-
+    //    page push/pop is well under that delay, so the model stays
+    //    loaded across navigation transitions.
     if (next >= _liveMountThreshold) {
       _unmountTimer?.cancel();
       _unmountTimer = null;
-      if (!_isLive) _setLive(true);
-    } else if (_isLive && _unmountTimer == null) {
-      _unmountTimer = Timer(_unmountDelay, () {
-        if (mounted) _setLive(false);
-        _unmountTimer = null;
-      });
+      if (!_isLive && _mountTimer == null) {
+        _mountTimer = Timer(_mountDebounce, () {
+          _mountTimer = null;
+          // Re-check mount/visibility at fire time — the card may have
+          // scrolled away or been disposed during the debounce.
+          if (mounted && _visibility >= _liveMountThreshold && !_isLive) {
+            _setLive(true);
+          }
+        });
+      }
+    } else {
+      // Cancel any pending mount — the card scrolled away before
+      // the dwell time elapsed, so we never paid the GPU upload cost.
+      _mountTimer?.cancel();
+      _mountTimer = null;
+      if (_isLive && _unmountTimer == null) {
+        _unmountTimer = Timer(_unmountDelay, () {
+          if (mounted) _setLive(false);
+          _unmountTimer = null;
+        });
+      }
     }
   }
 
@@ -224,6 +261,8 @@ class _PostCardState extends State<PostCard> {
   void dispose() {
     _unmountTimer?.cancel();
     _unmountTimer = null;
+    _mountTimer?.cancel();
+    _mountTimer = null;
     if (_isLive) {
       _LiveInstanceRegistry.unregister(_forceUnmountCallback);
     }
@@ -262,6 +301,13 @@ class _PostCardState extends State<PostCard> {
                       ? AetherCppCardDemo(
                           key: ValueKey('mv-aether-${_work.id}'),
                           modelUrl: modelUrl,
+                          // CRITICAL for the Dawn-MTLTexture-storm fix:
+                          // only the focused card runs a Ticker → only
+                          // it pushes setMatrices each frame → only it
+                          // stays "dirty" on the native side. Static
+                          // cards render once after load and then sleep
+                          // until they become focused (scrolled to).
+                          isFocused: widget.isFocused,
                         )
                       : LiveModelView(
                           // LiveModelView with manipulatorType: NONE has
@@ -304,19 +350,19 @@ class _ThumbnailPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Loading state per UX direction (2026-05-02): bare gradient. The
+    // 3D-cube icon previously shown here read as a separate "third
+    // viewer state" distinct from AetherCppCardDemo's own gradient
+    // cover, even though both represent "content not yet visible".
+    // Unifying both to the same look gives the user a single
+    // "loading → display" perception instead of "icon-placeholder →
+    // bare-gradient → display".
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [Colors.grey.shade100, Colors.grey.shade200],
-        ),
-      ),
-      child: const Center(
-        child: Icon(
-          Icons.view_in_ar_rounded,
-          color: AetherColors.textTertiary,
-          size: 48,
         ),
       ),
     );
@@ -534,30 +580,29 @@ class _ViewsChip extends StatelessWidget {
   }
 }
 
-/// Hard cap on simultaneously alive LiveModelView instances across the
-/// whole app. Each one holds a Filament swap chain + 60fps render
-/// thread; the visibility-driven _unmountTimer (5s grace) usually
-/// keeps us in 1–3 range, but a fast fling-scroll past 6+ cards in
-/// <1s briefly mounts all of them. That's been observed to spike GPU
-/// and occasionally provoke thermion's "Object doesn't exist (double
-/// free?)" RenderThread panic. The registry forces an immediate
-/// eviction of the LRU peer so we never go above [_maxAlive] in
-/// flight, regardless of scroll speed.
+/// Hard cap on simultaneously alive viewer instances across the whole
+/// app. Each one holds a 768×768 IOSurface, a Dawn SharedTextureMemory
+/// import, per-primitive vertex/index/factor buffers, and a per-
+/// primitive BindGroup chain (49 of these for the chess scene alone).
 ///
-/// Number cited from compose-reels (manjees/compose-reels), an open-
-/// source Jetpack Compose Reels implementation. Its README defines
-/// `playerPoolSize >= (preloadCount * 2) + 1`; with preloadCount=2
-/// (preload 2 ahead + 2 behind) that evaluates to 5 — the visible
-/// card plus the four cards we'd want pre/post-loaded around it.
-/// compose-reels itself defaults to 7 with two extra fling-time
-/// slots, but our Filament viewer is heavier than ExoPlayer (full
-/// Filament Engine + scene + IBL state per instance vs. ExoPlayer's
-/// shared codec resources), so we take the hard minimum.
+/// Original cap was 5 (compose-reels formula: `(preloadCount*2)+1`
+/// with preloadCount=2). Reduced to 3 on 2026-05-02 after iPhone 14
+/// Pro testing showed thermal=serious + 12-15fps drops within ~10s of
+/// fast scrolling — even with the new mount-debounce (PostCard
+/// `_mountDebounce = 150ms`), 5 simultaneously-alive renderers each
+/// holding a 768² IOSurface + ~10 GPU buffers + Metal command queue
+/// state is too much for the A16 to sustain. Cap=3 means: visible
+/// card + 1 ahead + 1 behind, which matches the compose-reels formula
+/// when we read it as preloadCount=1 instead.
+///
+/// If a future device has obviously more headroom (Pro Max with M-
+/// series-style sustained perf, or a tile-binned splat path that
+/// drops per-card GPU cost dramatically), revisit.
 ///
 /// References:
 ///   • https://github.com/manjees/compose-reels (README — Configuration)
 class _LiveInstanceRegistry {
-  static const int _maxAlive = 5;
+  static const int _maxAlive = 3;
   static final List<void Function()> _alive = <void Function()>[];
 
   static void register(void Function() forceUnmount) {

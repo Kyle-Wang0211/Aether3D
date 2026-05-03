@@ -158,8 +158,19 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 let texture = try SharedNativeTexture(width: width, height: height)
                 let id = textures.register(texture)
                 registered[id] = texture
-                texture.render()
-                textures.textureFrameAvailable(id)
+                // Skip the synchronous priming render when the app is
+                // backgrounded (or about to be). iOS Metal refuses GPU
+                // submissions from background processes and floods stderr
+                // with `IOGPUMetalError: Insufficient Permission` when we
+                // try anyway. Texture stays dirty by default; the next
+                // display-link tick after foreground resume picks it up
+                // and renders it for free.
+                let isBackgrounded = UIApplication.shared.applicationState
+                    != .active
+                if !isPaused && !isBackgrounded {
+                    texture.render()
+                    textures.textureFrameAvailable(id)
+                }
                 startAnimation(textureId: id, texture: texture)
                 result(NSNumber(value: id))
             } catch TextureCreateError.iosurfaceCreate {
@@ -267,6 +278,12 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             // Phase 6.4f.3.b — accept memory caps from Dart side.
             let maxSplats = (args["maxSplats"] as? NSNumber)?.uint32Value ?? 0
             let maxShDegree = (args["maxShDegree"] as? NSNumber)?.uint8Value ?? 3
+            // Phase 6.4f hotfix — splat scale multiplier (see loadSpz).
+            let splatScale = (args["splatScaleMultiplier"] as? NSNumber)?.floatValue ?? 1.0
+            texture.setSplatScaleMultiplier(splatScale)
+            // Phase 6.4f hotfix — halo cull by 3D scale (see loadSpz).
+            let max3dScale = (args["max3dScale"] as? NSNumber)?.floatValue ?? 0.0
+            texture.setMax3dScale(max3dScale)
             if !texture.loadPly(path: path,
                                 maxSplats: maxSplats,
                                 maxShDegree: maxShDegree) {
@@ -317,6 +334,15 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             // Phase 6.4f.3.b — accept memory caps from Dart side.
             let maxSplats = (args["maxSplats"] as? NSNumber)?.uint32Value ?? 0
             let maxShDegree = (args["maxShDegree"] as? NSNumber)?.uint8Value ?? 3
+            // Phase 6.4f hotfix — splat scale multiplier (1.0 default
+            // honors file scale; PocketWorld feed thumbnails pass 4.0).
+            // Apply BEFORE loadSpz so the very first frame uses it.
+            let splatScale = (args["splatScaleMultiplier"] as? NSNumber)?.floatValue ?? 1.0
+            texture.setSplatScaleMultiplier(splatScale)
+            // Phase 6.4f hotfix — halo cull by 3D scale (drop large
+            // soft Gaussians authored as background context). 0 disables.
+            let max3dScale = (args["max3dScale"] as? NSNumber)?.floatValue ?? 0.0
+            texture.setMax3dScale(max3dScale)
             if !texture.loadSpz(path: path,
                                 maxSplats: maxSplats,
                                 maxShDegree: maxShDegree) {
@@ -489,14 +515,25 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         // has the newest.
         let total = registered.count
         guard total > 0 else { return }
-        var sortedByRecency = registered.sorted { lhs, rhs in
-            lhs.value.lastRenderTimestamp > rhs.value.lastRenderTimestamp
-        }
-        // Keep the most recent ONE (the focused card). Dispose the
-        // rest. Tighten this if memory pressure is severe (e.g. keep
-        // 0 in critical), but for typical iOS warnings 1 is enough.
-        let keepCount = 1
-        let disposeIds = sortedByRecency.dropFirst(keepCount).map { $0.key }
+        // Sort: NEWEST first. Swift can't infer the closure param
+        // types on Dictionary.sorted because the iterator yields
+        // anonymous (key:Int64, value:SharedNativeTexture) tuples,
+        // hence the explicit annotation.
+        let sortedByRecency: [(key: Int64, value: SharedNativeTexture)] =
+            registered.sorted { (lhs: (key: Int64, value: SharedNativeTexture),
+                                 rhs: (key: Int64, value: SharedNativeTexture)) -> Bool in
+                lhs.value.lastRenderTimestamp > rhs.value.lastRenderTimestamp
+            }
+        // Keep the K most-recently rendered textures. With K=1 the
+        // memory warning aggressively drops everyone except the
+        // focused card, but that means the user's last few back-
+        // scrolls all hit the rebuild path. iPhone 14 Pro's jetsam
+        // threshold (~1.5 GB) leaves room for ~3 SPZ scenes
+        // (~50 MB GPU each) plus a GLB plus Flutter overhead, so
+        // K=3 is the sweet spot — keeps the focused card AND the
+        // two most-recent neighbors alive across pressure events.
+        let keepCount = 3
+        let disposeIds: [Int64] = sortedByRecency.dropFirst(keepCount).map { $0.key }
         NSLog("[AetherTexture] memory warning — disposing %d/%d textures (keeping focused)",
               disposeIds.count, total)
         warningChannel?.invokeMethod("warning", arguments: [

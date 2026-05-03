@@ -43,11 +43,14 @@ struct RenderUniforms {
     // post-projection 2D bounding-box extent is below this value (in
     // pixels) are dropped early in this kernel without ever entering
     // the visible list. 0.0 disables the cull (legacy behavior).
-    // WGSL's host-shareable struct layout pads the struct end to the
-    // largest member alignment (16 B from the vec4 background) — so
-    // a single trailing f32 here implicitly pads to a 16-B-aligned
-    // 160-B struct, matching RenderArgsStorage on the C++ side.
     lod_extent_min: f32,
+    // Phase 6.4f hotfix — global splat-scale multiplier; see C++
+    // RenderArgsStorage doc. Must match project_visible.wgsl layout.
+    splat_scale_multiplier: f32,
+    // Phase 6.4f hotfix — drop splats whose 3D scale (max of xyz)
+    // exceeds this threshold. Filters the halo splats authored as
+    // large soft Gaussians by 3DGS photometric optimizers.
+    max_3d_scale: f32,
 }
 
 const COV_BLUR: f32 = 0.3f;
@@ -220,7 +223,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if ((mean_c_2.z < 0.01f) || (mean_c_2.z > 10000000000f)) {
         return;
     }
-    let scale_2 = s.scale;
+    // Phase 6.4f hotfix — 3D-scale halo cull. Drops splats whose
+    // authored scale (max of xyz, in world units) exceeds the
+    // threshold. Per-splat property → view-stable cull, no
+    // depth-shell artifact like screen-extent culling. Threshold
+    // applied to the AUTHORED scale (s.scale), NOT the multiplied
+    // scale_2 — the multiplier is a viewer-side display tweak that
+    // shouldn't move splats in/out of the cull set.
+    let max_scale_thresh = uniforms.max_3d_scale;
+    let max_scale_xyz = max(max(s.scale.x, s.scale.y), s.scale.z);
+    if ((max_scale_thresh > 0f) && (max_scale_xyz > max_scale_thresh)) {
+        return;
+    }
+    // Phase 6.4f hotfix — global splat-scale multiplier; see
+    // project_visible.wgsl for rationale.
+    let scale_mult = select(uniforms.splat_scale_multiplier,
+                            1.0f,
+                            uniforms.splat_scale_multiplier <= 0.0f);
+    let scale_2 = s.scale * scale_mult;
     let quat_norm_sqr = dot(s.quat, s.quat);
     if (quat_norm_sqr < 0.000001f) {
         return;

@@ -219,8 +219,12 @@ class _LiveModelViewState extends State<LiveModelView>
   // Drag DOWN = positive dy; need elevation to ADD → multiplier +1.0.
   // (Triple-check the math when changing — got this wrong twice.)
   static const double _yInversion = 1.0;
-  static const double _minRadius = 1.5;
-  static const double _maxRadius = 20.0;
+  // Pinch-zoom bounds. Static defaults are sized for normalized models
+  // (sphereR ≈ 1) — they get overwritten by _computeFit once the real
+  // bounding sphere is known so ToyCar (sphereR≈540) doesn't snap from
+  // its fit distance of ~2900 down to 20 on the user's first pinch.
+  double _minRadius = 1.5;
+  double _maxRadius = 20.0;
 
   // ─── Load gating ─────────────────────────────────────────────────────
   // _modelReady stays false until the asset is in the scene + the first
@@ -555,13 +559,52 @@ class _LiveModelViewState extends State<LiveModelView>
       final dist = (r / sinHalfFovV) * padding;
       if (!dist.isFinite || dist <= 0) return;
       final fovVdeg = halfFovV * 2 * 180 / math.pi;
+      // Re-issue setLensProjection with near/far scaled to the model
+      // AND scale the pinch-zoom bounds while we're at it.
+      //
+      // thermion 0.3.4's defaults are kNear=0.1, kFar=100.0 (see
+      // .pub-cache/.../filament/src/interface/layers.dart). That works
+      // for normalized models but completely clips anything large —
+      // e.g. the Khronos ToyCar GLB lives in a sphereR≈540 local
+      // space, so the fit puts the camera at ~2900 units, ~29× past
+      // the default far plane. Result: the entire model is culled
+      // and the texture renders the clear color (black on detail
+      // page).
+      //
+      // model-viewer's solution: derive near/far from the fitted
+      // sphere — near just inside the front of the bounding sphere,
+      // far just past the back. Because we ALSO let the user pinch-
+      // zoom on the detail page, near/far need to span the entire
+      // [min,max] orbit range so a zoom-in-then-out gesture doesn't
+      // trip the planes. We size the orbit bounds at [0.5×fit, 4×fit]
+      // (the legacy [1.5, 20] absolute bounds were wrong for any
+      // model that wasn't unit-cube-normalized) and floor near at
+      // 0.01 so the projection matrix stays sane for the tiny-r
+      // Corset case (r=0.04).
+      _minRadius = math.max(r * 1.05, dist * 0.5);
+      _maxRadius = dist * 4.0;
+      final nearPlane = math.max(0.01, _minRadius - r * 1.5);
+      final farPlane = _maxRadius + r * 1.5;
+      try {
+        await camera.setLensProjection(
+          focalLength: _kFocalLengthMM,
+          aspect: 1.0,
+          near: nearPlane,
+          far: farPlane,
+        );
+      } catch (e) {
+        debugPrint('[LiveModelView] setLensProjection (fit) failed: $e');
+      }
+      if (_disposed) return;
       debugPrint('[LiveModelView] fit ${widget.modelUrl}: '
           'aabb=([${aabb.min.x.toStringAsFixed(2)}..${aabb.max.x.toStringAsFixed(2)}], '
           '[${aabb.min.y.toStringAsFixed(2)}..${aabb.max.y.toStringAsFixed(2)}], '
           '[${aabb.min.z.toStringAsFixed(2)}..${aabb.max.z.toStringAsFixed(2)}]) '
           'center=(${cx.toStringAsFixed(2)},${cy.toStringAsFixed(2)},${cz.toStringAsFixed(2)}) '
           'sphereR=${r.toStringAsFixed(2)} fovV=${fovVdeg.toStringAsFixed(1)}° '
-          '→ dist=${dist.toStringAsFixed(2)}');
+          '→ dist=${dist.toStringAsFixed(2)} '
+          'near=${nearPlane.toStringAsFixed(2)} '
+          'far=${farPlane.toStringAsFixed(2)}');
       _fittedDistance = dist;
       _orbitRadius = dist;
       if (mounted && !_disposed) {
@@ -721,18 +764,10 @@ class _LoadCover extends StatelessWidget {
         ),
       );
     }
+    // Loading state per UX direction (2026-05-02): bare gradient cover,
+    // no spinner. See AetherCppCardDemo._AetherCardCover for rationale.
     return DecoratedBox(
       decoration: BoxDecoration(gradient: gradient),
-      child: const Center(
-        child: SizedBox(
-          width: 24,
-          height: 24,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation<Color>(AetherColors.primary),
-          ),
-        ),
-      ),
     );
   }
 }

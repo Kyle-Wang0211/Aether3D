@@ -60,6 +60,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -209,7 +210,31 @@ struct RenderArgsStorage {
     // Phase 6.4f.4.b — runtime LOD: min projected pixel extent for
     // a splat to participate in the visible list. 0 = disabled.
     float    lod_extent_min;
-    float    _lod_pad[3];  // align to vec4 for WGSL uniform layout
+    // Phase 6.4f hotfix — global splat-scale multiplier applied in
+    // project_visible.wgsl / project_forward.wgsl. Niantic SPZ files
+    // are typically authored at AR-viewing density (sub-pixel splats
+    // when shown at PocketWorld feed thumbnail resolution); a
+    // multiplier of 4× makes each splat overlap its neighbors enough
+    // to read as a continuous surface. Detail page passes 1.0 (file
+    // intent honored). 0.0 sentinel falls back to 1.0 in the shader
+    // for safety; the C ABI setter accepts >0 and clamps.
+    float    splat_scale_multiplier;
+    // Phase 6.4f hotfix — maximum 3D-space scale for a splat to render.
+    // Splats whose `max(scale_x, scale_y, scale_z)` (in world units)
+    // exceeds this threshold are culled. 0 disables.
+    //
+    // Why this beats lod_extent_max for halo removal: extent_max is
+    // screen-pixel based, so its cull boundary is depth-dependent
+    // (forms a sphere around the camera that always projects as a
+    // circle, no matter the orbit angle). 3D scale is a property of
+    // the SPLAT not the camera, so the kept splat set stays the same
+    // under rotation. Why this beats min_opacity: 3DGS training does
+    // sometimes author halo splats as high-opacity-but-large
+    // Gaussians (specifically, photometric optimizers prefer big
+    // Gaussians to cheaply cover smooth low-frequency background
+    // regions), so opacity isn't a reliable halo signal.
+    float    max_3d_scale;
+    float    _lod_pad[1];  // align tail to vec4 for WGSL storage layout
 };
 static_assert(sizeof(RenderArgsStorage) == 160, "matches WGSL RenderUniforms");
 
@@ -688,8 +713,67 @@ private:
     std::unordered_map<std::string, std::weak_ptr<SplatData>> entries_;
 };
 
+// Phase 6.4f hotfix — DECODED splat data cache.
+//
+// `SplatDataCache` above only saves the GPU-upload step on a cache hit.
+// The 17 MB SPZ → 786 k gaussian decode itself takes ~3 s on iPhone 14
+// Pro, and that work runs every time we call load_spz with a different
+// `max_sh_degree` — feed loads with cap=0 and detail page loads with
+// cap=3 produce different SplatDataCache keys, so the second load
+// re-decodes from scratch even though the file is identical.
+//
+// `DecodedSplatCache` keys on `"spz|path|mtime"` (no caps) so the
+// decoded gaussians + raw sh_rest survive the SH-cap variation. The
+// pre-cap percentile bounds get cached too (~120 ms saved per re-load).
+//
+// Memory cost: ~786 k × 96 B (GaussianParams) + 786 k × 180 B
+// (sh_rest at sh_degree=3) ≈ 220 MB per cached scene. Held by
+// weak_ptr so it auto-evicts when no SplatScene references it; the
+// SplatDataCache below also keeps the GPU upload alive separately, so
+// freeing the decoded cache doesn't break in-flight renders.
+struct DecodedSplatData {
+    std::vector<::aether::splat::GaussianParams> gaussians;
+    std::vector<float> sh_rest;
+    std::uint32_t sh_degree{0};
+    float bounds_min_pre[3]{0.0f, 0.0f, 0.0f};
+    float bounds_max_pre[3]{0.0f, 0.0f, 0.0f};
+    bool has_bounds_pre{false};
+};
+
+class DecodedSplatCache {
+public:
+    std::shared_ptr<DecodedSplatData> get(const std::string& key) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(key);
+        if (it == entries_.end()) return nullptr;
+        if (auto sp = it->second.lock()) return sp;
+        entries_.erase(it);
+        return nullptr;
+    }
+    void put(const std::string& key, std::shared_ptr<DecodedSplatData> data) {
+        std::lock_guard<std::mutex> lk(mu_);
+        entries_[key] = data;
+        if (entries_.size() > 64u) {
+            for (auto i = entries_.begin(); i != entries_.end();) {
+                if (i->second.expired()) i = entries_.erase(i);
+                else ++i;
+            }
+        }
+    }
+    static DecodedSplatCache& instance() {
+        static DecodedSplatCache s;
+        return s;
+    }
+private:
+    std::mutex mu_;
+    std::unordered_map<std::string, std::weak_ptr<DecodedSplatData>> entries_;
+};
+
 struct SplatScene {
     std::shared_ptr<SplatData> data;      // shared GPU data buffers (Phase 6.4f.3.c)
+    std::shared_ptr<DecodedSplatData> decoded;  // pin decoded source so the
+                                                 // cache entry survives until
+                                                 // last consumer is gone
     std::uint32_t num_splats{0};          // mirror of data->num_splats
     std::uint32_t sh_degree{0};           // mirror of data->sh_degree
     float bounds_min[3]{0.0f, 0.0f, 0.0f};
@@ -1109,6 +1193,19 @@ struct AetherSceneRenderer {
     // for a splat to enter the visible list. Default 0 disables the
     // cull (legacy behavior). Set via aether_scene_renderer_set_lod_extent_min.
     float lod_extent_min{0.0f};
+
+    // Phase 6.4f hotfix — global splat-scale multiplier propagated to
+    // project_forward / project_visible. Default 1.0 honors the file's
+    // authored splat density. PocketWorld feed thumbnails set this to
+    // 4.0 so each splat overlaps neighbors enough to read as a
+    // continuous surface even when projected sub-pixel at fit
+    // distance. Set via aether_scene_renderer_set_splat_scale_multiplier.
+    float splat_scale_multiplier{1.0f};
+
+    // Phase 6.4f hotfix — drop splats whose 3D scale exceeds this
+    // (per-splat property, view-stable). 0 disables. See
+    // RenderArgsStorage.max_3d_scale doc.
+    float max_3d_scale{0.0f};
 
     // Mesh path (filled by load_glb)
     bool has_mesh{false};
@@ -1874,7 +1971,9 @@ static bool build_splat_scene_from_gaussians(
     const std::vector<::aether::splat::GaussianParams>& gaussians,
     std::uint32_t sh_degree,
     const float* sh_rest,
-    const std::string& cache_key = std::string{}) {
+    const std::string& cache_key = std::string{},
+    const float* bounds_hint_min = nullptr,   // optional pre-cap percentile bounds
+    const float* bounds_hint_max = nullptr) {
     if (!r || !r->device || gaussians.empty()) return false;
     using namespace ::aether::render;
     auto& dev = *(r->device);
@@ -1982,6 +2081,21 @@ static bool build_splat_scene_from_gaussians(
                     coeffs_non_dc[dst + 1] = sh_rest[src_base + 1u * non_dc_basis + b];
                     coeffs_non_dc[dst + 2] = sh_rest[src_base + 2u * non_dc_basis + b];
                 }
+            }
+        }
+
+        // Phase 6.4f hotfix: prefer pre-cap bounds hint if caller computed
+        // one — load_spz_into_renderer / load_ply_into_renderer compute
+        // percentile bounds on the ORIGINAL (uncapped) gaussians, where
+        // the 92%-central / 7%-outlier split is honest. Computing here on
+        // post-cap gaussians is wrong: octree subsample re-balances the
+        // distribution so that outlier voxels hold roughly equal
+        // representative weight as central voxels, and a 1st/99th
+        // percentile on the merged set still falls in the outlier ring.
+        if (bounds_hint_min && bounds_hint_max) {
+            for (int c = 0; c < 3; ++c) {
+                s.bounds_min[c] = bounds_hint_min[c];
+                s.bounds_max[c] = bounds_hint_max[c];
             }
         }
 
@@ -2858,6 +2972,29 @@ static std::string make_cache_key(const char* ext,
     return std::string(buf);
 }
 
+// Phase 6.4f hotfix — path+mtime-only key for the DecodedSplatCache.
+// Same file → same decoded data regardless of caps; the SH cap is
+// applied as an effective_sh_degree at upload time without modifying
+// the cached vectors.
+static std::string make_decoded_cache_key(const char* ext, const char* path) {
+    std::int64_t mtime = 0;
+    struct stat st{};
+    if (path && stat(path, &st) == 0) {
+#if defined(__APPLE__)
+        mtime = static_cast<std::int64_t>(st.st_mtimespec.tv_sec) * 1'000'000'000LL +
+                static_cast<std::int64_t>(st.st_mtimespec.tv_nsec);
+#else
+        mtime = static_cast<std::int64_t>(st.st_mtime);
+#endif
+    }
+    char buf[1024];
+    std::snprintf(buf, sizeof(buf), "decoded|%s|%s|%lld",
+                  ext ? ext : "?",
+                  path ? path : "",
+                  static_cast<long long>(mtime));
+    return std::string(buf);
+}
+
 static bool load_ply_into_renderer(
     AetherSceneRenderer* r,
     const char* ply_path,
@@ -2865,32 +3002,111 @@ static bool load_ply_into_renderer(
     std::uint8_t max_sh_degree)
 {
     if (!r || !ply_path) return false;
-    ::aether::splat::PlyLoadResult result;
-    auto status = ::aether::splat::load_ply(ply_path, result);
-    if (!::aether::core::is_ok(status)) {
-        scene_log("load_ply: parse failed status=%d path='%s'",
-                  static_cast<int>(status), ply_path);
-        return false;
+    // DecodedSplatCache lookup, same pattern as load_spz_into_renderer.
+    const std::string decoded_key = make_decoded_cache_key("ply", ply_path);
+    std::shared_ptr<DecodedSplatData> decoded =
+        DecodedSplatCache::instance().get(decoded_key);
+    bool decoded_cache_hit = (decoded != nullptr);
+
+    if (!decoded) {
+        ::aether::splat::PlyLoadResult result;
+        auto status = ::aether::splat::load_ply(ply_path, result);
+        if (!::aether::core::is_ok(status)) {
+            scene_log("load_ply: parse failed status=%d path='%s'",
+                      static_cast<int>(status), ply_path);
+            return false;
+        }
+        if (result.gaussians.empty()) {
+            scene_log("load_ply: no gaussians in '%s'", ply_path);
+            return false;
+        }
+        decoded = std::make_shared<DecodedSplatData>();
+        decoded->gaussians = std::move(result.gaussians);
+        decoded->sh_rest   = std::move(result.sh_rest);
+        decoded->sh_degree = result.sh_degree;
+        const std::size_t Norig = decoded->gaussians.size();
+        if (Norig >= 100u) {
+            std::vector<float> coord_buf(Norig);
+            for (int c = 0; c < 3; ++c) {
+                for (std::size_t i = 0; i < Norig; ++i) {
+                    coord_buf[i] = decoded->gaussians[i].position[c];
+                }
+                const std::size_t lo_idx = Norig * 5u / 100u;
+                const std::size_t hi_idx = Norig * 95u / 100u;
+                std::nth_element(coord_buf.begin(),
+                                 coord_buf.begin() + lo_idx,
+                                 coord_buf.end());
+                decoded->bounds_min_pre[c] = coord_buf[lo_idx];
+                std::nth_element(coord_buf.begin() + lo_idx + 1,
+                                 coord_buf.begin() + hi_idx,
+                                 coord_buf.end());
+                decoded->bounds_max_pre[c] = coord_buf[hi_idx];
+            }
+            decoded->has_bounds_pre = true;
+        }
+        DecodedSplatCache::instance().put(decoded_key, decoded);
     }
-    if (result.gaussians.empty()) {
-        scene_log("load_ply: no gaussians in '%s'", ply_path);
-        return false;
+
+    std::uint32_t sh_degree = decoded->sh_degree;
+
+    // Same stride decimation + SH cap fast path as load_spz_into_renderer.
+    // See that function for the why-not-octree-merge rationale.
+    std::vector<::aether::splat::GaussianParams> work_gaussians_local;
+    std::vector<float> work_sh_rest_local;
+    const std::vector<::aether::splat::GaussianParams>* work_gaussians =
+        &decoded->gaussians;
+    const std::vector<float>* work_sh_rest = &decoded->sh_rest;
+    std::uint32_t effective_sh_degree = sh_degree;
+
+    // Same stride-only subset as load_spz_into_renderer (no position
+    // filter). Halo splats are dropped in the shader by lod_extent_max.
+    const std::size_t Norig = decoded->gaussians.size();
+    if (max_splats > 0u && Norig > max_splats) {
+        const std::size_t k = (Norig + max_splats - 1u) / max_splats;
+        const std::size_t out_n = (Norig + k - 1u) / k;
+        work_gaussians_local.reserve(out_n);
+        const std::uint32_t orig_basis_per_splat =
+              (sh_degree == 0u) ? 0u
+            : (sh_degree == 1u) ? 9u
+            : (sh_degree == 2u) ? 24u
+            : 45u;
+        if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+            work_sh_rest_local.reserve(out_n * orig_basis_per_splat);
+        }
+        for (std::size_t i = 0; i < Norig; i += k) {
+            work_gaussians_local.push_back(decoded->gaussians[i]);
+            if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+                const std::size_t off = i * orig_basis_per_splat;
+                work_sh_rest_local.insert(
+                    work_sh_rest_local.end(),
+                    decoded->sh_rest.begin() + off,
+                    decoded->sh_rest.begin() + off + orig_basis_per_splat);
+            }
+        }
+        work_gaussians = &work_gaussians_local;
+        work_sh_rest = &work_sh_rest_local;
     }
-    std::uint32_t sh_degree = result.sh_degree;
-    apply_load_caps(result.gaussians, result.sh_rest, sh_degree,
-                    max_splats, max_sh_degree);
-    const float* sh_rest = result.sh_rest.empty() ? nullptr : result.sh_rest.data();
+    if (max_sh_degree < effective_sh_degree) {
+        effective_sh_degree = static_cast<std::uint32_t>(max_sh_degree);
+    }
+
+    const float* sh_rest_ptr = work_sh_rest->empty()
+        ? nullptr : work_sh_rest->data();
     const std::string key = make_cache_key("ply", ply_path,
                                             max_splats, max_sh_degree);
-    if (!build_splat_scene_from_gaussians(r, result.gaussians,
-                                           sh_degree, sh_rest, key)) {
+    if (!build_splat_scene_from_gaussians(r, *work_gaussians,
+                                           effective_sh_degree, sh_rest_ptr, key,
+                                           decoded->has_bounds_pre ? decoded->bounds_min_pre : nullptr,
+                                           decoded->has_bounds_pre ? decoded->bounds_max_pre : nullptr)) {
         scene_log("load_ply: build_splat_scene failed for '%s'", ply_path);
         return false;
     }
-    scene_log("load_ply: '%s' kept=%zu sh_degree=%u (cap max_splats=%u max_sh=%u)",
-              ply_path, result.gaussians.size(),
-              static_cast<unsigned>(sh_degree),
-              max_splats, static_cast<unsigned>(max_sh_degree));
+    if (r->splat_scene) r->splat_scene->decoded = decoded;
+    scene_log("load_ply: '%s' kept=%zu sh_degree=%u (cap max_splats=%u max_sh=%u)%s",
+              ply_path, work_gaussians->size(),
+              static_cast<unsigned>(effective_sh_degree),
+              max_splats, static_cast<unsigned>(max_sh_degree),
+              decoded_cache_hit ? " [DECODED CACHE HIT]" : "");
     return true;
 }
 
@@ -2901,37 +3117,173 @@ static bool load_spz_into_renderer(
     std::uint8_t max_sh_degree)
 {
     if (!r || !spz_path) return false;
-    ::aether::splat::SpzDecodeResult spz_result;
-    auto status = ::aether::splat::load_spz(spz_path, spz_result);
-    if (!::aether::core::is_ok(status)) {
-        scene_log("load_spz: parse/decode failed status=%d path='%s'",
-                  static_cast<int>(status), spz_path);
-        return false;
+    // Phase 6.4f hotfix — per-stage timing instrumentation.
+    // User reports ~10 s end-to-end load on iPhone 14 Pro for the
+    // 17 MB hornedlizard.spz. Break it down so we know which stage
+    // to optimize next.
+    using clk = std::chrono::steady_clock;
+    const auto t_load_begin = clk::now();
+    auto ms_since = [](clk::time_point a) {
+        return std::chrono::duration<double, std::milli>(clk::now() - a).count();
+    };
+
+    // Phase 6.4f hotfix — DecodedSplatCache lookup. Same file (path +
+    // mtime) → reuse decoded gaussians + sh_rest + pre-cap bounds even
+    // if max_sh_degree differs (feed cap=0 vs detail cap=3). Saves
+    // ~3 s per re-load on second + later opens of the same file.
+    const std::string decoded_key = make_decoded_cache_key("spz", spz_path);
+    std::shared_ptr<DecodedSplatData> decoded =
+        DecodedSplatCache::instance().get(decoded_key);
+    bool decoded_cache_hit = (decoded != nullptr);
+    double t_decode_ms = 0.0;
+    double t_bounds_ms = 0.0;
+
+    if (!decoded) {
+        ::aether::splat::SpzDecodeResult spz_result;
+        auto status = ::aether::splat::load_spz(spz_path, spz_result);
+        if (!::aether::core::is_ok(status)) {
+            scene_log("load_spz: parse/decode failed status=%d path='%s'",
+                      static_cast<int>(status), spz_path);
+            return false;
+        }
+        if (spz_result.gaussians.empty()) {
+            scene_log("load_spz: no gaussians in '%s'", spz_path);
+            return false;
+        }
+        t_decode_ms = ms_since(t_load_begin);
+        const auto t_after_decode = clk::now();
+
+        // Phase 6.4f hotfix: compute percentile bounds on the ORIGINAL,
+        // uncapped gaussians. apply_load_caps below runs an octree merge
+        // that re-balances the position distribution (each leaf becomes one
+        // representative regardless of how many splats fed it), so a
+        // post-cap percentile gets pulled toward the outlier ring. Pre-cap,
+        // 786k Niantic-style gaussians are typically ~92% on-subject + 7%
+        // background tail; 5%/95% percentile cleanly drops the tail.
+        decoded = std::make_shared<DecodedSplatData>();
+        decoded->gaussians = std::move(spz_result.gaussians);
+        decoded->sh_rest   = std::move(spz_result.sh_rest);
+        decoded->sh_degree = static_cast<std::uint32_t>(spz_result.sh_degree);
+        const std::size_t Norig = decoded->gaussians.size();
+        if (Norig >= 100u) {
+            std::vector<float> coord_buf(Norig);
+            for (int c = 0; c < 3; ++c) {
+                for (std::size_t i = 0; i < Norig; ++i) {
+                    coord_buf[i] = decoded->gaussians[i].position[c];
+                }
+                // 5%/95% per-axis — Niantic/Polycam/KIRI captures all
+                // have a heavy outlier tail (~5%) at ±20× the subject;
+                // tighter percentiles clip legitimate subject extents.
+                const std::size_t lo_idx = Norig * 5u / 100u;
+                const std::size_t hi_idx = Norig * 95u / 100u;
+                std::nth_element(coord_buf.begin(),
+                                 coord_buf.begin() + lo_idx,
+                                 coord_buf.end());
+                decoded->bounds_min_pre[c] = coord_buf[lo_idx];
+                std::nth_element(coord_buf.begin() + lo_idx + 1,
+                                 coord_buf.begin() + hi_idx,
+                                 coord_buf.end());
+                decoded->bounds_max_pre[c] = coord_buf[hi_idx];
+            }
+            decoded->has_bounds_pre = true;
+        }
+        t_bounds_ms = ms_since(t_after_decode);
+        DecodedSplatCache::instance().put(decoded_key, decoded);
     }
-    if (spz_result.gaussians.empty()) {
-        scene_log("load_spz: no gaussians in '%s'", spz_path);
-        return false;
+
+    const auto t_after_bounds = clk::now();
+    std::uint32_t sh_degree = decoded->sh_degree;
+
+    // Caps. SH-cap-only fast path: pass an effective_sh_degree to
+    // build_splat_scene below, which only reads non_dc_basis(deg)
+    // entries from sh_rest regardless of how much is allocated.
+    // Splat-count cap path: STRIDE decimation (every k-th splat),
+    // preserves each splat's authored scale — works well combined
+    // with splat_scale_multiplier=4 in feed mode (no octree-merge
+    // scale inflation that PR #97.c introduced).
+    //
+    // Why not octree_subsample_merged: the octree merge sets each
+    // representative's scale to mean(intrinsic) + sqrt(spatial_variance),
+    // which inflates 2-3× per leaf. Combined with the 4× viewer-side
+    // splat_scale_multiplier, splats become enormous blobs (16-30×
+    // their authored size) — looks like a halftone smear instead of
+    // a detailed surface. Stride decimation keeps each kept splat at
+    // its authored scale, so feed thumbnails read as a coherent
+    // (if slightly sparser) surface.
+    std::vector<::aether::splat::GaussianParams> work_gaussians_local;
+    std::vector<float> work_sh_rest_local;
+    const std::vector<::aether::splat::GaussianParams>* work_gaussians =
+        &decoded->gaussians;
+    const std::vector<float>* work_sh_rest = &decoded->sh_rest;
+    std::uint32_t effective_sh_degree = sh_degree;
+
+    // Stride decimation only — no position filter. Splat sharpness
+    // doesn't correlate with position (a sharp surrounding splat is
+    // just as valuable as a sharp subject splat). Halo / blur splats
+    // are filtered in project_forward.wgsl by their projected screen
+    // extent (lod_extent_max), which is the correct signal: anything
+    // covering >N pixels is a soft halo, anything smaller is detail.
+    const std::size_t Norig = decoded->gaussians.size();
+    if (max_splats > 0u && Norig > max_splats) {
+        const std::size_t k = (Norig + max_splats - 1u) / max_splats;
+        const std::size_t out_n = (Norig + k - 1u) / k;
+        work_gaussians_local.reserve(out_n);
+        const std::uint32_t orig_basis_per_splat =
+              (sh_degree == 0u) ? 0u
+            : (sh_degree == 1u) ? 9u
+            : (sh_degree == 2u) ? 24u
+            : 45u;
+        if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+            work_sh_rest_local.reserve(out_n * orig_basis_per_splat);
+        }
+        for (std::size_t i = 0; i < Norig; i += k) {
+            work_gaussians_local.push_back(decoded->gaussians[i]);
+            if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+                const std::size_t off = i * orig_basis_per_splat;
+                work_sh_rest_local.insert(
+                    work_sh_rest_local.end(),
+                    decoded->sh_rest.begin() + off,
+                    decoded->sh_rest.begin() + off + orig_basis_per_splat);
+            }
+        }
+        work_gaussians = &work_gaussians_local;
+        work_sh_rest = &work_sh_rest_local;
     }
-    // Phase 6.4f.4.a — SPZ now decodes higher-order SH coefficients into
-    // sh_rest (PLY-native channel-major basis-major layout). Run the
-    // shared cap path on (gaussians, sh_rest, sh_degree) just like PLY.
-    std::uint32_t sh_degree = static_cast<std::uint32_t>(spz_result.sh_degree);
-    apply_load_caps(spz_result.gaussians, spz_result.sh_rest, sh_degree,
-                    max_splats, max_sh_degree);
-    const float* sh_rest = spz_result.sh_rest.empty()
-        ? nullptr : spz_result.sh_rest.data();
+    if (max_sh_degree < effective_sh_degree) {
+        effective_sh_degree = static_cast<std::uint32_t>(max_sh_degree);
+    }
+    const double t_caps_ms = ms_since(t_after_bounds);
+    const auto t_after_caps = clk::now();
+
+    const float* sh_rest_ptr = work_sh_rest->empty()
+        ? nullptr : work_sh_rest->data();
     const std::string key = make_cache_key("spz", spz_path,
                                             max_splats, max_sh_degree);
-    if (!build_splat_scene_from_gaussians(r, spz_result.gaussians,
-                                           sh_degree, sh_rest, key)) {
+    if (!build_splat_scene_from_gaussians(r, *work_gaussians,
+                                           effective_sh_degree, sh_rest_ptr, key,
+                                           decoded->has_bounds_pre ? decoded->bounds_min_pre : nullptr,
+                                           decoded->has_bounds_pre ? decoded->bounds_max_pre : nullptr)) {
         scene_log("load_spz: build_splat_scene failed for '%s'", spz_path);
         return false;
     }
-    scene_log("load_spz: '%s' kept=%zu sh_degree=%u (file_deg=%u, cap max_splats=%u max_sh=%u)",
-              spz_path, spz_result.gaussians.size(),
+    // Pin the decoded cache entry to the rendered scene so the cache
+    // doesn't drop the entry while we're still using it.
+    if (r->splat_scene) r->splat_scene->decoded = decoded;
+    const double t_build_ms = ms_since(t_after_caps);
+    const double t_total_ms = ms_since(t_load_begin);
+    const std::size_t kept_count = work_gaussians->size();
+    sh_degree = effective_sh_degree;  // for the final log line below
+    scene_log("load_spz: '%s' kept=%zu sh_degree=%u (file_deg=%u, cap max_splats=%u max_sh=%u)%s",
+              spz_path, kept_count,
               static_cast<unsigned>(sh_degree),
-              static_cast<unsigned>(spz_result.sh_degree),
-              max_splats, static_cast<unsigned>(max_sh_degree));
+              static_cast<unsigned>(decoded->sh_degree),
+              max_splats, static_cast<unsigned>(max_sh_degree),
+              decoded_cache_hit ? " [DECODED CACHE HIT]" : "");
+    // Phase 6.4f hotfix — per-stage breakdown so we know what to
+    // optimize when the user reports "10 s loading is unacceptable".
+    // decode + bounds will read 0.0 ms when DecodedSplatCache hit.
+    scene_log("load_spz: TIMING decode=%.1fms bounds=%.1fms caps=%.1fms build=%.1fms TOTAL=%.1fms",
+              t_decode_ms, t_bounds_ms, t_caps_ms, t_build_ms, t_total_ms);
     return true;
 }
 
@@ -2977,6 +3329,31 @@ extern "C" void aether_scene_renderer_set_lod_extent_min(
     if (pixel_extent_min < 0.0f) pixel_extent_min = 0.0f;
     if (pixel_extent_min > 256.0f) pixel_extent_min = 256.0f;
     r->lod_extent_min = pixel_extent_min;
+}
+
+extern "C" void aether_scene_renderer_set_splat_scale_multiplier(
+    AetherSceneRenderer* r,
+    float multiplier)
+{
+    if (!r) return;
+    // Clamp to a sane range. <= 0 falls back to 1.0 (sentinel handled
+    // shader-side too). > 16x would make every splat a screen-spanning
+    // blob — cap at 16 to keep the worst case from looking like a
+    // monochrome smear.
+    if (multiplier <= 0.0f) multiplier = 1.0f;
+    if (multiplier > 16.0f) multiplier = 16.0f;
+    r->splat_scale_multiplier = multiplier;
+}
+
+extern "C" void aether_scene_renderer_set_max_3d_scale(
+    AetherSceneRenderer* r,
+    float max_3d_scale)
+{
+    if (!r) return;
+    // 0 disables. Negative is meaningless. Generous upper clamp.
+    if (max_3d_scale < 0.0f) max_3d_scale = 0.0f;
+    if (max_3d_scale > 1024.0f) max_3d_scale = 1024.0f;
+    r->max_3d_scale = max_3d_scale;
 }
 
 extern "C" bool aether_scene_renderer_get_bounds(AetherSceneRenderer* r,
@@ -3070,7 +3447,47 @@ extern "C" void aether_scene_renderer_render_full(
     // vertical FOV — matches the mesh path's projection.
     if (r->has_splats && r->splat_scene) {
         RenderArgsStorage splat_u = make_empty_uniforms(r->width, r->height);
-        std::memcpy(splat_u.viewmat, view_matrix, 16 * sizeof(float));
+        // Phase 6.4f hotfix — convert OpenGL-convention view matrix to
+        // Brush splat shader convention (left-multiply by diag(1,-1,-1,1)).
+        //
+        // The Dart-side fit/orbit caller emits an OpenGL right-handed
+        // view matrix from `vector_math.makeViewMatrix`: in-front
+        // splats land at camera_z NEGATIVE, world +Y maps to screen
+        // top via the GL viewport's implicit Y-flip.
+        //
+        // The Brush splat shader (project_forward.wgsl line ~221)
+        // expects:
+        //   1) camera_z POSITIVE for in-front splats (it culls
+        //      `mean_c.z < 0.01`); without this fix every front-facing
+        //      splat gets discarded and we accidentally render only
+        //      the outlier tail behind the camera — making the pinch
+        //      gesture feel inverted (pinch-in moves camera away in
+        //      world coords but exposes more back-tail splats, so user
+        //      perceives the model "growing").
+        //   2) Pre-Y-flipped coords for the screen mapping
+        //      `mean2d_y = focal * y / z + height/2` (Metal /Vulkan
+        //      "screen y=0 is top" convention). Without flipping Y,
+        //      world up maps to screen bottom and the model renders
+        //      upside-down.
+        //
+        // diag(1,-1,-1,1) flips both Y and Z — equivalent to a 180°
+        // rotation around the X axis, which preserves handedness while
+        // converting between the two conventions.
+        //
+        // The mesh path keeps the original OpenGL view matrix because
+        // mesh_render.wgsl pairs it with a projection matrix that
+        // already handles the convention.
+        for (int i = 0; i < 16; ++i) splat_u.viewmat[i] = view_matrix[i];
+        // Negate rows 1 and 2 of every column (Y and Z components in
+        // the column-major 4x4 layout).
+        splat_u.viewmat[1]  = -splat_u.viewmat[1];
+        splat_u.viewmat[5]  = -splat_u.viewmat[5];
+        splat_u.viewmat[9]  = -splat_u.viewmat[9];
+        splat_u.viewmat[13] = -splat_u.viewmat[13];
+        splat_u.viewmat[2]  = -splat_u.viewmat[2];
+        splat_u.viewmat[6]  = -splat_u.viewmat[6];
+        splat_u.viewmat[10] = -splat_u.viewmat[10];
+        splat_u.viewmat[14] = -splat_u.viewmat[14];
         // Match the mesh-pass FOV = 60° vertical → focal_y = (h/2) / tan(30°)
         // ≈ h * 0.866. Apply same focal_x for square pixels (no anamorphism).
         const float fov_y_rad = 60.0f * 3.14159265f / 180.0f;
@@ -3103,6 +3520,10 @@ extern "C" void aether_scene_renderer_render_full(
         // Phase 6.4f.4.b — propagate the configured LOD threshold each
         // frame. Cheap (write-coalesced into the same uniform write).
         splat_u.lod_extent_min = r->lod_extent_min;
+        // Phase 6.4f hotfix — propagate the splat-scale multiplier.
+        splat_u.splat_scale_multiplier = r->splat_scale_multiplier;
+        // Phase 6.4f hotfix — propagate the halo-cull 3D-scale threshold.
+        splat_u.max_3d_scale = r->max_3d_scale;
         r->device->update_buffer(r->splat_uniforms_buf, &splat_u, 0, sizeof(splat_u));
     }
 

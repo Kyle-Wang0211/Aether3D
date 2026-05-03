@@ -59,6 +59,40 @@ class GlbCache {
     return future;
   }
 
+  /// Variant of [fetch] that returns the on-disk path instead of the
+  /// bytes. Required by the aether_cpp scene renderer path (cgltf
+  /// uses fopen/fread inside `cgltf_parse_file`; it can't accept an
+  /// HTTPS URL or an in-memory buffer through that entry point). The
+  /// thermion path doesn't use this — it consumes the Uint8List
+  /// directly via `loadGltfFromBuffer`.
+  ///
+  /// For `file://` URLs returns the local path immediately. For
+  /// HTTPS URLs ensures bytes are downloaded + persisted to disk
+  /// (re-using fetch's mem + disk caches) and returns the disk path.
+  Future<String> fetchPath(String url) async {
+    if (url.startsWith('file://')) {
+      return Uri.parse(url).toFilePath();
+    }
+    // Force a fetch so the bytes are guaranteed to have been written
+    // to disk by _persist(). _persist is fire-and-forget though, so
+    // we ALSO check existence + write synchronously here if needed —
+    // a race where fetch returned bytes but _persist hasn't completed
+    // yet would otherwise hand cgltf an empty file.
+    await fetch(url);
+    final file = await _diskFile(url);
+    if (!await file.exists()) {
+      // _persist hasn't finished; do it synchronously so cgltf finds
+      // the file on its first fopen call.
+      final bytes = _mem[url];
+      if (bytes == null) {
+        throw StateError('GlbCache.fetchPath: bytes vanished mid-fetch');
+      }
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(bytes, flush: true);
+    }
+    return file.path;
+  }
+
   Future<Uint8List> _load(String url) async {
     // file:// — local artifact (downloaded by JobStatusWatcher into the
     // app docs dir). Read straight from disk; don't double-cache to
@@ -100,7 +134,32 @@ class GlbCache {
   Future<File> _diskFile(String url) async {
     final dir = await getTemporaryDirectory();
     final hash = sha1.convert(utf8.encode(url)).toString();
-    return File('${dir.path}/glb_cache/$hash.glb');
+    // Preserve the source URL's extension so the native loader sees a
+    // sensible file name. Originally this hardcoded `.glb` (when the
+    // cache only held GLB), but Phase 6.4f routes PLY/SPZ through here
+    // too. The native spz parser uses extension as a hint for which
+    // decoder to invoke when both PLY and SPZ are accepted, and the
+    // log line `load_spz: parse/decode failed status=-1 path='...glb'`
+    // is exactly that hint going wrong.
+    final ext = _extensionForUrl(url);
+    return File('${dir.path}/glb_cache/$hash$ext');
+  }
+
+  /// Extract the file extension (e.g. `.spz`, `.ply`, `.glb`) from a
+  /// URL, stripping any query string / fragment. Falls back to `.glb`
+  /// for legacy compatibility with the cache's original purpose.
+  String _extensionForUrl(String url) {
+    final lower = url.toLowerCase();
+    final qIdx = lower.indexOf('?');
+    final hashIdx = lower.indexOf('#');
+    final cut = [qIdx, hashIdx]
+        .where((i) => i >= 0)
+        .fold<int>(lower.length, (a, b) => a < b ? a : b);
+    final path = lower.substring(0, cut);
+    for (final ext in const ['.spz', '.ply', '.gltf', '.splat', '.glb']) {
+      if (path.endsWith(ext)) return ext;
+    }
+    return '.glb';
   }
 
   Future<void> _persist(File file, Uint8List bytes) async {

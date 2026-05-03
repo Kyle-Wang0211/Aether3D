@@ -67,6 +67,24 @@ private func aether_scene_renderer_render_full(
     _ modelMatrix: UnsafePointer<Float>
 )
 
+// Phase 6.4f hotfix — global splat-scale multiplier (1.0 = honor file
+// scale, 4.0 = thumbnail plumping). Set once between create and load.
+@_silgen_name("aether_scene_renderer_set_splat_scale_multiplier")
+private func aether_scene_renderer_set_splat_scale_multiplier(
+    _ renderer: OpaquePointer?,
+    _ multiplier: Float
+)
+
+// Phase 6.4f hotfix — drop splats whose 3D scale (max of xyz)
+// exceeds the threshold. Filters halo splats authored by 3DGS
+// optimizers as large soft Gaussians for low-frequency background.
+// 0 disables.
+@_silgen_name("aether_scene_renderer_set_max_3d_scale")
+private func aether_scene_renderer_set_max_3d_scale(
+    _ renderer: OpaquePointer?,
+    _ max3dScale: Float
+)
+
 // G4: get_bounds surfaces the loaded mesh's local AABB. Returns false if
 // no mesh loaded; the caller can fall back to a hardcoded distance.
 @_silgen_name("aether_scene_renderer_get_bounds")
@@ -118,6 +136,15 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     // become focused). dirty starts true so the very first frame after
     // create lands on the texture.
     private var dirty: Bool = true
+
+    // Last time render() was called (CACurrentMediaTime seconds since
+    // boot). Used by AetherTexturePlugin's selective LRU dispose on
+    // memory warning — keep the most-recently-rendered texture (the
+    // focused card the user is looking at) alive, dispose the rest.
+    // Initialized to 0 so freshly created textures look "stale" until
+    // they actually render once; in practice every alive texture
+    // renders within the first few frames after create.
+    private(set) var lastRenderTimestamp: CFTimeInterval = 0.0
 
     // Same passRetained contract watch used by the macOS texture bridge.
     private var copyCount: UInt64 = 0
@@ -198,6 +225,7 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     func render() -> Double {
         guard let rendererHandle else { return 0.0 }
         let frameStart = CACurrentMediaTime()
+        lastRenderTimestamp = frameStart  // for memory-warning LRU
         latestView.withUnsafeBufferPointer { viewBuf in
             latestModel.withUnsafeBufferPointer { modelBuf in
                 guard let viewPtr = viewBuf.baseAddress,
@@ -257,6 +285,25 @@ class SharedNativeTexture: NSObject, FlutterTexture {
             aether_scene_renderer_load_spz_capped(
                 rendererHandle, cPath, maxSplats, maxShDegree)
         }
+    }
+
+    /// Phase 6.4f hotfix — set the per-renderer splat-scale multiplier
+    /// (1.0 honors file scale, 4.0 plumps splats so thumbnails read as
+    /// continuous surfaces). Call between `create` and `loadSpz` /
+    /// `loadPly`; the multiplier persists across renders on this
+    /// renderer until reset.
+    func setSplatScaleMultiplier(_ multiplier: Float) {
+        guard let rendererHandle else { return }
+        aether_scene_renderer_set_splat_scale_multiplier(rendererHandle, multiplier)
+    }
+
+    /// Phase 6.4f hotfix — drop splats with 3D scale (max xyz)
+    /// above the threshold. Filters the large soft halo splats
+    /// authored by 3DGS optimizers for low-frequency background.
+    /// 0 disables (default).
+    func setMax3dScale(_ max3dScale: Float) {
+        guard let rendererHandle else { return }
+        aether_scene_renderer_set_max_3d_scale(rendererHandle, max3dScale)
     }
 
     /// G4: read the local AABB of the just-loaded mesh. Call AFTER a

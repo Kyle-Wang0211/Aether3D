@@ -32,6 +32,13 @@ struct RenderUniforms {
     background: vec4<f32>,
     // Phase 6.4f.4.b — must match project_forward.wgsl layout.
     lod_extent_min: f32,
+    // Phase 6.4f hotfix — global splat-scale multiplier; see C++
+    // RenderArgsStorage doc. Must match project_forward.wgsl layout.
+    splat_scale_multiplier: f32,
+    // Phase 6.4f hotfix — see project_forward.wgsl. Not consumed
+    // here (cull happens in project_forward), but the field needs
+    // to be declared so the struct layout matches the C++ side.
+    max_3d_scale: f32,
 }
 
 struct ProjectedSplat {
@@ -320,7 +327,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let global_gid = global_from_compact_gid[compact_gid];
 
     let s = read_splat_full(global_gid);
-    let scale_2 = s.scale;
+    // Phase 6.4f hotfix — global splat-scale multiplier (1.0 = honor
+    // file scale, 4.0 = thumbnail-mode plumping). 0 sentinel falls
+    // back to 1.0 so older Runners that don't set this field render
+    // unchanged.
+    let scale_mult = select(uniforms.splat_scale_multiplier,
+                            1.0f,
+                            uniforms.splat_scale_multiplier <= 0.0f);
+    let scale_2 = s.scale * scale_mult;
     let quat_2 = normalize(s.quat);
     let _e26 = sigmoid(s.raw_opacity);
     let viewmat_1 = uniforms.viewmat;
