@@ -79,6 +79,37 @@ enum ViewerQuality {
   feedThumbnail,
 }
 
+/// Phase 6.4f.5 — per-asset overrides for the splat viewer tunables.
+///
+/// `splatScaleMultiplier` and `max3dScale` are Niantic-tuned defaults
+/// in [AetherCppViewerImpl.load]; some captures (Polycam scans,
+/// user-trained scenes) authored at different splat density / halo
+/// scale want different values. Callers can pass these when they have
+/// per-work metadata — e.g., a future `FeedWork.viewerOverrides` field
+/// populated from the upload pipeline. Until that schema lands, the
+/// default `null` here keeps the per-quality presets in effect.
+class SplatViewerOverrides {
+  /// Multiplier applied to every splat's authored 3D scale before
+  /// projection. Niantic SPZ defaults to 4.0 (compensates for
+  /// AR-density splats at thumbnail distance). Polycam might want
+  /// 1.0–2.0; user-uploaded high-res scans may want 1.0.
+  final double? splatScaleMultiplier;
+
+  /// Max authored 3D scale (max of xyz, world units) above which a
+  /// splat is culled. Default 0.3 drops the soft halo around Niantic
+  /// captures. Cleaner captures may want 1.0+ (don't cull anything)
+  /// or this could be 0 to disable the cull entirely.
+  final double? max3dScale;
+
+  const SplatViewerOverrides({
+    this.splatScaleMultiplier,
+    this.max3dScale,
+  });
+
+  /// All-default overrides. Equivalent to passing `null`.
+  static const SplatViewerOverrides none = SplatViewerOverrides();
+}
+
 abstract class ViewerImpl {
   /// Allocate the underlying renderer. Returns the Flutter texture id
   /// the caller should hand to a `Texture(textureId: ...)` widget,
@@ -98,7 +129,13 @@ abstract class ViewerImpl {
   /// query inside).
   ///
   /// [quality] controls splat-scene memory use — see [ViewerQuality].
-  Future<ModelBounds?> load(String url, {ViewerQuality quality});
+  /// [overrides] lets the caller dial the splat-scene tunables on a
+  /// per-asset basis (creator-side metadata or per-URL hardcoded
+  /// overrides). Default uses the per-quality presets.
+  Future<ModelBounds?> load(String url, {
+    ViewerQuality quality,
+    SplatViewerOverrides overrides,
+  });
 
   /// One frame. View + model matrices are 4×4 column-major. Note
   /// that aether_cpp's API takes view + MODEL — projection is
@@ -132,7 +169,8 @@ class ThermionViewerImpl implements ViewerImpl {
 
   @override
   Future<ModelBounds?> load(String url,
-      {ViewerQuality quality = ViewerQuality.full}) async {
+      {ViewerQuality quality = ViewerQuality.full,
+      SplatViewerOverrides overrides = SplatViewerOverrides.none}) async {
     throw UnimplementedError(
         'G4: move existing GlbAssetCache.getOrLoad + addToScene here.');
   }
@@ -204,7 +242,8 @@ class AetherCppViewerImpl implements ViewerImpl {
 
   @override
   Future<ModelBounds?> load(String url,
-      {ViewerQuality quality = ViewerQuality.full}) async {
+      {ViewerQuality quality = ViewerQuality.full,
+      SplatViewerOverrides overrides = SplatViewerOverrides.none}) async {
     final id = _textureId;
     if (id == null) {
       throw StateError('AetherCppViewerImpl.load called before create');
@@ -247,20 +286,11 @@ class AetherCppViewerImpl implements ViewerImpl {
     // 2× is still grid-visible; 4× reads as a continuous surface;
     // 8× over-blurs feature detail. Re-evaluate per-asset if a
     // future SPZ has notably different authoring density.
-    final double splatScaleMultiplier = 4.0;
-    // Phase 6.4f hotfix — halo cull by 3D scale. Drops splats whose
-    // authored max(scale_x, scale_y, scale_z) exceeds the threshold.
-    // 3DGS optimizers prefer to use large soft Gaussians for cheap
-    // low-frequency background coverage; subject surfaces are
-    // typically encoded as 0.005-0.05 unit splats while halo splats
-    // run 0.3-1.5 units in extent. Per-splat property → cull set
-    // stays the same under camera rotation (no depth-shell artifact
-    // like the lod_extent_max approach exhibited).
-    //
-    // 0.3 is empirical for hornedlizard-style captures. Tighten
-    // (~0.1) if halo persists; loosen (~0.5) if it eats subject
-    // detail.
-    final double max3dScale = 0.3;
+    // Phase 6.4f.5 — per-asset overrides win over per-quality presets.
+    // Niantic-tuned defaults (4.0 / 0.3) are the fallback; callers
+    // with per-work metadata can pass tighter or looser values.
+    final double splatScaleMultiplier = overrides.splatScaleMultiplier ?? 4.0;
+    final double max3dScale = overrides.max3dScale ?? 0.3;
     // G5: dispatch by format. URL extension is the cheap pre-fetch
     // hint; once aether_cpp ships an HTTP-then-detect path (or once
     // the splat engine actually exists, we'll sniff the bytes on the

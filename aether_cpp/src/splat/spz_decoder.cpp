@@ -3,6 +3,7 @@
 
 #include "aether/splat/spz_decoder.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -68,11 +69,19 @@ core::Status decode_spz(const std::uint8_t* compressed_data,
                          std::size_t compressed_size,
                          SpzDecodeResult& result) noexcept {
 #if AETHER_HAS_ZLIB
+    using clk = std::chrono::steady_clock;
+    const auto t_gz_begin = clk::now();
     auto decompressed = decompress_gzip(compressed_data, compressed_size);
+    const double gunzip_ms =
+        std::chrono::duration<double, std::milli>(clk::now() - t_gz_begin).count();
     if (decompressed.empty()) {
         return core::Status::kInvalidArgument;
     }
-    return decode_spz_raw(decompressed.data(), decompressed.size(), result);
+    auto status = decode_spz_raw(decompressed.data(), decompressed.size(), result);
+    // raw_decode_total_ms was set by decode_spz_raw; populate gunzip
+    // timing here so the caller sees the full pipeline breakdown.
+    result.timings.gunzip_ms = gunzip_ms;
+    return status;
 #else
     (void)compressed_data;
     (void)compressed_size;
@@ -82,6 +91,8 @@ core::Status decode_spz(const std::uint8_t* compressed_data,
 }
 
 core::Status load_spz(const char* path, SpzDecodeResult& result) noexcept {
+    using clk = std::chrono::steady_clock;
+    const auto t_io_begin = clk::now();
     std::FILE* file = std::fopen(path, "rb");
     if (!file) return core::Status::kInvalidArgument;
 
@@ -97,12 +108,16 @@ core::Status load_spz(const char* path, SpzDecodeResult& result) noexcept {
     std::vector<std::uint8_t> buffer(static_cast<std::size_t>(file_size));
     std::size_t read = std::fread(buffer.data(), 1, buffer.size(), file);
     std::fclose(file);
+    const double file_io_ms =
+        std::chrono::duration<double, std::milli>(clk::now() - t_io_begin).count();
 
     if (read != buffer.size()) {
         return core::Status::kInvalidArgument;
     }
 
-    return decode_spz(buffer.data(), buffer.size(), result);
+    auto status = decode_spz(buffer.data(), buffer.size(), result);
+    result.timings.file_io_ms = file_io_ms;
+    return status;
 }
 
 }  // namespace splat

@@ -71,6 +71,11 @@ class AetherCppCardDemo extends StatefulWidget {
   /// LiveModelView's `cameraDistance` default for parity.
   final double fallbackCameraDistance;
 
+  /// Phase 6.4f.5 — per-asset splat tunables (creator-side metadata
+  /// hook). Default `none` keeps the Niantic-tuned per-quality
+  /// presets in [AetherCppViewerImpl.load].
+  final SplatViewerOverrides splatOverrides;
+
   const AetherCppCardDemo({
     super.key,
     required this.modelUrl,
@@ -79,6 +84,7 @@ class AetherCppCardDemo extends StatefulWidget {
     this.autoRotateSpeed = 0.6,
     this.background = Colors.white,
     this.fallbackCameraDistance = 5.5,
+    this.splatOverrides = SplatViewerOverrides.none,
   });
 
   @override
@@ -276,6 +282,7 @@ class _AetherCppCardDemoState extends State<AetherCppCardDemo>
         quality: widget.interactive
             ? ViewerQuality.full
             : ViewerQuality.feedThumbnail,
+        overrides: widget.splatOverrides,
       );
       if (_disposedFlag || !mounted) return;
 

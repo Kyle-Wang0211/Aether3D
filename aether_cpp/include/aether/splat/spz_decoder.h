@@ -6,6 +6,7 @@
 
 #ifdef __cplusplus
 
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -55,6 +56,24 @@ static_assert(sizeof(SpzHeader) == 16, "SpzHeader must be 16 bytes");
 ///         | byte[3]='P'(0x50)  → little-endian u32 = 0x5053474E.
 constexpr std::uint32_t kSpzMagic = 0x5053474Eu;
 
+/// Phase 6.4f.5 — per-stage timing telemetry surfaced through
+/// `SpzDecodeResult`. The caller logs these to identify which stage
+/// of the SPZ decode pipeline to optimize next. All values in
+/// milliseconds. 0 means the stage was not measured (e.g. older
+/// callsites that don't instrument file I/O).
+struct SpzDecodeTimings {
+    double file_io_ms{0.0};      // fopen + fread (load_spz only)
+    double gunzip_ms{0.0};       // zlib inflate (decode_spz only)
+    double header_parse_ms{0.0}; // SpzHeader memcpy + magic / version check
+    double position_read_ms{0.0};// 24-bit fixed-point per-axis decode
+    double alpha_read_ms{0.0};   // byte/255 per splat
+    double color_read_ms{0.0};   // SH DC unquantize per splat per channel
+    double scale_read_ms{0.0};   // log_scale = byte/16 - 10 per splat per axis
+    double rotation_read_ms{0.0};// v2 first-three pack → quaternion
+    double sh_unpack_ms{0.0};    // higher-order SH transpose
+    double raw_decode_total_ms{0.0};  // sum of header_parse..sh_unpack
+};
+
 /// Result of decoding an SPZ file.
 struct SpzDecodeResult {
     std::vector<GaussianParams> gaussians;
@@ -69,6 +88,7 @@ struct SpzDecodeResult {
     std::vector<float> sh_rest;
     std::uint32_t num_points{0};
     std::uint8_t sh_degree{0};
+    SpzDecodeTimings timings{};
 };
 
 // ─── gzip decompression ─────────────────────────────────────────────
@@ -106,9 +126,17 @@ inline std::vector<std::uint8_t> gzip_decompress(
 inline core::Status decode_spz_raw(const std::uint8_t* data,
                                     std::size_t size,
                                     SpzDecodeResult& result) noexcept {
+    using clk_ = std::chrono::steady_clock;
+    auto ms_since_ = [](clk_::time_point a) {
+        return std::chrono::duration<double, std::milli>(clk_::now() - a).count();
+    };
+    const auto t_raw_begin = clk_::now();
+    auto t_stage = clk_::now();
+
     result.gaussians.clear();
     result.num_points = 0;
     result.sh_degree = 0;
+    result.timings = SpzDecodeTimings{};
 
     if (size < sizeof(SpzHeader)) {
         return core::Status::kInvalidArgument;
@@ -193,6 +221,8 @@ inline core::Status decode_spz_raw(const std::uint8_t* data,
 
     const std::uint8_t* ptr = data + sizeof(SpzHeader);
     result.gaussians.resize(n);
+    result.timings.header_parse_ms = ms_since_(t_stage);
+    t_stage = clk_::now();
 
     // ── Positions: 24-bit signed fixed-point, ABSOLUTE (not delta) ────
     const float pos_scale = 1.0f / static_cast<float>(1u << header.fractional_bits);
@@ -207,6 +237,8 @@ inline core::Status decode_spz_raw(const std::uint8_t* data,
             result.gaussians[i].position[c] = static_cast<float>(val) * pos_scale;
         }
     }
+    result.timings.position_read_ms = ms_since_(t_stage);
+    t_stage = clk_::now();
 
     // ── Alphas: uint8 → linear opacity in [0, 1] ──────────────────────
     // Niantic stores `invSigmoid(alpha) → quantized to uint8` and the
@@ -219,6 +251,8 @@ inline core::Status decode_spz_raw(const std::uint8_t* data,
         result.gaussians[i].opacity = static_cast<float>(*ptr) / 255.0f;
         ptr++;
     }
+    result.timings.alpha_read_ms = ms_since_(t_stage);
+    t_stage = clk_::now();
 
     // ── Colors: uint8 → SH DC coefficient ─────────────────────────────
     // GaussianParams.color stores the SH degree-0 coefficient (NOT a
@@ -234,6 +268,8 @@ inline core::Status decode_spz_raw(const std::uint8_t* data,
             ptr++;
         }
     }
+    result.timings.color_read_ms = ms_since_(t_stage);
+    t_stage = clk_::now();
 
     // ── Scales: uint8 → log-scale (NOT linear) ────────────────────────
     // GaussianParams.scale layout matches PLY's scale_0..2 (log space).
@@ -248,6 +284,8 @@ inline core::Status decode_spz_raw(const std::uint8_t* data,
             ptr++;
         }
     }
+    result.timings.scale_read_ms = ms_since_(t_stage);
+    t_stage = clk_::now();
 
     // ── Rotations: v2 "first-three" packing → quaternion (w, x, y, z) ─
     // 3 bytes encode (x, y, z) as `(byte/127.5) - 1`, the encoding
@@ -274,6 +312,8 @@ inline core::Status decode_spz_raw(const std::uint8_t* data,
         result.gaussians[i].rotation[2] = qy;
         result.gaussians[i].rotation[3] = qz;
     }
+    result.timings.rotation_read_ms = ms_since_(t_stage);
+    t_stage = clk_::now();
 
     // ── Phase 6.4f.4.a — Higher-order SH coefficients ─────────────────
     //
@@ -314,6 +354,8 @@ inline core::Status decode_spz_raw(const std::uint8_t* data,
             }
         }
     }
+    result.timings.sh_unpack_ms = ms_since_(t_stage);
+    result.timings.raw_decode_total_ms = ms_since_(t_raw_begin);
 
     return core::Status::kOk;
 }

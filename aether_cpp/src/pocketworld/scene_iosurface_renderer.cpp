@@ -70,6 +70,7 @@
 #include <optional>
 #include <string>
 #include <sys/stat.h>
+#include <list>
 #include <unordered_map>
 #include <vector>
 
@@ -681,23 +682,56 @@ struct SplatData {
     }
 };
 
+// Phase 6.4f.5 hotfix — strong-ref LRU layer.
+//
+// Previously the cache was weak_ptr only, which meant the entry expired
+// the moment its last SplatScene was destroyed. The Flutter feed
+// regularly destroys + remounts AetherCppCardDemo on fast scroll; with
+// only weak refs, every remount re-uploaded ~50 MB of packed splats and
+// rebuilt the bind groups (~500 ms). The strong-ref LRU pins the K
+// most-recently-used entries so back-scroll within K cards is a true
+// O(1) lookup.
+//
+// Why not unconditionally strong-ref everything: GPU memory budget. K=8
+// SPZ scenes ≈ 8 × 50 MB = 400 MB, comfortable on iPhone 14 Pro's
+// ~1.5 GB jetsam ceiling but a hard cap matters when the feed has
+// dozens of distinct works.
 class SplatDataCache {
 public:
     std::shared_ptr<SplatData> get(const std::string& key) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = entries_.find(key);
         if (it == entries_.end()) return nullptr;
-        if (auto sp = it->second.lock()) return sp;
+        if (auto sp = it->second.lock()) {
+            // Promote in LRU: erase + push_front. lru_iter_ tracks the
+            // entry's position so this is O(1).
+            promote_locked_(key);
+            return sp;
+        }
         entries_.erase(it);
         return nullptr;
     }
     void put(const std::string& key, std::shared_ptr<SplatData> data) {
         std::lock_guard<std::mutex> lk(mu_);
         entries_[key] = data;
-        // Sweep expired weak refs when the table grows; cheap O(N) walk
-        // amortized across loads. 64 is arbitrary — picked so the sweep
-        // runs once per ~screen of cards, not on every reload.
-        if (entries_.size() > 64u) {
+        // Add to / move to LRU front.
+        auto lit = lru_iter_.find(key);
+        if (lit != lru_iter_.end()) lru_.erase(lit->second);
+        lru_.push_front({key, data});
+        lru_iter_[key] = lru_.begin();
+        // Evict tail when over capacity. The shared_ptr in the popped
+        // pair drops; if no SplatScene is still holding the data, the
+        // SplatData destructor frees the GPU buffers.
+        while (lru_.size() > kStrongCap_) {
+            const auto& tail = lru_.back();
+            lru_iter_.erase(tail.first);
+            // Note: `entries_` keeps a weak_ptr — leave it so a still-
+            // referenced SplatData is reachable; cleared on next get().
+            lru_.pop_back();
+        }
+        // Periodic sweep of expired weak entries — keeps the map from
+        // growing unbounded as old work URLs disappear from the feed.
+        if (entries_.size() > 256u) {
             for (auto i = entries_.begin(); i != entries_.end();) {
                 if (i->second.expired()) i = entries_.erase(i);
                 else ++i;
@@ -709,8 +743,20 @@ public:
         return s;
     }
 private:
+    void promote_locked_(const std::string& key) {
+        auto lit = lru_iter_.find(key);
+        if (lit == lru_iter_.end()) return;  // not strongly held
+        if (lit->second != lru_.begin()) {
+            lru_.splice(lru_.begin(), lru_, lit->second);
+        }
+    }
+    static constexpr std::size_t kStrongCap_ = 8u;  // tune w/ memory budget
     std::mutex mu_;
     std::unordered_map<std::string, std::weak_ptr<SplatData>> entries_;
+    std::list<std::pair<std::string, std::shared_ptr<SplatData>>> lru_;
+    std::unordered_map<std::string,
+        std::list<std::pair<std::string, std::shared_ptr<SplatData>>>::iterator>
+        lru_iter_;
 };
 
 // Phase 6.4f hotfix — DECODED splat data cache.
@@ -746,14 +792,34 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         auto it = entries_.find(key);
         if (it == entries_.end()) return nullptr;
-        if (auto sp = it->second.lock()) return sp;
+        if (auto sp = it->second.lock()) {
+            promote_locked_(key);
+            return sp;
+        }
         entries_.erase(it);
         return nullptr;
     }
     void put(const std::string& key, std::shared_ptr<DecodedSplatData> data) {
         std::lock_guard<std::mutex> lk(mu_);
         entries_[key] = data;
-        if (entries_.size() > 64u) {
+        auto lit = lru_iter_.find(key);
+        if (lit != lru_iter_.end()) lru_.erase(lit->second);
+        lru_.push_front({key, data});
+        lru_iter_[key] = lru_.begin();
+        // Phase 6.4f.5: cap the strongly-held set at 4 decoded scenes.
+        // Each ~220 MB (786 k gaussians + sh_rest at sh_degree=3), so
+        // 4 × 220 MB = 880 MB upper bound; iPhone 14 Pro tolerates this
+        // because the corresponding GPU upload (SplatDataCache) is a
+        // separate budget. Tightening here is safer than tightening
+        // SplatDataCache because dropping decoded data only costs
+        // ~3 s re-decode on next access, while dropping GPU data
+        // costs ~500 ms re-upload + a visible "loading" frame.
+        while (lru_.size() > kStrongCap_) {
+            const auto& tail = lru_.back();
+            lru_iter_.erase(tail.first);
+            lru_.pop_back();
+        }
+        if (entries_.size() > 256u) {
             for (auto i = entries_.begin(); i != entries_.end();) {
                 if (i->second.expired()) i = entries_.erase(i);
                 else ++i;
@@ -765,8 +831,20 @@ public:
         return s;
     }
 private:
+    void promote_locked_(const std::string& key) {
+        auto lit = lru_iter_.find(key);
+        if (lit == lru_iter_.end()) return;
+        if (lit->second != lru_.begin()) {
+            lru_.splice(lru_.begin(), lru_, lit->second);
+        }
+    }
+    static constexpr std::size_t kStrongCap_ = 4u;
     std::mutex mu_;
     std::unordered_map<std::string, std::weak_ptr<DecodedSplatData>> entries_;
+    std::list<std::pair<std::string, std::shared_ptr<DecodedSplatData>>> lru_;
+    std::unordered_map<std::string,
+        std::list<std::pair<std::string, std::shared_ptr<DecodedSplatData>>>::iterator>
+        lru_iter_;
 };
 
 struct SplatScene {
@@ -3152,6 +3230,21 @@ static bool load_spz_into_renderer(
         }
         t_decode_ms = ms_since(t_load_begin);
         const auto t_after_decode = clk::now();
+
+        // Phase 6.4f.5 — per-stage decode timing breakdown so we
+        // know which stage (gunzip / position read / SH unpack) is
+        // the dominant cost. Logged once per cold load (subsequent
+        // loads of the same SPZ file hit DecodedSplatCache and skip
+        // the entire decode pipeline).
+        const auto& tt = spz_result.timings;
+        scene_log("load_spz: DECODE BREAKDOWN file_io=%.1fms gunzip=%.1fms "
+                  "header=%.1fms pos=%.1fms alpha=%.1fms color=%.1fms "
+                  "scale=%.1fms rot=%.1fms sh=%.1fms (raw_total=%.1fms)",
+                  tt.file_io_ms, tt.gunzip_ms,
+                  tt.header_parse_ms, tt.position_read_ms,
+                  tt.alpha_read_ms, tt.color_read_ms,
+                  tt.scale_read_ms, tt.rotation_read_ms,
+                  tt.sh_unpack_ms, tt.raw_decode_total_ms);
 
         // Phase 6.4f hotfix: compute percentile bounds on the ORIGINAL,
         // uncapped gaussians. apply_load_caps below runs an octree merge

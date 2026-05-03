@@ -524,15 +524,13 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                                  rhs: (key: Int64, value: SharedNativeTexture)) -> Bool in
                 lhs.value.lastRenderTimestamp > rhs.value.lastRenderTimestamp
             }
-        // Keep the K most-recently rendered textures. With K=1 the
-        // memory warning aggressively drops everyone except the
-        // focused card, but that means the user's last few back-
-        // scrolls all hit the rebuild path. iPhone 14 Pro's jetsam
-        // threshold (~1.5 GB) leaves room for ~3 SPZ scenes
-        // (~50 MB GPU each) plus a GLB plus Flutter overhead, so
-        // K=3 is the sweet spot — keeps the focused card AND the
-        // two most-recent neighbors alive across pressure events.
-        let keepCount = 3
+        // Keep the K most-recently rendered textures. iPhone 14 Pro's
+        // jetsam threshold (~1.5 GB) easily handles 5 SPZ scenes
+        // (~50 MB GPU each = 250 MB) plus a GLB plus Flutter overhead
+        // (~200 MB). K=5 keeps the focused card AND its 4 most-recent
+        // neighbors alive across pressure events — covers a 5-card
+        // sliding window which matches typical thumb-scroll cadence.
+        let keepCount = 5
         let disposeIds: [Int64] = sortedByRecency.dropFirst(keepCount).map { $0.key }
         NSLog("[AetherTexture] memory warning — disposing %d/%d textures (keeping focused)",
               disposeIds.count, total)
