@@ -750,7 +750,16 @@ private:
             lru_.splice(lru_.begin(), lru_, lit->second);
         }
     }
-    static constexpr std::size_t kStrongCap_ = 8u;  // tune w/ memory budget
+    // Phase 6.4f.7: sized for iPhone 12 floor (4 GB RAM, ~2098 MB
+    // jetsam hard limit, ~1.3 GB sustainable budget after Flutter VM
+    // + Metal/WebGPU baseline). Each entry = ~150-180 MB GPU vertex/SH
+    // buffer in unified memory, counted toward phys_footprint. With
+    // keepCount=3 active renderers also holding shared_ptrs, this cap
+    // mostly overlaps with the active set; the headroom only matters
+    // when an evicted card is scrolled back within ~1-2 cards. Real-
+    // device measurement (Phase 6.4f.7 phys_footprint logging) will
+    // refine.
+    static constexpr std::size_t kStrongCap_ = 3u;
     std::mutex mu_;
     std::unordered_map<std::string, std::weak_ptr<SplatData>> entries_;
     std::list<std::pair<std::string, std::shared_ptr<SplatData>>> lru_;
@@ -806,14 +815,16 @@ public:
         if (lit != lru_iter_.end()) lru_.erase(lit->second);
         lru_.push_front({key, data});
         lru_iter_[key] = lru_.begin();
-        // Phase 6.4f.5: cap the strongly-held set at 4 decoded scenes.
-        // Each ~220 MB (786 k gaussians + sh_rest at sh_degree=3), so
-        // 4 × 220 MB = 880 MB upper bound; iPhone 14 Pro tolerates this
-        // because the corresponding GPU upload (SplatDataCache) is a
-        // separate budget. Tightening here is safer than tightening
-        // SplatDataCache because dropping decoded data only costs
-        // ~3 s re-decode on next access, while dropping GPU data
-        // costs ~500 ms re-upload + a visible "loading" frame.
+        // Phase 6.4f.7: tightened to 2 for iPhone 12 floor.
+        // Each entry ~220 MB main memory (786 k gaussians + sh_rest at
+        // sh_degree=3); 2 × 220 = 440 MB. iPhone 12's ~1.3 GB
+        // sustainable budget can't host both 3 active GPU scenes
+        // (~1.14 GB unified) AND 4 decoded blobs (880 MB) — the active
+        // set already holds a decoded shared_ptr, so this 2-cap mostly
+        // overlaps with the active set and only buys re-decode savings
+        // for the 1-2 cards adjacent to the live window. Dropping
+        // decoded data costs ~3 s re-decode (worst case), preferable
+        // to OOM jetsam.
         while (lru_.size() > kStrongCap_) {
             const auto& tail = lru_.back();
             lru_iter_.erase(tail.first);
@@ -838,7 +849,7 @@ private:
             lru_.splice(lru_.begin(), lru_, lit->second);
         }
     }
-    static constexpr std::size_t kStrongCap_ = 4u;
+    static constexpr std::size_t kStrongCap_ = 2u;
     std::mutex mu_;
     std::unordered_map<std::string, std::weak_ptr<DecodedSplatData>> entries_;
     std::list<std::pair<std::string, std::shared_ptr<DecodedSplatData>>> lru_;
