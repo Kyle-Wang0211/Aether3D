@@ -76,6 +76,14 @@ class _PostCardState extends State<PostCard> {
   // all", isFocused is "is this the most-centered one".
   double _visibility = 0;
 
+  // Phase 6.4f.9 — gate the live viewer's visibility by "first frame
+  // has been painted into the IOSurface". When false, we show only the
+  // backdrop (thumbnail image) so the user never sees an empty IOSurface
+  // fill during scroll-back. Set true via AetherCppCardDemo's
+  // onFirstFrameReady callback. Reset whenever the live viewer is
+  // unmounted/remounted so re-mount cycles get a fresh fade-in.
+  bool _viewerFirstFrameReady = false;
+
   // Above this fraction, the card is on-screen enough that mounting a
   // live Thermion viewer is worth the Filament-instance cost. Tuned for
   // the 1:1 vertical scroll: two adjacent cards typically hover around
@@ -244,7 +252,14 @@ class _PostCardState extends State<PostCard> {
     } else {
       _LiveInstanceRegistry.unregister(_forceUnmountCallback);
     }
-    setState(() => _isLive = next);
+    setState(() {
+      _isLive = next;
+      // Reset the first-frame-ready flag whenever the viewer
+      // mounts/unmounts. Mount: backdrop covers until viewer signals
+      // it has painted. Unmount: the viewer Texture is gone anyway,
+      // so the backdrop is the only visible layer until next mount.
+      _viewerFirstFrameReady = false;
+    });
   }
 
   /// Called by _LiveInstanceRegistry when this card is the LRU peer
@@ -274,7 +289,23 @@ class _PostCardState extends State<PostCard> {
     final modelPath = _work.modelStoragePath;
     final modelUrl =
         modelPath == null ? null : widget.service.modelUrlFor(modelPath);
-    final shouldMountLive = _isLive && modelUrl != null;
+
+    // Phase 6.4f.9 — point-cloud-class formats (SPZ, gsplat, PLY) are
+    // ~1 GB unified memory each on iOS, which OOMs iPhone 12 if more
+    // than 1 mounts simultaneously. Polycam handles this the same way:
+    // their pointcloud projects show static thumbnails in the feed,
+    // live render only on detail-page tap. Force feed cards into
+    // backdrop-only mode for these formats; the work_detail_page path
+    // (interactive=true) still spins up the live viewer.
+    final fmt = _work.format.toLowerCase();
+    final isPointCloudFormat =
+        fmt == 'spz' || fmt == 'gsplat' || fmt == 'ply';
+    final canMountLiveViewer =
+        _isLive && modelUrl != null && !isPointCloudFormat;
+
+    final thumbPath = _work.thumbnailStoragePath;
+    final thumbUrl =
+        thumbPath == null ? null : widget.service.thumbnailUrlFor(thumbPath);
 
     return VisibilityDetector(
       key: Key('post-card-${_work.id}'),
@@ -289,43 +320,68 @@ class _PostCardState extends State<PostCard> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                if (shouldMountLive)
-                  // G4 toggle: when kPostCardUseAetherCppViewer flips
-                  // to true, this card switches from thermion to the
-                  // aether_cpp scene renderer (via SceneBridge
-                  // MethodChannel). Default false during the migration
-                  // — flipping it is the per-card validation path
-                  // before we replace LiveModelView entirely (G9).
-                  // ignore: dead_code
-                  kPostCardUseAetherCppViewer
-                      ? AetherCppCardDemo(
-                          key: ValueKey('mv-aether-${_work.id}'),
-                          modelUrl: modelUrl,
-                          // CRITICAL for the Dawn-MTLTexture-storm fix:
-                          // only the focused card runs a Ticker → only
-                          // it pushes setMatrices each frame → only it
-                          // stays "dirty" on the native side. Static
-                          // cards render once after load and then sleep
-                          // until they become focused (scrolled to).
-                          isFocused: widget.isFocused,
-                        )
-                      : LiveModelView(
-                          // LiveModelView with manipulatorType: NONE has
-                          // no built-in gestures, so the parent
-                          // GestureDetector (single-tap → detail page)
-                          // wins on its own. No IgnorePointer needed
-                          // here — Thermion writes to a Texture, not a
-                          // WKWebView, so iOS long-press / text-select
-                          // can't latch onto it.
-                          key: ValueKey('mv-${_work.id}'),
-                          modelUrl: modelUrl,
-                          autoRotate: widget.isFocused,
-                        )
-                else
-                  const _ThumbnailPlaceholder(),
+                // ─── Bottom layer: backdrop ─────────────────────────
+                // ALWAYS on, even when a live viewer is mounted. The
+                // backdrop = real thumbnail (preferred) or gradient
+                // fallback. While the live viewer's IOSurface hasn't
+                // painted its first frame yet, this layer is what the
+                // user sees instead of the empty IOSurface's default
+                // fill (the "灰色 reload" symptom from the 2026-05-04
+                // log even though the cache HIT made decode 52ms-fast).
+                _CardBackdrop(thumbUrl: thumbUrl),
+
+                // ─── Middle layer: live 3D viewer (conditional) ─────
+                // Only mounted for non-pointcloud formats AND when
+                // visibility-debounce + LRU registry both green-light.
+                // Wrapped in AnimatedOpacity so the viewer fades in
+                // ONLY after onFirstFrameReady fires — backdrop stays
+                // visible underneath until that moment, eliminating
+                // the empty-IOSurface flash.
+                if (canMountLiveViewer)
+                  AnimatedOpacity(
+                    opacity: _viewerFirstFrameReady ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOut,
+                    // G4 toggle: when kPostCardUseAetherCppViewer flips
+                    // to true, this card switches from thermion to the
+                    // aether_cpp scene renderer (via SceneBridge
+                    // MethodChannel). Default false during the
+                    // migration — flipping it is the per-card
+                    // validation path before we replace LiveModelView
+                    // entirely (G9).
+                    // ignore: dead_code
+                    child: kPostCardUseAetherCppViewer
+                        ? AetherCppCardDemo(
+                            key: ValueKey('mv-aether-${_work.id}'),
+                            modelUrl: modelUrl,
+                            // CRITICAL for the Dawn-MTLTexture-storm
+                            // fix: only the focused card runs a
+                            // Ticker → only it pushes setMatrices each
+                            // frame → only it stays "dirty" on the
+                            // native side. Static cards render once
+                            // after load and then sleep until they
+                            // become focused (scrolled to).
+                            isFocused: widget.isFocused,
+                            onFirstFrameReady: _onViewerFirstFrameReady,
+                          )
+                        : LiveModelView(
+                            // LiveModelView with manipulatorType: NONE
+                            // has no built-in gestures, so the parent
+                            // GestureDetector (single-tap → detail
+                            // page) wins on its own. No IgnorePointer
+                            // needed here — Thermion writes to a
+                            // Texture, not a WKWebView, so iOS long-
+                            // press / text-select can't latch onto it.
+                            key: ValueKey('mv-${_work.id}'),
+                            modelUrl: modelUrl,
+                            autoRotate: widget.isFocused,
+                          ),
+                  ),
+
+                // ─── Top layer: glass info plate ───────────────────
                 // Inset from the card edges so the plate reads as a
-                // separate floating element, not a banner glued to the
-                // bottom. Matches the user's "嵌套关系" sketch.
+                // separate floating element, not a banner glued to
+                // the bottom. Matches the user's "嵌套关系" sketch.
                 Positioned(
                   left: 12,
                   right: 12,
@@ -343,20 +399,69 @@ class _PostCardState extends State<PostCard> {
       ),
     );
   }
+
+  /// AetherCppCardDemo signals via this when its Texture has its first
+  /// real frame painted. Crossfades the viewer in over the backdrop.
+  void _onViewerFirstFrameReady() {
+    if (!mounted) return;
+    if (_viewerFirstFrameReady) return;
+    setState(() => _viewerFirstFrameReady = true);
+  }
 }
 
-class _ThumbnailPlaceholder extends StatelessWidget {
-  const _ThumbnailPlaceholder();
+/// Phase 6.4f.9 — backdrop layer behind the optional live viewer.
+///
+/// Shows the real server-side thumbnail when the FeedWork carries one
+/// (the GLB capture pipeline auto-generates one from the .mov; 2B SPZ
+/// uploads bring their own). Falls back to the same gradient that the
+/// pre-6.4f.9 [_ThumbnailPlaceholder] used so cards without a thumb
+/// still get a coherent UX.
+///
+/// CRITICAL: this layer is ALWAYS visible — even when the live viewer
+/// is mounted on top — until the viewer signals first-frame-ready via
+/// [AetherCppCardDemo.onFirstFrameReady]. The previous
+/// [_ThumbnailPlaceholder] only rendered in the `else` branch, which
+/// meant during scroll-back the user briefly saw the empty IOSurface
+/// fill (the "灰色 reload" the user reported on 2026-05-04 even after
+/// the SplatDataCache hit).
+class _CardBackdrop extends StatelessWidget {
+  final String? thumbUrl;
+  const _CardBackdrop({required this.thumbUrl});
 
   @override
   Widget build(BuildContext context) {
-    // Loading state per UX direction (2026-05-02): bare gradient. The
-    // 3D-cube icon previously shown here read as a separate "third
-    // viewer state" distinct from AetherCppCardDemo's own gradient
-    // cover, even though both represent "content not yet visible".
-    // Unifying both to the same look gives the user a single
-    // "loading → display" perception instead of "icon-placeholder →
-    // bare-gradient → display".
+    final url = thumbUrl;
+    if (url == null) return const _GradientBackdrop();
+    return Image.network(
+      url,
+      fit: BoxFit.cover,
+      // While the network image is fetching, fall through to the
+      // gradient. iOS NSURLCache caches the response after the first
+      // hit, so subsequent rebuilds of the same card paint instantly.
+      loadingBuilder: (ctx, child, progress) {
+        if (progress == null) return child;
+        return const _GradientBackdrop();
+      },
+      // Network failure (offline, 404 on a missing thumb, etc.) →
+      // gradient fallback. Never let the user see a broken-image icon.
+      errorBuilder: (ctx, err, stack) => const _GradientBackdrop(),
+      // Cap decode resolution to roughly the on-screen size to keep
+      // image-decode memory bounded. The card is ~360pt × dpr=3 ≈
+      // 1080px on the long side; clamp to 1024 to land on a clean
+      // power-of-two pyramid level inside Flutter's image cache.
+      cacheWidth: 1024,
+    );
+  }
+}
+
+class _GradientBackdrop extends StatelessWidget {
+  const _GradientBackdrop();
+
+  @override
+  Widget build(BuildContext context) {
+    // Same gradient the pre-6.4f.9 [_ThumbnailPlaceholder] used so the
+    // missing-thumb fallback feels visually continuous with the
+    // network-loading state.
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(

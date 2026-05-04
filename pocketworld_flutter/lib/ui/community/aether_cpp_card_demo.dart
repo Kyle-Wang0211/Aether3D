@@ -76,6 +76,21 @@ class AetherCppCardDemo extends StatefulWidget {
   /// presets in [AetherCppViewerImpl.load].
   final SplatViewerOverrides splatOverrides;
 
+  /// Phase 6.4f.9 — fired exactly once after the first valid frame has
+  /// been pushed into the IOSurface (i.e. the moment the Texture widget
+  /// will start showing real pixels rather than the freshly-allocated
+  /// IOSurface's default fill). PostCard uses this to keep its thumbnail
+  /// backdrop visible UNDER the viewer until this callback fires, then
+  /// crossfades the viewer in. Without this, scroll-back to a card in
+  /// the SplatDataCache window briefly flashes the empty IOSurface
+  /// (the user-perceived "灰色 reload" even though the cache HIT made
+  /// the actual decode 52ms-fast).
+  ///
+  /// Fires after `_pushFrame()` resolves AND `setState(_modelReady)`
+  /// has run, so the widget is paint-ready when this lands. Also fires
+  /// after a memory-warning rebuild's first frame.
+  final VoidCallback? onFirstFrameReady;
+
   const AetherCppCardDemo({
     super.key,
     required this.modelUrl,
@@ -85,6 +100,7 @@ class AetherCppCardDemo extends StatefulWidget {
     this.background = Colors.white,
     this.fallbackCameraDistance = 5.5,
     this.splatOverrides = SplatViewerOverrides.none,
+    this.onFirstFrameReady,
   });
 
   @override
@@ -366,6 +382,15 @@ class _AetherCppCardDemoState extends State<AetherCppCardDemo>
       }
       // Texture has its first valid frame; flip the cover off.
       setState(() => _modelReady = true);
+      // Phase 6.4f.9: notify parent (PostCard) so it can crossfade out
+      // its thumbnail backdrop. Wrapped in a try because the callback
+      // is owned by the parent and may throw — we don't want a parent
+      // bug to mark this card as failed.
+      try {
+        widget.onFirstFrameReady?.call();
+      } catch (e, s) {
+        debugPrint('[AetherCppCardDemo] onFirstFrameReady threw: $e\n$s');
+      }
     } on UnsupportedViewerFormatError catch (e) {
       // G5: typed error path for "format we know about but can't
       // render yet" (PLY / SPZ / SPLAT pre-Phase-6.4f). Logs in a
