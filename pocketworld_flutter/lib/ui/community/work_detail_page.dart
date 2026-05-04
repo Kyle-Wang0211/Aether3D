@@ -20,8 +20,10 @@ import 'package:flutter/material.dart';
 
 import '../../community/community_service.dart';
 import '../../community/feed_models.dart';
+import '../../community/thumb_baker.dart';
 import '../design_system.dart';
 import 'aether_cpp_card_demo.dart';
+import 'viewer_impl.dart';
 
 class WorkDetailPage extends StatefulWidget {
   final FeedWork work;
@@ -39,6 +41,12 @@ class WorkDetailPage extends StatefulWidget {
 
 class _WorkDetailPageState extends State<WorkDetailPage> {
   late int _viewsCount = widget.work.viewsCount;
+  // Phase 6.4f.10 — first-viewer thumbnail baker. Fires once when the
+  // viewer signals first-frame-ready IF the work has no thumb yet AND
+  // the current user is the work owner (RLS gate). After successful
+  // bake, all feed viewers see the JPG instead of the gradient
+  // fallback that the user reported as "灰色" on 2026-05-04.
+  late final ThumbBaker _thumbBaker = ThumbBaker(service: widget.service);
 
   @override
   void initState() {
@@ -53,6 +61,17 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
     final updated = await widget.service.recordView(widget.work.id);
     if (!mounted || updated == null) return;
     if (updated != _viewsCount) setState(() => _viewsCount = updated);
+  }
+
+  /// Phase 6.4f.10 — fires when AetherCppCardDemo's underlying viewer
+  /// has painted its first frame into the IOSurface. Hands off to
+  /// ThumbBaker which checks the gate conditions (no existing thumb +
+  /// caller is owner) and skips quietly if either fails.
+  void _onViewerReady(AetherCppViewerImpl viewer) {
+    unawaited(_thumbBaker.maybeBake(
+      work: widget.work,
+      viewer: viewer,
+    ));
   }
 
   @override
@@ -98,6 +117,11 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                       // auto-rotate. Ported 2026-05-02 from the
                       // LiveModelView path.
                       interactive: true,
+                      // Phase 6.4f.10 — bake feed thumbnail on first
+                      // valid frame. ThumbBaker.maybeBake() checks
+                      // pre-conditions (work has no thumb yet + caller
+                      // is owner) and silently skips if either fails.
+                      onViewerReady: _onViewerReady,
                     ),
             ),
             _MetaRow(

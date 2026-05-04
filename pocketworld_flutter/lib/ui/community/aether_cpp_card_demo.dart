@@ -91,6 +91,12 @@ class AetherCppCardDemo extends StatefulWidget {
   /// after a memory-warning rebuild's first frame.
   final VoidCallback? onFirstFrameReady;
 
+  /// Phase 6.4f.10 — same trigger as [onFirstFrameReady] but exposes
+  /// the underlying viewer so the parent (e.g. work_detail_page) can
+  /// snapshot the IOSurface for the thumbnail-bake pipeline. Fires
+  /// AFTER [onFirstFrameReady]. Wrapped in try/catch the same way.
+  final void Function(AetherCppViewerImpl viewer)? onViewerReady;
+
   const AetherCppCardDemo({
     super.key,
     required this.modelUrl,
@@ -101,6 +107,7 @@ class AetherCppCardDemo extends StatefulWidget {
     this.fallbackCameraDistance = 5.5,
     this.splatOverrides = SplatViewerOverrides.none,
     this.onFirstFrameReady,
+    this.onViewerReady,
   });
 
   @override
@@ -390,6 +397,16 @@ class _AetherCppCardDemoState extends State<AetherCppCardDemo>
         widget.onFirstFrameReady?.call();
       } catch (e, s) {
         debugPrint('[AetherCppCardDemo] onFirstFrameReady threw: $e\n$s');
+      }
+      // Phase 6.4f.10: separate hook that hands the parent the live
+      // viewer, used by the detail page to snapshot the IOSurface for
+      // the thumbnail-bake pipeline. Fires after onFirstFrameReady so
+      // parents that only need the visibility signal don't depend on
+      // the viewer reference.
+      try {
+        widget.onViewerReady?.call(impl);
+      } catch (e, s) {
+        debugPrint('[AetherCppCardDemo] onViewerReady threw: $e\n$s');
       }
     } on UnsupportedViewerFormatError catch (e) {
       // G5: typed error path for "format we know about but can't

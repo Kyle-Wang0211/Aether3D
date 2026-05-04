@@ -12,6 +12,7 @@
 // Cross-platform: pure Dart on top of supabase_flutter, runs identically
 // on iOS / Android / HarmonyOS / Web.
 
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'feed_models.dart';
@@ -195,5 +196,58 @@ class CommunityService {
   /// works so the public path is correct here.
   String modelUrlFor(String path) {
     return _client.storage.from('works').getPublicUrl(path);
+  }
+
+  /// Phase 6.4f.10 — bake-and-publish a thumbnail JPG for a work that
+  /// doesn't have one yet. Returns the storage path written on success,
+  /// or null if anything failed (RLS rejection, network error, etc.).
+  ///
+  /// This is the "first viewer wins" mechanic: when the work owner (or
+  /// a future authorized RPC) opens a work detail page that has no
+  /// thumbnail yet, the viewer captures the rendered IOSurface and
+  /// uploads it here. RLS on `works` only allows the owner to UPDATE,
+  /// so today this only succeeds when the user is the work owner —
+  /// good enough to fix our own SPZ test sample without a server-side
+  /// migration. Later we can add an RPC that lets any authenticated
+  /// user one-shot bake a missing thumb.
+  ///
+  /// Layout: `<work_id>/auto.jpg` inside the `thumbnails` bucket. The
+  /// bucket is public so feed readers don't need auth.
+  Future<String?> uploadAndSetThumbnail({
+    required String workId,
+    required Uint8List jpegBytes,
+  }) async {
+    try {
+      final storagePath = '$workId/auto.jpg';
+      // Storage upload. upsert=true so a re-bake replaces an older
+      // auto-generated thumbnail without 409.
+      await _client.storage.from('thumbnails').uploadBinary(
+            storagePath,
+            jpegBytes,
+            fileOptions: const FileOptions(
+              contentType: 'image/jpeg',
+              upsert: true,
+              cacheControl: '604800', // 7 days — JPG is content-addressed
+              // by work id; if a re-bake replaces it, supabase + CDN
+              // will rev the URL via the upsert.
+            ),
+          );
+      // Update the work row. RLS will reject if the caller isn't the
+      // owner (or doesn't have an explicit policy granting UPDATE).
+      // The catch below logs and returns null — caller treats this as
+      // a soft failure.
+      await _client
+          .from('works')
+          .update({'thumbnail_storage_path': storagePath})
+          .eq('id', workId);
+      debugPrint(
+          '[CommunityService] thumbnail baked for $workId → $storagePath '
+          '(${(jpegBytes.lengthInBytes / 1024).toStringAsFixed(1)} KB)');
+      return storagePath;
+    } catch (e, s) {
+      debugPrint(
+          '[CommunityService] uploadAndSetThumbnail($workId) failed: $e\n$s');
+      return null;
+    }
   }
 }

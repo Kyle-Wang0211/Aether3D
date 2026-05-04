@@ -247,6 +247,28 @@ class SceneBridge {
       _channel.invokeMethod<void>('pauseRendering');
   Future<void> resumeRendering() =>
       _channel.invokeMethod<void>('resumeRendering');
+
+  /// Phase 6.4f.10 — snapshot the IOSurface backing [textureId] as JPEG
+  /// bytes for the thumbnail-bake pipeline. Returns null if the texture
+  /// is disposed, the lock fails, or encoding fails — callers should
+  /// treat null as "skip the bake, try again later".
+  ///
+  /// Pre-condition: at least one frame must have been rendered into
+  /// the texture (otherwise the IOSurface holds the default 0x00 fill).
+  /// Use [AetherCppCardDemo.onFirstFrameReady] as the trigger.
+  Future<Uint8List?> captureThumb({
+    required int textureId,
+    double quality = 0.85,
+  }) async {
+    final raw = await _channel.invokeMethod<Uint8List>(
+      'captureThumb',
+      <String, dynamic>{
+        'textureId': textureId,
+        'quality': quality,
+      },
+    );
+    return raw;
+  }
 }
 
 /// True iff the current platform has a registered `aether_texture`

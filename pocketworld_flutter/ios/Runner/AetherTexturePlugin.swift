@@ -402,6 +402,38 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             )
             result(nil)
 
+        case "captureThumb":
+            // Phase 6.4f.10 — snapshot a SharedNativeTexture's IOSurface
+            // contents as JPEG bytes. Wired into the detail-page bake
+            // pipeline; see lib/community/thumb_baker.dart.
+            //
+            // The texture must have rendered at least one frame before
+            // this is called or the JPEG comes out solid black (default
+            // IOSurface fill). Dart-side `onFirstFrameReady` is the
+            // correct trigger; this method does no readiness-check.
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "captureThumb requires {textureId: int}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                // Texture already disposed (memory warning, scroll-out,
+                // navigation away). Surface as `null` not an error so
+                // the Dart caller can skip the bake quietly.
+                result(nil)
+                return
+            }
+            let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.85
+            let data = texture.captureAsJPEG(quality: CGFloat(quality))
+            if let data = data {
+                result(FlutterStandardTypedData(bytes: data))
+            } else {
+                result(nil)
+            }
+
         case "pauseRendering":
             pauseAnimation(reason: "dart lifecycle")
             result(nil)

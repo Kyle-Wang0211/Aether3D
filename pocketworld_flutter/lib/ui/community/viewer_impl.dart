@@ -432,6 +432,28 @@ class AetherCppViewerImpl implements ViewerImpl {
       }
     }
   }
+
+  /// Phase 6.4f.10 — read-only access to the underlying Flutter texture
+  /// id, used by the thumbnail-bake pipeline (post detail-page first
+  /// frame). Null if the viewer is pre-`create` or post-`dispose`.
+  int? get textureId => _textureId;
+
+  /// Phase 6.4f.10 — JPEG snapshot of the IOSurface backing this viewer.
+  /// Returns null if not yet rendered, the texture is gone, or encoding
+  /// failed. Caller should treat null as "skip the bake, try later".
+  Future<Uint8List?> captureThumb({double quality = 0.85}) async {
+    final id = _textureId;
+    if (id == null) return null;
+    try {
+      return await SceneBridge.instance.captureThumb(
+        textureId: id,
+        quality: quality,
+      );
+    } catch (e, s) {
+      debugPrint('[AetherCppViewerImpl] captureThumb($id) failed: $e\n$s');
+      return null;
+    }
+  }
 }
 
 /// Master switch the LiveModelView / createViewerImpl() consult to
