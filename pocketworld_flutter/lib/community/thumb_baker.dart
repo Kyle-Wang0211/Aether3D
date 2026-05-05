@@ -57,26 +57,55 @@ class ThumbBaker {
     required FeedWork work,
     required AetherCppViewerImpl viewer,
   }) async {
+    // Phase 6.4f.10.1 — verbose diagnostic logging. Without this, gate
+    // skips are silent and the user's "still gray" reports can't be
+    // distinguished from "bake never fired" vs "bake fired and failed".
+    debugPrint(
+        '[ThumbBaker] maybeBake fired for work=${work.id} '
+        'format=${work.format} '
+        'thumbPath=${work.thumbnailStoragePath ?? "<null>"} '
+        'ownerId=${work.userId}');
+
     // Fast path: already has one.
     if (work.thumbnailStoragePath != null &&
         work.thumbnailStoragePath!.isNotEmpty) {
+      debugPrint(
+          '[ThumbBaker] SKIP work=${work.id} — already has thumbnail '
+          '(${work.thumbnailStoragePath})');
       return null;
     }
 
     // Per-process dedup.
-    if (_completed.contains(work.id) || _inFlight.contains(work.id)) {
+    if (_completed.contains(work.id)) {
+      debugPrint(
+          '[ThumbBaker] SKIP work=${work.id} — already baked this session');
+      return null;
+    }
+    if (_inFlight.contains(work.id)) {
+      debugPrint(
+          '[ThumbBaker] SKIP work=${work.id} — bake already in-flight');
       return null;
     }
 
     // Auth gate. RLS will reject UPDATE from non-owner anyway, but the
     // pre-check avoids a wasted upload to storage and a logged 401.
     final myId = _client.auth.currentUser?.id;
-    if (myId == null || myId != work.userId) {
+    if (myId == null) {
       debugPrint(
-          '[ThumbBaker] skipping ${work.id} — caller=$myId, owner=${work.userId}');
+          '[ThumbBaker] SKIP work=${work.id} — no signed-in user (anon RLS)');
+      return null;
+    }
+    if (myId != work.userId) {
+      debugPrint(
+          '[ThumbBaker] SKIP work=${work.id} — caller=$myId is not owner '
+          '(owner=${work.userId}); only owner can update '
+          'thumbnail_storage_path under current RLS');
       return null;
     }
 
+    debugPrint(
+        '[ThumbBaker] BAKING work=${work.id} — gates passed, '
+        'capturing in 100ms');
     _inFlight.add(work.id);
     try {
       // Tiny delay so the viewer's first push frame fully settles
@@ -87,9 +116,14 @@ class ThumbBaker {
 
       final bytes = await viewer.captureThumb(quality: 0.85);
       if (bytes == null || bytes.isEmpty) {
-        debugPrint('[ThumbBaker] ${work.id} — captureThumb returned empty');
+        debugPrint(
+            '[ThumbBaker] FAIL work=${work.id} — captureThumb returned empty '
+            '(textureId=${viewer.textureId ?? "<null>"})');
         return null;
       }
+      debugPrint(
+          '[ThumbBaker] captured ${(bytes.length / 1024).toStringAsFixed(1)} KB '
+          'for work=${work.id}, uploading...');
 
       final storagePath = await _service.uploadAndSetThumbnail(
         workId: work.id,
@@ -97,10 +131,16 @@ class ThumbBaker {
       );
       if (storagePath != null) {
         _completed.add(work.id);
+        debugPrint(
+            '[ThumbBaker] SUCCESS work=${work.id} → $storagePath');
+      } else {
+        debugPrint(
+            '[ThumbBaker] FAIL work=${work.id} — uploadAndSetThumbnail '
+            'returned null (likely RLS reject; see CommunityService log)');
       }
       return storagePath;
     } catch (e, s) {
-      debugPrint('[ThumbBaker] ${work.id} bake failed: $e\n$s');
+      debugPrint('[ThumbBaker] FAIL work=${work.id}: $e\n$s');
       return null;
     } finally {
       _inFlight.remove(work.id);
