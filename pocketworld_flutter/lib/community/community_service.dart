@@ -211,14 +211,33 @@ class CommunityService {
   /// migration. Later we can add an RPC that lets any authenticated
   /// user one-shot bake a missing thumb.
   ///
-  /// Layout: `<work_id>/auto.jpg` inside the `thumbnails` bucket. The
-  /// bucket is public so feed readers don't need auth.
+  /// Phase 6.4f.10.2 — path layout fix. The supabase `thumbnails`
+  /// bucket's storage RLS policy is the conventional
+  ///   (storage.foldername(name))[1] = auth.uid()::text
+  /// — i.e. the first path segment must be the caller's auth.uid.
+  /// The original 6.4f.10 layout `<work_id>/auto.jpg` violated this
+  /// (work_id ≠ user_id in our schema) and the upload returned 403
+  /// "new row violates row-level security policy" on real-device
+  /// testing 2026-05-04. The new layout `<uid>/<work_id>.jpg` mirrors
+  /// the [PublishService] convention `<uid>/<record_id>.jpg` and
+  /// satisfies the standard storage RLS policy. Bucket is public so
+  /// feed readers (any auth state, including anon) still get the JPG.
   Future<String?> uploadAndSetThumbnail({
     required String workId,
     required Uint8List jpegBytes,
   }) async {
     try {
-      final storagePath = '$workId/auto.jpg';
+      final uid = _client.auth.currentUser?.id;
+      if (uid == null) {
+        debugPrint(
+            '[CommunityService] uploadAndSetThumbnail($workId) skipped — '
+            'no signed-in user (anon RLS will reject upload anyway)');
+        return null;
+      }
+      // Phase 6.4f.10.2: path = <uid>/<work_id>.jpg, NOT <work_id>/auto.jpg.
+      // Required by the standard supabase storage RLS policy that pins
+      // the first folder segment to auth.uid().
+      final storagePath = '$uid/$workId.jpg';
       // Storage upload. upsert=true so a re-bake replaces an older
       // auto-generated thumbnail without 409.
       await _client.storage.from('thumbnails').uploadBinary(
@@ -232,10 +251,11 @@ class CommunityService {
               // will rev the URL via the upsert.
             ),
           );
-      // Update the work row. RLS will reject if the caller isn't the
-      // owner (or doesn't have an explicit policy granting UPDATE).
-      // The catch below logs and returns null — caller treats this as
-      // a soft failure.
+      // Update the work row. RLS on the `works` table allows the owner
+      // to UPDATE; since the upload above just succeeded under the same
+      // auth, this should also succeed if owner==caller. Soft-fail
+      // (debugPrint + return null) preserves the bucket file for the
+      // next bake retry to discover.
       await _client
           .from('works')
           .update({'thumbnail_storage_path': storagePath})
