@@ -4,15 +4,19 @@
 // top-left, which pushes MeSettingsPage.
 
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../auth/auth_models.dart';
 import '../auth/auth_scope.dart';
 import '../i18n/relative_time.dart';
 import '../l10n/app_localizations.dart';
+import '../me/import_glb_coordinator.dart';
 import '../me/my_works_sync_service.dart';
 import '../me/scan_record_store.dart';
+import '../me/upload_coordinator.dart';
 import 'design_system.dart';
 import 'home_view_model.dart';
 import 'me/my_work_detail_page.dart';
@@ -61,6 +65,52 @@ class _MePageState extends State<MePage> {
   void _openSettings() {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => MeSettingsPage(stats: _stats),
+    ));
+  }
+
+  /// Phase 6 entry — pick a .glb / .gltf and hand it to the
+  /// ImportGlbCoordinator for normalize + persist. Local-only for v1
+  /// (no broker upload); see ImportGlbCoordinator's TODO note.
+  Future<void> _importGlb() async {
+    final messenger = ScaffoldMessenger.of(context);
+    FilePickerResult? picked;
+    try {
+      picked = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['glb', 'gltf'],
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(
+        content: Text('打开文件选择器失败: $e'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    if (picked == null || picked.files.isEmpty) return;
+    final pickedFile = picked.files.single;
+    final path = pickedFile.path;
+    if (path == null || path.isEmpty) {
+      if (!mounted) return;
+      messenger.showSnackBar(const SnackBar(
+        content: Text('无法读取所选文件'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    final fileName = pickedFile.name;
+    final bareName = fileName.contains('.')
+        ? fileName.substring(0, fileName.lastIndexOf('.'))
+        : fileName;
+    ImportGlbCoordinator.instance.start(
+      glbFile: File(path),
+      name: bareName,
+    );
+    if (!mounted) return;
+    messenger.showSnackBar(const SnackBar(
+      content: Text('正在导入 GLB 模型…'),
+      behavior: SnackBarBehavior.floating,
+      duration: Duration(seconds: 2),
     ));
   }
 
@@ -147,6 +197,15 @@ class _MePageState extends State<MePage> {
                       onPressed: _openSettings,
                     ),
                   ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: IconButton(
+                      icon: const Icon(Icons.add_rounded),
+                      color: AetherColors.textPrimary,
+                      tooltip: '导入 GLB 模型',
+                      onPressed: _importGlb,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -228,6 +287,7 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
             isLeft: true,
             vm: _vm,
             onTap: _onTap,
+            onLongPress: _confirmDelete,
           ),
         ),
         const SizedBox(width: AetherSpacing.lg),
@@ -240,6 +300,7 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
             isLeft: false,
             vm: _vm,
             onTap: _onTap,
+            onLongPress: _confirmDelete,
           ),
         ),
       ],
@@ -247,9 +308,165 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   }
 
   void _onTap(ScanRecord record) {
+    // In-flight (uploading / queued / training / packaging) → no detail
+    // page; the detail screen would just sit on a "Uploading" /
+    // "Processing failed" placeholder which doesn't tell the user
+    // anything they don't already see on the card. Pop a SnackBar
+    // hint instead.
+    final status = record.jobStatus;
+    if (status != null && status.isRunning) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('正在生成 3D 模型，完成后会自动打开'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => MyWorkDetailPage(recordId: record.id),
     ));
+  }
+
+  /// Long-press handler — opens a bottom sheet with up to three actions
+  /// (改名 / 重新上传素材 / 删除). Polycam-style. The sheet itself isn't a
+  /// destructive surface; the destructive 删除 still triggers a follow-up
+  /// confirmation dialog so a stray hold doesn't nuke a scan in one tap.
+  /// 重新上传素材 is only shown when the record's upload failed AND the
+  /// persisted .mov + curated.json are still on disk (the prep was far
+  /// enough along to save them).
+  Future<void> _confirmDelete(ScanRecord record) async {
+    // Check retry availability up-front so we know whether to render
+    // the row. Async, but very fast — two File.exists() calls.
+    final canRetry =
+        await UploadCoordinator.instance.canRetry(record.id);
+    if (!mounted) return;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AetherColors.bgCanvas,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('改名'),
+              onTap: () => Navigator.of(ctx).pop('rename'),
+            ),
+            if (canRetry)
+              ListTile(
+                leading: const Icon(Icons.cloud_upload_outlined),
+                title: const Text('重新上传素材'),
+                onTap: () => Navigator.of(ctx).pop('retry'),
+              ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline,
+                  color: AetherColors.danger),
+              title: const Text('删除',
+                  style: TextStyle(color: AetherColors.danger)),
+              onTap: () => Navigator.of(ctx).pop('delete'),
+            ),
+            const SizedBox(height: 4),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'rename') {
+      await _renameRecord(record);
+    } else if (action == 'retry') {
+      await _retryUpload(record);
+    } else if (action == 'delete') {
+      await _confirmAndDelete(record);
+    }
+  }
+
+  Future<void> _renameRecord(ScanRecord record) async {
+    final controller = TextEditingController(text: record.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('改名'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 40,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            counterText: '',
+          ),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty || newName == record.name) return;
+    await ScanRecordStore.instance
+        .addOrUpdate(record.copyWith(name: newName));
+  }
+
+  /// Re-run the upload for [record] from the persisted .mov + curated.json.
+  /// Surface success/failure via SnackBar; the card itself updates
+  /// reactively because UploadCoordinator.retry() flips the record's
+  /// status back to uploading and the gallery rebuilds on store change.
+  Future<void> _retryUpload(ScanRecord record) async {
+    try {
+      await UploadCoordinator.instance.retry(record.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已开始重新上传'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('重新上传失败: $e'),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmAndDelete(ScanRecord record) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除这次扫描?'),
+        content: Text('"${record.name}" 将从你的作品里移除。'
+            '已发布到社区的内容不受影响。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: AetherColors.danger),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _vm.deleteRecord(record);
   }
 }
 
@@ -258,12 +475,14 @@ class _MyWorksColumn extends StatelessWidget {
   final bool isLeft;
   final HomeViewModel vm;
   final void Function(ScanRecord) onTap;
+  final void Function(ScanRecord) onLongPress;
 
   const _MyWorksColumn({
     required this.records,
     required this.isLeft,
     required this.vm,
     required this.onTap,
+    required this.onLongPress,
   });
 
   @override
@@ -280,6 +499,7 @@ class _MyWorksColumn extends StatelessWidget {
               isLeft: isLeft,
             ),
             onTap: () => onTap(records[i]),
+            onLongPress: () => onLongPress(records[i]),
           ),
           if (i < records.length - 1)
             const SizedBox(height: AetherSpacing.lg),
