@@ -4,16 +4,13 @@
 // top-left, which pushes MeSettingsPage.
 
 import 'dart:async';
-import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../auth/auth_models.dart';
 import '../auth/auth_scope.dart';
 import '../i18n/relative_time.dart';
 import '../l10n/app_localizations.dart';
-import '../me/import_glb_coordinator.dart';
 import '../me/my_works_sync_service.dart';
 import '../me/scan_record_store.dart';
 import '../me/upload_coordinator.dart';
@@ -65,52 +62,6 @@ class _MePageState extends State<MePage> {
   void _openSettings() {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => MeSettingsPage(stats: _stats),
-    ));
-  }
-
-  /// Phase 6 entry — pick a .glb / .gltf and hand it to the
-  /// ImportGlbCoordinator for normalize + persist. Local-only for v1
-  /// (no broker upload); see ImportGlbCoordinator's TODO note.
-  Future<void> _importGlb() async {
-    final messenger = ScaffoldMessenger.of(context);
-    FilePickerResult? picked;
-    try {
-      picked = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['glb', 'gltf'],
-      );
-    } catch (e) {
-      if (!mounted) return;
-      messenger.showSnackBar(SnackBar(
-        content: Text('打开文件选择器失败: $e'),
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
-    if (picked == null || picked.files.isEmpty) return;
-    final pickedFile = picked.files.single;
-    final path = pickedFile.path;
-    if (path == null || path.isEmpty) {
-      if (!mounted) return;
-      messenger.showSnackBar(const SnackBar(
-        content: Text('无法读取所选文件'),
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
-    final fileName = pickedFile.name;
-    final bareName = fileName.contains('.')
-        ? fileName.substring(0, fileName.lastIndexOf('.'))
-        : fileName;
-    ImportGlbCoordinator.instance.start(
-      glbFile: File(path),
-      name: bareName,
-    );
-    if (!mounted) return;
-    messenger.showSnackBar(const SnackBar(
-      content: Text('正在导入 GLB 模型…'),
-      behavior: SnackBarBehavior.floating,
-      duration: Duration(seconds: 2),
     ));
   }
 
@@ -195,15 +146,6 @@ class _MePageState extends State<MePage> {
                       color: AetherColors.textPrimary,
                       tooltip: l.meSettingsTitle,
                       onPressed: _openSettings,
-                    ),
-                  ),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: IconButton(
-                      icon: const Icon(Icons.add_rounded),
-                      color: AetherColors.textPrimary,
-                      tooltip: '导入 GLB 模型',
-                      onPressed: _importGlb,
                     ),
                   ),
                 ],
