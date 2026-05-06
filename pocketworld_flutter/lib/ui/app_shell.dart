@@ -15,6 +15,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../l10n/app_localizations.dart';
 import '../me/import_glb_coordinator.dart';
 import 'capture/capture_page.dart';
 import 'design_system.dart';
@@ -91,6 +92,7 @@ class _AetherAppShellState extends State<AetherAppShell> {
   /// merged here so all "create work" entries share one entry point
   /// and the Me header stays clean.
   Future<void> _openCreate() async {
+    final l = AppL10n.of(context);
     final action = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: AetherColors.bgCanvas,
@@ -105,7 +107,7 @@ class _AetherAppShellState extends State<AetherAppShell> {
               Expanded(
                 child: _CreateOption(
                   icon: Icons.photo_camera_outlined,
-                  label: '拍摄',
+                  label: l.createOptionCapture,
                   onTap: () => Navigator.of(ctx).pop('capture'),
                 ),
               ),
@@ -113,7 +115,7 @@ class _AetherAppShellState extends State<AetherAppShell> {
               Expanded(
                 child: _CreateOption(
                   icon: Icons.cloud_upload_outlined,
-                  label: '上传',
+                  label: l.createOptionUpload,
                   onTap: () => Navigator.of(ctx).pop('upload'),
                 ),
               ),
@@ -152,6 +154,7 @@ class _AetherAppShellState extends State<AetherAppShell> {
   /// to Me tab so the user sees the importing card.
   Future<void> _importGlb() async {
     final messenger = ScaffoldMessenger.of(context);
+    final l = AppL10n.of(context);
     FilePickerResult? picked;
     try {
       picked = await FilePicker.platform.pickFiles(
@@ -161,7 +164,7 @@ class _AetherAppShellState extends State<AetherAppShell> {
     } catch (e) {
       if (!mounted) return;
       messenger.showSnackBar(SnackBar(
-        content: Text('打开文件选择器失败: $e'),
+        content: Text(l.createImportPickerFailed(e.toString())),
         behavior: SnackBarBehavior.floating,
       ));
       return;
@@ -171,8 +174,8 @@ class _AetherAppShellState extends State<AetherAppShell> {
     final path = pickedFile.path;
     if (path == null || path.isEmpty) {
       if (!mounted) return;
-      messenger.showSnackBar(const SnackBar(
-        content: Text('无法读取所选文件'),
+      messenger.showSnackBar(SnackBar(
+        content: Text(l.createImportFileUnreadable),
         behavior: SnackBarBehavior.floating,
       ));
       return;
@@ -186,10 +189,10 @@ class _AetherAppShellState extends State<AetherAppShell> {
       name: bareName,
     );
     if (!mounted) return;
-    messenger.showSnackBar(const SnackBar(
-      content: Text('正在导入 GLB 模型…'),
+    messenger.showSnackBar(SnackBar(
+      content: Text(l.createImportingGlb),
       behavior: SnackBarBehavior.floating,
-      duration: Duration(seconds: 2),
+      duration: const Duration(seconds: 2),
     ));
     if (_tab != AetherRootTab.me) {
       setState(() => _tab = AetherRootTab.me);

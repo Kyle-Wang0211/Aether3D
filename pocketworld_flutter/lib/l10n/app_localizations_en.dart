@@ -114,16 +114,109 @@ class AppL10nEn extends AppL10n {
   String get scanLifecyclePending => 'Pending review';
 
   @override
-  String get scanLifecycleFailed => 'Failed';
+  String get scanLifecycleFailed => 'Failed to process';
 
   @override
-  String get scanLifecycleTraining => 'Training';
+  String get scanLifecycleTraining => 'Generating 3D model';
 
   @override
-  String get scanLifecyclePackaging => 'Exporting';
+  String get scanLifecyclePackaging => 'Finalizing';
 
   @override
   String get scanLifecycleUploading => 'Uploading';
+
+  @override
+  String get createOptionCapture => 'Capture';
+
+  @override
+  String get createOptionUpload => 'Upload';
+
+  @override
+  String get createImportingGlb => 'Importing GLB model…';
+
+  @override
+  String createImportPickerFailed(String error) {
+    return 'Couldn\'t open file picker: $error';
+  }
+
+  @override
+  String get createImportFileUnreadable => 'Couldn\'t read the selected file';
+
+  @override
+  String get meTapHintInProgress => 'Generating 3D model — opens when ready';
+
+  @override
+  String get meTapHintTapToRetry => 'Long-press the card to retry the upload';
+
+  @override
+  String get captureWarmupHint => 'Initializing AR…';
+
+  @override
+  String get captureReadyHint => 'Tap the center to select your subject';
+
+  @override
+  String get captureAimHint =>
+      'Aim the crosshair at the center, then tap again to lock';
+
+  @override
+  String get captureMaterialTooSparseTitle => 'Not enough captured';
+
+  @override
+  String get captureMaterialTooSparseHint =>
+      'Keep scanning a moment longer before stopping';
+
+  @override
+  String get captureLockFailedHint =>
+      'Surface not detected or tracking not ready — point at the object\'s surface and try again';
+
+  @override
+  String get captureUploadFailedTitle => 'Upload failed';
+
+  @override
+  String get captureUploadedTitle => 'Uploaded';
+
+  @override
+  String get captureUploadPhasePreparing => 'Preparing';
+
+  @override
+  String get captureUploadPhaseCreatingJob => 'Registering job';
+
+  @override
+  String get captureUploadPhaseUploadingVideo => 'Uploading video';
+
+  @override
+  String get captureUploadPhaseUploadingCurated => 'Uploading frame manifest';
+
+  @override
+  String get captureUploadPhaseUploading => 'Uploading';
+
+  @override
+  String get captureSessionExpiredTitle => 'Session expired';
+
+  @override
+  String get captureSessionExpiredHint =>
+      'Sign back in from the Me tab and try again';
+
+  @override
+  String captureInitFailed(String error) {
+    return 'Initialization failed: $error';
+  }
+
+  @override
+  String captureRecordingStartFailed(String error) {
+    return 'Couldn\'t start recording: $error';
+  }
+
+  @override
+  String get captureCameraConflict =>
+      'This device can\'t record video alongside AR — upload not started';
+
+  @override
+  String get captureUploadPreparingDetail => 'Preparing upload…';
+
+  @override
+  String get captureUploadStreamMissing =>
+      'Upload coordinator returned no progress stream';
 
   @override
   String get scanSampleHelmetName => 'Sample · Helmet';

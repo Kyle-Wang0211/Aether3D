@@ -51,10 +51,48 @@
 
   "scanLifecycleCompleted": "Completed",
   "scanLifecyclePending": "Pending review",
-  "scanLifecycleFailed": "Failed",
-  "scanLifecycleTraining": "Training",
-  "scanLifecyclePackaging": "Exporting",
+  "scanLifecycleFailed": "Failed to process",
+  "scanLifecycleTraining": "Generating 3D model",
+  "scanLifecyclePackaging": "Finalizing",
   "scanLifecycleUploading": "Uploading",
+
+  "createOptionCapture": "Capture",
+  "createOptionUpload": "Upload",
+  "createImportingGlb": "Importing GLB model…",
+  "createImportPickerFailed": "Couldn't open file picker: {error}",
+  "@createImportPickerFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "createImportFileUnreadable": "Couldn't read the selected file",
+  "meTapHintInProgress": "Generating 3D model — opens when ready",
+  "meTapHintTapToRetry": "Long-press the card to retry the upload",
+
+  "captureWarmupHint": "Initializing AR…",
+  "captureReadyHint": "Tap the center to select your subject",
+  "captureAimHint": "Aim the crosshair at the center, then tap again to lock",
+  "captureMaterialTooSparseTitle": "Not enough captured",
+  "captureMaterialTooSparseHint": "Keep scanning a moment longer before stopping",
+  "captureLockFailedHint": "Surface not detected or tracking not ready — point at the object's surface and try again",
+  "captureUploadFailedTitle": "Upload failed",
+  "captureUploadedTitle": "Uploaded",
+  "captureUploadPhasePreparing": "Preparing",
+  "captureUploadPhaseCreatingJob": "Registering job",
+  "captureUploadPhaseUploadingVideo": "Uploading video",
+  "captureUploadPhaseUploadingCurated": "Uploading frame manifest",
+  "captureUploadPhaseUploading": "Uploading",
+  "captureSessionExpiredTitle": "Session expired",
+  "captureSessionExpiredHint": "Sign back in from the Me tab and try again",
+  "captureInitFailed": "Initialization failed: {error}",
+  "@captureInitFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "captureRecordingStartFailed": "Couldn't start recording: {error}",
+  "@captureRecordingStartFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "captureCameraConflict": "This device can't record video alongside AR — upload not started",
+  "captureUploadPreparingDetail": "Preparing upload…",
+  "captureUploadStreamMissing": "Upload coordinator returned no progress stream",
 
   "scanSampleHelmetName": "Sample · Helmet",
   "scanRecordOpenPlaceholder": "Opening \"{name}\" (viewer not wired)",

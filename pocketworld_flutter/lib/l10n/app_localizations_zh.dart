@@ -113,16 +113,103 @@ class AppL10nZh extends AppL10n {
   String get scanLifecyclePending => '待查看';
 
   @override
-  String get scanLifecycleFailed => '失败';
+  String get scanLifecycleFailed => '处理失败';
 
   @override
-  String get scanLifecycleTraining => '训练中';
+  String get scanLifecycleTraining => '正在生成 3D 模型';
 
   @override
-  String get scanLifecyclePackaging => '导出中';
+  String get scanLifecyclePackaging => '正在打包';
 
   @override
   String get scanLifecycleUploading => '上传中';
+
+  @override
+  String get createOptionCapture => '拍摄';
+
+  @override
+  String get createOptionUpload => '上传';
+
+  @override
+  String get createImportingGlb => '正在导入 GLB 模型…';
+
+  @override
+  String createImportPickerFailed(String error) {
+    return '打开文件选择器失败：$error';
+  }
+
+  @override
+  String get createImportFileUnreadable => '无法读取所选文件';
+
+  @override
+  String get meTapHintInProgress => '正在生成 3D 模型，完成后会自动打开';
+
+  @override
+  String get meTapHintTapToRetry => '长按卡片可以重新上传素材';
+
+  @override
+  String get captureWarmupHint => '正在初始化 AR…';
+
+  @override
+  String get captureReadyHint => '点击中心选择主体物';
+
+  @override
+  String get captureAimHint => '将准星对准物体中心，再次点击锁定';
+
+  @override
+  String get captureMaterialTooSparseTitle => '素材太少';
+
+  @override
+  String get captureMaterialTooSparseHint => '请继续拍摄一会儿再停止';
+
+  @override
+  String get captureLockFailedHint => '未检测到平面或跟踪未就绪 — 请对准物体所在表面后再试';
+
+  @override
+  String get captureUploadFailedTitle => '上传失败';
+
+  @override
+  String get captureUploadedTitle => '已上传';
+
+  @override
+  String get captureUploadPhasePreparing => '准备上传';
+
+  @override
+  String get captureUploadPhaseCreatingJob => '注册任务';
+
+  @override
+  String get captureUploadPhaseUploadingVideo => '上传视频';
+
+  @override
+  String get captureUploadPhaseUploadingCurated => '上传质量清单';
+
+  @override
+  String get captureUploadPhaseUploading => '上传中';
+
+  @override
+  String get captureSessionExpiredTitle => '登录已过期';
+
+  @override
+  String get captureSessionExpiredHint => '请到「我」中重新登录后再试';
+
+  @override
+  String captureInitFailed(String error) {
+    return '初始化失败：$error';
+  }
+
+  @override
+  String captureRecordingStartFailed(String error) {
+    return '开始录制失败：$error';
+  }
+
+  @override
+  String get captureCameraConflict => '设备未支持同时录像，无法上传';
+
+  @override
+  String get captureUploadPreparingDetail => '正在准备上传…';
+
+  @override
+  String get captureUploadStreamMissing => '上传协调器没有返回进度流';
 
   @override
   String get scanSampleHelmetName => '样板 · 头盔';

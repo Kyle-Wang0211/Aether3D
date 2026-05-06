@@ -250,18 +250,23 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   }
 
   void _onTap(ScanRecord record) {
-    // In-flight (uploading / queued / training / packaging) → no detail
-    // page; the detail screen would just sit on a "Uploading" /
-    // "Processing failed" placeholder which doesn't tell the user
-    // anything they don't already see on the card. Pop a SnackBar
-    // hint instead.
-    final status = record.jobStatus;
-    if (status != null && status.isRunning) {
+    // The detail page only renders when there's a viewable artifact
+    // (artifactPath != null). For everything else — in-flight,
+    // failed, cancelled, or queued — show a contextual SnackBar
+    // instead of pushing an empty detail page that just shows
+    // "Processing failed". The recovery path for failed scans is
+    // long-press → 重新上传素材, which the existing menu surfaces.
+    if (record.artifactPath == null) {
+      final l = AppL10n.of(context);
+      final status = record.jobStatus;
+      final hint = (status?.isRunning ?? false)
+          ? l.meTapHintInProgress
+          : l.meTapHintTapToRetry;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('正在生成 3D 模型，完成后会自动打开'),
+        SnackBar(
+          content: Text(hint),
           behavior: SnackBarBehavior.floating,
-          duration: Duration(seconds: 2),
+          duration: const Duration(seconds: 2),
         ),
       );
       return;
