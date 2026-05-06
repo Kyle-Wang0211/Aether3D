@@ -114,7 +114,19 @@ class _MePageState extends State<MePage> {
         ),
       );
     }
-    return Scaffold(
+    // Wrap in a local ScaffoldMessenger so SnackBars triggered by
+    // MePage interactions (retry-upload, source-files-missing, delete
+    // confirmation) only paint while MePage is the visible tab. Without
+    // this, ScaffoldMessenger.of(context) walks up to AppShell's
+    // top-level Scaffold and the SnackBar's overlay sits ABOVE the
+    // IndexedStack — so tapping "重新上传" then switching to Discover/
+    // Capture leaves the prompt visible on the wrong tab. Local
+    // ScaffoldMessenger is owned by MePage's Scaffold; when MePage
+    // goes offstage in the IndexedStack the SnackBar's overlay stops
+    // painting, matching the user's expectation that the prompt is
+    // tab-scoped.
+    return ScaffoldMessenger(
+      child: Scaffold(
       backgroundColor: AetherColors.bg,
       body: SafeArea(
         bottom: false,
@@ -167,7 +179,8 @@ class _MePageState extends State<MePage> {
           ),
         ),
       ),
-    );
+    ),  // Scaffold
+    );  // ScaffoldMessenger (local — see build comment above)
   }
 }
 
