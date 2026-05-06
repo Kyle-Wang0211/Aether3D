@@ -35,6 +35,25 @@ class _MePageState extends State<MePage> {
   // it's pushed.
   final MeStatsViewModel _stats = MeStatsViewModel();
 
+  // Phase 6.4f.13.1 — direct handle to MePage's local ScaffoldMessenger.
+  // `ScaffoldMessenger.of(context)` from a State's BuildContext walks
+  // UP the tree, past anything build() has output — including the
+  // local ScaffoldMessenger we wrap below — and lands on MaterialApp's
+  // root messenger. That displays SnackBars on AppShell's Scaffold,
+  // which sits ABOVE the IndexedStack and bleeds into other tabs.
+  // Holding a GlobalKey to the local messenger lets us call
+  // `_messengerKey.currentState!.showSnackBar(...)` directly, routing
+  // SnackBars to MePage's own Scaffold whose overlay disappears with
+  // the tab when AppShell switches indices.
+  final GlobalKey<ScaffoldMessengerState> _messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+
+  // Returns MePage's local messenger if available, falling back to the
+  // ambient (root) messenger so first-frame edge cases don't crash.
+  ScaffoldMessengerState _localMessenger() {
+    return _messengerKey.currentState ?? ScaffoldMessenger.of(context);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -67,7 +86,7 @@ class _MePageState extends State<MePage> {
 
   Future<void> _onRefresh() async {
     final l = AppL10n.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _localMessenger();
     try {
       final added = await MyWorksSyncService.instance.refreshFromCloud();
       if (!mounted) return;
@@ -126,6 +145,7 @@ class _MePageState extends State<MePage> {
     // painting, matching the user's expectation that the prompt is
     // tab-scoped.
     return ScaffoldMessenger(
+      key: _messengerKey,
       child: Scaffold(
       backgroundColor: AetherColors.bg,
       body: SafeArea(
@@ -275,6 +295,12 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
       final hint = (status?.isRunning ?? false)
           ? l.meTapHintInProgress
           : l.meTapHintTapToRetry;
+      // Note: this is `_MyWorksSectionState`'s context, which sits
+      // INSIDE _MePageState.build()'s output tree — i.e. inside the
+      // local ScaffoldMessenger. So `.of(context)` correctly resolves
+      // to the local messenger. (MePage's State.context — used by
+      // _onRefresh up the file — sits ABOVE the local messenger and
+      // needs the GlobalKey path via _localMessenger().)
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(hint),
@@ -387,6 +413,10 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   /// pointing at delete + recapture instead of leaking the StateError.
   Future<void> _retryUpload(ScanRecord record) async {
     final l = AppL10n.of(context);
+    // _MyWorksSectionState.context is inside MePage's local
+    // ScaffoldMessenger (we are reached via _MyWorksSection widget in
+    // MePage's build output), so the standard .of(context) resolves
+    // to the local messenger.
     final messenger = ScaffoldMessenger.of(context);
     try {
       await UploadCoordinator.instance.retry(record.id);
