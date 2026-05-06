@@ -52,6 +52,24 @@
   "createImportFileUnreadable": "无法读取所选文件",
   "meTapHintInProgress": "正在生成 3D 模型，完成后会自动打开",
   "meTapHintTapToRetry": "长按卡片可以重新上传素材",
+  "meActionRename": "改名",
+  "meActionRetryUpload": "重新上传素材",
+  "meActionDelete": "删除",
+  "meActionCancel": "取消",
+  "meActionSave": "保存",
+  "meRenameDialogTitle": "改名",
+  "meRetryStarted": "已开始重新上传",
+  "meRetryFailed": "重新上传失败：{error}",
+  "@meRetryFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "meRetryUnavailable": "原始素材已不在设备上，请删除后重新拍摄或重新导入。",
+  "meDeleteDialogTitle": "删除这次扫描?",
+  "meDeleteDialogContent": "\"{name}\" 将从你的作品里移除。已发布到社区的内容不受影响。",
+  "@meDeleteDialogContent": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "defaultUntitledScan": "未命名",
 
   "captureWarmupHint": "正在初始化 AR…",
   "captureReadyHint": "点击中心选择主体物",

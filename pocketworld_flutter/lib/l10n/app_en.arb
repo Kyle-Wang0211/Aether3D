@@ -66,6 +66,24 @@
   "createImportFileUnreadable": "Couldn't read the selected file",
   "meTapHintInProgress": "Generating 3D model — opens when ready",
   "meTapHintTapToRetry": "Long-press the card to retry the upload",
+  "meActionRename": "Rename",
+  "meActionRetryUpload": "Re-upload source",
+  "meActionDelete": "Delete",
+  "meActionCancel": "Cancel",
+  "meActionSave": "Save",
+  "meRenameDialogTitle": "Rename",
+  "meRetryStarted": "Re-upload started",
+  "meRetryFailed": "Re-upload failed: {error}",
+  "@meRetryFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "meRetryUnavailable": "Source files are no longer on this device — please delete and re-capture or re-import.",
+  "meDeleteDialogTitle": "Delete this scan?",
+  "meDeleteDialogContent": "\"{name}\" will be removed from your works. Items already published to the community are unaffected.",
+  "@meDeleteDialogContent": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "defaultUntitledScan": "Untitled",
 
   "captureWarmupHint": "Initializing AR…",
   "captureReadyHint": "Tap the center to select your subject",

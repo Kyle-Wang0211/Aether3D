@@ -277,18 +277,18 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   }
 
   /// Long-press handler — opens a bottom sheet with up to three actions
-  /// (改名 / 重新上传素材 / 删除). Polycam-style. The sheet itself isn't a
-  /// destructive surface; the destructive 删除 still triggers a follow-up
-  /// confirmation dialog so a stray hold doesn't nuke a scan in one tap.
-  /// 重新上传素材 is only shown when the record's upload failed AND the
-  /// persisted .mov + curated.json are still on disk (the prep was far
-  /// enough along to save them).
+  /// (rename / retry / delete). Polycam-style. The destructive delete
+  /// triggers a follow-up confirmation dialog so a stray hold doesn't
+  /// nuke a scan in one tap. Retry is shown for any failed/cancelled
+  /// record; if the persisted .mov + curated.json have been cleaned up
+  /// (e.g. older records, iOS temp-dir eviction), the retry handler
+  /// surfaces a clear "source no longer available" message instead of
+  /// silently failing.
   Future<void> _confirmDelete(ScanRecord record) async {
-    // Check retry availability up-front so we know whether to render
-    // the row. Async, but very fast — two File.exists() calls.
-    final canRetry =
-        await UploadCoordinator.instance.canRetry(record.id);
-    if (!mounted) return;
+    final l = AppL10n.of(context);
+    final showRetry =
+        record.jobStatus == ScanJobStatus.failed ||
+        record.jobStatus == ScanJobStatus.cancelled;
     final action = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: AetherColors.bgCanvas,
@@ -301,20 +301,20 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
           children: [
             ListTile(
               leading: const Icon(Icons.edit_outlined),
-              title: const Text('改名'),
+              title: Text(l.meActionRename),
               onTap: () => Navigator.of(ctx).pop('rename'),
             ),
-            if (canRetry)
+            if (showRetry)
               ListTile(
                 leading: const Icon(Icons.cloud_upload_outlined),
-                title: const Text('重新上传素材'),
+                title: Text(l.meActionRetryUpload),
                 onTap: () => Navigator.of(ctx).pop('retry'),
               ),
             ListTile(
               leading: const Icon(Icons.delete_outline,
                   color: AetherColors.danger),
-              title: const Text('删除',
-                  style: TextStyle(color: AetherColors.danger)),
+              title: Text(l.meActionDelete,
+                  style: const TextStyle(color: AetherColors.danger)),
               onTap: () => Navigator.of(ctx).pop('delete'),
             ),
             const SizedBox(height: 4),
@@ -333,11 +333,12 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   }
 
   Future<void> _renameRecord(ScanRecord record) async {
+    final l = AppL10n.of(context);
     final controller = TextEditingController(text: record.name);
     final newName = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('改名'),
+        title: Text(l.meRenameDialogTitle),
         content: TextField(
           controller: controller,
           autofocus: true,
@@ -351,11 +352,11 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
+            child: Text(l.meActionCancel),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
-            child: const Text('保存'),
+            child: Text(l.meActionSave),
           ),
         ],
       ),
@@ -366,25 +367,38 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   }
 
   /// Re-run the upload for [record] from the persisted .mov + curated.json.
-  /// Surface success/failure via SnackBar; the card itself updates
-  /// reactively because UploadCoordinator.retry() flips the record's
-  /// status back to uploading and the gallery rebuilds on store change.
+  /// UploadCoordinator.retry() throws StateError when the record is
+  /// missing source files (older records pre-Plan-C, or iOS evicted the
+  /// temp-dir copies before we moved them to Documents). That's a
+  /// non-recoverable case for this device — we surface a clear message
+  /// pointing at delete + recapture instead of leaking the StateError.
   Future<void> _retryUpload(ScanRecord record) async {
+    final l = AppL10n.of(context);
+    final messenger = ScaffoldMessenger.of(context);
     try {
       await UploadCoordinator.instance.retry(record.id);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('已开始重新上传'),
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l.meRetryStarted),
           behavior: SnackBarBehavior.floating,
-          duration: Duration(seconds: 2),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } on StateError catch (_) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l.meRetryUnavailable),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
         ),
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(
-          content: Text('重新上传失败: $e'),
+          content: Text(l.meRetryFailed(e.toString())),
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 3),
         ),
@@ -393,21 +407,21 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   }
 
   Future<void> _confirmAndDelete(ScanRecord record) async {
+    final l = AppL10n.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('删除这次扫描?'),
-        content: Text('"${record.name}" 将从你的作品里移除。'
-            '已发布到社区的内容不受影响。'),
+        title: Text(l.meDeleteDialogTitle),
+        content: Text(l.meDeleteDialogContent(record.name)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消'),
+            child: Text(l.meActionCancel),
           ),
           TextButton(
             style: TextButton.styleFrom(foregroundColor: AetherColors.danger),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('删除'),
+            child: Text(l.meActionDelete),
           ),
         ],
       ),

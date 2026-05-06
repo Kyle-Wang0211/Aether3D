@@ -359,6 +359,78 @@ abstract class AppL10n {
   /// **'Long-press the card to retry the upload'**
   String get meTapHintTapToRetry;
 
+  /// No description provided for @meActionRename.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename'**
+  String get meActionRename;
+
+  /// No description provided for @meActionRetryUpload.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-upload source'**
+  String get meActionRetryUpload;
+
+  /// No description provided for @meActionDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get meActionDelete;
+
+  /// No description provided for @meActionCancel.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get meActionCancel;
+
+  /// No description provided for @meActionSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get meActionSave;
+
+  /// No description provided for @meRenameDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename'**
+  String get meRenameDialogTitle;
+
+  /// No description provided for @meRetryStarted.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-upload started'**
+  String get meRetryStarted;
+
+  /// No description provided for @meRetryFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-upload failed: {error}'**
+  String meRetryFailed(String error);
+
+  /// No description provided for @meRetryUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Source files are no longer on this device — please delete and re-capture or re-import.'**
+  String get meRetryUnavailable;
+
+  /// No description provided for @meDeleteDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete this scan?'**
+  String get meDeleteDialogTitle;
+
+  /// No description provided for @meDeleteDialogContent.
+  ///
+  /// In en, this message translates to:
+  /// **'\"{name}\" will be removed from your works. Items already published to the community are unaffected.'**
+  String meDeleteDialogContent(String name);
+
+  /// No description provided for @defaultUntitledScan.
+  ///
+  /// In en, this message translates to:
+  /// **'Untitled'**
+  String get defaultUntitledScan;
+
   /// No description provided for @captureWarmupHint.
   ///
   /// In en, this message translates to:

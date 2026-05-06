@@ -148,6 +148,46 @@ class AppL10nZh extends AppL10n {
   String get meTapHintTapToRetry => '长按卡片可以重新上传素材';
 
   @override
+  String get meActionRename => '改名';
+
+  @override
+  String get meActionRetryUpload => '重新上传素材';
+
+  @override
+  String get meActionDelete => '删除';
+
+  @override
+  String get meActionCancel => '取消';
+
+  @override
+  String get meActionSave => '保存';
+
+  @override
+  String get meRenameDialogTitle => '改名';
+
+  @override
+  String get meRetryStarted => '已开始重新上传';
+
+  @override
+  String meRetryFailed(String error) {
+    return '重新上传失败：$error';
+  }
+
+  @override
+  String get meRetryUnavailable => '原始素材已不在设备上，请删除后重新拍摄或重新导入。';
+
+  @override
+  String get meDeleteDialogTitle => '删除这次扫描?';
+
+  @override
+  String meDeleteDialogContent(String name) {
+    return '\"$name\" 将从你的作品里移除。已发布到社区的内容不受影响。';
+  }
+
+  @override
+  String get defaultUntitledScan => '未命名';
+
+  @override
   String get captureWarmupHint => '正在初始化 AR…';
 
   @override

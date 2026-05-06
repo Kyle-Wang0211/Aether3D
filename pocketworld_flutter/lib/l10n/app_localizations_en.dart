@@ -149,6 +149,47 @@ class AppL10nEn extends AppL10n {
   String get meTapHintTapToRetry => 'Long-press the card to retry the upload';
 
   @override
+  String get meActionRename => 'Rename';
+
+  @override
+  String get meActionRetryUpload => 'Re-upload source';
+
+  @override
+  String get meActionDelete => 'Delete';
+
+  @override
+  String get meActionCancel => 'Cancel';
+
+  @override
+  String get meActionSave => 'Save';
+
+  @override
+  String get meRenameDialogTitle => 'Rename';
+
+  @override
+  String get meRetryStarted => 'Re-upload started';
+
+  @override
+  String meRetryFailed(String error) {
+    return 'Re-upload failed: $error';
+  }
+
+  @override
+  String get meRetryUnavailable =>
+      'Source files are no longer on this device — please delete and re-capture or re-import.';
+
+  @override
+  String get meDeleteDialogTitle => 'Delete this scan?';
+
+  @override
+  String meDeleteDialogContent(String name) {
+    return '\"$name\" will be removed from your works. Items already published to the community are unaffected.';
+  }
+
+  @override
+  String get defaultUntitledScan => 'Untitled';
+
+  @override
   String get captureWarmupHint => 'Initializing AR…';
 
   @override
