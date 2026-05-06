@@ -77,11 +77,23 @@ struct CroppedChart {
     int packed_y = -1;            // origin = packed_x + dilate_px etc.)
 };
 
-// Clamp a UV scalar to [0,1] without branching pessimization.
-float clamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
-    return v;
+// Wrap a UV scalar into [0,1) with glTF REPEAT semantics.
+//
+// Phase X bug fix (Damaged_Helmet, 2026-05-06): the previous version
+// of this helper was a clamp01 that pinned out-of-[0,1] values to the
+// edge. That broke any GLB authored with REPEAT-wrap UVs whose values
+// fall outside [0,1] (a common photogrammetry / Sketchfab/Khronos
+// pattern — e.g. Damaged_Helmet ships with V ∈ [1.0006, 1.9987]).
+// All V values clamped to 1.0, which collapsed the chart's V bbox to
+// a single line and the packer rejected the resulting 2047×4 strip.
+//
+// glTF spec § 3.7.4: "if no sampler is supplied, a sampler with
+// MAG_FILTER LINEAR + MIN_FILTER LINEAR_MIPMAP_LINEAR + WRAP_S/T
+// REPEAT is used." So a value of 1.5 samples the same texel as 0.5,
+// and the correct way to bring out-of-range UVs into [0,1] for atlas
+// packing is `v - floor(v)`. Behaviour for in-range UVs is unchanged.
+float frac01(float v) {
+    return v - std::floor(v);
 }
 
 // Per-chart UV bbox. Returns false on a chart with zero UVs.
@@ -93,8 +105,8 @@ bool compute_uv_bbox(const std::vector<float>& uvs,
     umax = vmax = 0.0f;
     bool seen = false;
     for (size_t i = 0; i + 1 < uvs.size(); i += 2) {
-        const float u = clamp01(uvs[i + 0]);
-        const float v = clamp01(uvs[i + 1]);
+        const float u = frac01(uvs[i + 0]);
+        const float v = frac01(uvs[i + 1]);
         if (!seen) {
             umin = umax = u;
             vmin = vmax = v;
@@ -341,8 +353,46 @@ bool merge_atlases(const std::vector<ChartInput>& inputs,
         }
     }
 
-    // Step 6: pack.
-    if (!try_pack(side, dilate_px, charts)) return false;
+    // Step 6: pack with retry-on-overflow.
+    //
+    // Phase X bug fix (Antique_Camera, 2026-05-06): the original code
+    // committed to ONE side (Step 3's `next_pow2_ge` of area+util heuristic)
+    // and gave up on first try_pack failure. That's wrong when:
+    //   • two charts of dst_w=2048 each, dilation +16 → 2064 wide,
+    //     side=4096 → only 1×2 = 4128 columns can't fit because
+    //     2 × 2064 = 4128 > 4096 by 32 pixels.
+    //   • charts dimensioned as long strips (degenerate UV bbox before
+    //     the frac01 fix) sometimes still can't pack at the area-derived
+    //     side even though they'd pack fine at side*2.
+    //
+    // Retry by doubling the side until either:
+    //   (a) try_pack succeeds, or
+    //   (b) side reaches max_size (configured cap, kHardMaxAtlasSize=8192).
+    //
+    // Geometry: each retry doubles area, so worst-case retry depth from
+    // 1024 → 8192 is 3 attempts. The dst_w/h on each chart is
+    // unaffected by side; only the packing arrangement changes.
+    {
+        bool packed = false;
+        int attempt = 0;
+        while (true) {
+            ++attempt;
+            if (try_pack(side, dilate_px, charts)) {
+                packed = true;
+                break;
+            }
+            const int next_side = side * 2;
+            if (next_side > max_size) break;
+            side = next_side;
+        }
+        if (!packed) {
+            // Permanent failure even at max atlas size — the input is
+            // genuinely too large to fit. Keep this as the only true
+            // packing_failed path.
+            return false;
+        }
+        result.chosen_atlas_size = side;
+    }
 
     // Step 7: composite. Background = chart-pixel-mean (excl.
     // texrecon padding). Charts go in at (packed_x + dilate_px,
@@ -416,8 +466,8 @@ bool merge_atlases(const std::vector<ChartInput>& inputs,
         const double src_W = in.atlas_w;
         const double src_H = in.atlas_h;
         for (size_t k = 0; k + 1 < in.uvs.size(); k += 2) {
-            const double u = clamp01(in.uvs[k + 0]);
-            const double v = clamp01(in.uvs[k + 1]);
+            const double u = frac01(in.uvs[k + 0]);
+            const double v = frac01(in.uvs[k + 1]);
             const double rel_x = u * src_W - c.crop_x0;
             const double rel_y = v * src_H - c.crop_y0;
             const double atlas_x =
