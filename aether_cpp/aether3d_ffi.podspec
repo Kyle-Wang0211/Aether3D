@@ -19,11 +19,21 @@ Pod::Spec.new do |s|
   s.source           = { :path => '.' }
   s.platform         = :ios, '14.0'
 
-  # Public C header — copied into Pods/Headers/Public/aether3d_ffi/.
-  # Path resolves relative to this podspec (aether_cpp/aether3d_ffi.podspec),
+  # Public C headers — copied into Pods/Headers/Public/aether3d_ffi/.
+  # Paths resolve relative to this podspec (aether_cpp/aether3d_ffi.podspec),
   # so 'include/aether/aether_version.h' = 'aether_cpp/include/aether/aether_version.h'.
-  s.source_files        = 'include/aether/aether_version.h'
-  s.public_header_files = 'include/aether/aether_version.h'
+  #
+  # Phase 4 added 'include/aether_glb_norm_c.h' (top-level include/, not under
+  # aether/) — Dart FFI consumers ffigen this header to generate the glb_norm
+  # bindings. Keep these arrays in lock-step on any later FFI surface addition.
+  s.source_files        = [
+    'include/aether/aether_version.h',
+    'include/aether_glb_norm_c.h',
+  ]
+  s.public_header_files = [
+    'include/aether/aether_version.h',
+    'include/aether_glb_norm_c.h',
+  ]
 
   # Final iOS scene renderer links Dawn/Metal/IOSurface objects into the
   # vendored archive. Keep the platform frameworks explicit so Runner's
@@ -96,7 +106,11 @@ Pod::Spec.new do |s|
     # reference to it from outside), preventing dead-strip from dropping it.
     # Repeat per FFI symbol added — this list must match
     # aether_cpp/include/aether/*.h public C ABI.
-    'OTHER_LDFLAGS[sdk=iphoneos*]'               => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64/libaether3d_ffi.a -Wl,-u,_aether_version_string',
-    'OTHER_LDFLAGS[sdk=iphonesimulator*]'        => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator/libaether3d_ffi.a -Wl,-u,_aether_version_string',
+    # Phase 4 — glb_norm symbols added to the -Wl,-u list so they survive
+    # dead-strip on Release. dart:ffi resolves them via dlsym at runtime, so
+    # without an explicit "needed" marker the linker has no static reference
+    # and drops the entire .o → AetherGlbNorm.run() dlsym-fails at runtime.
+    'OTHER_LDFLAGS[sdk=iphoneos*]'               => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64/libaether3d_ffi.a -Wl,-u,_aether_version_string -Wl,-u,_aether_glb_norm_run -Wl,-u,_aether_glb_norm_options_default -Wl,-u,_aether_glb_norm_buffer_free -Wl,-u,_aether_glb_norm_result_str',
+    'OTHER_LDFLAGS[sdk=iphonesimulator*]'        => '$(inherited) -force_load $(PODS_ROOT)/../../../dist/libs/ios-arm64-simulator/libaether3d_ffi.a -Wl,-u,_aether_version_string -Wl,-u,_aether_glb_norm_run -Wl,-u,_aether_glb_norm_options_default -Wl,-u,_aether_glb_norm_buffer_free -Wl,-u,_aether_glb_norm_result_str',
   }
 end
