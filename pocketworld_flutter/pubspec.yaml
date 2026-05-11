@@ -142,6 +142,27 @@ dependencies:
   # permission needed) and SAF / ACTION_OPEN_DOCUMENT on Android.
   file_picker: ^8.1.2
 
+  # Task 3: on-device subject masking via MobileSAM (Apache-2.0). Two
+  # ONNX sessions (encoder ~28 MB + decoder ~16 MB) bundled under
+  # assets/models/edgesam/ are loaded by lib/capture/sam/mobile_sam_inference.dart
+  # and run on a 5 Hz cadence in a background isolate so the ARKit /
+  # capture loop is not blocked. Each curated frame's `subject_mask`
+  # field in curated.json is then consumed by the worker's
+  # apply_subject_mask stage to white-out background pixels before VGGT.
+  #
+  # Platform support:
+  #   • iOS / Android / macOS / Linux / Windows: full inference
+  #   • Web: not supported by this package (1.4.1 — "Coming soon")
+  #     → segment() returns null, manifest omits subject_mask, worker
+  #     stage no-ops on that frame
+  #   • HarmonyOS: no published support → same graceful-degrade path
+  onnxruntime: ^1.4.1
+
+  # Pure-Dart image decoder/resizer used by MobileSAM input prep
+  # (resize to 1024x1024, write into the encoder's HWC uint8 tensor).
+  # Standard pub.dev package, no native deps so it runs in any isolate.
+  image: ^4.2.0
+
 
 dev_dependencies:
   flutter_test:
@@ -186,6 +207,16 @@ flutter:
     # the original baseColorMap, so true KHR_materials_unlit override
     # while preserving textures isn't expressible via its public API).
     - assets/ibl/default_env_ibl.ktx
+    # MobileSAM (Apache-2.0) — on-device subject masking during capture.
+    # Two ONNX sessions: encoder (28.2 MB, runs once per frame) +
+    # decoder (16.5 MB, runs once per prompt point at center).
+    # Mask is RLE-packed into curated.json's per-frame `subject_mask`
+    # field; worker uses it to white-out background before VGGT.
+    # Tracked via Git LFS (.gitattributes `*.onnx filter=lfs`).
+    # Directory is named `edgesam/` for forward-compat with earlier
+    # session paths — contents are MobileSAM, see assets/models/edgesam/README.md.
+    - assets/models/edgesam/mobile_sam_image_encoder.onnx
+    - assets/models/edgesam/sam_mask_decoder_single.onnx
 
   # To add assets to your application, add an assets section, like this:
   # assets:
