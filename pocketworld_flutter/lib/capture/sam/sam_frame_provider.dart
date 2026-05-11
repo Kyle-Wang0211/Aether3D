@@ -42,7 +42,6 @@
 
 import 'dart:async';
 import 'dart:isolate' show TransferableTypedData;
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart';

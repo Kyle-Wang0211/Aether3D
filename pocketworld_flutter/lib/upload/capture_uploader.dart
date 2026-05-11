@@ -29,6 +29,7 @@ import 'curated_manifest.dart';
 
 import '../capture/dome/dome_target_points.dart';
 import '../capture/pose_drift_tracker.dart';
+import '../capture/sam/sam_loop.dart';
 import '../capture/sam/subject_mask_data.dart';
 
 /// One progress notification for the upload UI.
@@ -90,6 +91,8 @@ class CaptureUploader {
     PoseDriftReport? poseDriftReport,
     Map<String, SubjectMaskData> subjectMasks =
         const <String, SubjectMaskData>{},
+    SamLoop? samLoop,
+    DateTime? recordingStartedAt,
     void Function(CaptureUploadResult result)? onCompleted,
   }) async* {
     yield const UploadProgress(
@@ -102,6 +105,8 @@ class CaptureUploader {
       targetPoints,
       poseDriftReport: poseDriftReport,
       subjectMasks: subjectMasks,
+      samLoop: samLoop,
+      recordingStartedAt: recordingStartedAt,
     );
     yield* uploadPersisted(
       videoFile: videoFile,
@@ -129,6 +134,8 @@ class CaptureUploader {
     PoseDriftReport? poseDriftReport,
     Map<String, SubjectMaskData> subjectMasks =
         const <String, SubjectMaskData>{},
+    SamLoop? samLoop,
+    DateTime? recordingStartedAt,
   }) {
     final curated =
         targetPoints.curateForUpload(targetTotal: curatedFrameTarget);
@@ -138,11 +145,39 @@ class CaptureUploader {
         'target points produced 0 curated frames — was the recording too short?',
       );
     }
+
+    // Phase B SAM mask map. If both samLoop and recordingStartedAt
+    // are supplied AND the loop has cached masks, walk curated frames
+    // and ask SamLoop for the temporally-nearest mask per frame.
+    // Frames are stamped with monotonic-clock seconds-since-recording-
+    // start (CapturedFrameSample.timestamp); we add that to the wall-
+    // clock baseline to get DateTime for matching against SamLoop's
+    // wall-clock-stamped masks.
+    //
+    // Falls through to the explicit `subjectMasks` parameter if SAM
+    // wasn't running this session (e.g. retry path that lost session
+    // state, or LOW-tier device where startIfHighTier returned false).
+    var resolvedMasks = subjectMasks;
+    if (samLoop != null &&
+        recordingStartedAt != null &&
+        samLoop.cachedMaskCount > 0 &&
+        resolvedMasks.isEmpty) {
+      final framesWithWallTime = curated
+          .map((cf) => (
+                frameId: cf.sample.frameId,
+                captureTime: recordingStartedAt.add(
+                  Duration(microseconds: (cf.sample.timestamp * 1e6).round()),
+                ),
+              ))
+          .toList(growable: false);
+      resolvedMasks = samLoop.buildMaskMap(framesWithWallTime);
+    }
+
     final manifest = CuratedManifest(
       captureOrigin: captureOrigin,
       frames: curated,
       poseDriftReport: poseDriftReport,
-      subjectMasks: subjectMasks,
+      subjectMasks: resolvedMasks,
     );
     return manifest.encode();
   }

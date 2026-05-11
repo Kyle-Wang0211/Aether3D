@@ -347,9 +347,15 @@ class _CapturePageState extends State<CapturePage>
       // worker logs/aggregates it, no UI surfaces it (dome cell
       // colors already convey real-time AR health).
       final driftReport = _session?.poseDriftReport;
+      // Phase B: pass live SAM loop + wall-clock baseline so the
+      // manifest writer can attach per-frame masks. Both null on retry
+      // paths that lost session state — manifest then omits subject_mask
+      // and the worker stage no-ops, identical to pre-Phase-B behavior.
       manifestBytes = CaptureUploader().curateManifestBytes(
         _targetPoints,
         poseDriftReport: driftReport,
+        samLoop: _session?.samLoop,
+        recordingStartedAt: _session?.recordingStartedAt,
       );
     } catch (e) {
       if (!mounted) return;

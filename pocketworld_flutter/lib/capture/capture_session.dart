@@ -48,6 +48,7 @@ import 'dome/dome_config.dart';
 import 'dome/dome_target_points.dart';
 import 'orientation_tracker.dart';
 import 'pose_drift_tracker.dart';
+import 'sam/sam_loop.dart';
 
 class CaptureSession {
   final ARPoseProvider poseProvider;
@@ -85,6 +86,15 @@ class CaptureSession {
   // Monotonic clock starting from each `start()` so ring-buffer
   // timeSpread checks (excellentMinTimeSpreadSec) work consistently.
   final Stopwatch _clock = Stopwatch();
+
+  /// Wall-clock instant at which the most recent `start()` fired.
+  /// Paired with [_clock] so callers can convert a monotonic
+  /// [CapturedFrameSample.timestamp] (seconds-since-start) into a
+  /// `DateTime` for cross-referencing with wall-clock-stamped events
+  /// like SAM mask captureTime. Null before the first start().
+  DateTime? _recordingStartedAtWall;
+  DateTime? get recordingStartedAt => _recordingStartedAtWall;
+
   int _frameSeq = 0;
   bool _attached = false;
   bool _started = false;
@@ -119,6 +129,17 @@ class CaptureSession {
   // server can log the IMU-vs-ARKit ratio.
   final OrientationTracker _orientation = OrientationTracker();
   bool _orientationStarted = false;
+
+  /// Phase B subject-mask loop. Pulled into the session so its
+  /// lifecycle matches recording (clear masks on start, run while
+  /// recording, stop on stop()). Auto-no-op on LOW-tier devices
+  /// (iPhone 11/12, 4 GB RAM) — `startIfHighTier` returns false
+  /// without ever touching SAM weights, so memory stays flat.
+  ///
+  /// Mask cache is read at upload-curate time via [samLoop] getter
+  /// → CaptureUploader → CuratedManifest.subjectMasks.
+  final SamLoop _samLoop = SamLoop();
+  SamLoop get samLoop => _samLoop;
 
   // ── Tier 1 pose-drift health aggregator ──────────────────────────────
   //
@@ -446,6 +467,18 @@ class CaptureSession {
     _clock
       ..reset()
       ..start();
+    _recordingStartedAtWall = DateTime.now();
+
+    // Phase B SAM loop: clear last session's masks, install the
+    // current-frame-id getter so each new mask gets stamped with
+    // the dome frame_uuid that was current at SAM-pull time, then
+    // start the loop. startIfHighTier returns false without touching
+    // SAM on LOW-tier (iPhone 11/12) so we just proceed unmasked
+    // there — the manifest will omit subject_mask and the worker
+    // stage will no-op.
+    _samLoop.clearMasks();
+    _samLoop.currentFrameIdGetter = () => 'cap-$_frameSeq';
+    unawaited(_samLoop.startIfHighTier());
 
     _started = true;
 
@@ -531,6 +564,10 @@ class CaptureSession {
     _started = false;
     _clock.stop();
     guidance.endRecording();
+    // Stop SAM loop but PRESERVE the mask cache — capture_uploader
+    // will read it during curate. clearMasks() happens in start()
+    // for the next session, not here.
+    _samLoop.stop();
     final imuRatio = (_diagArkitPoses + _diagImuPoses) == 0
         ? 0.0
         : _diagImuPoses / (_diagArkitPoses + _diagImuPoses);
@@ -558,6 +595,7 @@ class CaptureSession {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _samLoop.dispose();
     if (_started) {
       _started = false;
       _clock.stop();
