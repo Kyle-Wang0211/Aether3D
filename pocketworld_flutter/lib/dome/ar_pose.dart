@@ -40,6 +40,25 @@ class ARPose {
   /// Tracking state. Dome UI hides guidance when not tracking.
   final bool isTracking;
 
+  /// Native AR runtime's tracking-state classification, mirrored as a
+  /// string so the Dart layer doesn't carry per-platform enums. Values:
+  ///
+  ///   "normal", "not_available",
+  ///   "limited_initializing", "limited_relocalizing",
+  ///   "limited_excessive_motion", "limited_insufficient_features",
+  ///   "limited_unknown"
+  ///
+  /// Set by `AetherARKitPlugin` (iOS) verbatim of `ARCamera.TrackingState`.
+  /// Mock providers (Web, HarmonyOS, simulator) pass `"normal"` because
+  /// they have no real tracker. Null when the underlying provider hasn't
+  /// supplied a value yet — `PoseDriftTracker` treats null as `"normal"`
+  /// to avoid mis-attributing diagnostic time to the mock path.
+  ///
+  /// Used purely for Tier 1 pose-drift aggregation in
+  /// [PoseDriftTracker]; nothing in the live UI consumes it (dome cell
+  /// colors already convey real-time AR health).
+  final String? trackingStateName;
+
   /// Wall-clock timestamp (seconds since app start) for smoothing /
   /// delta-velocity calculations.
   final double timestamp;
@@ -51,6 +70,7 @@ class ARPose {
     required this.elevation,
     required this.isTracking,
     required this.timestamp,
+    this.trackingStateName,
   });
 
   static ARPose fromPositionOrientation({
@@ -58,6 +78,7 @@ class ARPose {
     required Quaternion orientation,
     required double timestamp,
     bool isTracking = true,
+    String? trackingStateName,
   }) {
     // Forward = orientation · (0, 0, -1).
     final forward = orientation.rotated(Vector3(0, 0, -1));
@@ -70,6 +91,7 @@ class ARPose {
       elevation: elevation,
       isTracking: isTracking,
       timestamp: timestamp,
+      trackingStateName: trackingStateName,
     );
   }
 }

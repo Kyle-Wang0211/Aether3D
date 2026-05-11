@@ -5,7 +5,7 @@
 //   `stopSession`  → void
 //   EventChannel `aether_arkit/pose_stream` → JSON pose events:
 //       {
-//         tx, ty, tz, qx, qy, qz, qw, isTracking, t
+//         tx, ty, tz, qx, qy, qz, qw, isTracking, trackingStateName, t
 //       }
 //
 // If the channel isn't registered (e.g. iOS native plugin not wired
@@ -61,6 +61,12 @@ class PlatformARPoseProvider implements ARPoseProvider {
             ),
             isTracking: (map['isTracking'] as bool?) ?? true,
             timestamp: (map['t'] as num?)?.toDouble() ?? 0,
+            // ARKit reason string (iOS only). Null for any other backend
+            // (ARCore plugin not yet registered on Android, HarmonyOS XR
+            // Engine, WebXR) — PoseDriftTracker treats null as "normal"
+            // so backends without a tracker classification don't poison
+            // the health stats.
+            trackingStateName: map['trackingStateName'] as String?,
           );
           _lastPose = pose;
           if (!_controller.isClosed) _controller.add(pose);
