@@ -33,6 +33,16 @@ import UIKit
 //         "extrinsic"                — column-major 16-float 4×4
 //         "intrinsicFxFyCxCy"        — 4 floats
 //         "isTracking"               — true iff trackingState == .normal
+//         "trackingStateName"        — "normal" | "not_available" |
+//                                      "limited_initializing" |
+//                                      "limited_relocalizing" |
+//                                      "limited_excessive_motion" |
+//                                      "limited_insufficient_features" |
+//                                      "limited_unknown". Mirrors
+//                                      ARCamera.TrackingState exactly so
+//                                      Tier 1 pose-drift aggregation on
+//                                      the Dart side can attribute the
+//                                      degraded windows to a root cause.
 //         "t"                        — ARFrame timestamp (CACurrentMediaTime)
 //       }
 //
@@ -729,6 +739,7 @@ class AetherARKitPlugin: NSObject {
     case .normal: isTracking = true
     default: isTracking = false
     }
+    let trackingStateName = Self.trackingStateString(frame.camera.trackingState)
 
     var payload: [String: Any] = [
       "tx": t.columns.3.x,
@@ -741,6 +752,7 @@ class AetherARKitPlugin: NSObject {
       "extrinsic": extrinsic,
       "intrinsicFxFyCxCy": intrinsicArr,
       "isTracking": isTracking,
+      "trackingStateName": trackingStateName,
       "t": frame.timestamp,
     ]
 
@@ -854,6 +866,32 @@ extension AetherARKitPlugin {
     let globalVariance: Double // luma variance, used for low-texture
                                // soft downgrade in GuidanceEngine
     let signature: Data        // signatureSide² bytes, block-mean
+  }
+
+  /// Stringified `ARCamera.TrackingState` for the pose stream's
+  /// `trackingStateName` field. Mirrors the enum 1:1 so the Dart side
+  /// (PoseDriftTracker) can attribute degraded windows to a root cause
+  /// without smuggling a Swift enum across the platform channel.
+  ///
+  /// `@unknown default` exists because Apple has added new
+  /// `.limited(reason:)` cases between SDKs (e.g. relocalizing landed
+  /// in iOS 11.3); falling through to "limited_unknown" is the
+  /// forward-compatible behaviour rather than crashing.
+  static func trackingStateString(_ state: ARCamera.TrackingState) -> String {
+    switch state {
+    case .normal:
+      return "normal"
+    case .notAvailable:
+      return "not_available"
+    case .limited(let reason):
+      switch reason {
+      case .initializing: return "limited_initializing"
+      case .relocalizing: return "limited_relocalizing"
+      case .excessiveMotion: return "limited_excessive_motion"
+      case .insufficientFeatures: return "limited_insufficient_features"
+      @unknown default: return "limited_unknown"
+      }
+    }
   }
 
   /// Compute Laplacian variance, mean brightness, global variance and
