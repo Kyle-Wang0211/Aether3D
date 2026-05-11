@@ -44,6 +44,7 @@ import 'dart:typed_data';
 import '../capture/dome/dome_cell_state.dart';
 import '../capture/dome/dome_target_points.dart';
 import '../capture/pose_drift_tracker.dart';
+import '../capture/sam/subject_mask_data.dart';
 
 class CuratedManifest {
   final String captureOrigin;
@@ -60,10 +61,24 @@ class CuratedManifest {
   /// to gate or weight reconstruction.
   final PoseDriftReport? poseDriftReport;
 
+  /// Per-frame MobileSAM subject masks, keyed by `CapturedFrameSample.frameId`.
+  /// When a frame's id is present in this map, its `subject_mask` block is
+  /// emitted into the manifest; absent ids produce no `subject_mask` field
+  /// (worker stage gracefully no-ops that frame).
+  ///
+  /// Defaults to empty so pre-Task-3 callers, retry paths, and platforms
+  /// where MobileSAM isn't supported (Web / HarmonyOS in onnxruntime
+  /// 1.4.1) keep producing the byte-identical pre-Task-3 manifest shape.
+  /// Server-side `apply_subject_mask` stage is env-gated off by default
+  /// during rollout, so even a manifest WITH masks is safe against an
+  /// untouched worker fleet.
+  final Map<String, SubjectMaskData> subjectMasks;
+
   const CuratedManifest({
     required this.captureOrigin,
     required this.frames,
     this.poseDriftReport,
+    this.subjectMasks = const <String, SubjectMaskData>{},
   });
 
   Map<String, dynamic> toJson() {
@@ -121,6 +136,12 @@ class CuratedManifest {
       // shape is byte-identical for backward compat.
       if (poseDriftReport != null)
         'pose_drift_report': poseDriftReport!.toJson(),
+      // Aggregate count of frames carrying a MobileSAM subject mask.
+      // Lets the server worker log "X / Y frames had masks" in one
+      // glance without having to count `subject_mask` keys.
+      'subject_mask_count': frames
+          .where((cf) => subjectMasks.containsKey(cf.sample.frameId))
+          .length,
       'frame_count': frames.length,
       'frames': frames
           .map((cf) => <String, dynamic>{
@@ -157,6 +178,14 @@ class CuratedManifest {
                 if (cf.sample.cameraIntrinsicFxFyCxCy != null)
                   'arkit_intrinsic_fx_fy_cx_cy':
                       cf.sample.cameraIntrinsicFxFyCxCy,
+                // MobileSAM subject mask, RLE+base64 packed. Optional —
+                // present only when the capture-side SAM loop (Task 3
+                // Phase B, native pixel-buffer bridge required) was
+                // running AND produced a mask within the temporal
+                // matching window for this frame. Absent → worker
+                // `apply_subject_mask` stage no-ops this frame.
+                if (subjectMasks.containsKey(cf.sample.frameId))
+                  'subject_mask': subjectMasks[cf.sample.frameId]!.toJson(),
               })
           .toList(growable: false),
     };

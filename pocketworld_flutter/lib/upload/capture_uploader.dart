@@ -29,6 +29,7 @@ import 'curated_manifest.dart';
 
 import '../capture/dome/dome_target_points.dart';
 import '../capture/pose_drift_tracker.dart';
+import '../capture/sam/subject_mask_data.dart';
 
 /// One progress notification for the upload UI.
 class UploadProgress {
@@ -87,6 +88,8 @@ class CaptureUploader {
     required DomeTargetPoints targetPoints,
     String? clientRecordId,
     PoseDriftReport? poseDriftReport,
+    Map<String, SubjectMaskData> subjectMasks =
+        const <String, SubjectMaskData>{},
     void Function(CaptureUploadResult result)? onCompleted,
   }) async* {
     yield const UploadProgress(
@@ -98,6 +101,7 @@ class CaptureUploader {
     final manifestBytes = curateManifestBytes(
       targetPoints,
       poseDriftReport: poseDriftReport,
+      subjectMasks: subjectMasks,
     );
     yield* uploadPersisted(
       videoFile: videoFile,
@@ -123,6 +127,8 @@ class CaptureUploader {
   Uint8List curateManifestBytes(
     DomeTargetPoints targetPoints, {
     PoseDriftReport? poseDriftReport,
+    Map<String, SubjectMaskData> subjectMasks =
+        const <String, SubjectMaskData>{},
   }) {
     final curated =
         targetPoints.curateForUpload(targetTotal: curatedFrameTarget);
@@ -136,6 +142,7 @@ class CaptureUploader {
       captureOrigin: captureOrigin,
       frames: curated,
       poseDriftReport: poseDriftReport,
+      subjectMasks: subjectMasks,
     );
     return manifest.encode();
   }
