@@ -44,6 +44,12 @@
 
 import '../dome/ar_pose.dart' show ARPose;
 
+// Diagnostic log switch. When true, every normal↔limited transition
+// prints a single line so testers running real-device captures can
+// see WHEN tracking dropped without parsing curated.json. The dedupe
+// state ensures back-to-back identical events stay quiet.
+const bool _kDiagLog = true;
+
 /// Aggregated tracking-state health for a single capture session.
 class PoseDriftReport {
   /// Wall-clock duration the tracker observed events across.
@@ -179,6 +185,10 @@ class PoseDriftTracker {
     _transitionsToDegraded = 0;
     _currentDegradedRunStart = null;
     _longestDegradedRunMicros = 0;
+    if (_kDiagLog) {
+      // ignore: avoid_print
+      print('[PoseDrift] reset — tracker armed for new session');
+    }
   }
 
   /// Consume one observed pose event.
@@ -208,6 +218,10 @@ class PoseDriftTracker {
         // normal` to compare against, so this isn't a "fall from
         // healthy" — it's "started in a bad state".
         _currentDegradedRunStart = t;
+      }
+      if (_kDiagLog) {
+        // ignore: avoid_print
+        print('[PoseDrift] first event: state=$state');
       }
       return;
     }
@@ -240,19 +254,40 @@ class PoseDriftTracker {
     if (wasNormal && !isNormal) {
       _transitionsToDegraded++;
       _currentDegradedRunStart = t;
+      if (_kDiagLog) {
+        // ignore: avoid_print
+        print('[PoseDrift] DEGRADED: normal → $state '
+            '(transition #$_transitionsToDegraded)');
+      }
     } else if (!wasNormal && isNormal) {
       // Recovery — close out the current degraded run, update the
       // record holder. Use the wall-clock between the run-start and
       // NOW (not the wall-clock between events) — those are the
       // same since the recovery event IS now.
       final runStart = _currentDegradedRunStart;
+      int runMicros = 0;
       if (runStart != null) {
-        final runMicros = t.difference(runStart).inMicroseconds;
+        runMicros = t.difference(runStart).inMicroseconds;
         if (runMicros > _longestDegradedRunMicros) {
           _longestDegradedRunMicros = runMicros;
         }
       }
       _currentDegradedRunStart = null;
+      if (_kDiagLog) {
+        final runSec = (runMicros / 1e6).toStringAsFixed(2);
+        // ignore: avoid_print
+        print('[PoseDrift] RECOVERED: $prevState → normal '
+            '(degraded for ${runSec}s)');
+      }
+    } else if (!wasNormal && !isNormal && prevState != state) {
+      // limited reason changed mid-degraded-run (e.g.
+      // excessive_motion → insufficient_features). Worth logging
+      // because the root cause shifted.
+      if (_kDiagLog) {
+        // ignore: avoid_print
+        print('[PoseDrift] limited reason changed: '
+            '$prevState → $state (still degraded)');
+      }
     }
     // Same-bucket transitions (normal→normal, limited→limited, even
     // limited_excessive_motion→limited_initializing) are not
