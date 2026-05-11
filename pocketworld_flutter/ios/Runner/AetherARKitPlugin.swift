@@ -286,6 +286,26 @@ class AetherARKitPlugin: NSObject {
     // and makes the dome look "tilted when phone is level".
     configuration.planeDetection = [.horizontal]
 
+    // 4K capture when the device supports it. iOS 16+ exposes
+    // `recommendedVideoFormatFor4KResolution` on ARWorldTrackingConfiguration;
+    // it returns nil on devices that can't run ARKit at 4K. Project floor
+    // is iPhone 11+ which all support 4K via this API, but we keep the
+    // nil-fallback as a safety net (system default = 1920×1440).
+    //
+    // Must be set BEFORE `session.run` — videoFormat changes after a
+    // session is already running don't take effect. AVAssetWriter setup
+    // below reads `configuration.videoFormat.imageResolution`, so picking
+    // the format here automatically propagates the right pixel buffer
+    // dimensions to the recording path.
+    if #available(iOS 16.0, *) {
+      if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+        configuration.videoFormat = fourK
+        NSLog("[AetherARKit] using 4K videoFormat: \(fourK.imageResolution) @ \(fourK.framesPerSecond) fps")
+      } else {
+        NSLog("[AetherARKit] recommendedVideoFormatFor4KResolution returned nil; falling back to system default \(configuration.videoFormat.imageResolution)")
+      }
+    }
+
     let session = arSession ?? ARSession()
     session.delegate = sessionDelegate
     // .resetTracking gives the user a clean reference frame each
@@ -376,18 +396,32 @@ class AetherARKitPlugin: NSObject {
         DispatchQueue.main.async { completion(error) }
         return
       }
+      // Resolve actual capture dimensions from the currently-running
+      // ARKit session's videoFormat (set in startSession() above to 4K
+      // when supported, default 1920×1440 otherwise). This is the only
+      // way the recording path stays in sync with whatever videoFormat
+      // ARKit ended up using — hardcoding here would silently throw
+      // away pixels if 4K was selected but recorded at 1920×1440.
+      let videoRes: CGSize = self.arSession?.configuration?.videoFormat.imageResolution
+        ?? CGSize(width: 1920, height: 1440)
+      let captureWidth = Int(videoRes.width)
+      let captureHeight = Int(videoRes.height)
+      NSLog("[AetherARKit] startRecording: pixel buffer dims = \(captureWidth)×\(captureHeight)")
+
       let settings: [String: Any] = [
         AVVideoCodecKey: AVVideoCodecType.h264,
-        AVVideoWidthKey: 1920,
-        AVVideoHeightKey: 1440,
+        AVVideoWidthKey: captureWidth,
+        AVVideoHeightKey: captureHeight,
       ]
       let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
       input.expectsMediaDataInRealTime = true
-      // ARFrame.capturedImage is always 1920×1440 landscape (sensor native
-      // orientation), regardless of how the user is holding the phone. We
-      // record portrait — so apply a +90° clockwise rotation transform on
-      // the writer input. The pixel buffers stay landscape on disk, but
-      // .mov metadata tells QuickTime / ffmpeg / video_thumbnail / any
+      // ARFrame.capturedImage dimensions = configuration.videoFormat.imageResolution
+      // (landscape-native sensor orientation). On iPhone 11+ with iOS 16+:
+      // typically 3840×2160 in 4K mode, falls back to 1920×1440 if the
+      // device's recommendedVideoFormatFor4KResolution is nil. We record
+      // portrait — so apply a +90° clockwise rotation transform on the
+      // writer input. The pixel buffers stay landscape on disk, but .mov
+      // metadata tells QuickTime / ffmpeg / video_thumbnail / any
       // downstream player to rotate +90° at playback. Without this:
       // (a) the thumbnail extracted by video_thumbnail comes out sideways,
       // (b) the viewer's playback shows the world rotated 90°, (c) the
@@ -402,8 +436,8 @@ class AetherARKitPlugin: NSObject {
         sourcePixelBufferAttributes: [
           kCVPixelBufferPixelFormatTypeKey as String:
             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-          kCVPixelBufferWidthKey as String: 1920,
-          kCVPixelBufferHeightKey as String: 1440,
+          kCVPixelBufferWidthKey as String: captureWidth,
+          kCVPixelBufferHeightKey as String: captureHeight,
         ]
       )
 
