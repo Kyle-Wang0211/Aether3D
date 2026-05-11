@@ -143,23 +143,48 @@ post_install do |installer|
   marker = 'onnxruntime.xcframework'
   Dir[File.join(installer.config.installation_root, 'Pods/Target Support Files/Pods-Runner/*.xcconfig')].each do |xcconfig|
     contents = File.read(xcconfig)
-    next if contents.include?(marker) # idempotent
     appended = contents.dup
-    # Append to existing OTHER_LDFLAGS[sdk=iphoneos*] / iphonesimulator*
-    # lines if present; otherwise add a new line at end. Both lines
-    # always exist for Pods-Runner because aether3d_ffi already adds
-    # sdk-conditional ldflags upstream of us.
-    [
-      [/^OTHER_LDFLAGS\[sdk=iphoneos\*\] = (.*)$/, device_force_load],
-      [/^OTHER_LDFLAGS\[sdk=iphonesimulator\*\] = (.*)$/, sim_force_load],
-    ].each do |pattern, flag|
-      if appended.match?(pattern)
-        appended = appended.sub(pattern) { |m| "#{m} #{flag}" }
-      else
-        sdk = flag.include?('simulator') ? 'iphonesimulator*' : 'iphoneos*'
-        appended += "\nOTHER_LDFLAGS[sdk=#{sdk}] = $(inherited) #{flag}\n"
+
+    # 1) Strip `-l"onnxruntime-objc"`. The `onnxruntime` Flutter plugin
+    #    1.4.1 has zero Obj-C / Swift source files in its iOS folder —
+    #    it goes straight to C via dart:ffi. The podspec declares
+    #    onnxruntime-objc as a dependency only to transitively pull in
+    #    onnxruntime-c. CocoaPods then dutifully adds
+    #    `-l"onnxruntime-objc"` to Pods-Runner's OTHER_LDFLAGS,
+    #    re-importing the C ABI a second time. Combined with our
+    #    `-force_load` of onnxruntime.framework below, that produces
+    #    duplicate-symbol linker errors.
+    #    Dropping the `-l onnxruntime-objc` is safe: no Obj-C code in
+    #    this app references the wrapper's classes, and the C surface
+    #    is provided by the framework we force-load.
+    appended = appended.gsub(/ -l"onnxruntime-objc"/, '')
+
+    # 1b) Strip `-framework "onnxruntime"`. CocoaPods adds it because
+    #     onnxruntime-c declares the framework as a `vendored_framework`,
+    #     and the `-framework F` linker flag resolves to exactly the
+    #     same `onnxruntime.framework/onnxruntime` binary that our
+    #     `-force_load` below also pulls in. Linker sees the same
+    #     archive listed twice → 25 duplicate symbols. force_load alone
+    #     is enough: it both resolves the framework and retains every
+    #     symbol for dart:ffi lookup.
+    appended = appended.gsub(/ -framework "onnxruntime"/, '')
+
+    # 2) Append force_load only if not already there (idempotent on
+    #    repeat `pod install`).
+    unless contents.include?(marker)
+      [
+        [/^OTHER_LDFLAGS\[sdk=iphoneos\*\] = (.*)$/, device_force_load],
+        [/^OTHER_LDFLAGS\[sdk=iphonesimulator\*\] = (.*)$/, sim_force_load],
+      ].each do |pattern, flag|
+        if appended.match?(pattern)
+          appended = appended.sub(pattern) { |m| "#{m} #{flag}" }
+        else
+          sdk = flag.include?('simulator') ? 'iphonesimulator*' : 'iphoneos*'
+          appended += "\nOTHER_LDFLAGS[sdk=#{sdk}] = $(inherited) #{flag}\n"
+        end
       end
     end
-    File.write(xcconfig, appended)
+
+    File.write(xcconfig, appended) if appended != contents
   end
 end
