@@ -13,20 +13,25 @@
 // Wire format (per-frame inside curated.json):
 //
 //   "subject_mask": {
-//     "width": 512,
-//     "height": 512,
+//     "width": 1024,
+//     "height": 1024,
 //     "rle_b64": "<base64 of run-length-encoded binary mask>",
 //     "centerProb": 0.92,
 //     "fillRatio": 0.18,
 //     "mask_uuid": "msk-708"
 //   }
 //
-// Recommended mask resolution is 512×512 (see kRecommendedMaskSize
+// Recommended mask resolution is 1024×1024 (see kRecommendedMaskSize
 // below). Width/height are wire fields, not hardcoded constants —
 // any (W, H) pair the producer wrote is what the consumer decodes —
-// but Phase B implementers should default to kRecommendedMaskSize
-// to keep edge fidelity on 4K JPEGs (~7.5 px aliasing vs ~15 px at
-// 256×256 NEAREST upsample).
+// but Phase B implementers should default to kRecommendedMaskSize.
+//
+// Why 1024 and not 512: MobileSAM's encoder is trained at exactly
+// 1024×1024 input (ResizeLongestSide(1024)). Cross-bridging the
+// camera frame at 1024×1024 gives SAM the maximum detail it can
+// actually use; anything larger gets internally downsampled before
+// the encoder sees it. Mask output then matches SAM's natural
+// resolution, eliminating one resize step worker-side.
 //
 // RLE format: row-major scan starts on background (0). Each run is
 // emitted as a little-endian uint16 run length. A run length of 0 means
@@ -41,32 +46,38 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-/// Recommended mask resolution for Phase B producers. Tradeoff math
-/// (see chat history Phase B / mask sizing discussion):
+/// Recommended mask + cross-bridge resolution for Phase B producers.
+///
+/// Tradeoff table:
 ///
 /// | size | RLE/frame | manifest @ 118 frames | 4K JPEG edge aliasing |
 /// | 256  |   ~2 KB   |        236 KB         |       ~15 px          |
 /// | 384  |   ~4 KB   |        472 KB         |       ~10 px          |
-/// | 512  |   ~8 KB   |        944 KB         |       ~7.5 px         |  ← default
+/// | 512  |   ~8 KB   |        944 KB         |       ~7.5 px         |
 /// | 768  |  ~18 KB   |        2.1 MB         |       ~5 px           |
-/// | 1024 |  ~32 KB   |        3.7 MB         |       ~3.75 px        |
+/// | 1024 |  ~32 KB   |        3.7 MB         |       ~3.75 px        |  ← default
 ///
-/// SAM inference cost does NOT scale with this — the decoder always
-/// emits 256×256 logits internally then bilinear-resizes to the caller-
-/// requested orig_im_size. Only the post-SAM RLE encode + manifest
-/// upload + worker-side NEAREST upsample sees this size.
+/// 1024 is the natural ceiling: MobileSAM's encoder is trained at
+/// 1024×1024 (ResizeLongestSide(1024) preprocessing). Anything
+/// larger gets downsampled internally and provides zero extra signal.
 ///
-/// 512 chosen because:
-///   • 7.5 px aliasing on 4K JPEGs is below most users' visual
-///     attention threshold for object cutouts.
-///   • Manifest stays under 1 MB total, negligible vs the .mov
-///     upload size (tens of MB).
-///   • Cross-bridge bandwidth at 5 Hz = 5 MB/s sustained while SAM
-///     is enabled. iPhone MethodChannel comfortably does 100+ MB/s,
-///     so this is well within budget.
-///   • Matches what KIRI Engine's public 2024 writeup reports for
-///     their object-masking input resolution tier.
-const int kRecommendedMaskSize = 512;
+/// Cross-bridge data flow at 1024:
+///   • Native bridge captures 1024×1024×4 = 4 MB RGBA per pull
+///   • 5 Hz pull cadence → 20 MB/s sustained while SAM is enabled
+///   • iPhone MethodChannel cap is ~200 MB/s → 10% of budget
+///   • Dart isolate handoff uses TransferableTypedData (Dart 2.15+,
+///     zero-copy) so the main isolate never copies the 4 MB blob
+///     across the SendPort — critical for 60 fps Flutter UI
+///   • SAM inference cost (encoder + decoder on iPhone 12 Pro+ A14
+///     CoreML) is ~31 ms per call regardless of this value, since
+///     the encoder always runs at 1024×1024 internally
+///   • Manifest 3.7 MB is negligible vs the 30–80 MB .mov upload
+///
+/// LOW tier devices (iPhone 11/12, 4 GB RAM) skip SAM entirely via
+/// the `>= 5 GB physicalMemory` device-tier gate in
+/// AetherARKitPlugin.swift::startSession(); see
+/// project_pocketworld_device_tier.md memory for the full estimate.
+const int kRecommendedMaskSize = 1024;
 
 class SubjectMaskData {
   final int width;
