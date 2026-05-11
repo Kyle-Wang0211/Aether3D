@@ -304,24 +304,47 @@ class AetherARKitPlugin: NSObject {
     // and makes the dome look "tilted when phone is level".
     configuration.planeDetection = [.horizontal]
 
-    // 4K capture when the device supports it. iOS 16+ exposes
-    // `recommendedVideoFormatFor4KResolution` on ARWorldTrackingConfiguration;
-    // it returns nil on devices that can't run ARKit at 4K. Project floor
-    // is iPhone 11+ which all support 4K via this API, but we keep the
-    // nil-fallback as a safety net (system default = 1920×1440).
+    // 4K capture when the device supports it AND has enough RAM headroom.
+    //
+    // Device-tier gating (added Phase 6.4f.x):
+    //   • 4 GB RAM phones (iPhone 11, 12, 12 mini): system-default
+    //     1920×1440. ProcessInfo.physicalMemory reports ~3.86 GB on
+    //     these. 4K AR + 4K H.264 + ARSCNView + ARWorldTracking pushes
+    //     them to ~2.1 GB phys_footprint, which is at the iOS foreground
+    //     jetsam threshold (~1.7–2.0 GB on 4 GB devices, iOS 14+).
+    //     Long captures (60s+) reliably hit OOM at 4K on these.
+    //   • 6 GB+ RAM phones (iPhone 12 Pro+, 13+, 14+, 15+): 4K AR.
+    //     ProcessInfo.physicalMemory reports ~5.78 GB on 6 GB devices,
+    //     ~7.83 GB on 8 GB Pro variants. The 5 GB threshold cleanly
+    //     separates the two tiers and is forward-compatible with any
+    //     future memory bumps.
+    //
+    // This same threshold gates Task 3 Phase B (MobileSAM on-device
+    // inference, +180 MB peak) — 4 GB devices stay SAM-disabled.
+    //
+    // iOS 16+ exposes `recommendedVideoFormatFor4KResolution` on
+    // ARWorldTrackingConfiguration; nil-fallback to system default
+    // is kept as a safety net even on 6 GB devices.
     //
     // Must be set BEFORE `session.run` — videoFormat changes after a
     // session is already running don't take effect. AVAssetWriter setup
     // below reads `configuration.videoFormat.imageResolution`, so picking
     // the format here automatically propagates the right pixel buffer
     // dimensions to the recording path.
-    if #available(iOS 16.0, *) {
+    let physMemBytes = ProcessInfo.processInfo.physicalMemory
+    let physMemGB = Double(physMemBytes) / (1024.0 * 1024.0 * 1024.0)
+    let kFourKMemThresholdBytes: UInt64 = 5_000_000_000  // 5.0 GB
+    let allow4K = physMemBytes >= kFourKMemThresholdBytes
+    if #available(iOS 16.0, *), allow4K {
       if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
         configuration.videoFormat = fourK
-        NSLog("[AetherARKit] using 4K videoFormat: \(fourK.imageResolution) @ \(fourK.framesPerSecond) fps")
+        NSLog("[AetherARKit] device tier HIGH (\(String(format: "%.2f", physMemGB)) GB RAM), using 4K videoFormat: \(fourK.imageResolution) @ \(fourK.framesPerSecond) fps")
       } else {
-        NSLog("[AetherARKit] recommendedVideoFormatFor4KResolution returned nil; falling back to system default \(configuration.videoFormat.imageResolution)")
+        NSLog("[AetherARKit] device tier HIGH (\(String(format: "%.2f", physMemGB)) GB RAM) but recommendedVideoFormatFor4KResolution returned nil; using system default \(configuration.videoFormat.imageResolution)")
       }
+    } else {
+      let res = configuration.videoFormat.imageResolution
+      NSLog("[AetherARKit] device tier LOW (\(String(format: "%.2f", physMemGB)) GB RAM), staying on default videoFormat \(res) to avoid 4K jetsam risk")
     }
 
     let session = arSession ?? ARSession()
