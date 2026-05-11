@@ -92,26 +92,34 @@ class AetherARKitPlugin: NSObject {
   private var arSession: ARSession?
   private let sessionDelegate = ARSessionForwarder()
 
-  /// `worldOrigin` is the user-locked center of the captured object.
+  /// `worldOrigin` is the user-locked center of the captured object,
+  /// recomputed every broadcast frame from `worldSubjectAnchor.transform`.
   /// `worldYaw` is the camera's bearing at lock time. Subsequent frames'
   /// azimuth = atan2(rel.z, rel.x) − worldYaw, so the dome's az = 0
   /// always corresponds to "where the user was standing at lock".
   private var worldOrigin: simd_float3?
   private var worldYaw: Float = 0
 
-  /// When `lockOrigin` succeeds via plane raycast, we keep a handle on
-  /// the underlying ARPlaneAnchor + the offset of the hit point from
-  /// the plane's center. Each broadcast frame we re-read the plane's
-  /// latest transform (ARKit refines plane geometry continuously as
-  /// it sees more of the scene) and recompute `worldOrigin = plane +
-  /// offset`. This is what stops the world origin from drifting —
-  /// Polycam-style anchored origin instead of the previous static
-  /// camPos+forward*0.5 floating point. If raycast doesn't hit a
-  /// plane (no horizontal surface visible yet), `worldPlaneAnchor`
-  /// stays nil and the floating fallback is used (origin doesn't
-  /// auto-correct, same as the previous behavior).
-  private var worldPlaneAnchor: ARPlaneAnchor?
-  private var worldOffsetFromAnchor: simd_float3 = simd_float3(0, 0, 0)
+  /// The named `ARAnchor` we install at the locked origin point.
+  /// ARKit's contract: this is a fixed real-world point; ARKit tracks
+  /// it across world-frame re-alignments (limited→normal recovery,
+  /// loop closure) and updates its `transform` accordingly. Reading
+  /// the anchor's transform every broadcast frame keeps `worldOrigin`
+  /// glued to the real-world point the user locked, regardless of
+  /// internal SLAM corrections. WWDC 2018 §610 + Polycam polyform
+  /// pattern. We trust ARKit's updates unconditionally; an earlier
+  /// 0.5 m drift-rejection threshold got stuck rejecting forever once
+  /// ARKit issued a real >0.5 m correction.
+  private var worldSubjectAnchor: ARAnchor?
+
+  /// Snapshot of `worldOrigin` at lockOrigin time, kept for the 1 Hz
+  /// drift diagnostic in `broadcast`. `simd_distance(currentOrigin,
+  /// lockTimeOrigin)` tells us how far ARKit has internally moved the
+  /// anchor since we placed it — small drift is normal SLAM refinement,
+  /// metres-scale drift means the anchor sits in a feature-poor region
+  /// (mid-air with no nearby texture).
+  private var lockTimeOrigin: simd_float3?
+  private var lastDriftLogTime: TimeInterval = 0
 
   /// Last time we computed image-quality metrics from an ARFrame. iOS
   /// `ObjectModeV2ARDomeCoordinator.sampleInterval = 1.0 / 6.0` — we
@@ -325,8 +333,9 @@ class AetherARKitPlugin: NSObject {
     arSession = session
     worldOrigin = nil
     worldYaw = 0
-    worldPlaneAnchor = nil
-    worldOffsetFromAnchor = simd_float3(0, 0, 0)
+    worldSubjectAnchor = nil
+    lockTimeOrigin = nil
+    lastDriftLogTime = 0
   }
 
   private func stopSession() {
@@ -340,11 +349,15 @@ class AetherARKitPlugin: NSObject {
       recordingOutputURL = nil
       isRecording = false
     }
+    if let anchor = worldSubjectAnchor {
+      arSession?.remove(anchor: anchor)
+    }
     arSession?.pause()
     worldOrigin = nil
     worldYaw = 0
-    worldPlaneAnchor = nil
-    worldOffsetFromAnchor = simd_float3(0, 0, 0)
+    worldSubjectAnchor = nil
+    lockTimeOrigin = nil
+    lastDriftLogTime = 0
   }
 
   // MARK: Recording lifecycle (verbatim port of
@@ -583,55 +596,102 @@ class AetherARKitPlugin: NSObject {
     }
     let t = frame.camera.transform
     let camPos = simd_float3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-    // Verbatim of ObjectModeV2ARDomeCoordinator.lockAtCameraForward
-    // lines 300-307. Forward keeps its Y component on purpose: lock-
-    // time tilt is what makes "shoot the object from 45° above → dome
-    // shows the +45° cell" work without any extra orientation math.
+    // Forward = camera's optical axis (-Z column of the camera
+    // transform). Lock targets whatever's at the center of the screen.
+    // Y component is preserved on purpose: lock-time tilt is what makes
+    // "shoot the object from 45° above → dome shows the +45° cell"
+    // work without any extra orientation math.
     let forward = -simd_float3(t.columns.2.x, t.columns.2.y, t.columns.2.z)
 
-    // ── Step 1: Try to anchor the origin to a horizontal plane that
-    // ARKit has detected. Polycam-style — the plane's transform gets
-    // refined by ARKit continuously as it sees more of the scene, and
-    // we re-read the latest transform on every broadcast frame. This
-    // is what stops the world origin from drifting (the earlier static
-    // simd_float3 origin wasn't tracked by ARKit, so it visibly drifted
-    // over a long capture, throwing off azimuth/elevation calculations).
-    // If raycast misses (no plane visible yet),
-    // fall through to the floating-origin fallback.
+    // Pick the lock POSITION via a tiered raycast strategy:
+    //
+    //   1. `.estimatedPlane / .any` — ARKit fits a virtual plane to
+    //      nearby feature points along the gaze direction, regardless
+    //      of orientation. Hits upright surfaces (a paper bag's side,
+    //      a chair's back, a figurine) where no detected horizontal
+    //      plane exists. This is what fixes the "depth wrong" symptom
+    //      where `.existingPlaneInfinite, .horizontal` silently
+    //      sailed past the subject and hit the floor 0.47 m in front
+    //      of the user instead of the actual subject.
+    //   2. `.existingPlaneInfinite, .horizontal` — fallback for the
+    //      case where ARKit hasn't accumulated enough feature points
+    //      to estimate a plane yet, but has detected a real horizontal
+    //      surface. Same behavior as before.
+    //   3. forward × distanceMeters — final mid-air fallback if
+    //      neither raycast lands.
+    //
+    // Cap=2.5 m: subjects beyond that are usually mis-aimed (raycast
+    // sails past intended subject); fall back to forward × distance
+    // so the anchor stays close enough to ARKit's feature cloud for
+    // stable tracking.
+    let subjectAnchorMaxRange: Float = 2.5
     var origin: simd_float3
-    var anchorSource: String
+    var positionSource: String
     if let session = arSession {
-      let raycastQuery = ARRaycastQuery(
-        origin: camPos,
-        direction: simd_normalize(forward),
-        allowing: .existingPlaneInfinite,
-        alignment: .horizontal
-      )
-      let hits = session.raycast(raycastQuery)
-      if let hit = hits.first, let plane = hit.anchor as? ARPlaneAnchor {
+      var hits: [ARRaycastResult] = []
+      var raycastSource: String = ""
+      if #available(iOS 13.0, *) {
+        let estimateQuery = ARRaycastQuery(
+          origin: camPos,
+          direction: simd_normalize(forward),
+          allowing: .estimatedPlane,
+          alignment: .any
+        )
+        hits = session.raycast(estimateQuery)
+        if !hits.isEmpty { raycastSource = "estimated plane" }
+      }
+      if hits.isEmpty {
+        let infQuery = ARRaycastQuery(
+          origin: camPos,
+          direction: simd_normalize(forward),
+          allowing: .existingPlaneInfinite,
+          alignment: .horizontal
+        )
+        hits = session.raycast(infQuery)
+        if !hits.isEmpty { raycastSource = "existing horizontal plane" }
+      }
+      if let hit = hits.first {
         let hitPos = simd_float3(
           hit.worldTransform.columns.3.x,
           hit.worldTransform.columns.3.y,
           hit.worldTransform.columns.3.z
         )
-        let planePos = simd_float3(
-          plane.transform.columns.3.x,
-          plane.transform.columns.3.y,
-          plane.transform.columns.3.z
-        )
-        worldPlaneAnchor = plane
-        worldOffsetFromAnchor = hitPos - planePos
-        origin = hitPos
-        anchorSource = "plane raycast (anchor=\(plane.identifier.uuidString.prefix(8)))"
+        let hitDistance = simd_distance(camPos, hitPos)
+        if hitDistance <= subjectAnchorMaxRange {
+          origin = hitPos
+          positionSource = "\(raycastSource) (\(String(format: "%.2f", hitDistance)) m)"
+        } else {
+          origin = camPos + simd_normalize(forward) * distanceMeters
+          positionSource = "forward fallback (\(raycastSource) hit \(String(format: "%.2f", hitDistance)) m > cap \(subjectAnchorMaxRange) m)"
+        }
       } else {
-        worldPlaneAnchor = nil
         origin = camPos + simd_normalize(forward) * distanceMeters
-        anchorSource = "floating fallback (no plane in raycast)"
+        positionSource = "forward fallback (no raycast hit)"
       }
     } else {
-      worldPlaneAnchor = nil
       origin = camPos + simd_normalize(forward) * distanceMeters
-      anchorSource = "floating fallback (no session)"
+      positionSource = "forward fallback (no session)"
+    }
+
+    // Drop any previous subject anchor — a fresh lock means we're
+    // starting over.
+    if let oldAnchor = worldSubjectAnchor, let session = arSession {
+      session.remove(anchor: oldAnchor)
+      worldSubjectAnchor = nil
+    }
+
+    // Install a single named ARAnchor at the chosen origin. ARKit
+    // tracks its transform across world-frame re-alignments;
+    // broadcast() re-reads it every frame to update worldOrigin in
+    // lock-step. WWDC 2018 §610 + Polycam polyform pattern — the
+    // canonical ARKit-correct way to pin a real-world point.
+    if let session = arSession {
+      var transform = matrix_identity_float4x4
+      transform.columns.3 = simd_float4(origin.x, origin.y, origin.z, 1)
+      let anchor = ARAnchor(name: "pocketworld_subject_origin",
+                            transform: transform)
+      session.add(anchor: anchor)
+      worldSubjectAnchor = anchor
     }
 
     // worldYaw = "camera's relative bearing at lock". Subsequent
@@ -641,8 +701,10 @@ class AetherARKitPlugin: NSObject {
 
     worldOrigin = origin
     worldYaw = yaw
+    lockTimeOrigin = origin
+    lastDriftLogTime = 0  // force first drift log on next broadcast
 
-    NSLog("[AetherARKit] lockOrigin: SUCCESS via \(anchorSource) at "
+    NSLog("[AetherARKit] lockOrigin: SUCCESS via \(positionSource) at "
       + "(\(origin.x), \(origin.y), \(origin.z))")
 
     return [
@@ -688,30 +750,55 @@ class AetherARKitPlugin: NSObject {
       let pts = CMTimeSubtract(now, startPTS ?? now)
       let pixelBuffer = frame.capturedImage  // retained by closure capture
       writerQueue.async {
+        // Re-check on the writer queue: `isReadyForMoreMediaData` was
+        // YES on the main thread when we dispatched, but H.264 hardware
+        // back-pressure can flip it to NO before this closure runs
+        // (we've seen the gap span 5-30 ms under thermal=serious load).
+        // Calling `append` while NO throws NSInternalInconsistencyException
+        // and crashes the writer queue. Drop the frame instead — the
+        // dropped frame is invisible to the user (recording continues
+        // at near-target fps), the crash isn't.
+        guard adaptor.assetWriterInput.isReadyForMoreMediaData else { return }
         _ = adaptor.append(pixelBuffer, withPresentationTime: pts)
       }
       recordedFrameCount += 1
     }
 
-    // ── Refresh worldOrigin from the plane anchor's latest transform.
-    // ARKit refines plane geometry continuously; reading the anchor's
-    // current transform on every frame is what makes the origin STAY
-    // put (in algorithm-space — there's no visual reticle anymore) as
-    // the user walks around. Without this, the anchor's static initial
-    // transform drifts away from the table over the course of a long
-    // capture, corrupting azimuth/elevation. Only kicks in if
-    // `lockOrigin` got a plane raycast hit.
-    if let myAnchor = worldPlaneAnchor {
-      if let updatedAnchor = frame.anchors.first(
-        where: { $0.identifier == myAnchor.identifier }
-      ) as? ARPlaneAnchor {
-        worldPlaneAnchor = updatedAnchor
-        let planePos = simd_float3(
-          updatedAnchor.transform.columns.3.x,
-          updatedAnchor.transform.columns.3.y,
-          updatedAnchor.transform.columns.3.z
-        )
-        worldOrigin = planePos + worldOffsetFromAnchor
+    // ── Refresh worldOrigin from the subject anchor's latest transform.
+    // ARKit re-aligns its world frame continuously (limited→normal
+    // recovery, loop closure). Per WWDC 2018 §610 + Polycam polyform:
+    // an `ARAnchor`'s transform is updated by ARKit in lock-step with
+    // those re-alignments, so reading it every frame keeps `worldOrigin`
+    // glued to the real-world point the user locked. We accept the
+    // update unconditionally — an earlier 0.5 m drift-rejection
+    // threshold got stuck rejecting forever once ARKit issued a real
+    // multi-meter correction (no recovery once `diff(old, new)` stayed
+    // above the cap; user-facing symptom: "白球还是会大跳去很远的地方").
+    if let myAnchor = worldSubjectAnchor,
+       let updatedAnchor = frame.anchors.first(
+         where: { $0.identifier == myAnchor.identifier }
+       ) {
+      worldSubjectAnchor = updatedAnchor
+      worldOrigin = simd_float3(
+        updatedAnchor.transform.columns.3.x,
+        updatedAnchor.transform.columns.3.y,
+        updatedAnchor.transform.columns.3.z
+      )
+    }
+
+    // Diagnostic: 1 Hz drift log against lock-time origin. Tells us
+    // whether the anchor is sitting in a feature-rich region (drift
+    // < 5 cm) or feature-poor mid-air (drift in metres).
+    if let lockTime = lockTimeOrigin, let curr = worldOrigin {
+      if frame.timestamp - lastDriftLogTime > 1.0 {
+        let drift = simd_distance(curr, lockTime)
+        NSLog(String(
+          format: "[AetherARKit] anchor drift: %.3f m from lock origin "
+            + "(curr=(%.3f, %.3f, %.3f) lock=(%.3f, %.3f, %.3f))",
+          drift, curr.x, curr.y, curr.z,
+          lockTime.x, lockTime.y, lockTime.z
+        ))
+        lastDriftLogTime = frame.timestamp
       }
     }
 
@@ -1105,10 +1192,28 @@ class AetherARKitPreviewFactory: NSObject, FlutterPlatformViewFactory {
 }
 
 @available(iOS 11.0, *)
-class AetherARKitPreviewView: NSObject, FlutterPlatformView {
+class AetherARKitPreviewView: NSObject, FlutterPlatformView, ARSCNViewDelegate {
   private let arscnView: ARSCNView
   private let getSession: () -> ARSession?
   private var pollTimer: Timer?
+
+  // ── Subject marker (Remy-style locked-origin visualization) ────────
+  //
+  // Kept post-SAM-revert for ongoing validation: user wanted more
+  // capture sessions before deciding whether the marker is signal or
+  // noise. Mechanism: lockOrigin installs the named
+  // `pocketworld_subject_origin` ARAnchor → ARKit fires
+  // `renderer(_:didAdd:for:)` with an auto-managed SCNNode whose
+  // transform tracks the anchor across ARKit world-frame
+  // re-alignments. We attach a 3 cm white sphere as a CHILD of that
+  // node — SceneKit hierarchy propagates ARKit's transform updates
+  // automatically. WWDC 2018 §610 + Polycam polyform pattern.
+  //
+  // writesToDepthBuffer=false renders the sphere OVER any geometry —
+  // diagnostic, not scene element. If the dot sits "behind" the
+  // subject visually, the user sees that the lock missed.
+  private static let subjectMarkerRadius: CGFloat = 0.03 // 3 cm
+  private static let subjectAnchorName = "pocketworld_subject_origin"
 
   init(frame: CGRect, getSession: @escaping () -> ARSession?) {
     self.arscnView = ARSCNView(frame: frame)
@@ -1118,6 +1223,7 @@ class AetherARKitPreviewView: NSObject, FlutterPlatformView {
     arscnView.scene = SCNScene()         // empty scene — camera feed only
     arscnView.rendersContinuously = true
     arscnView.antialiasingMode = .none
+    arscnView.delegate = self
     attachSessionIfReady()
   }
 
@@ -1128,8 +1234,15 @@ class AetherARKitPreviewView: NSObject, FlutterPlatformView {
   /// AetherARKitPlugin creates the ARSession lazily on `startSession`,
   /// which the Dart side does inside CaptureSession.attach(). The
   /// preview widget can be in the tree before attach() runs, so we
-  /// poll briefly until the session shows up. Once attached, stop the
-  /// timer.
+  /// poll briefly until the session shows up.
+  ///
+  /// We deliberately do NOT install `ARCoachingOverlayView` here —
+  /// CapturePage's own "AR warmup" gate (1500 ms continuous
+  /// trackingState == .normal before enabling the lock button) covers
+  /// the same user-guidance role and is cross-platform (Android /
+  /// HarmonyOS / Web each get the same widget). Polycam's UX runs
+  /// effectively the same shape with their own widget — same path,
+  /// our wrapper.
   private func attachSessionIfReady() {
     if let session = getSession() {
       arscnView.session = session
@@ -1150,6 +1263,36 @@ class AetherARKitPreviewView: NSObject, FlutterPlatformView {
         self.pollTimer = nil
       }
     }
+  }
+
+  // MARK: ARSCNViewDelegate
+
+  /// Fires when ARKit adds an anchor to the session. ARSCNView creates
+  /// the parent SCNNode for us; we attach a child sphere if this is OUR
+  /// subject anchor (filtered by name to ignore plane anchors that
+  /// `planeDetection = [.horizontal]` adds automatically).
+  func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
+    guard anchor.name == Self.subjectAnchorName else { return }
+    let sphere = SCNSphere(radius: Self.subjectMarkerRadius)
+    let material = SCNMaterial()
+    material.diffuse.contents = UIColor.white
+    material.lightingModel = .constant
+    material.writesToDepthBuffer = false
+    material.readsFromDepthBuffer = false
+    material.isDoubleSided = true
+    sphere.materials = [material]
+    let markerNode = SCNNode(geometry: sphere)
+    markerNode.renderingOrder = 100
+    node.addChildNode(markerNode)
+    NSLog("[AetherARKitPreview] subject marker attached as child of anchor node")
+  }
+
+  /// Fires when ARKit removes our anchor (re-lock or stopSession).
+  /// SceneKit auto-removes child nodes when the parent goes — nothing
+  /// to do, but log for visibility.
+  func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
+    guard anchor.name == Self.subjectAnchorName else { return }
+    NSLog("[AetherARKitPreview] subject anchor removed; marker went with it")
   }
 
   deinit {
