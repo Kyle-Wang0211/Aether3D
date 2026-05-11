@@ -2,39 +2,153 @@ PODS:
   - aether3d_ffi (0.1.0-phase3)
   - app_links (7.0.0):
     - Flutter
+  - background_downloader (0.0.1):
+    - Flutter
+  - camera_avfoundation (0.0.1):
+    - Flutter
+  - DKImagePickerController/Core (4.3.9):
+    - DKImagePickerController/ImageDataManager
+    - DKImagePickerController/Resource
+  - DKImagePickerController/ImageDataManager (4.3.9)
+  - DKImagePickerController/PhotoGallery (4.3.9):
+    - DKImagePickerController/Core
+    - DKPhotoGallery
+  - DKImagePickerController/Resource (4.3.9)
+  - DKPhotoGallery (0.0.19):
+    - DKPhotoGallery/Core (= 0.0.19)
+    - DKPhotoGallery/Model (= 0.0.19)
+    - DKPhotoGallery/Preview (= 0.0.19)
+    - DKPhotoGallery/Resource (= 0.0.19)
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Core (0.0.19):
+    - DKPhotoGallery/Model
+    - DKPhotoGallery/Preview
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Model (0.0.19):
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Preview (0.0.19):
+    - DKPhotoGallery/Model
+    - DKPhotoGallery/Resource
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Resource (0.0.19):
+    - SDWebImage
+    - SwiftyGif
+  - file_picker (0.0.1):
+    - DKImagePickerController/PhotoGallery
+    - Flutter
   - Flutter (1.0.0)
+  - libwebp (1.5.0):
+    - libwebp/demux (= 1.5.0)
+    - libwebp/mux (= 1.5.0)
+    - libwebp/sharpyuv (= 1.5.0)
+    - libwebp/webp (= 1.5.0)
+  - libwebp/demux (1.5.0):
+    - libwebp/webp
+  - libwebp/mux (1.5.0):
+    - libwebp/demux
+  - libwebp/sharpyuv (1.5.0)
+  - libwebp/webp (1.5.0):
+    - libwebp/sharpyuv
+  - onnxruntime (0.0.1):
+    - Flutter
+    - onnxruntime-objc (= 1.15.1)
+  - onnxruntime-c (1.15.1)
+  - onnxruntime-objc (1.15.1):
+    - onnxruntime-objc/Core (= 1.15.1)
+  - onnxruntime-objc/Core (1.15.1):
+    - onnxruntime-c (= 1.15.1)
+  - SDWebImage (5.21.7):
+    - SDWebImage/Core (= 5.21.7)
+  - SDWebImage/Core (5.21.7)
+  - sensors_plus (0.0.1):
+    - Flutter
   - shared_preferences_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
+  - SwiftyGif (5.4.5)
+  - thermion_flutter (0.0.1):
+    - Flutter
   - url_launcher_ios (0.0.1):
     - Flutter
+  - video_thumbnail (0.0.1):
+    - Flutter
+    - libwebp
 
 DEPENDENCIES:
   - aether3d_ffi (from `../../aether_cpp`)
   - app_links (from `.symlinks/plugins/app_links/ios`)
+  - background_downloader (from `.symlinks/plugins/background_downloader/ios`)
+  - camera_avfoundation (from `.symlinks/plugins/camera_avfoundation/ios`)
+  - file_picker (from `.symlinks/plugins/file_picker/ios`)
   - Flutter (from `Flutter`)
+  - onnxruntime (from `.symlinks/plugins/onnxruntime/ios`)
+  - sensors_plus (from `.symlinks/plugins/sensors_plus/ios`)
   - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
+  - thermion_flutter (from `.symlinks/plugins/thermion_flutter/ios`)
   - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
+  - video_thumbnail (from `.symlinks/plugins/video_thumbnail/ios`)
+
+SPEC REPOS:
+  trunk:
+    - DKImagePickerController
+    - DKPhotoGallery
+    - libwebp
+    - onnxruntime-c
+    - onnxruntime-objc
+    - SDWebImage
+    - SwiftyGif
 
 EXTERNAL SOURCES:
   aether3d_ffi:
     :path: "../../aether_cpp"
   app_links:
     :path: ".symlinks/plugins/app_links/ios"
+  background_downloader:
+    :path: ".symlinks/plugins/background_downloader/ios"
+  camera_avfoundation:
+    :path: ".symlinks/plugins/camera_avfoundation/ios"
+  file_picker:
+    :path: ".symlinks/plugins/file_picker/ios"
   Flutter:
     :path: Flutter
+  onnxruntime:
+    :path: ".symlinks/plugins/onnxruntime/ios"
+  sensors_plus:
+    :path: ".symlinks/plugins/sensors_plus/ios"
   shared_preferences_foundation:
     :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
+  thermion_flutter:
+    :path: ".symlinks/plugins/thermion_flutter/ios"
   url_launcher_ios:
     :path: ".symlinks/plugins/url_launcher_ios/ios"
+  video_thumbnail:
+    :path: ".symlinks/plugins/video_thumbnail/ios"
 
 SPEC CHECKSUMS:
-  aether3d_ffi: d01e1abd338acb0858bd9297d724103894985804
+  aether3d_ffi: 03f2ce7f3c2b4fcdd17799c21c5db3d018e9af9f
   app_links: a754cbec3c255bd4bbb4d236ecc06f28cd9a7ce8
+  background_downloader: 50e91d979067b82081aba359d7d916b3ba5fadad
+  camera_avfoundation: 968a9a5323c79a99c166ad9d7866bfd2047b5a9b
+  DKImagePickerController: 946cec48c7873164274ecc4624d19e3da4c1ef3c
+  DKPhotoGallery: b3834fecb755ee09a593d7c9e389d8b5d6deed60
+  file_picker: a0560bc09d61de87f12d246fc47d2119e6ef37be
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  libwebp: 02b23773aedb6ff1fd38cec7a77b81414c6842a8
+  onnxruntime: 2ab1957eb029c71d47f7bb35cc4efc9f0d297828
+  onnxruntime-c: ebdcfd8650bcbd10121c125262f99dea681b92a3
+  onnxruntime-objc: ae7acec7a3d03eaf072d340afed7a35635c1c2a6
+  SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
+  sensors_plus: 6a11ed0c2e1d0bd0b20b4029d3bad27d96e0c65b
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
+  SwiftyGif: 706c60cf65fa2bc5ee0313beece843c8eb8194d4
+  thermion_flutter: d0c4adbb1de69e5ecc244d70bbde81d8497246b2
   url_launcher_ios: 7a95fa5b60cc718a708b8f2966718e93db0cef1b
+  video_thumbnail: b637e0ad5f588ca9945f6e2c927f73a69a661140
 
-PODFILE CHECKSUM: 83961b4880a9812ed5befed55faf5434dd0b293b
+PODFILE CHECKSUM: 404a5c3f6b8e770aee59ad0dfb3b31e3763b0f07
 
 COCOAPODS: 1.16.2
