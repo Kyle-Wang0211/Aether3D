@@ -945,9 +945,9 @@ class AetherARKitPlugin: NSObject {
     // directly here — same pattern iOS Aether3D uses on its AR-only
     // path (capture session reads the AR buffer too).
     //
-    // Compute runs OFF the main thread (qualityQueue) so it doesn't
-    // block ARKit's delegate callback chain. Result is cached in
-    // `pendingQuality` and attached to the NEXT pose event (1-3
+    // Plane extract runs OFF the main thread (qualityQueue) so it
+    // doesn't block ARKit's delegate callback chain. Result is cached
+    // in `pendingGray128` and attached to the NEXT pose event (1-3
     // frames stale ≈ 17-50 ms, irrelevant for the 6 Hz sample rate).
     qDiagPoseEvents += 1
     if qDiagWindowStart == 0 { qDiagWindowStart = frame.timestamp }
@@ -1027,23 +1027,13 @@ class AetherARKitPlugin: NSObject {
   }
 }
 
-// MARK: - Frame quality compute (Y plane → Laplacian + signature)
+// MARK: - Frame quality plane extract (cross-platform handoff to Dart)
 
 @available(iOS 11.0, *)
 extension AetherARKitPlugin {
-  /// Side of the small grayscale signature embedded in each pose
-  /// event for the GuidanceEngine's novelty / similarity check. 16² =
-  /// 256 bytes — small enough for byte-by-byte comparison in Dart.
-  static let signatureSide = 16
-  /// Internal downsample side for Laplacian. iOS Aether3D's analyzer
-  /// uses 128² for the same reason: low-pass enough to ignore sensor
-  /// noise, high enough to preserve real edges.
+  /// Output edge length of `extractGray128`. Must match
+  /// `kQualityGraySide` in lib/quality/quality_compute.dart.
   static let downsampleSide = 128
-
-  // QualityReport struct removed: native no longer computes metrics.
-  // All Laplacian / brightness / signature math lives in
-  // lib/quality/quality_compute.dart, derived from the gray128 thumbnail
-  // extracted by `extractGray128(_:)` below.
 
   /// Stringified `ARCamera.TrackingState` for the pose stream's
   /// `trackingStateName` field. Mirrors the enum 1:1 so the Dart side
