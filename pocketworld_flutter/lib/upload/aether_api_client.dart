@@ -609,7 +609,28 @@ class AetherApiClient {
         'server returned multipart upload but no partSizeBytes',
       );
     }
-    final maxConcurrency = math.max(1, upload.maxConcurrency ?? 4);
+    // Concurrency cap — DigitalOcean's default `maxConcurrency=20` is
+    // server-side advice ("S3 won't throttle if you stay under this").
+    // It's NOT a recommendation for client memory: 20 × 16 MB part = 320
+    // MB of in-flight buffer, which on a 4 GB device (iPhone 11/12 once
+    // the Android ARCore plugin lands and ships 1080p captures) can
+    // push phys_footprint past the iOS jetsam threshold mid-upload.
+    //
+    // 8 is the compromise:
+    //   • Bandwidth: 8 concurrent PUT-16MB easily saturates 100 Mbps up
+    //     (a typical good wifi / 5G uplink), so we don't lose throughput
+    //   • Memory: 8 × 16 MB = 128 MB peak resident, safe even on top of
+    //     a 1.5 GB just-stopped-capture working set
+    //   • Server: 8 is well below DO Spaces' actual rate ceiling
+    //
+    // Server still gets to set the floor (small file with 2 parts → 2
+    // concurrent), and the env-overridable `maxConcurrency` default
+    // (4 if server omits the field entirely) survives.
+    const kClientMaxConcurrency = 8;
+    final maxConcurrency = math.max(
+      1,
+      math.min(kClientMaxConcurrency, upload.maxConcurrency ?? 4),
+    );
     final totalBytes = await file.length();
 
     // ignore: avoid_print
