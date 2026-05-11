@@ -1,5 +1,6 @@
 import ARKit
 @preconcurrency import AVFoundation
+import CoreImage
 import CoreMedia
 import Flutter
 import Foundation
@@ -269,6 +270,70 @@ class AetherARKitPlugin: NSObject {
           result(payload)
         }
       }
+    case "requestSamFrame":
+      // On-demand snapshot of the latest ARFrame.capturedImage,
+      // YUV→RGBA downsampled to a square. Used by the Dart-side
+      // MobileSAM 5 Hz loop in CaptureSession. We do NOT push
+      // frames over the EventChannel because:
+      //   • A 1024×1024×4 = 4 MB blob at 5 Hz = 20 MB/s of
+      //     channel chatter even when SAM isn't running.
+      //   • The Dart caller already polls on a Timer; pull-based
+      //     means it can throttle without us shipping unwanted
+      //     bytes.
+      // Default 1024 = MobileSAM's training input resolution
+      // (ResizeLongestSide(1024)); see kRecommendedMaskSize in
+      // lib/capture/sam/subject_mask_data.dart for the full
+      // tradeoff math. Caller may override via args["size"];
+      // valid range [64, 1024] (clamp on both ends — values
+      // beyond 1024 get downsampled by SAM internally and
+      // provide zero extra signal).
+      let target: Int
+      if let args = call.arguments as? [String: Any],
+         let s = (args["size"] as? NSNumber)?.intValue, s > 0 {
+        target = min(max(s, 64), 1024)
+      } else {
+        target = 1024
+      }
+      guard let frame = arSession?.currentFrame else {
+        // No frame yet (session warming up). Return nil — caller
+        // treats as "skip this tick".
+        result(nil)
+        return
+      }
+      let pixelBuffer = frame.capturedImage
+      // Hop off main; YUV→RGBA on a 1920×1440 source costs ~5-8 ms
+      // even with the fast nearest-neighbour downsample below.
+      qualityQueue.async {
+        let bytes = AetherARKitPlugin.captureRgbaSquare(
+          pixelBuffer: pixelBuffer,
+          target: target
+        )
+        DispatchQueue.main.async {
+          if let data = bytes {
+            result([
+              "width": target,
+              "height": target,
+              "rgba": FlutterStandardTypedData(bytes: data),
+            ])
+          } else {
+            result(nil)
+          }
+        }
+      }
+    case "getDeviceTier":
+      // Reports device memory tier so the Dart side can decide whether
+      // to start MobileSAM (HIGH only — LOW devices would OOM, see
+      // project_pocketworld_device_tier.md memory). Single source of
+      // truth for the 5 GB threshold lives in startSession() above
+      // where the 4K AR videoFormat decision uses the same boundary.
+      let physMemBytes = ProcessInfo.processInfo.physicalMemory
+      let physMemGB = Double(physMemBytes) / (1024.0 * 1024.0 * 1024.0)
+      let tier = physMemBytes >= 5_000_000_000 ? "high" : "low"
+      result([
+        "tier": tier,
+        "physicalMemoryBytes": NSNumber(value: physMemBytes),
+        "physicalMemoryGB": physMemGB,
+      ])
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -1002,6 +1067,94 @@ extension AetherARKitPlugin {
       @unknown default: return "limited_unknown"
       }
     }
+  }
+
+  /// Shared CIContext for the SAM frame snapshot path. CIContext is
+  /// expensive to create (~10ms cold-start, allocates Metal device +
+  /// program cache), so we keep one alive for the lifetime of the
+  /// process. CoreImage internally uses Metal/IOSurface and reuses
+  /// pipeline state across `render(toBitmap:)` calls; per-frame cost
+  /// is dominated by the YUV→RGB conversion shader + bilinear scale,
+  /// typically 8–20 ms on iPhone 12 Pro+ for a 1024×1024 output.
+  ///
+  /// Thread-safety: CIContext.render is documented as thread-safe
+  /// (see Apple's CIContext.h header). All callers run on
+  /// `qualityQueue` (serial), so even if Apple's docs were wrong
+  /// we'd still serialize accesses.
+  private static let samCIContext: CIContext = {
+    // High-quality color management adds ~30% latency for ARKit
+    // YUV→RGB but doesn't change the SAM mask (SAM is colorspace-
+    // agnostic at the binary mask level). Keep colorspace nil →
+    // CoreImage auto-detects from CVPixelBuffer attachments.
+    return CIContext(options: [
+      .useSoftwareRenderer: false,  // force GPU
+      .priorityRequestLow: true,    // don't compete with ARKit's
+                                    // own GPU rendering for the
+                                    // preview view
+    ])
+  }()
+
+  /// Snapshot the current ARFrame's `capturedImage` (typically a
+  /// 1920×1440 or 3840×2160 BiPlanar YUV CVPixelBuffer), convert to
+  /// RGBA, and downsample bilinearly to (target × target). Used by
+  /// the Dart-side `requestSamFrame` MethodChannel handler to feed
+  /// MobileSAM at its native 1024×1024 input resolution.
+  ///
+  /// Why a square output: SAM expects ResizeLongestSide(1024) input
+  /// with the short side zero-padded. Returning a square buffer
+  /// already-padded keeps the Dart wrapper trivial — it can feed the
+  /// bytes straight into the encoder ONNX without further reshape.
+  ///
+  /// We do NOT preserve the source aspect ratio. ARKit landscape
+  /// frames are 4:3 (1920×1440) or 16:9 (3840×2160); both squashed
+  /// to a square introduces vertical/horizontal stretch in SAM input.
+  /// MobileSAM was trained on stretched-to-1024² ImageNet, so this
+  /// matches its training distribution; the binary mask snaps back
+  /// to a true square the worker upsamples NEAREST onto the original
+  /// (non-square) JPEG, restoring the aspect.
+  ///
+  /// Returns nil if pixel buffer can't be wrapped as CIImage (would
+  /// only happen for a corrupted ARFrame, which we've never seen in
+  /// practice).
+  static func captureRgbaSquare(
+    pixelBuffer: CVPixelBuffer,
+    target: Int
+  ) -> Data? {
+    let srcWidth = CVPixelBufferGetWidth(pixelBuffer)
+    let srcHeight = CVPixelBufferGetHeight(pixelBuffer)
+    guard srcWidth > 0, srcHeight > 0, target > 0 else {
+      return nil
+    }
+
+    // CIImage(cvPixelBuffer:) accepts BiPlanar YUV directly and
+    // CoreImage handles the YUV→RGB conversion lazily on render.
+    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+
+    // Squash to (target, target) via affine scale. Independent X/Y
+    // scales = stretch (matches MobileSAM's training preprocessing).
+    let scaleX = CGFloat(target) / CGFloat(srcWidth)
+    let scaleY = CGFloat(target) / CGFloat(srcHeight)
+    let scaled = ciImage.transformed(
+      by: CGAffineTransform(scaleX: scaleX, y: scaleY)
+    )
+
+    // Pre-allocate the destination RGBA8 byte buffer. CIContext.render
+    // writes into this directly (no extra copy).
+    var rgba = Data(count: target * target * 4)
+    let rect = CGRect(x: 0, y: 0, width: target, height: target)
+
+    rgba.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+      guard let baseAddr = raw.baseAddress else { return }
+      samCIContext.render(
+        scaled,
+        toBitmap: baseAddr,
+        rowBytes: target * 4,
+        bounds: rect,
+        format: .RGBA8,
+        colorSpace: CGColorSpaceCreateDeviceRGB()
+      )
+    }
+    return rgba
   }
 
   /// Compute Laplacian variance, mean brightness, global variance and
