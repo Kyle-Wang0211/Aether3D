@@ -13,13 +13,20 @@
 // Wire format (per-frame inside curated.json):
 //
 //   "subject_mask": {
-//     "width": 256,
-//     "height": 256,
+//     "width": 512,
+//     "height": 512,
 //     "rle_b64": "<base64 of run-length-encoded binary mask>",
 //     "centerProb": 0.92,
 //     "fillRatio": 0.18,
 //     "mask_uuid": "msk-708"
 //   }
+//
+// Recommended mask resolution is 512×512 (see kRecommendedMaskSize
+// below). Width/height are wire fields, not hardcoded constants —
+// any (W, H) pair the producer wrote is what the consumer decodes —
+// but Phase B implementers should default to kRecommendedMaskSize
+// to keep edge fidelity on 4K JPEGs (~7.5 px aliasing vs ~15 px at
+// 256×256 NEAREST upsample).
 //
 // RLE format: row-major scan starts on background (0). Each run is
 // emitted as a little-endian uint16 run length. A run length of 0 means
@@ -33,6 +40,33 @@
 
 import 'dart:convert';
 import 'dart:typed_data';
+
+/// Recommended mask resolution for Phase B producers. Tradeoff math
+/// (see chat history Phase B / mask sizing discussion):
+///
+/// | size | RLE/frame | manifest @ 118 frames | 4K JPEG edge aliasing |
+/// | 256  |   ~2 KB   |        236 KB         |       ~15 px          |
+/// | 384  |   ~4 KB   |        472 KB         |       ~10 px          |
+/// | 512  |   ~8 KB   |        944 KB         |       ~7.5 px         |  ← default
+/// | 768  |  ~18 KB   |        2.1 MB         |       ~5 px           |
+/// | 1024 |  ~32 KB   |        3.7 MB         |       ~3.75 px        |
+///
+/// SAM inference cost does NOT scale with this — the decoder always
+/// emits 256×256 logits internally then bilinear-resizes to the caller-
+/// requested orig_im_size. Only the post-SAM RLE encode + manifest
+/// upload + worker-side NEAREST upsample sees this size.
+///
+/// 512 chosen because:
+///   • 7.5 px aliasing on 4K JPEGs is below most users' visual
+///     attention threshold for object cutouts.
+///   • Manifest stays under 1 MB total, negligible vs the .mov
+///     upload size (tens of MB).
+///   • Cross-bridge bandwidth at 5 Hz = 5 MB/s sustained while SAM
+///     is enabled. iPhone MethodChannel comfortably does 100+ MB/s,
+///     so this is well within budget.
+///   • Matches what KIRI Engine's public 2024 writeup reports for
+///     their object-masking input resolution tier.
+const int kRecommendedMaskSize = 512;
 
 class SubjectMaskData {
   final int width;
