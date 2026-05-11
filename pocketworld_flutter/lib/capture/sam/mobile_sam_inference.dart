@@ -408,7 +408,25 @@ class MobileSamInference {
       }
     }
 
-    opts.appendCPUProvider(CPUFlags.useArena);
+    // CPU provider is the default fallback inside onnxruntime — we
+    // append it explicitly to opt into useArena (arena allocator
+    // reduces tensor-buffer churn on long inference runs). On iOS,
+    // however, onnxruntime 1.4.1's FFI lookup of
+    // `OrtSessionOptionsAppendExecutionProvider_CPU` symbol-not-found
+    // crashes warmup unless onnxruntime-c (not -objc) is force-linked
+    // into Runner.app. We treat the call as best-effort: failure
+    // means "stay on the default CPU provider without arena"
+    // (still functional, just a hair less efficient for SAM's
+    // ~30 ms inferences). The CoreML provider above is already in
+    // a try/catch for the same reason.
+    try {
+      opts.appendCPUProvider(CPUFlags.useArena);
+    } catch (e) {
+      debugPrint(
+        '[MobileSamInference] appendCPUProvider failed ($e); '
+        'falling back to onnxruntime default CPU provider',
+      );
+    }
     return opts;
   }
 
