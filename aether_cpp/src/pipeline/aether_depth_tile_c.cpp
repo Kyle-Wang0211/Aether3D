@@ -80,46 +80,42 @@ int32_t aether_blend_tiles(
     const TileLayout layout = aether::pipeline::make_tile_layout(
         image_w, image_h, tile_size, overlap);
 
-    // Marshal tiles into C++ vector. Copy depth/conf pointers as-is (avoid
-    // double-allocating the per-tile float buffers — read-only access).
-    std::vector<TileInference> cpp_tiles;
-    cpp_tiles.reserve(static_cast<std::size_t>(n_tiles));
-    const std::size_t tile_px = static_cast<std::size_t>(tile_size) * tile_size;
+    // Build non-owning TileView array. NO float copy across FFI boundary —
+    // the C ABI's `const float* depth` / `*conf` are passed straight through
+    // to blend_tiles_view as read-only views. Earlier impl copied each tile
+    // into a std::vector<TileInference>, which added ~170ms FFI marshaling
+    // for 12 tiles × 2 × 268K floats on iPhone 14 Pro.
+    std::vector<aether::pipeline::TileView> views;
+    views.reserve(static_cast<std::size_t>(n_tiles));
     for (int32_t i = 0; i < n_tiles; ++i) {
         if (tiles[i].depth == nullptr || tiles[i].conf == nullptr) {
             return AETHER_DEPTH_TILE_ERR_BAD_ARGS;
         }
-        TileInference t;
-        t.tile.x = tiles[i].tile.x;
-        t.tile.y = tiles[i].tile.y;
-        t.tile.width = tiles[i].tile.width;
-        t.tile.height = tiles[i].tile.height;
-        t.tile.row = tiles[i].tile.row;
-        t.tile.col = tiles[i].tile.col;
-        // Copy in. (Future: refactor blend_tiles to accept non-owning views to
-        // avoid this copy — for now we copy to match the C++ struct layout.)
-        t.depth.assign(tiles[i].depth, tiles[i].depth + tile_px);
-        t.conf.assign(tiles[i].conf, tiles[i].conf + tile_px);
-        cpp_tiles.push_back(std::move(t));
+        aether::pipeline::TileView v;
+        v.tile.x = tiles[i].tile.x;
+        v.tile.y = tiles[i].tile.y;
+        v.tile.width = tiles[i].tile.width;
+        v.tile.height = tiles[i].tile.height;
+        v.tile.row = tiles[i].tile.row;
+        v.tile.col = tiles[i].tile.col;
+        v.depth = tiles[i].depth;
+        v.conf = tiles[i].conf;
+        views.push_back(v);
     }
 
-    const BlendResult result = aether::pipeline::blend_tiles(
-        cpp_tiles, layout, edge_floor, conf_floor, conf_cap);
-
-    // Copy results out into caller buffers.
-    const std::size_t pixel_count =
-        static_cast<std::size_t>(image_w) * static_cast<std::size_t>(image_h);
-    std::memcpy(out_depth, result.depth.data(), pixel_count * sizeof(float));
-    std::memcpy(out_weight, result.weight.data(), pixel_count * sizeof(float));
+    aether::pipeline::BlendStats stats;
+    aether::pipeline::blend_tiles_view(
+        views.data(), static_cast<int32_t>(views.size()),
+        layout, edge_floor, conf_floor, conf_cap,
+        out_depth, out_weight, stats);
 
     if (out_stats != nullptr) {
-        out_stats->covered_pixel_count = static_cast<int32_t>(
-            static_cast<double>(result.coverage) * static_cast<double>(pixel_count) + 0.5);
-        out_stats->coverage = result.coverage;
-        out_stats->min_depth = result.min_depth;
-        out_stats->max_depth = result.max_depth;
-        out_stats->mean_depth = result.mean_depth;
-        out_stats->blend_time_ms = result.blend_time_ms;
+        out_stats->covered_pixel_count = stats.covered_pixel_count;
+        out_stats->coverage = stats.coverage;
+        out_stats->min_depth = stats.min_depth;
+        out_stats->max_depth = stats.max_depth;
+        out_stats->mean_depth = stats.mean_depth;
+        out_stats->blend_time_ms = stats.blend_time_ms;
     }
     return AETHER_DEPTH_TILE_OK;
 }

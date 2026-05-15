@@ -31,6 +31,8 @@ namespace aether {
 namespace pipeline {
 
 /// One tile's inference output. depth and conf are tile_size² floats each.
+/// Owning vectors — convenience for synthesized tiles and tests. The hot path
+/// uses TileView (non-owning) to avoid memcpy on the FFI boundary.
 struct TileInference {
     TileRect tile;                       ///< Tile position (from TileLayout).
     std::vector<float> depth;            ///< tile_size × tile_size, row-major.
@@ -38,7 +40,28 @@ struct TileInference {
     double inference_time_ms{0.0};       ///< For diagnostics.
 };
 
-/// Full-frame blended depth output.
+/// Non-owning per-tile view. The hot-path API (blend_tiles_view + C ABI)
+/// takes these so the caller's depth/conf buffers are read directly with no
+/// memcpy across the FFI boundary. Caller guarantees the buffers stay live
+/// for the duration of the blend call.
+struct TileView {
+    TileRect tile;                       ///< Tile position (from TileLayout).
+    const float* depth{nullptr};         ///< tile_size² floats, row-major.
+    const float* conf{nullptr};          ///< tile_size² floats, row-major.
+};
+
+/// Per-frame blend stats (no full-image buffers — caller owns those).
+struct BlendStats {
+    std::int32_t covered_pixel_count{0}; ///< Pixels with weight > 0 (should = W*H).
+    float coverage{0.0f};                ///< covered / (W*H).
+    float min_depth{0.0f};
+    float max_depth{0.0f};
+    float mean_depth{0.0f};
+    double blend_time_ms{0.0};
+};
+
+/// Full-frame blended depth output (owning convenience wrapper around
+/// blend_tiles_view).
 struct BlendResult {
     std::vector<float> depth;            ///< image_width × image_height, row-major.
     std::vector<float> weight;           ///< Per-pixel accumulated weight (pre-normalize).
@@ -79,6 +102,26 @@ BlendResult blend_tiles(
     float edge_floor = 0.05f,
     float conf_floor = 0.01f,
     float conf_cap = 1.0f) noexcept;
+
+/// Hot-path: blend non-owning tile views into caller-allocated depth + weight
+/// maps. No vector allocation, no per-tile memcpy. Used by the C ABI
+/// (aether_blend_tiles) to skip FFI marshaling overhead.
+///
+/// @param tiles            N tile views. Caller guarantees views are live.
+/// @param n_tiles          Number of tiles.
+/// @param layout           Tile layout (image_width/height, tile_size, overlap).
+/// @param edge_floor       Method A floor (Plan G locked 0.05).
+/// @param conf_floor       Conf weight floor (Plan G locked 0.01).
+/// @param conf_cap         Conf weight cap (Plan G locked 1.0).
+/// @param out_depth        OUT: image_width × image_height floats. Caller alloc.
+/// @param out_weight       OUT: image_width × image_height floats. Caller alloc.
+/// @param out_stats        OUT: blend stats (coverage, min/max/mean, timing).
+void blend_tiles_view(
+    const TileView* tiles, std::int32_t n_tiles,
+    const TileLayout& layout,
+    float edge_floor, float conf_floor, float conf_cap,
+    float* out_depth, float* out_weight,
+    BlendStats& out_stats) noexcept;
 
 }  // namespace pipeline
 }  // namespace aether

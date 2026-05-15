@@ -5,17 +5,18 @@
 
 #include <cmath>
 #include <chrono>
+#include <cstring>
 #include <limits>
 
 namespace aether {
 namespace pipeline {
 
-BlendResult blend_tiles(
-    const std::vector<TileInference>& tiles,
+void blend_tiles_view(
+    const TileView* tiles, std::int32_t n_tiles,
     const TileLayout& layout,
-    float edge_floor,
-    float conf_floor,
-    float conf_cap) noexcept {
+    float edge_floor, float conf_floor, float conf_cap,
+    float* out_depth, float* out_weight,
+    BlendStats& out_stats) noexcept {
 
     const std::int32_t W = layout.image_width;
     const std::int32_t H = layout.image_height;
@@ -24,34 +25,31 @@ BlendResult blend_tiles(
     const float inv_overlap = 1.0f / static_cast<float>(overlap);
     constexpr float kHalfPi = 1.5707963267948966f;
 
-    BlendResult result;
-    result.width = W;
-    result.height = H;
+    out_stats = BlendStats{};
 
-    // Guard: degenerate layout → empty result, not crash.
-    if (W <= 0 || H <= 0 || tile_size <= 0) {
-        return result;
+    // Guard: degenerate layout / null buffers → leave stats zeroed.
+    if (W <= 0 || H <= 0 || tile_size <= 0
+        || out_depth == nullptr || out_weight == nullptr
+        || tiles == nullptr || n_tiles <= 0) {
+        return;
     }
 
     const std::size_t total_pixels =
         static_cast<std::size_t>(W) * static_cast<std::size_t>(H);
-    result.depth.assign(total_pixels, 0.0f);
-    result.weight.assign(total_pixels, 0.0f);
+    std::memset(out_depth, 0, total_pixels * sizeof(float));
+    std::memset(out_weight, 0, total_pixels * sizeof(float));
 
     const auto t_start = std::chrono::steady_clock::now();
 
-    for (const TileInference& inf : tiles) {
-        const TileRect& tile = inf.tile;
-        const float* depth_tile = inf.depth.data();
-        const float* conf_tile = inf.conf.data();
+    for (std::int32_t ti = 0; ti < n_tiles; ++ti) {
+        const TileView& v = tiles[ti];
+        if (v.depth == nullptr || v.conf == nullptr) continue;
+
+        const TileRect& tile = v.tile;
+        const float* depth_tile = v.depth;
+        const float* conf_tile = v.conf;
         const std::int32_t tile_x = tile.x;
         const std::int32_t tile_y = tile.y;
-
-        // Defensive: per-tile depth/conf must be tile_size² floats.
-        if (inf.depth.size() != static_cast<std::size_t>(tile_size) * tile_size
-            || inf.conf.size() != static_cast<std::size_t>(tile_size) * tile_size) {
-            continue;  // Skip malformed tile.
-        }
 
         for (std::int32_t ly = 0; ly < tile_size; ++ly) {
             const std::int32_t gy = tile_y + ly;
@@ -98,8 +96,8 @@ BlendResult blend_tiles(
                 const float w = conf_w * edge_w;
                 const float d = depth_tile[row_tile + lx];
 
-                result.depth[row_global + gx] += d * w;
-                result.weight[row_global + gx] += w;
+                out_depth[row_global + gx] += d * w;
+                out_weight[row_global + gx] += w;
             }
         }
     }
@@ -110,10 +108,10 @@ BlendResult blend_tiles(
     float max_d = -std::numeric_limits<float>::infinity();
     float sum_d = 0.0f;
     for (std::size_t i = 0; i < total_pixels; ++i) {
-        const float w = result.weight[i];
+        const float w = out_weight[i];
         if (w > 0.0f) {
-            const float d = result.depth[i] / w;
-            result.depth[i] = d;
+            const float d = out_depth[i] / w;
+            out_depth[i] = d;
             ++covered_pixels;
             if (d < min_d) min_d = d;
             if (d > max_d) max_d = d;
@@ -125,13 +123,65 @@ BlendResult blend_tiles(
     const double elapsed_ms =
         std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
-    result.coverage = static_cast<float>(covered_pixels) / static_cast<float>(total_pixels);
-    result.blend_time_ms = elapsed_ms;
+    out_stats.covered_pixel_count = static_cast<std::int32_t>(covered_pixels);
+    out_stats.coverage =
+        static_cast<float>(covered_pixels) / static_cast<float>(total_pixels);
+    out_stats.blend_time_ms = elapsed_ms;
     if (covered_pixels > 0) {
-        result.min_depth = min_d;
-        result.max_depth = max_d;
-        result.mean_depth = sum_d / static_cast<float>(covered_pixels);
+        out_stats.min_depth = min_d;
+        out_stats.max_depth = max_d;
+        out_stats.mean_depth = sum_d / static_cast<float>(covered_pixels);
     }
+}
+
+BlendResult blend_tiles(
+    const std::vector<TileInference>& tiles,
+    const TileLayout& layout,
+    float edge_floor,
+    float conf_floor,
+    float conf_cap) noexcept {
+
+    BlendResult result;
+    result.width = layout.image_width;
+    result.height = layout.image_height;
+
+    if (layout.image_width <= 0 || layout.image_height <= 0) {
+        return result;
+    }
+
+    const std::size_t total_pixels =
+        static_cast<std::size_t>(layout.image_width) *
+        static_cast<std::size_t>(layout.image_height);
+    result.depth.assign(total_pixels, 0.0f);
+    result.weight.assign(total_pixels, 0.0f);
+
+    // Wrap each owning TileInference in a non-owning TileView and delegate to
+    // blend_tiles_view (the hot path). No per-tile float copy.
+    std::vector<TileView> views;
+    views.reserve(tiles.size());
+    const std::size_t tile_px =
+        static_cast<std::size_t>(layout.tile_size) * layout.tile_size;
+    for (const TileInference& t : tiles) {
+        // Defensive: per-tile vectors must have tile_size² floats.
+        if (t.depth.size() != tile_px || t.conf.size() != tile_px) continue;
+        TileView v;
+        v.tile = t.tile;
+        v.depth = t.depth.data();
+        v.conf = t.conf.data();
+        views.push_back(v);
+    }
+
+    BlendStats stats;
+    blend_tiles_view(
+        views.data(), static_cast<std::int32_t>(views.size()),
+        layout, edge_floor, conf_floor, conf_cap,
+        result.depth.data(), result.weight.data(), stats);
+
+    result.coverage = stats.coverage;
+    result.blend_time_ms = stats.blend_time_ms;
+    result.min_depth = stats.min_depth;
+    result.max_depth = stats.max_depth;
+    result.mean_depth = stats.mean_depth;
     return result;
 }
 

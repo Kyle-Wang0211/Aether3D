@@ -429,6 +429,13 @@ import VideoToolbox
     ///   w = conf_w × edge_w
     ///   conf_w = clamp(conf - 1.0, 0.01, 1.0)
     ///   edge_w = max(0.05, sin²(π/2·tx) · sin²(π/2·ty))
+    ///
+    /// Non-owning view path: each tile's `depth` / `conf` Swift `[Float]` is
+    /// passed to the C ABI directly via nested `withUnsafeBufferPointer`
+    /// closures (recursive helper). No packing copy on the Swift side; no
+    /// std::vector<TileInference> copy in the C ABI either. Earlier path
+    /// memcpy'd ~25 MB per blend call (12 tiles × 2 × 268k floats), inflating
+    /// blendTimeMs from 18 ms (Swift inline) to 193 ms (C++ via FFI).
     public static func blendTiles(
         _ tiles: [TileInference],
         layout: TileLayout
@@ -437,19 +444,6 @@ import VideoToolbox
         let H = layout.imageHeight
         let tileSize = layout.tileSize
         let n = tiles.count
-        let tilePx = tileSize * tileSize
-
-        // Pack per-tile depth/conf into contiguous Swift arrays. The packed buffers
-        // stay alive throughout the C call; the per-tile pointer in the C struct
-        // is computed as `dBuf.baseAddress! + i*tilePx` for tile i.
-        var packedDepth = [Float](repeating: 0, count: n * tilePx)
-        var packedConf = [Float](repeating: 0, count: n * tilePx)
-        for i in 0..<n {
-            for j in 0..<tilePx {
-                packedDepth[i * tilePx + j] = tiles[i].depth[j]
-                packedConf[i * tilePx + j] = tiles[i].conf[j]
-            }
-        }
 
         var outDepth = [Float](repeating: 0, count: W * H)
         var outWeight = [Float](repeating: 0, count: W * H)
@@ -457,36 +451,22 @@ import VideoToolbox
 
         let start = CFAbsoluteTimeGetCurrent()
 
-        packedDepth.withUnsafeBufferPointer { dBuf in
-            packedConf.withUnsafeBufferPointer { cBuf in
-                var cInfs = [aether_tile_inference_t]()
-                cInfs.reserveCapacity(n)
-                for i in 0..<n {
-                    var inf = aether_tile_inference_t()
-                    inf.tile = aether_tile_rect_t(
-                        x: Int32(tiles[i].tile.x),
-                        y: Int32(tiles[i].tile.y),
-                        width: Int32(tiles[i].tile.width),
-                        height: Int32(tiles[i].tile.height),
-                        row: Int32(tiles[i].tile.row),
-                        col: Int32(tiles[i].tile.col)
-                    )
-                    inf.depth = dBuf.baseAddress!.advanced(by: i * tilePx)
-                    inf.conf = cBuf.baseAddress!.advanced(by: i * tilePx)
-                    cInfs.append(inf)
-                }
-                cInfs.withUnsafeBufferPointer { iBuf in
-                    outDepth.withUnsafeMutableBufferPointer { odBuf in
-                        outWeight.withUnsafeMutableBufferPointer { owBuf in
-                            _ = aether_blend_tiles(
-                                iBuf.baseAddress, Int32(n),
-                                Int32(W), Int32(H),
-                                Int32(tileSize), Int32(layout.overlap),
-                                0.05, 0.01, 1.0,
-                                odBuf.baseAddress, owBuf.baseAddress,
-                                &stats
-                            )
-                        }
+        // Recursive nested `withUnsafeBufferPointer` builds aether_tile_inference_t
+        // for each tile with the tile's own [Float] base address as `depth` / `conf`.
+        // All pointers stay alive at the deepest closure depth, where we call the
+        // C ABI on the assembled array.
+        outDepth.withUnsafeMutableBufferPointer { odBuf in
+            outWeight.withUnsafeMutableBufferPointer { owBuf in
+                Self.withTilePointers(tiles: tiles, index: 0, accumulator: []) { cInfs in
+                    cInfs.withUnsafeBufferPointer { iBuf in
+                        _ = aether_blend_tiles(
+                            iBuf.baseAddress, Int32(n),
+                            Int32(W), Int32(H),
+                            Int32(tileSize), Int32(layout.overlap),
+                            0.05, 0.01, 1.0,
+                            odBuf.baseAddress, owBuf.baseAddress,
+                            &stats
+                        )
                     }
                 }
             }
@@ -505,6 +485,46 @@ import VideoToolbox
             maxDepth: stats.max_depth,
             meanDepth: stats.mean_depth
         )
+    }
+
+    /// Recursively walk `tiles[index..]`, capturing each tile's depth + conf
+    /// `[Float]` baseAddress via nested `withUnsafeBufferPointer`. At the deepest
+    /// recursion level (index == tiles.count), all N tiles' pointers are live;
+    /// invoke `action` with the assembled `[aether_tile_inference_t]`.
+    ///
+    /// Recursion depth = N tiles (12 for 1920×1080 capture). Stack is fine.
+    private static func withTilePointers(
+        tiles: [TileInference],
+        index: Int,
+        accumulator: [aether_tile_inference_t],
+        action: ([aether_tile_inference_t]) -> Void
+    ) {
+        if index >= tiles.count {
+            action(accumulator)
+            return
+        }
+        let t = tiles[index]
+        t.depth.withUnsafeBufferPointer { dBuf in
+            t.conf.withUnsafeBufferPointer { cBuf in
+                var inf = aether_tile_inference_t()
+                inf.tile = aether_tile_rect_t(
+                    x: Int32(t.tile.x),
+                    y: Int32(t.tile.y),
+                    width: Int32(t.tile.width),
+                    height: Int32(t.tile.height),
+                    row: Int32(t.tile.row),
+                    col: Int32(t.tile.col)
+                )
+                inf.depth = dBuf.baseAddress
+                inf.conf = cBuf.baseAddress
+                withTilePointers(
+                    tiles: tiles,
+                    index: index + 1,
+                    accumulator: accumulator + [inf],
+                    action: action
+                )
+            }
+        }
     }
 
     /// Convert blended depth map to a grayscale UIImage for visual debugging.
