@@ -29,10 +29,16 @@ Pod::Spec.new do |s|
   s.source_files        = [
     'include/aether/aether_version.h',
     'include/aether_glb_norm_c.h',
+    # Plan G W1 D3 + W2 D1 — DA3-LARGE-1.1 tile-based depth math + EdgeTAM
+    # mask post-process. Pure-C ABI (extern "C") into aether::pipeline C++
+    # internals. Implementations linked from libaether3d_ffi.a (built via
+    # scripts/build_ios_xcframework.sh).
+    'include/aether_depth_tile_c.h',
   ]
   s.public_header_files = [
     'include/aether/aether_version.h',
     'include/aether_glb_norm_c.h',
+    'include/aether_depth_tile_c.h',
   ]
 
   # Final iOS scene renderer links Dawn/Metal/IOSurface objects into the

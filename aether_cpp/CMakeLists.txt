@@ -563,6 +563,17 @@ set(AETHER_FFI_SOURCES
     # cgltf/stb/meshoptimizer pipeline. Source has no aether3d_core
     # dependencies, so it adds zero link-graph cost on iOS sim Dawn-OFF.
     src/glb_norm/glb_normalize_c_api.cpp
+    # Plan G W1 D3 + W2 D1 — Tile-based DA3-LARGE-1.1 depth math + EdgeTAM
+    # mask post-process. Pure C++ algorithm (tile layout, conf-weighted
+    # blend with Method A 0.05 floor, sigmoid + IoU pick, bilinear resize).
+    # CoreML/TFLite/NNAPI inference itself stays in per-platform thin shims;
+    # this layer is the cross-platform deterministic math shared between
+    # iOS / Android / 鸿蒙 / Web. Ported from Tile2KWrapper.swift +
+    # EdgeTAMWrapper.swift — bit-equal verified on iPhone bench parity test.
+    src/pipeline/tile_layout.cpp
+    src/pipeline/tile_blend.cpp
+    src/pipeline/mask_post.cpp
+    src/pipeline/aether_depth_tile_c.cpp
 )
 
 # Phase 6.4b: PocketWorld scene IOSurface renderer (mesh PBR + splat
