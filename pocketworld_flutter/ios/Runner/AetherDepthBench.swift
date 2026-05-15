@@ -128,6 +128,97 @@ import UIKit
         } else {
             NSLog("[EdgeTAM-E2E] iOS < 16, skipping (EdgeTAMWrapper requires .float16 MLMultiArrayDataType, iOS 16+)")
         }
+
+        // W2 D2: Scale alignment LSQ smoke test on synthetic anchors.
+        runScaleAlignSyntheticTest()
+    }
+
+    /// W2 D2: Verify `aether_scale_align_lsq` recovers a known (scale, translation)
+    /// from synthetic ARKit-style anchor pairs. Plain-LSQ + outlier-rejection passes.
+    ///
+    /// Synthetic ground-truth: z_metric_i = TRUE_S · z_ai_i + TRUE_T + noise.
+    /// After fit: recovered s, t should ≈ TRUE_S, TRUE_T (within noise budget).
+    private static func runScaleAlignSyntheticTest() {
+        NSLog("[ScaleAlign-E2E] ======== W2 D2 LSQ smoke test start ========")
+
+        // Plan G W2 D2 — chosen values match typical dome capture envelope:
+        // DA3 depth output is roughly [0.5, 2.5]; ARKit anchors ~30-80 cm to 1.5 m
+        // for hand-held tabletop captures. So a metric scale around 0.5 + 0.3 m
+        // offset is realistic.
+        let trueS: Float = 0.85
+        let trueT: Float = 0.45
+        let nAnchors = 30
+        let noiseSigma: Float = 0.02  // 2 cm noise per anchor
+
+        var zAi = [Float](repeating: 0, count: nAnchors)
+        var zMetric = [Float](repeating: 0, count: nAnchors)
+
+        // Deterministic synthetic anchors: spread z_ai over [0.5, 2.0] with a
+        // sin-based pattern + pseudo-random noise (xorshift32 from idx).
+        var rngState: UInt32 = 0xdead_beef
+        for i in 0..<nAnchors {
+            let t = Float(i) / Float(nAnchors - 1)
+            zAi[i] = 0.5 + 1.5 * t  // [0.5, 2.0] linear ramp
+            // xorshift32 noise → [-1, 1] uniform → scaled by sigma.
+            rngState ^= rngState << 13
+            rngState ^= rngState >> 17
+            rngState ^= rngState << 5
+            let noise01 = Float(rngState & 0xffff) / Float(0xffff) * 2.0 - 1.0
+            let noise = noise01 * noiseSigma
+            zMetric[i] = trueS * zAi[i] + trueT + noise
+        }
+
+        // Plain LSQ (no outlier rejection).
+        var result = aether_scale_align_result_t()
+        _ = zAi.withUnsafeBufferPointer { aBuf in
+            zMetric.withUnsafeBufferPointer { mBuf in
+                aether_scale_align_lsq(
+                    aBuf.baseAddress, mBuf.baseAddress,
+                    Int32(nAnchors), 0.0, &result
+                )
+            }
+        }
+        NSLog("[ScaleAlign-E2E] plain LSQ: s=%.4f (true %.4f, Δ=%.4f)  t=%.4f (true %.4f, Δ=%.4f)  rmse=%.4f  n_used=%d/%d",
+              result.scale, trueS, abs(result.scale - trueS),
+              result.translation, trueT, abs(result.translation - trueT),
+              result.rmse, result.n_used, result.n_input)
+        let plainPass = abs(result.scale - trueS) < 0.01
+            && abs(result.translation - trueT) < 0.02
+            && result.rmse < 0.05
+        NSLog("[ScaleAlign-E2E] plain LSQ: %@", plainPass ? "✓ PASS" : "✗ FAIL")
+
+        // RANSAC outlier rejection test: inject 5 bad anchors with 50 cm offset
+        // (25σ outliers). Use inlier_dist_m = 0.05 (5 cm = 2.5 × noise sigma)
+        // — anything within this tolerance of the recovered line is kept.
+        var zAi2 = zAi
+        var zMetric2 = zMetric
+        for k in 0..<5 {
+            zMetric2[k] = zMetric[k] + 0.5  // 50 cm wrong
+        }
+        var result2 = aether_scale_align_result_t()
+        _ = zAi2.withUnsafeBufferPointer { aBuf in
+            zMetric2.withUnsafeBufferPointer { mBuf in
+                aether_scale_align_lsq(
+                    aBuf.baseAddress, mBuf.baseAddress,
+                    Int32(nAnchors), 0.05, &result2  // 5 cm RANSAC inlier band
+                )
+            }
+        }
+        NSLog("[ScaleAlign-E2E] RANSAC (5/30 bad, inlier_dist=5cm): s=%.4f (Δ=%.4f)  t=%.4f (Δ=%.4f)  rmse=%.4f  n_used=%d/%d",
+              result2.scale, abs(result2.scale - trueS),
+              result2.translation, abs(result2.translation - trueT),
+              result2.rmse, result2.n_used, result2.n_input)
+        // RANSAC should recover near-true (s, t) by rejecting the 5 bad anchors
+        // (we expect n_used == 25 inliers, fit Δ < 1 cm).
+        let outlierPass = abs(result2.scale - trueS) < 0.02
+            && abs(result2.translation - trueT) < 0.04
+            && result2.n_used >= 23   // 25 inliers expected, allow ±2 jitter
+            && result2.n_used <= 27
+        NSLog("[ScaleAlign-E2E] RANSAC outlier reject: %@", outlierPass ? "✓ PASS" : "✗ FAIL")
+
+        let allPass = plainPass && outlierPass
+        NSLog("[ScaleAlign-E2E] ======== %@ ========",
+              allPass ? "W2 D2 ✓ ALL PASS" : "W2 D2 ✗ FAIL")
     }
 
     /// W2 D1: EdgeTAM 3-stage SAM 2 mobile inference smoke test.

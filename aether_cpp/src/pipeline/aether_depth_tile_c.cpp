@@ -6,6 +6,7 @@
 #include "aether/pipeline/tile_layout.h"
 #include "aether/pipeline/tile_blend.h"
 #include "aether/pipeline/mask_post.h"
+#include "aether/pipeline/scale_align.h"
 
 #include <cstdint>
 #include <cstring>
@@ -151,6 +152,24 @@ int32_t aether_edgetam_post_process(
     if (out_best_idx != nullptr) {
         *out_best_idx = best_idx;
     }
+    return AETHER_DEPTH_TILE_OK;
+}
+
+int32_t aether_scale_align_lsq(
+    const float* z_ai, const float* z_metric,
+    int32_t n, float outlier_thresh,
+    aether_scale_align_result_t* out_result) {
+    if (out_result == nullptr) {
+        return AETHER_DEPTH_TILE_ERR_BAD_ARGS;
+    }
+    const aether::pipeline::ScaleAlignResult r =
+        aether::pipeline::scale_align_lsq(z_ai, z_metric, n, outlier_thresh);
+    out_result->scale = r.scale;
+    out_result->translation = r.translation;
+    out_result->rmse = r.rmse;
+    out_result->n_used = r.n_used;
+    out_result->n_input = r.n_input;
+    out_result->ok = r.ok ? 1 : 0;
     return AETHER_DEPTH_TILE_OK;
 }
 

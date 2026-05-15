@@ -573,6 +573,7 @@ set(AETHER_FFI_SOURCES
     src/pipeline/tile_layout.cpp
     src/pipeline/tile_blend.cpp
     src/pipeline/mask_post.cpp
+    src/pipeline/scale_align.cpp
     src/pipeline/aether_depth_tile_c.cpp
 )
 

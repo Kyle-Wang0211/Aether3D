@@ -152,6 +152,37 @@ int32_t aether_edgetam_post_process(
     int32_t n_hypotheses, int32_t mask_h, int32_t mask_w,
     float* out_mask, int32_t* out_best_idx);
 
+// ─── Scale alignment (W2 D2) ────────────────────────────────────────
+
+/// Per-frame LSQ result: metric_depth ≈ scale · ai_depth + translation (meters).
+typedef struct {
+    float scale;
+    float translation;
+    float rmse;             ///< Root-mean-squared residual (meters).
+    int32_t n_used;         ///< Anchors used in final fit (post-outlier-reject).
+    int32_t n_input;        ///< Anchors caller passed in.
+    int32_t ok;             ///< Non-zero if fit converged.
+} aether_scale_align_result_t;
+
+/// Solve per-frame (scale, translation) by closed-form LSQ on N anchor pairs.
+///
+/// Use case: DA3 monocular depth is scale-invariant; ARKit gives sparse 3D
+/// anchors with metric world positions. Project anchors → camera frame to
+/// get z_metric_i; sample AI depth at projected (u, v) → z_ai_i. Pass pairs
+/// to this function to recover per-frame s, t.
+///
+/// @param z_ai            N AI depth samples at anchor pixel coords.
+/// @param z_metric        N metric depths from ARKit (meters).
+/// @param n               Anchor count. Minimum 2; ideal ≥ 8 for stable fit.
+/// @param outlier_thresh  If > 0, drop anchors with residual > thresh·rmse and
+///                        re-fit once. Plan G suggested 2.5. Pass 0 to disable.
+/// @param out_result      OUT: scale/translation/rmse/n_used/n_input/ok.
+/// @return AETHER_DEPTH_TILE_OK on success (separate from out_result.ok).
+int32_t aether_scale_align_lsq(
+    const float* z_ai, const float* z_metric,
+    int32_t n, float outlier_thresh,
+    aether_scale_align_result_t* out_result);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
