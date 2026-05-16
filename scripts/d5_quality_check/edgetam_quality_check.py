@@ -101,6 +101,8 @@ def infer_frame(
     prompt_encoder: ct.models.MLModel,
     mask_decoder: ct.models.MLModel,
     image_pe: np.ndarray,
+    prompt_point: tuple[float, float] | None = None,  # (px, py) in ORIGINAL image coords
+    prompt_box: tuple[float, float, float, float] | None = None,  # (x1, y1, x2, y2) in ORIGINAL coords
 ) -> dict:
     img_pil = Image.open(image_path).convert("RGB")
     orig_w, orig_h = img_pil.size
@@ -114,18 +116,45 @@ def infer_frame(
     high_res_feat_0 = to_fp32(enc_out["high_res_feat_0"])
     high_res_feat_1 = to_fp32(enc_out["high_res_feat_1"])
 
-    # Stage 2: prompt encoder. Default prompt = image center mapped to 1024 coords.
-    prompt_x = INPUT_SIZE / 2.0
-    prompt_y = INPUT_SIZE / 2.0
+    # Stage 2: prompt encoder. Pick effective prompt point.
+    #   - if prompt_point given → use it
+    #   - elif prompt_box given → use box center
+    #   - else → image center (legacy default; Plan G W2 D1 showed this is
+    #     unreliable on real dome captures because subject isn't always centered)
+    scale_x = INPUT_SIZE / orig_w
+    scale_y = INPUT_SIZE / orig_h
+    if prompt_point is not None:
+        px, py = prompt_point
+    elif prompt_box is not None:
+        bx1, by1, bx2, by2 = prompt_box
+        px = (bx1 + bx2) / 2.0
+        py = (by1 + by2) / 2.0
+    else:
+        px = orig_w / 2.0
+        py = orig_h / 2.0
+    prompt_x_1024 = px * scale_x
+    prompt_y_1024 = py * scale_y
+
     point_coords = np.zeros((1, 4, 2), dtype=np.float32)
-    point_coords[0, 0, 0] = prompt_x
-    point_coords[0, 0, 1] = prompt_y
+    point_coords[0, 0, 0] = prompt_x_1024
+    point_coords[0, 0, 1] = prompt_y_1024
     point_labels = np.zeros((1, 4), dtype=np.float32)
     point_labels[0, 0] = 1.0   # foreground
     point_labels[0, 1] = -1.0  # ignore
     point_labels[0, 2] = -1.0
     point_labels[0, 3] = -1.0
+
+    # Box prompt: pass in 1024-space when provided. SAM 2 prompt_encoder takes
+    # (1, 4) shape = (x1, y1, x2, y2). Non-ambiguous prompt; Meta docs note it
+    # gives better masks than single-point on real subjects.
     boxes = np.zeros((1, 4), dtype=np.float32)
+    if prompt_box is not None:
+        bx1, by1, bx2, by2 = prompt_box
+        boxes[0, 0] = bx1 * scale_x
+        boxes[0, 1] = by1 * scale_y
+        boxes[0, 2] = bx2 * scale_x
+        boxes[0, 3] = by2 * scale_y
+
     mask_input = np.zeros((1, 1, MASK_OUT_SIZE, MASK_OUT_SIZE), dtype=np.float32)
 
     t0 = time.time()
@@ -190,6 +219,11 @@ def infer_frame(
         "max_prob": max_prob,
         "mask": mask,           # (256, 256) fp32 [0, 1]
         "img_pil": img_pil,     # original for overlay
+        "prompt_point_orig": (float(px), float(py)),
+        "prompt_box_orig": (
+            None if prompt_box is None
+            else tuple(float(v) for v in prompt_box)
+        ),
     }
 
 
@@ -294,7 +328,42 @@ def main() -> int:
         choices=["cpuOnly", "cpuAndGPU", "cpuAndNeuralEngine", "ALL"],
     )
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
+    parser.add_argument(
+        "--prompt-point",
+        default=None,
+        help="Override prompt point (default = image center). Format: 'X,Y' in "
+             "ORIGINAL image pixel coords. E.g. '960,640' for a 1920×1080 frame "
+             "where subject is below center. W6 production: pull from "
+             "PocketWorld curated _target_zone_metrics.",
+    )
+    parser.add_argument(
+        "--prompt-box",
+        default=None,
+        help="Box prompt (recommended, non-ambiguous per SAM 2 docs). Format: "
+             "'X1,Y1,X2,Y2' in ORIGINAL image coords. Overrides --prompt-point "
+             "for the point location (point defaults to box center unless "
+             "--prompt-point also given, in which case point + box combined).",
+    )
     args = parser.parse_args()
+
+    def parse_floats_csv(s: str, n: int, name: str) -> tuple:
+        try:
+            parts = [float(p.strip()) for p in s.split(",")]
+        except ValueError as e:
+            print(f"[EdgeTAM-D5] invalid --{name}: {s} ({e})", file=sys.stderr)
+            sys.exit(2)
+        if len(parts) != n:
+            print(f"[EdgeTAM-D5] --{name} expects {n} comma-separated floats, "
+                  f"got {len(parts)} ({s})", file=sys.stderr)
+            sys.exit(2)
+        return tuple(parts)
+
+    prompt_point = None
+    if args.prompt_point is not None:
+        prompt_point = parse_floats_csv(args.prompt_point, 2, "prompt-point")
+    prompt_box = None
+    if args.prompt_box is not None:
+        prompt_box = parse_floats_csv(args.prompt_box, 4, "prompt-box")
 
     frames_dir = Path(args.frames_dir)
     out_dir = Path(args.out)
@@ -344,7 +413,8 @@ def main() -> int:
         print(f"[EdgeTAM-D5] [{i + 1}/{len(frames)}] {frame_path.name}", flush=True)
         try:
             res = infer_frame(
-                frame_path, image_encoder, prompt_encoder, mask_decoder, image_pe
+                frame_path, image_encoder, prompt_encoder, mask_decoder, image_pe,
+                prompt_point=prompt_point, prompt_box=prompt_box,
             )
         except Exception as e:
             print(f"[EdgeTAM-D5] FAILED on {frame_path.name}: {e}",

@@ -93,16 +93,37 @@ import VideoToolbox
             self.multimaskOnFlag = try Self.makeFp16Array(shape: [1], fillFloat32: 1.0)
         }
 
-        /// Run a full mask prediction. If `promptPoint` is nil, defaults to image center
-        /// (dome capture convention — subject is always centered).
-        public func predictMask(image: CGImage, promptPoint: CGPoint? = nil) throws -> MaskResult {
+        /// Run a full mask prediction.
+        ///
+        /// Prompt selection (per SAM 2 official: box prompt is non-ambiguous,
+        /// gives best mask quality):
+        /// - `promptBox` provided → SAM 2 segments the bbox region (recommended
+        ///   for Plan G W6: caller pulls bbox from PocketWorld curated frame
+        ///   `_target_zone_metrics`).
+        /// - `promptPoint` provided → SAM 2 segments region around the point.
+        ///   Caller picks the point on the subject.
+        /// - Both provided → point + box combined (most informative).
+        /// - Neither provided → point defaults to image center. Plan G W2 D1
+        ///   bench showed this is unreliable on real dome captures (subject
+        ///   not always centered); rely on it only for tightly-framed fixtures.
+        public func predictMask(
+            image: CGImage,
+            promptPoint: CGPoint? = nil,
+            promptBox: CGRect? = nil
+        ) throws -> MaskResult {
             let origW = image.width
             let origH = image.height
-            let prompt = promptPoint ?? CGPoint(x: origW / 2, y: origH / 2)
+            let scaleX = Float(EdgeTAMWrapper.inputSize) / Float(origW)
+            let scaleY = Float(EdgeTAMWrapper.inputSize) / Float(origH)
 
-            // Map prompt to 1024×1024 space (image_encoder input).
-            let promptX = Float(prompt.x) / Float(origW) * Float(EdgeTAMWrapper.inputSize)
-            let promptY = Float(prompt.y) / Float(origH) * Float(EdgeTAMWrapper.inputSize)
+            // Pick effective prompt point. If only box given, use box center.
+            let effectivePoint: CGPoint = {
+                if let p = promptPoint { return p }
+                if let b = promptBox { return CGPoint(x: b.midX, y: b.midY) }
+                return CGPoint(x: origW / 2, y: origH / 2)
+            }()
+            let promptX = Float(effectivePoint.x) * scaleX
+            let promptY = Float(effectivePoint.y) * scaleY
 
             let t0 = CFAbsoluteTimeGetCurrent()
 
@@ -130,6 +151,31 @@ import VideoToolbox
             try Self.writeFp16(pointLabels, index: [0, 1], float32: -1.0)  // ignore
             try Self.writeFp16(pointLabels, index: [0, 2], float32: -1.0)
             try Self.writeFp16(pointLabels, index: [0, 3], float32: -1.0)
+
+            // Box prompt: SAM 2 prompt_encoder `boxes` shape is (1, 4) =
+            // (x1, y1, x2, y2) in 1024-space. When caller provides a CGRect,
+            // map from original-image coords → 1024 coords and overwrite the
+            // shared `emptyBox` MLMultiArray for this call (predictMask is
+            // not thread-safe; per Plan G W2 D1 the engine is single-call).
+            // When no box is provided, leave it zero — SAM 2 prompt_encoder
+            // treats all-zero box as "no box" and uses point prompt only.
+            if let b = promptBox {
+                let x1 = Float(b.minX) * scaleX
+                let y1 = Float(b.minY) * scaleY
+                let x2 = Float(b.maxX) * scaleX
+                let y2 = Float(b.maxY) * scaleY
+                try Self.writeFp16(emptyBox, index: [0, 0], float32: x1)
+                try Self.writeFp16(emptyBox, index: [0, 1], float32: y1)
+                try Self.writeFp16(emptyBox, index: [0, 2], float32: x2)
+                try Self.writeFp16(emptyBox, index: [0, 3], float32: y2)
+            } else {
+                // Restore zero box if a prior call set it (single-threaded API,
+                // so we own it).
+                try Self.writeFp16(emptyBox, index: [0, 0], float32: 0)
+                try Self.writeFp16(emptyBox, index: [0, 1], float32: 0)
+                try Self.writeFp16(emptyBox, index: [0, 2], float32: 0)
+                try Self.writeFp16(emptyBox, index: [0, 3], float32: 0)
+            }
 
             let promptIn = try MLDictionaryFeatureProvider(dictionary: [
                 "point_coords": pointCoords,
@@ -195,7 +241,7 @@ import VideoToolbox
                 bestHypothesis: bestIdx,
                 allIoUs: iouArr,
                 inferenceTimeMs: elapsed,
-                promptPoint: prompt,
+                promptPoint: effectivePoint,
                 imageWidth: origW,
                 imageHeight: origH
             )

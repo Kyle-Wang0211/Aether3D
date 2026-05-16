@@ -302,10 +302,49 @@ import UIKit
               EdgeTAMWrapper.maskOutSize, EdgeTAMWrapper.maskOutSize, fgPct, meanProb, maxProb)
 
         // Save mask PNG to Documents for visual inspection.
+        Self.writeMaskPNG(mask: result.mask, filename: "edgetam_mask_test.png")
+
+        // W6 fix verification: rerun with a BOX prompt covering central 50% of
+        // fixture. SAM 2 box prompt is non-ambiguous (per Meta docs); for
+        // dome capture the box would come from PocketWorld curated frame's
+        // `_target_zone_metrics`. Here we synthesize a plausible bbox so the
+        // bench exercises the new code path. Output saved separately.
+        let cgW = cgImage.width
+        let cgH = cgImage.height
+        let box = CGRect(
+            x: cgW / 4, y: cgH / 4,
+            width: cgW / 2, height: cgH / 2
+        )
+        NSLog("[EdgeTAM-E2E] re-running with box prompt: (%.0f, %.0f)-(%.0f, %.0f)",
+              box.minX, box.minY, box.maxX, box.maxY)
+        let boxResult: EdgeTAMWrapper.MaskResult
+        do {
+            // Pass the box; the point defaults to box center inside predictMask.
+            boxResult = try session.predictMask(image: cgImage, promptBox: box)
+        } catch {
+            NSLog("[EdgeTAM-E2E] predictMask with box FAILED: \(error)")
+            return
+        }
+        let fgPixelsBox = boxResult.mask.reduce(0) { $0 + ($1 > 0.5 ? 1 : 0) }
+        let fgPctBox = Float(fgPixelsBox) / Float(boxResult.mask.count) * 100.0
+        NSLog("[EdgeTAM-E2E] box-prompt mask: predicted in %.0f ms, IoUs [%.3f, %.3f, %.3f], picked %d (IoU=%.3f), fg %.1f%%",
+              boxResult.inferenceTimeMs,
+              boxResult.allIoUs[0], boxResult.allIoUs[1], boxResult.allIoUs[2],
+              boxResult.bestHypothesis, boxResult.iou, fgPctBox)
+        Self.writeMaskPNG(mask: boxResult.mask, filename: "edgetam_mask_box_test.png")
+
+        NSLog("[EdgeTAM-E2E] ======== W2 D1 complete ========")
+    }
+
+    /// Helper: write a 256×256 fp32 mask buffer as a grayscale PNG into the
+    /// app's Documents/ directory. Pulled out of the body to avoid duplicating
+    /// the (verbose) CGImage construction for the point + box mask variants.
+    @available(iOS 16.0, *)
+    private static func writeMaskPNG(mask: [Float], filename: String) {
         let maskSize = EdgeTAMWrapper.maskOutSize
         var maskBytes = [UInt8](repeating: 0, count: maskSize * maskSize)
         for i in 0..<(maskSize * maskSize) {
-            maskBytes[i] = UInt8(min(255, max(0, result.mask[i] * 255.0)))
+            maskBytes[i] = UInt8(min(255, max(0, mask[i] * 255.0)))
         }
         if let cs = CGColorSpace(name: CGColorSpace.linearGray),
            let provider = CGDataProvider(data: Data(maskBytes) as CFData),
@@ -323,13 +362,12 @@ import UIKit
             let ui = UIImage(cgImage: maskImg)
             if let png = ui.pngData() {
                 let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                let outURL = docs.appendingPathComponent("edgetam_mask_test.png")
+                let outURL = docs.appendingPathComponent(filename)
                 try? png.write(to: outURL)
-                NSLog("[EdgeTAM-E2E] wrote %.1f KB mask → %@", Double(png.count) / 1024.0, outURL.path as NSString)
+                NSLog("[EdgeTAM-E2E] wrote %.1f KB mask → %@",
+                      Double(png.count) / 1024.0, outURL.path as NSString)
             }
         }
-
-        NSLog("[EdgeTAM-E2E] ======== W2 D1 complete ========")
     }
 
     /// W1 D3 D4: end-to-end Tile2K pipeline smoke test.
