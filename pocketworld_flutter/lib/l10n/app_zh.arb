@@ -37,10 +37,66 @@
 
   "scanLifecycleCompleted": "已完成",
   "scanLifecyclePending": "待查看",
-  "scanLifecycleFailed": "失败",
-  "scanLifecycleTraining": "训练中",
-  "scanLifecyclePackaging": "导出中",
+  "scanLifecycleFailed": "处理失败",
+  "scanLifecycleTraining": "正在生成 3D 模型",
+  "scanLifecyclePackaging": "正在打包",
   "scanLifecycleUploading": "上传中",
+
+  "createOptionCapture": "拍摄",
+  "createOptionUpload": "上传",
+  "createImportingGlb": "正在导入 GLB 模型…",
+  "createImportPickerFailed": "打开文件选择器失败：{error}",
+  "@createImportPickerFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "createImportFileUnreadable": "无法读取所选文件",
+  "meTapHintInProgress": "正在生成 3D 模型，完成后会自动打开",
+  "meTapHintTapToRetry": "长按卡片可以重新上传素材",
+  "meActionRename": "改名",
+  "meActionRetryUpload": "重新上传素材",
+  "meActionDelete": "删除",
+  "meActionCancel": "取消",
+  "meActionSave": "保存",
+  "meRenameDialogTitle": "改名",
+  "meRetryStarted": "已开始重新上传",
+  "meRetryFailed": "重新上传失败：{error}",
+  "@meRetryFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "meRetryUnavailable": "原始素材已不在设备上，请删除后重新拍摄或重新导入。",
+  "meDeleteDialogTitle": "删除这次扫描?",
+  "meDeleteDialogContent": "\"{name}\" 将从你的作品里移除。已发布到社区的内容不受影响。",
+  "@meDeleteDialogContent": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "defaultUntitledScan": "未命名",
+
+  "captureWarmupHint": "正在初始化 AR…",
+  "captureReadyHint": "点击中心选择主体物",
+  "captureAimHint": "将准星对准物体中心，再次点击锁定",
+  "captureMaterialTooSparseTitle": "素材太少",
+  "captureMaterialTooSparseHint": "请继续拍摄一会儿再停止",
+  "captureLockFailedHint": "未检测到平面或跟踪未就绪 — 请对准物体所在表面后再试",
+  "captureUploadFailedTitle": "上传失败",
+  "captureUploadedTitle": "已上传",
+  "captureUploadPhasePreparing": "准备上传",
+  "captureUploadPhaseCreatingJob": "注册任务",
+  "captureUploadPhaseUploadingVideo": "上传视频",
+  "captureUploadPhaseUploadingCurated": "上传质量清单",
+  "captureUploadPhaseUploading": "上传中",
+  "captureSessionExpiredTitle": "登录已过期",
+  "captureSessionExpiredHint": "请到「我」中重新登录后再试",
+  "captureInitFailed": "初始化失败：{error}",
+  "@captureInitFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "captureRecordingStartFailed": "开始录制失败：{error}",
+  "@captureRecordingStartFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "captureCameraConflict": "设备未支持同时录像，无法上传",
+  "captureUploadPreparingDetail": "正在准备上传…",
+  "captureUploadStreamMissing": "上传协调器没有返回进度流",
 
   "scanSampleHelmetName": "样板 · 头盔",
   "scanRecordOpenPlaceholder": "打开「{name}」（查看器待接入）",

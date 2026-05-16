@@ -13,6 +13,7 @@ import '../i18n/relative_time.dart';
 import '../l10n/app_localizations.dart';
 import '../me/my_works_sync_service.dart';
 import '../me/scan_record_store.dart';
+import '../me/upload_coordinator.dart';
 import 'design_system.dart';
 import 'home_view_model.dart';
 import 'me/my_work_detail_page.dart';
@@ -33,6 +34,25 @@ class _MePageState extends State<MePage> {
   // doesn't have to re-fetch profiles / notification_settings every time
   // it's pushed.
   final MeStatsViewModel _stats = MeStatsViewModel();
+
+  // Phase 6.4f.13.1 — direct handle to MePage's local ScaffoldMessenger.
+  // `ScaffoldMessenger.of(context)` from a State's BuildContext walks
+  // UP the tree, past anything build() has output — including the
+  // local ScaffoldMessenger we wrap below — and lands on MaterialApp's
+  // root messenger. That displays SnackBars on AppShell's Scaffold,
+  // which sits ABOVE the IndexedStack and bleeds into other tabs.
+  // Holding a GlobalKey to the local messenger lets us call
+  // `_messengerKey.currentState!.showSnackBar(...)` directly, routing
+  // SnackBars to MePage's own Scaffold whose overlay disappears with
+  // the tab when AppShell switches indices.
+  final GlobalKey<ScaffoldMessengerState> _messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+
+  // Returns MePage's local messenger if available, falling back to the
+  // ambient (root) messenger so first-frame edge cases don't crash.
+  ScaffoldMessengerState _localMessenger() {
+    return _messengerKey.currentState ?? ScaffoldMessenger.of(context);
+  }
 
   @override
   void initState() {
@@ -66,7 +86,7 @@ class _MePageState extends State<MePage> {
 
   Future<void> _onRefresh() async {
     final l = AppL10n.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _localMessenger();
     try {
       final added = await MyWorksSyncService.instance.refreshFromCloud();
       if (!mounted) return;
@@ -113,7 +133,20 @@ class _MePageState extends State<MePage> {
         ),
       );
     }
-    return Scaffold(
+    // Wrap in a local ScaffoldMessenger so SnackBars triggered by
+    // MePage interactions (retry-upload, source-files-missing, delete
+    // confirmation) only paint while MePage is the visible tab. Without
+    // this, ScaffoldMessenger.of(context) walks up to AppShell's
+    // top-level Scaffold and the SnackBar's overlay sits ABOVE the
+    // IndexedStack — so tapping "重新上传" then switching to Discover/
+    // Capture leaves the prompt visible on the wrong tab. Local
+    // ScaffoldMessenger is owned by MePage's Scaffold; when MePage
+    // goes offstage in the IndexedStack the SnackBar's overlay stops
+    // painting, matching the user's expectation that the prompt is
+    // tab-scoped.
+    return ScaffoldMessenger(
+      key: _messengerKey,
+      child: Scaffold(
       backgroundColor: AetherColors.bg,
       body: SafeArea(
         bottom: false,
@@ -166,7 +199,8 @@ class _MePageState extends State<MePage> {
           ),
         ),
       ),
-    );
+    ),  // Scaffold
+    );  // ScaffoldMessenger (local — see build comment above)
   }
 }
 
@@ -228,6 +262,7 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
             isLeft: true,
             vm: _vm,
             onTap: _onTap,
+            onLongPress: _confirmDelete,
           ),
         ),
         const SizedBox(width: AetherSpacing.lg),
@@ -240,6 +275,7 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
             isLeft: false,
             vm: _vm,
             onTap: _onTap,
+            onLongPress: _confirmDelete,
           ),
         ),
       ],
@@ -247,9 +283,194 @@ class _MyWorksSectionState extends State<_MyWorksSection> {
   }
 
   void _onTap(ScanRecord record) {
+    // The detail page only renders when there's a viewable artifact
+    // (artifactPath != null). For everything else — in-flight,
+    // failed, cancelled, or queued — show a contextual SnackBar
+    // instead of pushing an empty detail page that just shows
+    // "Processing failed". The recovery path for failed scans is
+    // long-press → 重新上传素材, which the existing menu surfaces.
+    if (record.artifactPath == null) {
+      final l = AppL10n.of(context);
+      final status = record.jobStatus;
+      final hint = (status?.isRunning ?? false)
+          ? l.meTapHintInProgress
+          : l.meTapHintTapToRetry;
+      // Note: this is `_MyWorksSectionState`'s context, which sits
+      // INSIDE _MePageState.build()'s output tree — i.e. inside the
+      // local ScaffoldMessenger. So `.of(context)` correctly resolves
+      // to the local messenger. (MePage's State.context — used by
+      // _onRefresh up the file — sits ABOVE the local messenger and
+      // needs the GlobalKey path via _localMessenger().)
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(hint),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => MyWorkDetailPage(recordId: record.id),
     ));
+  }
+
+  /// Long-press handler — opens a bottom sheet with up to three actions
+  /// (rename / retry / delete). Polycam-style. The destructive delete
+  /// triggers a follow-up confirmation dialog so a stray hold doesn't
+  /// nuke a scan in one tap. Retry is shown for any failed/cancelled
+  /// record; if the persisted .mov + curated.json have been cleaned up
+  /// (e.g. older records, iOS temp-dir eviction), the retry handler
+  /// surfaces a clear "source no longer available" message instead of
+  /// silently failing.
+  Future<void> _confirmDelete(ScanRecord record) async {
+    final l = AppL10n.of(context);
+    final showRetry =
+        record.jobStatus == ScanJobStatus.failed ||
+        record.jobStatus == ScanJobStatus.cancelled;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AetherColors.bgCanvas,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: Text(l.meActionRename),
+              onTap: () => Navigator.of(ctx).pop('rename'),
+            ),
+            if (showRetry)
+              ListTile(
+                leading: const Icon(Icons.cloud_upload_outlined),
+                title: Text(l.meActionRetryUpload),
+                onTap: () => Navigator.of(ctx).pop('retry'),
+              ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline,
+                  color: AetherColors.danger),
+              title: Text(l.meActionDelete,
+                  style: const TextStyle(color: AetherColors.danger)),
+              onTap: () => Navigator.of(ctx).pop('delete'),
+            ),
+            const SizedBox(height: 4),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'rename') {
+      await _renameRecord(record);
+    } else if (action == 'retry') {
+      await _retryUpload(record);
+    } else if (action == 'delete') {
+      await _confirmAndDelete(record);
+    }
+  }
+
+  Future<void> _renameRecord(ScanRecord record) async {
+    final l = AppL10n.of(context);
+    final controller = TextEditingController(text: record.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(l.meRenameDialogTitle),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 40,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            counterText: '',
+          ),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(l.meActionCancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: Text(l.meActionSave),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty || newName == record.name) return;
+    await ScanRecordStore.instance
+        .addOrUpdate(record.copyWith(name: newName));
+  }
+
+  /// Re-run the upload for [record] from the persisted .mov + curated.json.
+  /// UploadCoordinator.retry() throws StateError when the record is
+  /// missing source files (older records pre-Plan-C, or iOS evicted the
+  /// temp-dir copies before we moved them to Documents). That's a
+  /// non-recoverable case for this device — we surface a clear message
+  /// pointing at delete + recapture instead of leaking the StateError.
+  Future<void> _retryUpload(ScanRecord record) async {
+    final l = AppL10n.of(context);
+    // _MyWorksSectionState.context is inside MePage's local
+    // ScaffoldMessenger (we are reached via _MyWorksSection widget in
+    // MePage's build output), so the standard .of(context) resolves
+    // to the local messenger.
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await UploadCoordinator.instance.retry(record.id);
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l.meRetryStarted),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } on StateError catch (_) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l.meRetryUnavailable),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(l.meRetryFailed(e.toString())),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmAndDelete(ScanRecord record) async {
+    final l = AppL10n.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(l.meDeleteDialogTitle),
+        content: Text(l.meDeleteDialogContent(record.name)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(l.meActionCancel),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: AetherColors.danger),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(l.meActionDelete),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _vm.deleteRecord(record);
   }
 }
 
@@ -258,12 +479,14 @@ class _MyWorksColumn extends StatelessWidget {
   final bool isLeft;
   final HomeViewModel vm;
   final void Function(ScanRecord) onTap;
+  final void Function(ScanRecord) onLongPress;
 
   const _MyWorksColumn({
     required this.records,
     required this.isLeft,
     required this.vm,
     required this.onTap,
+    required this.onLongPress,
   });
 
   @override
@@ -280,6 +503,7 @@ class _MyWorksColumn extends StatelessWidget {
               isLeft: isLeft,
             ),
             onTap: () => onTap(records[i]),
+            onLongPress: () => onLongPress(records[i]),
           ),
           if (i < records.length - 1)
             const SizedBox(height: AetherSpacing.lg),

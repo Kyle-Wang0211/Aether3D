@@ -296,19 +296,19 @@ abstract class AppL10n {
   /// No description provided for @scanLifecycleFailed.
   ///
   /// In en, this message translates to:
-  /// **'Failed'**
+  /// **'Failed to process'**
   String get scanLifecycleFailed;
 
   /// No description provided for @scanLifecycleTraining.
   ///
   /// In en, this message translates to:
-  /// **'Training'**
+  /// **'Generating 3D model'**
   String get scanLifecycleTraining;
 
   /// No description provided for @scanLifecyclePackaging.
   ///
   /// In en, this message translates to:
-  /// **'Exporting'**
+  /// **'Finalizing'**
   String get scanLifecyclePackaging;
 
   /// No description provided for @scanLifecycleUploading.
@@ -316,6 +316,240 @@ abstract class AppL10n {
   /// In en, this message translates to:
   /// **'Uploading'**
   String get scanLifecycleUploading;
+
+  /// No description provided for @createOptionCapture.
+  ///
+  /// In en, this message translates to:
+  /// **'Capture'**
+  String get createOptionCapture;
+
+  /// No description provided for @createOptionUpload.
+  ///
+  /// In en, this message translates to:
+  /// **'Upload'**
+  String get createOptionUpload;
+
+  /// No description provided for @createImportingGlb.
+  ///
+  /// In en, this message translates to:
+  /// **'Importing GLB model…'**
+  String get createImportingGlb;
+
+  /// No description provided for @createImportPickerFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t open file picker: {error}'**
+  String createImportPickerFailed(String error);
+
+  /// No description provided for @createImportFileUnreadable.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t read the selected file'**
+  String get createImportFileUnreadable;
+
+  /// No description provided for @meTapHintInProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'Generating 3D model — opens when ready'**
+  String get meTapHintInProgress;
+
+  /// No description provided for @meTapHintTapToRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Long-press the card to retry the upload'**
+  String get meTapHintTapToRetry;
+
+  /// No description provided for @meActionRename.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename'**
+  String get meActionRename;
+
+  /// No description provided for @meActionRetryUpload.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-upload source'**
+  String get meActionRetryUpload;
+
+  /// No description provided for @meActionDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get meActionDelete;
+
+  /// No description provided for @meActionCancel.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get meActionCancel;
+
+  /// No description provided for @meActionSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get meActionSave;
+
+  /// No description provided for @meRenameDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename'**
+  String get meRenameDialogTitle;
+
+  /// No description provided for @meRetryStarted.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-upload started'**
+  String get meRetryStarted;
+
+  /// No description provided for @meRetryFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-upload failed: {error}'**
+  String meRetryFailed(String error);
+
+  /// No description provided for @meRetryUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Source files are no longer on this device — please delete and re-capture or re-import.'**
+  String get meRetryUnavailable;
+
+  /// No description provided for @meDeleteDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete this scan?'**
+  String get meDeleteDialogTitle;
+
+  /// No description provided for @meDeleteDialogContent.
+  ///
+  /// In en, this message translates to:
+  /// **'\"{name}\" will be removed from your works. Items already published to the community are unaffected.'**
+  String meDeleteDialogContent(String name);
+
+  /// No description provided for @defaultUntitledScan.
+  ///
+  /// In en, this message translates to:
+  /// **'Untitled'**
+  String get defaultUntitledScan;
+
+  /// No description provided for @captureWarmupHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Initializing AR…'**
+  String get captureWarmupHint;
+
+  /// No description provided for @captureReadyHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap the center to select your subject'**
+  String get captureReadyHint;
+
+  /// No description provided for @captureAimHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Aim the crosshair at the center, then tap again to lock'**
+  String get captureAimHint;
+
+  /// No description provided for @captureMaterialTooSparseTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Not enough captured'**
+  String get captureMaterialTooSparseTitle;
+
+  /// No description provided for @captureMaterialTooSparseHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep scanning a moment longer before stopping'**
+  String get captureMaterialTooSparseHint;
+
+  /// No description provided for @captureLockFailedHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Surface not detected or tracking not ready — point at the object\'s surface and try again'**
+  String get captureLockFailedHint;
+
+  /// No description provided for @captureUploadFailedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Upload failed'**
+  String get captureUploadFailedTitle;
+
+  /// No description provided for @captureUploadedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploaded'**
+  String get captureUploadedTitle;
+
+  /// No description provided for @captureUploadPhasePreparing.
+  ///
+  /// In en, this message translates to:
+  /// **'Preparing'**
+  String get captureUploadPhasePreparing;
+
+  /// No description provided for @captureUploadPhaseCreatingJob.
+  ///
+  /// In en, this message translates to:
+  /// **'Registering job'**
+  String get captureUploadPhaseCreatingJob;
+
+  /// No description provided for @captureUploadPhaseUploadingVideo.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading video'**
+  String get captureUploadPhaseUploadingVideo;
+
+  /// No description provided for @captureUploadPhaseUploadingCurated.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading frame manifest'**
+  String get captureUploadPhaseUploadingCurated;
+
+  /// No description provided for @captureUploadPhaseUploading.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading'**
+  String get captureUploadPhaseUploading;
+
+  /// No description provided for @captureSessionExpiredTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Session expired'**
+  String get captureSessionExpiredTitle;
+
+  /// No description provided for @captureSessionExpiredHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign back in from the Me tab and try again'**
+  String get captureSessionExpiredHint;
+
+  /// No description provided for @captureInitFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Initialization failed: {error}'**
+  String captureInitFailed(String error);
+
+  /// No description provided for @captureRecordingStartFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t start recording: {error}'**
+  String captureRecordingStartFailed(String error);
+
+  /// No description provided for @captureCameraConflict.
+  ///
+  /// In en, this message translates to:
+  /// **'This device can\'t record video alongside AR — upload not started'**
+  String get captureCameraConflict;
+
+  /// No description provided for @captureUploadPreparingDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Preparing upload…'**
+  String get captureUploadPreparingDetail;
+
+  /// No description provided for @captureUploadStreamMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'Upload coordinator returned no progress stream'**
+  String get captureUploadStreamMissing;
 
   /// No description provided for @scanSampleHelmetName.
   ///
