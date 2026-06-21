@@ -241,6 +241,7 @@ VL_EXPORT vl_bool vl_covdet_get_transposed (VlCovDet const * self) ;
 VL_EXPORT VlScaleSpace *  vl_covdet_get_gss (VlCovDet const * self) ;
 VL_EXPORT VlScaleSpace *  vl_covdet_get_css (VlCovDet const * self) ;
 VL_EXPORT void  vl_covdet_set_gss (VlCovDet * self, VlScaleSpace * gss) ; /* borrow gss, no ownership (threaded extract) */
+VL_EXPORT void  vl_covdet_set_num_features (VlCovDet * self, vl_size num) ; /* publish compacted count (threaded affine) */
 VL_EXPORT vl_bool vl_covdet_get_aa_accurate_smoothing (VlCovDet const * self) ;
 VL_EXPORT vl_size const * vl_covdet_get_laplacian_scales_statistics (VlCovDet const * self, vl_size * numScales) ;
 VL_EXPORT double vl_covdet_get_non_extrema_suppression_threshold (VlCovDet const * self) ;

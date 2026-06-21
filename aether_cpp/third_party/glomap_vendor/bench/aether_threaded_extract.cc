@@ -81,9 +81,66 @@ bool ExtractCovariantSiftThreaded(const colmap::SiftExtractionOptions& sift_opts
 
   vl_covdet_detect(covdet.get(), sift_opts.max_num_features);
 
+  // estimate_affine_shape: parallel equivalent of vl_covdet_extract_affine_shape.
+  // affine_shape_for_frame is pure (reads the read-only gss + per-worker scratch,
+  // returns the adapted frame + status, never touches the feature array), so each
+  // feature adapts independently; the serial in-order compact below reproduces the
+  // exact upstream output (same drops, same order) -> bit-identical.
   if (sift_opts.estimate_affine_shape) {
-    vl_covdet_extract_affine_shape(covdet.get());
+    const int nf = vl_covdet_get_num_features(covdet.get());
+    VlCovDetFeature* feats = vl_covdet_get_features(covdet.get());
+    VlScaleSpace* aff_gss = vl_covdet_get_gss(covdet.get());
+    std::vector<VlFrameOrientedEllipse> adapted(nf > 0 ? nf : 0);
+    std::vector<char> ok(nf > 0 ? nf : 0, 0);
+
+    const int hwa = static_cast<int>(std::thread::hardware_concurrency());
+    int athreads = num_threads > 0 ? num_threads : (hwa > 0 ? hwa : 1);
+    if (athreads > nf) athreads = std::max<int>(1, nf);
+
+    auto aff_worker = [&](int lo, int hi) {
+      VlCovDet* wd = vl_covdet_new(VL_COVDET_METHOD_DOG);
+      if (!wd) return;
+      vl_covdet_set_gss(wd, aff_gss);  // borrow read-only gss
+      for (int i = lo; i < hi; ++i) {
+        ok[i] = (vl_covdet_extract_affine_shape_for_frame(
+                     wd, &adapted[i], feats[i].frame) == VL_ERR_OK)
+                    ? 1
+                    : 0;
+      }
+      vl_covdet_set_gss(wd, nullptr);
+      vl_covdet_delete(wd);
+    };
+
+    if (nf > 0) {
+      if (athreads <= 1) {
+        aff_worker(0, nf);
+      } else {
+        std::vector<std::thread> pool;
+        pool.reserve(athreads);
+        const int chunk = (nf + athreads - 1) / athreads;
+        for (int t = 0; t < athreads; ++t) {
+          const int lo = std::min(t * chunk, nf);
+          const int hi = std::min(lo + chunk, nf);
+          if (lo >= hi) break;
+          pool.emplace_back(aff_worker, lo, hi);
+        }
+        for (auto& th : pool) th.join();
+      }
+    }
+
+    // serial in-order compact — mirrors vl_covdet_extract_affine_shape (drops
+    // features whose affine shape did not converge), then publish the count.
+    int j = 0;
+    for (int i = 0; i < nf; ++i) {
+      if (ok[i]) {
+        feats[j] = feats[i];
+        feats[j].frame = adapted[i];
+        ++j;
+      }
+    }
+    vl_covdet_set_num_features(covdet.get(), static_cast<vl_size>(j));
   }
+
   if (!sift_opts.upright) {
     vl_covdet_extract_orientations(covdet.get());
   }
