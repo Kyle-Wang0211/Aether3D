@@ -125,4 +125,20 @@ if(BUILD_BENCH)
     /opt/homebrew/lib/libglog.dylib
     "-lsqlite3"
     ${ACCELERATE_FW})
+
+  # parameterized incremental-SfM bench (HOST ceres 2.2.0 + glog) — per-frame
+  # registration cost curve + reproj for the <=2s@frame-300 SLA lever sweeps.
+  # BA option fields via argv -> run many configs in parallel on a read-only db.
+  add_executable(colmap_bench_exe bench/colmap_bench.cc)
+  target_include_directories(colmap_bench_exe PRIVATE ${V}/stubs)
+  target_compile_definitions(colmap_bench_exe PRIVATE
+    COLMAP_BENCH_MAIN EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7)
+  target_compile_options(colmap_bench_exe PRIVATE -w)
+  target_link_libraries(colmap_bench_exe PRIVATE
+    glomap_core
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
 endif()

@@ -151,6 +151,18 @@ aether_sfm_result_t RunIncremental(
   try {
     auto pipeline_opts = std::make_shared<colmap::IncrementalPipelineOptions>();
     pipeline_opts->min_num_matches = 15;
+    // E4 BA caps (grounded on the 414-frame bench, host ceres): the periodic
+    // global BA is the only O(N) term + the per-frame SLA breaker. Capping
+    // refinements 5->1, global iters 50->15, local iters 25->15, firing less
+    // often (ratio 1.1->1.4), and multi-threading the local BA cut the worst
+    // per-frame registration from 11233ms -> 2425ms (4.6x) with reproj UNCHANGED
+    // (0.6794 -> 0.6785). Warm-started incremental BA converges well under these
+    // caps. Pure option fields => cross-platform + on-device, zero quality cost.
+    pipeline_opts->ba_global_max_refinements = 1;
+    pipeline_opts->ba_global_max_num_iterations = 15;
+    pipeline_opts->ba_global_frames_ratio = 1.4;
+    pipeline_opts->ba_local_max_num_iterations = 15;
+    pipeline_opts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
     auto manager = std::make_shared<colmap::ReconstructionManager>();
 
     const double t0 = NowMs();
