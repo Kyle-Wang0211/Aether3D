@@ -5,6 +5,14 @@
 extern int aether_dsp_sift_extract(const uint8_t* gray, int width, int height,
                                    int max_features, float* out_xy,
                                    uint8_t* out_desc, int out_cap, int* out_count);
+extern int aether_dsp_sift_extract_threaded(const uint8_t* gray, int width, int height,
+                                            int max_features, int num_threads,
+                                            float* out_xy, uint8_t* out_desc,
+                                            int out_cap, int* out_count);
+extern int aether_dsp_sift_selfcheck(const uint8_t* gray, int width, int height,
+                                     int max_features, int num_threads,
+                                     int* out_n_serial, int* out_n_threaded,
+                                     int* out_max_abs_desc_diff);
 extern int aether_gpu_match(const uint8_t*, int, const uint8_t*, int, double, int*);
 extern int aether_gpu_match_tiled(const uint8_t*, int, const uint8_t*, int, double, int*);
 extern int aether_gpu_match_gemm(const uint8_t*, int, const uint8_t*, int, double, int*);
@@ -55,43 +63,59 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     NSProcessInfo* pi = [NSProcessInfo processInfo];
     int waited = 0;
-    while (pi.thermalState >= NSProcessInfoThermalStateSerious && waited < 1200) {
+    while (pi.thermalState >= NSProcessInfoThermalStateCritical && waited < 1200) {
       printf("WAIT_COOL thermal=%ld\n", (long)pi.thermalState); fflush(stdout);
       [NSThread sleepForTimeInterval:10]; waited += 10;
     }
     printf("BENCH_START thermal=%ld\n", (long)pi.thermalState); fflush(stdout);
     os_log(OS_LOG_DEFAULT, "BENCH_START");
 
-    const int cap = 20000, K = 25;
+    const int cap = 30000;
     NSString* jA = [[NSBundle mainBundle] pathForResource:@"sift_test" ofType:@"jpg"];
-    NSString* jB = [[NSBundle mainBundle] pathForResource:@"sift_test2" ofType:@"jpg"];
-    if (!jB) jB = jA;   // fallback: self-match (timing still valid)
-    uint8_t* dA = (uint8_t*)malloc((size_t)128 * cap);
-    uint8_t* dB = (uint8_t*)malloc((size_t)128 * cap);
-    int nA = ExtractFrame(jA, 2048, dA, cap);
-    int nB = ExtractFrame(jB, 2048, dB, cap);
-    printf("MATCH_EXTRACT nA=%d nB=%d\n", nA, nB); fflush(stdout);
-    os_log(OS_LOG_DEFAULT, "MATCH_EXTRACT nA=%d nB=%d", nA, nB);
 
-    struct { const char* name; int (*fn)(const uint8_t*, int, const uint8_t*, int, double, int*); } variants[] = {
-      {"naive", aether_gpu_match},
-      {"tiled", aether_gpu_match_tiled},
-      {"gemm",  aether_gpu_match_gemm},
-    };
-    for (int v = 0; v < 3; ++v) {
-      int nm = 0;
-      // warmup (pipeline JIT) then timed
-      variants[v].fn(dA, nA, dB, nB, 0.7, &nm);
-      NSDate* t = [NSDate date];
-      int rc = variants[v].fn(dA, nA, dB, nB, 0.7, &nm);
-      double ms = -[t timeIntervalSinceNow] * 1000.0;
-      printf("MATCH_BENCH %s rc=%d pair_ms=%.1f matches=%d perframe_ms=%.0f(K=%d)\n",
-             variants[v].name, rc, ms, nm, ms * K, K); fflush(stdout);
-      os_log(OS_LOG_DEFAULT, "MATCH_BENCH %{public}s rc=%d pair_ms=%.1f matches=%d",
-             variants[v].name, rc, ms, nm);
-      NSLog(@"MATCH_BENCH %s rc=%d pair_ms=%.1f matches=%d", variants[v].name, rc, ms, nm);
+    // EXTRACT_BENCH: threaded DSP-SIFT vs serial. Correctness (bit-identical
+    // selfcheck) + speedup at 2048 (recipe) and 4224 (target quality route).
+    int resolutions[] = {2048, 4224};
+    for (int r = 0; r < 2; ++r) {
+      const int res = resolutions[r];
+      int w = 0, h = 0;
+      uint8_t* gray = DecodeGray(jA, res, &w, &h);
+      if (!gray) { printf("EXTRACT_DECODE_FAIL res=%d\n", res); fflush(stdout); continue; }
+      printf("EXTRACT_RES res=%d img=%dx%d\n", res, w, h); fflush(stdout);
+      os_log(OS_LOG_DEFAULT, "EXTRACT_RES res=%d img=%dx%d", res, w, h);
+
+      // correctness gate: serial vs threaded must be bit-identical.
+      int ns = 0, nt = 0, maxd = -1;
+      int sc = aether_dsp_sift_selfcheck(gray, w, h, 8192, 4, &ns, &nt, &maxd);
+      const char* verdict =
+          (sc == 0 && ns == nt && ns > 0 && maxd == 0) ? "PASS" : "FAIL";
+      printf("EXTRACT_SELFCHECK res=%d sc=%d n_serial=%d n_threaded=%d max_abs_desc_diff=%d %s\n",
+             res, sc, ns, nt, maxd, verdict); fflush(stdout);
+      os_log(OS_LOG_DEFAULT, "EXTRACT_SELFCHECK res=%d ns=%d nt=%d maxd=%d %{public}s",
+             res, ns, nt, maxd, verdict);
+
+      float* xy = (float*)malloc(sizeof(float) * 2 * cap);
+      uint8_t* dd = (uint8_t*)malloc((size_t)128 * cap);
+      int n = 0;
+
+      NSDate* t0 = [NSDate date];
+      aether_dsp_sift_extract(gray, w, h, 8192, xy, dd, cap, &n);
+      double sms = -[t0 timeIntervalSinceNow] * 1000.0;
+      printf("EXTRACT_BENCH res=%d serial n=%d ms=%.0f\n", res, n, sms); fflush(stdout);
+      os_log(OS_LOG_DEFAULT, "EXTRACT_BENCH res=%d serial n=%d ms=%.0f", res, n, sms);
+
+      int tcs[] = {2, 4, 6};
+      for (int k = (res >= 4224 ? 1 : 0); k < 3; ++k) {  // 4224: T={4,6}; 2048: T={2,4,6}
+        NSDate* t1 = [NSDate date];
+        aether_dsp_sift_extract_threaded(gray, w, h, 8192, tcs[k], xy, dd, cap, &n);
+        double tms = -[t1 timeIntervalSinceNow] * 1000.0;
+        printf("EXTRACT_BENCH res=%d threaded T=%d n=%d ms=%.0f speedup=%.2fx\n",
+               res, tcs[k], n, tms, sms / tms); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "EXTRACT_BENCH res=%d threaded T=%d n=%d ms=%.0f speedup=%.2f",
+               res, tcs[k], n, tms, sms / tms);
+      }
+      free(xy); free(dd); free(gray);
     }
-    free(dA); free(dB);
     printf("BENCH_DONE\n"); fflush(stdout);
     os_log(OS_LOG_DEFAULT, "BENCH_DONE");
   });

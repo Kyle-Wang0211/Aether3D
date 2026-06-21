@@ -3381,6 +3381,24 @@ vl_covdet_get_css (VlCovDet const * self)
   return self->css ;
 }
 
+/** @brief Attach a Gaussian scale space WITHOUT taking ownership
+ ** @param self object.
+ ** @param gss scale space to attach, or @c NULL to detach.
+ **
+ ** Non-computational accessor added for on-device multi-threaded descriptor
+ ** extraction: worker detectors borrow a single read-only @a gss that was built
+ ** once by the master (avoids rebuilding the Gaussian pyramid per thread, which
+ ** would multiply RAM). The caller MUST call vl_covdet_set_gss(self, NULL)
+ ** before ::vl_covdet_delete on any borrower so the shared scale space is freed
+ ** exactly once (by the master). This changes no detection/descriptor math.
+ **/
+
+void
+vl_covdet_set_gss (VlCovDet * self, VlScaleSpace * gss)
+{
+  self->gss = gss ;
+}
+
 /** @brief Get the number of features found with a certain number of scales
  ** @param self object.
  ** @param numScales length of the histogram (out).

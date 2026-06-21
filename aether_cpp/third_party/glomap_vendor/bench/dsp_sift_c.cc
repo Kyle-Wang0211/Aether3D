@@ -10,10 +10,13 @@
 #include "colmap/sensor/bitmap.h"
 
 #include "aether_bitmap_shim.h"
+#include "aether_threaded_extract.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 extern "C" {
 
@@ -74,6 +77,136 @@ int aether_dsp_sift_extract(const uint8_t* gray,
     return 0;
   } catch (...) {
     return 5;
+  }
+}
+
+// Same as aether_dsp_sift_extract, but the per-keypoint domain-size-pooling
+// descriptor loop runs across `num_threads` worker threads (<=0 -> hardware
+// concurrency). Output is BIT-IDENTICAL to aether_dsp_sift_extract.
+int aether_dsp_sift_extract_threaded(const uint8_t* gray,
+                                     int width,
+                                     int height,
+                                     int max_features,
+                                     int num_threads,
+                                     float* out_xy,
+                                     uint8_t* out_desc,
+                                     int out_cap,
+                                     int* out_count) {
+  if (out_count) *out_count = 0;
+  try {
+    if (gray == nullptr || width <= 0 || height <= 0 || out_cap <= 0) return 1;
+
+    colmap::Bitmap bitmap;
+    bitmap.Allocate(width, height, /*as_rgb=*/false);
+    FIBITMAP* fib = bitmap.Data();
+    if (fib == nullptr) return 2;
+    fib->data.assign(gray, gray + static_cast<size_t>(width) * height);
+
+    // Default-constructed options match aether_dsp_sift_extract's defaults
+    // (first_octave/octave_resolution/peak/edge/dsp_num_scales=10/L1_ROOT).
+    colmap::SiftExtractionOptions sift;
+    sift.max_num_features = max_features > 0 ? max_features : 8192;
+    sift.estimate_affine_shape = true;   // DSP-SIFT (covariant) path
+    sift.domain_size_pooling = true;
+
+    colmap::FeatureKeypoints kps;
+    colmap::FeatureDescriptors desc;
+    if (!aether::ExtractCovariantSiftThreaded(
+            sift, bitmap, &kps, &desc, num_threads)) {
+      return 4;
+    }
+
+    int n = static_cast<int>(kps.size());
+    if (n > out_cap) n = out_cap;
+    if (out_xy != nullptr) {
+      for (int i = 0; i < n; ++i) {
+        out_xy[2 * i] = kps[i].x;
+        out_xy[2 * i + 1] = kps[i].y;
+      }
+    }
+    if (out_desc != nullptr && desc.cols() == 128) {
+      const int dn = static_cast<int>(desc.rows());
+      const int m = n < dn ? n : dn;
+      for (int i = 0; i < m; ++i) {
+        for (int d = 0; d < 128; ++d) {
+          out_desc[i * 128 + d] = desc(i, d);
+        }
+      }
+    }
+    if (out_count) *out_count = n;
+    return 0;
+  } catch (...) {
+    return 5;
+  }
+}
+
+// Validation harness: runs serial + threaded extraction on the SAME image and
+// reports both keypoint counts + the max abs byte difference between the two
+// descriptor sets. 0 == bit-identical (the correctness gate). Returns 0 on
+// success, else the first non-zero extractor return code.
+int aether_dsp_sift_selfcheck(const uint8_t* gray,
+                              int width,
+                              int height,
+                              int max_features,
+                              int num_threads,
+                              int* out_n_serial,
+                              int* out_n_threaded,
+                              int* out_max_abs_desc_diff) {
+  if (out_n_serial) *out_n_serial = 0;
+  if (out_n_threaded) *out_n_threaded = 0;
+  if (out_max_abs_desc_diff) *out_max_abs_desc_diff = -1;
+  try {
+    const int cap = (max_features > 0 ? max_features : 8192) + 8192;
+    // 4-way diagnostic: serial x2 (base determinism) + threaded T=1 (clone
+    // serial+descriptor logic, no threading) + threaded T=N (threading).
+    auto extract = [&](int threads, std::vector<uint8_t>& d) -> int {
+      std::vector<float> xy(static_cast<size_t>(2) * cap);
+      int n = 0;
+      const int r =
+          (threads < 0)
+              ? aether_dsp_sift_extract(
+                    gray, width, height, max_features, xy.data(), d.data(), cap, &n)
+              : aether_dsp_sift_extract_threaded(gray, width, height, max_features,
+                                                 threads, xy.data(), d.data(), cap, &n);
+      return r == 0 ? n : -r;
+    };
+    auto maxdiff = [](const std::vector<uint8_t>& a, int na,
+                      const std::vector<uint8_t>& b, int nb) -> int {
+      int md = 0;
+      const int m = na < nb ? na : nb;
+      for (size_t i = 0; i < static_cast<size_t>(m) * 128; ++i) {
+        int diff = static_cast<int>(a[i]) - static_cast<int>(b[i]);
+        if (diff < 0) diff = -diff;
+        if (diff > md) md = diff;
+      }
+      return md;
+    };
+    std::vector<uint8_t> d_s1(static_cast<size_t>(128) * cap);
+    std::vector<uint8_t> d_s2(static_cast<size_t>(128) * cap);
+    std::vector<uint8_t> d_t1(static_cast<size_t>(128) * cap);
+    std::vector<uint8_t> d_tn(static_cast<size_t>(128) * cap);
+    const int n_s1 = extract(-1, d_s1);
+    const int n_s2 = extract(-1, d_s2);
+    const int n_t1 = extract(1, d_t1);
+    const int n_tn = extract(num_threads > 0 ? num_threads : 4, d_tn);
+    if (n_s1 < 0) return -n_s1;
+    if (n_s2 < 0) return -n_s2;
+    if (n_t1 < 0) return -n_t1;
+    if (n_tn < 0) return -n_tn;
+    const int md_ss = maxdiff(d_s1, n_s1, d_s2, n_s2);
+    const int md_st1 = maxdiff(d_s1, n_s1, d_t1, n_t1);
+    const int md_stn = maxdiff(d_s1, n_s1, d_tn, n_tn);
+    std::printf(
+        "SELFCHECK_DIAG n_s1=%d n_s2=%d n_t1=%d n_tn=%d | "
+        "maxd(s,s)=%d maxd(s,t1)=%d maxd(s,tn)=%d\n",
+        n_s1, n_s2, n_t1, n_tn, md_ss, md_st1, md_stn);
+    std::fflush(stdout);
+    if (out_n_serial) *out_n_serial = n_s1;
+    if (out_n_threaded) *out_n_threaded = n_tn;
+    if (out_max_abs_desc_diff) *out_max_abs_desc_diff = md_stn;
+    return 0;
+  } catch (...) {
+    return 9;
   }
 }
 
