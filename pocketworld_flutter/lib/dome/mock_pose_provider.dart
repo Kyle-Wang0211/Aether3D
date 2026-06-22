@@ -63,6 +63,10 @@ class MockARPoseProvider implements ARPoseProvider {
       position: position,
       orientation: orient,
       timestamp: t,
+      // Mock has no real tracker — synthesize a perpetually-healthy
+      // trackingStateName so PoseDriftTracker can run uniformly across
+      // platforms (Web, HarmonyOS, simulator) without a null-branch.
+      trackingStateName: 'normal',
     );
     _lastPose = pose;
     if (!_controller.isClosed) _controller.add(pose);

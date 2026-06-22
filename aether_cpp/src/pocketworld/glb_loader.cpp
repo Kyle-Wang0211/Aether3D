@@ -27,7 +27,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
+#include <utility>
+#include <vector>
 
 namespace aether {
 namespace pocketworld {
@@ -236,17 +239,147 @@ std::optional<LoadedMesh> load_glb_mesh(GPUDevice& device,
     }
 
     // ─── Geometry ─────────────────────────────────────────────────────
-    // Walk every mesh.primitive in the glTF. Each primitive becomes one
-    // MeshGeometry with its own GPU buffers and an index into the
-    // materials array.
-    for (std::size_t mi = 0; mi < data->meshes_count; ++mi) {
-        const cgltf_mesh& gltf_mesh = data->meshes[mi];
+    // Walk the scene/node hierarchy (NOT data->meshes directly). glTF
+    // places each mesh inside a node with a world transform; some
+    // sample assets (e.g. Khronos DamagedHelmet) rely on the root
+    // node's rotation to convert from their original Maya/Sketchfab
+    // Z-up coordinate system into glTF's canonical Y-up. Rendering the
+    // raw mesh.primitive vertex data without that transform makes the
+    // helmet appear lying on its side. Other samples (e.g. ToyCar)
+    // bake unit-conversion scale into the node — without it the model
+    // arrives at sphereR≈540 instead of 1.
+    //
+    // For each node with a mesh, ask cgltf for the full world
+    // transform (parent chain folded in), then apply it to each
+    // vertex's position + normal + tangent before GPU upload. The
+    // shader pipeline still receives a single flat LoadedMesh; node
+    // hierarchy is invisible past this loader.
+    //
+    // Collect (cgltf_node*, mesh*) pairs first so we can still iterate
+    // each primitive in source order.
+    using NodeMeshPair = std::pair<const cgltf_node*, const cgltf_mesh*>;
+    std::vector<NodeMeshPair> draw_list;
+    std::function<void(const cgltf_node*)> walk_node;
+    walk_node = [&](const cgltf_node* node) {
+        if (!node) return;
+        if (node->mesh) {
+            draw_list.emplace_back(node, node->mesh);
+        }
+        for (cgltf_size c = 0; c < node->children_count; ++c) {
+            walk_node(node->children[c]);
+        }
+    };
+    if (data->scenes_count > 0) {
+        const cgltf_scene* scene = data->scene
+            ? data->scene
+            : &data->scenes[0];
+        for (cgltf_size n = 0; n < scene->nodes_count; ++n) {
+            walk_node(scene->nodes[n]);
+        }
+    } else {
+        // glTF without a default scene — fall back to enumerating every
+        // mesh and rendering it at identity (the legacy behaviour).
+        // Rare in practice; Khronos samples all have scenes.
+        for (cgltf_size i = 0; i < data->nodes_count; ++i) {
+            walk_node(&data->nodes[i]);
+        }
+    }
+    // If even the node walk found nothing (unrigged mesh-only glTFs do
+    // exist), fall back to direct mesh enumeration with identity
+    // transform.
+    if (draw_list.empty()) {
+        for (cgltf_size i = 0; i < data->meshes_count; ++i) {
+            draw_list.emplace_back(nullptr, &data->meshes[i]);
+        }
+    }
+
+    // Helper: 4x4 column-major matrix-vector multiply (point: w=1).
+    auto transform_point = [](const float m[16], float x, float y, float z,
+                              float* out_x, float* out_y, float* out_z) {
+        // M is column-major: m[c*4 + r] = M[r][c].
+        *out_x = m[0]*x + m[4]*y + m[8]*z  + m[12];
+        *out_y = m[1]*x + m[5]*y + m[9]*z  + m[13];
+        *out_z = m[2]*x + m[6]*y + m[10]*z + m[14];
+    };
+    // Helper: transform a direction vector (w=0) through the matrix's
+    // upper-3x3. For rotation+uniform-scale this is the right thing for
+    // normals / tangents; for non-uniform scale a true inverse-
+    // transpose would be more correct, but every glTF sample we ship
+    // today uses uniform scale.
+    auto transform_dir = [](const float m[16], float x, float y, float z,
+                            float* out_x, float* out_y, float* out_z) {
+        *out_x = m[0]*x + m[4]*y + m[8]*z;
+        *out_y = m[1]*x + m[5]*y + m[9]*z;
+        *out_z = m[2]*x + m[6]*y + m[10]*z;
+        const float len2 = (*out_x)*(*out_x) + (*out_y)*(*out_y) + (*out_z)*(*out_z);
+        if (len2 > 1e-12f) {
+            const float inv = 1.0f / std::sqrt(len2);
+            *out_x *= inv; *out_y *= inv; *out_z *= inv;
+        }
+    };
+
+    for (std::size_t di = 0; di < draw_list.size(); ++di) {
+        const cgltf_node* node = draw_list[di].first;
+        const cgltf_mesh& gltf_mesh = *draw_list[di].second;
+        // World transform: identity when no node (fallback path) or
+        // pulled from cgltf when we have one. cgltf_node_transform_world
+        // folds in every ancestor, so this is the actual world-space
+        // basis the vertex should land in.
+        float xform[16];
+        if (node) {
+            cgltf_node_transform_world(node, xform);
+        } else {
+            std::memset(xform, 0, sizeof(xform));
+            xform[0] = xform[5] = xform[10] = xform[15] = 1.0f;
+        }
+        const std::size_t mi = static_cast<std::size_t>(
+            (&gltf_mesh) - data->meshes);
         for (std::size_t pi = 0; pi < gltf_mesh.primitives_count; ++pi) {
             const cgltf_primitive& prim = gltf_mesh.primitives[pi];
             if (prim.type != cgltf_primitive_type_triangles) {
                 glb_log("primitive %zu/%zu: non-triangle topology %d skipped",
                         mi, pi, static_cast<int>(prim.type));
                 continue;
+            }
+
+            // ─── Filter contact-shadow planes (2026-05-02) ──────────────
+            //
+            // Khronos PBR samples (ToyCar, Lantern, AntiqueCamera, etc.)
+            // bake a flat quad UNDER the model whose material has
+            //   alphaMode = BLEND
+            //   baseColorFactor.rgb = (0, 0, 0)
+            //   baseColorFactor.alpha (or texture alpha) encodes the
+            //     shadow strength
+            // The intended use is "draw on top of a ground/table mesh
+            // and provide a soft drop shadow." PocketWorld renders one
+            // model on a transparent IOSurface (no ground beneath), so
+            // these planes draw as a free-floating black blob over the
+            // white card background — visually broken without context.
+            //
+            // Heuristic: ANY primitive whose material has BLEND alpha
+            // mode AND a near-black baseColorFactor.rgb is by-design a
+            // shadow plane. Skip the GPU upload entirely.
+            //
+            // SAFE for legit translucent content (glass canopy, sheer
+            // fabric, etc.) — those have baseColorFactor.rgb close to
+            // (1,1,1) and the alpha comes from a real texture. The
+            // black-factor heuristic only matches deliberate "shadow
+            // material" authoring.
+            //
+            // NOT applied to splat content (PLY/SPZ go through a
+            // different loader entirely).
+            if (prim.material && prim.material->alpha_mode == cgltf_alpha_mode_blend) {
+                const auto& bcf = prim.material->pbr_metallic_roughness.base_color_factor;
+                const float brightness = bcf[0] + bcf[1] + bcf[2];
+                if (brightness < 0.3f) {
+                    glb_log("primitive %zu/%zu: contact-shadow plane filtered "
+                            "(material '%s' alphaMode=BLEND, baseColorFactor="
+                            "(%.2f,%.2f,%.2f), brightness=%.2f < 0.3)",
+                            mi, pi,
+                            prim.material->name ? prim.material->name : "?",
+                            bcf[0], bcf[1], bcf[2], brightness);
+                    continue;
+                }
             }
 
             // Resolve the 4 attributes we need.
@@ -276,15 +409,33 @@ std::optional<LoadedMesh> load_glb_mesh(GPUDevice& device,
             std::vector<MeshVertex> vertices(vcount);
             for (std::size_t i = 0; i < vcount; ++i) {
                 MeshVertex& v = vertices[i];
-                read_attribute_to_floats(acc_pos, i, v.position, 3);
-                read_attribute_to_floats(acc_nrm, i, v.normal, 3);
+                float raw_pos[3];
+                float raw_nrm[3];
+                read_attribute_to_floats(acc_pos, i, raw_pos, 3);
+                read_attribute_to_floats(acc_nrm, i, raw_nrm, 3);
+                // Bake the node's world transform into vertex data so
+                // the shader pipeline sees one flat mesh in world
+                // space. See the draw_list construction comment above
+                // for the rationale; without this DamagedHelmet renders
+                // sideways and ToyCar arrives at a 540-unit radius.
+                transform_point(xform,
+                                raw_pos[0], raw_pos[1], raw_pos[2],
+                                &v.position[0], &v.position[1], &v.position[2]);
+                transform_dir(xform,
+                              raw_nrm[0], raw_nrm[1], raw_nrm[2],
+                              &v.normal[0], &v.normal[1], &v.normal[2]);
                 if (acc_uv) {
                     read_attribute_to_floats(acc_uv, i, v.uv, 2);
                 } else {
                     v.uv[0] = 0; v.uv[1] = 0;
                 }
                 if (acc_tan) {
-                    read_attribute_to_floats(acc_tan, i, v.tangent, 4);
+                    float raw_tan[4];
+                    read_attribute_to_floats(acc_tan, i, raw_tan, 4);
+                    transform_dir(xform,
+                                  raw_tan[0], raw_tan[1], raw_tan[2],
+                                  &v.tangent[0], &v.tangent[1], &v.tangent[2]);
+                    v.tangent[3] = raw_tan[3];  // bitangent sign — preserved.
                 } else {
                     // Default tangent: along world-X with bitangent-sign +1.
                     // This is wrong for normal-mapped surfaces but only
@@ -294,7 +445,7 @@ std::optional<LoadedMesh> load_glb_mesh(GPUDevice& device,
                     v.tangent[0] = 1; v.tangent[1] = 0; v.tangent[2] = 0;
                     v.tangent[3] = 1;
                 }
-                // Update bounds.
+                // Update bounds in world space (post-transform).
                 for (int j = 0; j < 3; ++j) {
                     if (v.position[j] < mesh.bounds_min[j]) mesh.bounds_min[j] = v.position[j];
                     if (v.position[j] > mesh.bounds_max[j]) mesh.bounds_max[j] = v.position[j];

@@ -2,6 +2,7 @@ import CoreVideo
 import Flutter
 import IOSurface
 import QuartzCore
+import UIKit  // Phase 6.4f.10 — UIImage.jpegData for thumbnail bake
 
 // ─── Final iOS port — Scene IOSurface renderer bridge ─────────────────
 //
@@ -67,6 +68,24 @@ private func aether_scene_renderer_render_full(
     _ modelMatrix: UnsafePointer<Float>
 )
 
+// Phase 6.4f hotfix — global splat-scale multiplier (1.0 = honor file
+// scale, 4.0 = thumbnail plumping). Set once between create and load.
+@_silgen_name("aether_scene_renderer_set_splat_scale_multiplier")
+private func aether_scene_renderer_set_splat_scale_multiplier(
+    _ renderer: OpaquePointer?,
+    _ multiplier: Float
+)
+
+// Phase 6.4f hotfix — drop splats whose 3D scale (max of xyz)
+// exceeds the threshold. Filters halo splats authored by 3DGS
+// optimizers as large soft Gaussians for low-frequency background.
+// 0 disables.
+@_silgen_name("aether_scene_renderer_set_max_3d_scale")
+private func aether_scene_renderer_set_max_3d_scale(
+    _ renderer: OpaquePointer?,
+    _ max3dScale: Float
+)
+
 // G4: get_bounds surfaces the loaded mesh's local AABB. Returns false if
 // no mesh loaded; the caller can fall back to a hardcoded distance.
 @_silgen_name("aether_scene_renderer_get_bounds")
@@ -118,6 +137,15 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     // become focused). dirty starts true so the very first frame after
     // create lands on the texture.
     private var dirty: Bool = true
+
+    // Last time render() was called (CACurrentMediaTime seconds since
+    // boot). Used by AetherTexturePlugin's selective LRU dispose on
+    // memory warning — keep the most-recently-rendered texture (the
+    // focused card the user is looking at) alive, dispose the rest.
+    // Initialized to 0 so freshly created textures look "stale" until
+    // they actually render once; in practice every alive texture
+    // renders within the first few frames after create.
+    private(set) var lastRenderTimestamp: CFTimeInterval = 0.0
 
     // Same passRetained contract watch used by the macOS texture bridge.
     private var copyCount: UInt64 = 0
@@ -198,6 +226,7 @@ class SharedNativeTexture: NSObject, FlutterTexture {
     func render() -> Double {
         guard let rendererHandle else { return 0.0 }
         let frameStart = CACurrentMediaTime()
+        lastRenderTimestamp = frameStart  // for memory-warning LRU
         latestView.withUnsafeBufferPointer { viewBuf in
             latestModel.withUnsafeBufferPointer { modelBuf in
                 guard let viewPtr = viewBuf.baseAddress,
@@ -259,6 +288,25 @@ class SharedNativeTexture: NSObject, FlutterTexture {
         }
     }
 
+    /// Phase 6.4f hotfix — set the per-renderer splat-scale multiplier
+    /// (1.0 honors file scale, 4.0 plumps splats so thumbnails read as
+    /// continuous surfaces). Call between `create` and `loadSpz` /
+    /// `loadPly`; the multiplier persists across renders on this
+    /// renderer until reset.
+    func setSplatScaleMultiplier(_ multiplier: Float) {
+        guard let rendererHandle else { return }
+        aether_scene_renderer_set_splat_scale_multiplier(rendererHandle, multiplier)
+    }
+
+    /// Phase 6.4f hotfix — drop splats with 3D scale (max xyz)
+    /// above the threshold. Filters the large soft halo splats
+    /// authored by 3DGS optimizers for low-frequency background.
+    /// 0 disables (default).
+    func setMax3dScale(_ max3dScale: Float) {
+        guard let rendererHandle else { return }
+        aether_scene_renderer_set_max_3d_scale(rendererHandle, max3dScale)
+    }
+
     /// G4: read the local AABB of the just-loaded mesh. Call AFTER a
     /// successful loadGlb. Returns nil if no mesh is loaded.
     func getBounds() -> LoadedBounds? {
@@ -278,6 +326,86 @@ class SharedNativeTexture: NSObject, FlutterTexture {
             minX: minBuf[0], minY: minBuf[1], minZ: minBuf[2],
             maxX: maxBuf[0], maxY: maxBuf[1], maxZ: maxBuf[2]
         )
+    }
+
+    /// Phase 6.4f.10 — capture the IOSurface contents as JPEG bytes.
+    ///
+    /// Used by the detail-page thumbnail baker: when a user opens a work
+    /// detail page that has no `thumbnail_storage_path` in supabase, we
+    /// render the model live (current behavior), then snapshot the first
+    /// rendered frame and upload it as the canonical feed thumbnail. All
+    /// subsequent feed views show the JPG instead of the gradient
+    /// fallback the user was complaining about ("点云项目一直是灰色的").
+    ///
+    /// Pipeline:
+    ///   1. IOSurface lock(read-only) — guarantees Dawn isn't mid-write.
+    ///   2. Construct a CGContext over the IOSurface base address with
+    ///      BGRA8 → kCGImageAlphaPremultipliedFirst |
+    ///      kCGBitmapByteOrder32Little (canonical iOS BGRA mapping).
+    ///   3. CGContext.makeImage() copies the pixels into a CGImage so we
+    ///      can unlock the surface immediately.
+    ///   4. UIImage(cgImage:) → jpegData(compressionQuality:).
+    ///
+    /// Caller must have rendered at least one frame (dirty flag turned
+    /// false at least once) before calling — otherwise the IOSurface
+    /// holds the default 0x00 fill and the JPEG comes out solid black.
+    /// Dart-side AetherCppCardDemo's `onFirstFrameReady` callback is
+    /// the right trigger.
+    func captureAsJPEG(quality: CGFloat = 0.85) -> Data? {
+        let width = IOSurfaceGetWidth(ioSurface)
+        let height = IOSurfaceGetHeight(ioSurface)
+        let bytesPerRow = IOSurfaceGetBytesPerRow(ioSurface)
+
+        // Lock the surface for read-only access. Read-only is enough —
+        // we don't mutate the bytes — and matches Dawn's coexisting
+        // CPU-read pattern; full lock would invalidate Dawn's MTLTexture
+        // import on the next frame. IOSurfaceLock returns kern_return_t
+        // (Int32), KERN_SUCCESS = 0; <IOKit/IOReturn.h> isn't pulled in
+        // by `import IOSurface` so we compare against 0 directly.
+        let lockOpts: IOSurfaceLockOptions = [.readOnly]
+        let lockResult = IOSurfaceLock(ioSurface, lockOpts, nil)
+        guard lockResult == kern_return_t(0) else {
+            NSLog("[SharedNativeTexture iOS] captureAsJPEG: IOSurfaceLock failed (%d)",
+                  lockResult)
+            return nil
+        }
+        defer { IOSurfaceUnlock(ioSurface, lockOpts, nil) }
+
+        // IOSurfaceGetBaseAddress returns UnsafeMutableRawPointer (non-
+        // optional). Surface is already locked above, so the pointer is
+        // valid for the lifetime of this call.
+        let baseAddress = IOSurfaceGetBaseAddress(ioSurface)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        // BGRA8 wired to canonical iOS pixel layout — the renderer writes
+        // bytes [B, G, R, A]; CGImage interprets via byte-order 32Little
+        // so component ordering matches.
+        let bitmapInfo: UInt32 = CGImageAlphaInfo.premultipliedFirst.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let context = CGContext(
+            data: baseAddress,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            NSLog("[SharedNativeTexture iOS] captureAsJPEG: CGContext create failed")
+            return nil
+        }
+        guard let cgImage = context.makeImage() else {
+            NSLog("[SharedNativeTexture iOS] captureAsJPEG: makeImage failed")
+            return nil
+        }
+
+        let uiImage = UIImage(cgImage: cgImage)
+        let data = uiImage.jpegData(compressionQuality: quality)
+        if let bytes = data?.count {
+            NSLog("[SharedNativeTexture iOS] captureAsJPEG: %dx%d → %.1f KB",
+                  width, height, Double(bytes) / 1024.0)
+        }
+        return data
     }
 
     func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {

@@ -60,6 +60,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -69,6 +70,7 @@
 #include <optional>
 #include <string>
 #include <sys/stat.h>
+#include <list>
 #include <unordered_map>
 #include <vector>
 
@@ -206,8 +208,36 @@ struct RenderArgsStorage {
     uint32_t total_splats;
     uint32_t max_intersects;
     float    background[4];
+    // Phase 6.4f.4.b — runtime LOD: min projected pixel extent for
+    // a splat to participate in the visible list. 0 = disabled.
+    float    lod_extent_min;
+    // Phase 6.4f hotfix — global splat-scale multiplier applied in
+    // project_visible.wgsl / project_forward.wgsl. Niantic SPZ files
+    // are typically authored at AR-viewing density (sub-pixel splats
+    // when shown at PocketWorld feed thumbnail resolution); a
+    // multiplier of 4× makes each splat overlap its neighbors enough
+    // to read as a continuous surface. Detail page passes 1.0 (file
+    // intent honored). 0.0 sentinel falls back to 1.0 in the shader
+    // for safety; the C ABI setter accepts >0 and clamps.
+    float    splat_scale_multiplier;
+    // Phase 6.4f hotfix — maximum 3D-space scale for a splat to render.
+    // Splats whose `max(scale_x, scale_y, scale_z)` (in world units)
+    // exceeds this threshold are culled. 0 disables.
+    //
+    // Why this beats lod_extent_max for halo removal: extent_max is
+    // screen-pixel based, so its cull boundary is depth-dependent
+    // (forms a sphere around the camera that always projects as a
+    // circle, no matter the orbit angle). 3D scale is a property of
+    // the SPLAT not the camera, so the kept splat set stays the same
+    // under rotation. Why this beats min_opacity: 3DGS training does
+    // sometimes author halo splats as high-opacity-but-large
+    // Gaussians (specifically, photometric optimizers prefer big
+    // Gaussians to cheaply cover smooth low-frequency background
+    // regions), so opacity isn't a reliable halo signal.
+    float    max_3d_scale;
+    float    _lod_pad[1];  // align tail to vec4 for WGSL storage layout
 };
-static_assert(sizeof(RenderArgsStorage) == 144, "matches WGSL RenderUniforms");
+static_assert(sizeof(RenderArgsStorage) == 160, "matches WGSL RenderUniforms");
 
 // Initial RenderUniforms shape with no splats loaded. Phase 6.4f's
 // load_ply / load_spz path overwrites this with the loaded scene's
@@ -652,23 +682,56 @@ struct SplatData {
     }
 };
 
+// Phase 6.4f.5 hotfix — strong-ref LRU layer.
+//
+// Previously the cache was weak_ptr only, which meant the entry expired
+// the moment its last SplatScene was destroyed. The Flutter feed
+// regularly destroys + remounts AetherCppCardDemo on fast scroll; with
+// only weak refs, every remount re-uploaded ~50 MB of packed splats and
+// rebuilt the bind groups (~500 ms). The strong-ref LRU pins the K
+// most-recently-used entries so back-scroll within K cards is a true
+// O(1) lookup.
+//
+// Why not unconditionally strong-ref everything: GPU memory budget. K=8
+// SPZ scenes ≈ 8 × 50 MB = 400 MB, comfortable on iPhone 14 Pro's
+// ~1.5 GB jetsam ceiling but a hard cap matters when the feed has
+// dozens of distinct works.
 class SplatDataCache {
 public:
     std::shared_ptr<SplatData> get(const std::string& key) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = entries_.find(key);
         if (it == entries_.end()) return nullptr;
-        if (auto sp = it->second.lock()) return sp;
+        if (auto sp = it->second.lock()) {
+            // Promote in LRU: erase + push_front. lru_iter_ tracks the
+            // entry's position so this is O(1).
+            promote_locked_(key);
+            return sp;
+        }
         entries_.erase(it);
         return nullptr;
     }
     void put(const std::string& key, std::shared_ptr<SplatData> data) {
         std::lock_guard<std::mutex> lk(mu_);
         entries_[key] = data;
-        // Sweep expired weak refs when the table grows; cheap O(N) walk
-        // amortized across loads. 64 is arbitrary — picked so the sweep
-        // runs once per ~screen of cards, not on every reload.
-        if (entries_.size() > 64u) {
+        // Add to / move to LRU front.
+        auto lit = lru_iter_.find(key);
+        if (lit != lru_iter_.end()) lru_.erase(lit->second);
+        lru_.push_front({key, data});
+        lru_iter_[key] = lru_.begin();
+        // Evict tail when over capacity. The shared_ptr in the popped
+        // pair drops; if no SplatScene is still holding the data, the
+        // SplatData destructor frees the GPU buffers.
+        while (lru_.size() > kStrongCap_) {
+            const auto& tail = lru_.back();
+            lru_iter_.erase(tail.first);
+            // Note: `entries_` keeps a weak_ptr — leave it so a still-
+            // referenced SplatData is reachable; cleared on next get().
+            lru_.pop_back();
+        }
+        // Periodic sweep of expired weak entries — keeps the map from
+        // growing unbounded as old work URLs disappear from the feed.
+        if (entries_.size() > 256u) {
             for (auto i = entries_.begin(); i != entries_.end();) {
                 if (i->second.expired()) i = entries_.erase(i);
                 else ++i;
@@ -680,12 +743,126 @@ public:
         return s;
     }
 private:
+    void promote_locked_(const std::string& key) {
+        auto lit = lru_iter_.find(key);
+        if (lit == lru_iter_.end()) return;  // not strongly held
+        if (lit->second != lru_.begin()) {
+            lru_.splice(lru_.begin(), lru_, lit->second);
+        }
+    }
+    // Phase 6.4f.7: sized for iPhone 12 floor (4 GB RAM, ~2098 MB
+    // jetsam hard limit, ~1.3 GB sustainable budget after Flutter VM
+    // + Metal/WebGPU baseline). Each entry = ~150-180 MB GPU vertex/SH
+    // buffer in unified memory, counted toward phys_footprint. With
+    // keepCount=3 active renderers also holding shared_ptrs, this cap
+    // mostly overlaps with the active set; the headroom only matters
+    // when an evicted card is scrolled back within ~1-2 cards. Real-
+    // device measurement (Phase 6.4f.7 phys_footprint logging) will
+    // refine.
+    static constexpr std::size_t kStrongCap_ = 3u;
     std::mutex mu_;
     std::unordered_map<std::string, std::weak_ptr<SplatData>> entries_;
+    std::list<std::pair<std::string, std::shared_ptr<SplatData>>> lru_;
+    std::unordered_map<std::string,
+        std::list<std::pair<std::string, std::shared_ptr<SplatData>>>::iterator>
+        lru_iter_;
+};
+
+// Phase 6.4f hotfix — DECODED splat data cache.
+//
+// `SplatDataCache` above only saves the GPU-upload step on a cache hit.
+// The 17 MB SPZ → 786 k gaussian decode itself takes ~3 s on iPhone 14
+// Pro, and that work runs every time we call load_spz with a different
+// `max_sh_degree` — feed loads with cap=0 and detail page loads with
+// cap=3 produce different SplatDataCache keys, so the second load
+// re-decodes from scratch even though the file is identical.
+//
+// `DecodedSplatCache` keys on `"spz|path|mtime"` (no caps) so the
+// decoded gaussians + raw sh_rest survive the SH-cap variation. The
+// pre-cap percentile bounds get cached too (~120 ms saved per re-load).
+//
+// Memory cost: ~786 k × 96 B (GaussianParams) + 786 k × 180 B
+// (sh_rest at sh_degree=3) ≈ 220 MB per cached scene. Held by
+// weak_ptr so it auto-evicts when no SplatScene references it; the
+// SplatDataCache below also keeps the GPU upload alive separately, so
+// freeing the decoded cache doesn't break in-flight renders.
+struct DecodedSplatData {
+    std::vector<::aether::splat::GaussianParams> gaussians;
+    std::vector<float> sh_rest;
+    std::uint32_t sh_degree{0};
+    float bounds_min_pre[3]{0.0f, 0.0f, 0.0f};
+    float bounds_max_pre[3]{0.0f, 0.0f, 0.0f};
+    bool has_bounds_pre{false};
+};
+
+class DecodedSplatCache {
+public:
+    std::shared_ptr<DecodedSplatData> get(const std::string& key) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = entries_.find(key);
+        if (it == entries_.end()) return nullptr;
+        if (auto sp = it->second.lock()) {
+            promote_locked_(key);
+            return sp;
+        }
+        entries_.erase(it);
+        return nullptr;
+    }
+    void put(const std::string& key, std::shared_ptr<DecodedSplatData> data) {
+        std::lock_guard<std::mutex> lk(mu_);
+        entries_[key] = data;
+        auto lit = lru_iter_.find(key);
+        if (lit != lru_iter_.end()) lru_.erase(lit->second);
+        lru_.push_front({key, data});
+        lru_iter_[key] = lru_.begin();
+        // Phase 6.4f.7: tightened to 2 for iPhone 12 floor.
+        // Each entry ~220 MB main memory (786 k gaussians + sh_rest at
+        // sh_degree=3); 2 × 220 = 440 MB. iPhone 12's ~1.3 GB
+        // sustainable budget can't host both 3 active GPU scenes
+        // (~1.14 GB unified) AND 4 decoded blobs (880 MB) — the active
+        // set already holds a decoded shared_ptr, so this 2-cap mostly
+        // overlaps with the active set and only buys re-decode savings
+        // for the 1-2 cards adjacent to the live window. Dropping
+        // decoded data costs ~3 s re-decode (worst case), preferable
+        // to OOM jetsam.
+        while (lru_.size() > kStrongCap_) {
+            const auto& tail = lru_.back();
+            lru_iter_.erase(tail.first);
+            lru_.pop_back();
+        }
+        if (entries_.size() > 256u) {
+            for (auto i = entries_.begin(); i != entries_.end();) {
+                if (i->second.expired()) i = entries_.erase(i);
+                else ++i;
+            }
+        }
+    }
+    static DecodedSplatCache& instance() {
+        static DecodedSplatCache s;
+        return s;
+    }
+private:
+    void promote_locked_(const std::string& key) {
+        auto lit = lru_iter_.find(key);
+        if (lit == lru_iter_.end()) return;
+        if (lit->second != lru_.begin()) {
+            lru_.splice(lru_.begin(), lru_, lit->second);
+        }
+    }
+    static constexpr std::size_t kStrongCap_ = 2u;
+    std::mutex mu_;
+    std::unordered_map<std::string, std::weak_ptr<DecodedSplatData>> entries_;
+    std::list<std::pair<std::string, std::shared_ptr<DecodedSplatData>>> lru_;
+    std::unordered_map<std::string,
+        std::list<std::pair<std::string, std::shared_ptr<DecodedSplatData>>>::iterator>
+        lru_iter_;
 };
 
 struct SplatScene {
     std::shared_ptr<SplatData> data;      // shared GPU data buffers (Phase 6.4f.3.c)
+    std::shared_ptr<DecodedSplatData> decoded;  // pin decoded source so the
+                                                 // cache entry survives until
+                                                 // last consumer is gone
     std::uint32_t num_splats{0};          // mirror of data->num_splats
     std::uint32_t sh_degree{0};           // mirror of data->sh_degree
     float bounds_min[3]{0.0f, 0.0f, 0.0f};
@@ -1100,6 +1277,24 @@ struct AetherSceneRenderer {
     // Mirrors splat_scene.has_value() for fast per-frame branching. Kept
     // separate so the per-frame hot path doesn't pay the optional check.
     bool has_splats{false};
+
+    // Phase 6.4f.4.b — runtime LOD: minimum projected pixel extent
+    // for a splat to enter the visible list. Default 0 disables the
+    // cull (legacy behavior). Set via aether_scene_renderer_set_lod_extent_min.
+    float lod_extent_min{0.0f};
+
+    // Phase 6.4f hotfix — global splat-scale multiplier propagated to
+    // project_forward / project_visible. Default 1.0 honors the file's
+    // authored splat density. PocketWorld feed thumbnails set this to
+    // 4.0 so each splat overlaps neighbors enough to read as a
+    // continuous surface even when projected sub-pixel at fit
+    // distance. Set via aether_scene_renderer_set_splat_scale_multiplier.
+    float splat_scale_multiplier{1.0f};
+
+    // Phase 6.4f hotfix — drop splats whose 3D scale exceeds this
+    // (per-splat property, view-stable). 0 disables. See
+    // RenderArgsStorage.max_3d_scale doc.
+    float max_3d_scale{0.0f};
 
     // Mesh path (filled by load_glb)
     bool has_mesh{false};
@@ -1865,7 +2060,9 @@ static bool build_splat_scene_from_gaussians(
     const std::vector<::aether::splat::GaussianParams>& gaussians,
     std::uint32_t sh_degree,
     const float* sh_rest,
-    const std::string& cache_key = std::string{}) {
+    const std::string& cache_key = std::string{},
+    const float* bounds_hint_min = nullptr,   // optional pre-cap percentile bounds
+    const float* bounds_hint_max = nullptr) {
     if (!r || !r->device || gaussians.empty()) return false;
     using namespace ::aether::render;
     auto& dev = *(r->device);
@@ -1973,6 +2170,21 @@ static bool build_splat_scene_from_gaussians(
                     coeffs_non_dc[dst + 1] = sh_rest[src_base + 1u * non_dc_basis + b];
                     coeffs_non_dc[dst + 2] = sh_rest[src_base + 2u * non_dc_basis + b];
                 }
+            }
+        }
+
+        // Phase 6.4f hotfix: prefer pre-cap bounds hint if caller computed
+        // one — load_spz_into_renderer / load_ply_into_renderer compute
+        // percentile bounds on the ORIGINAL (uncapped) gaussians, where
+        // the 92%-central / 7%-outlier split is honest. Computing here on
+        // post-cap gaussians is wrong: octree subsample re-balances the
+        // distribution so that outlier voxels hold roughly equal
+        // representative weight as central voxels, and a 1st/99th
+        // percentile on the merged set still falls in the outlier ring.
+        if (bounds_hint_min && bounds_hint_max) {
+            for (int c = 0; c < 3; ++c) {
+                s.bounds_min[c] = bounds_hint_min[c];
+                s.bounds_max[c] = bounds_hint_max[c];
             }
         }
 
@@ -2498,11 +2710,11 @@ inline std::vector<std::uint32_t> octree_subsample_indices(
     for (auto& n : queue) leaves.push_back(std::move(n));
 
     // Pick one representative splat per leaf, weighted by visual
-    // importance. This single-rep-per-leaf is the "tiny-lod" tier in
-    // Spark's terminology — for higher quality we'd emit a *merged*
-    // splat (Bhattacharyya-fit gaussian over the leaf members). That's
-    // 6.4f.4 territory; the single-rep approximation is what
-    // PlayCanvas's build-lod ships by default.
+    // importance ("tiny-lod" tier — Spark's lightest LOD method).
+    // For multi-member leaves the higher-fidelity replacement is the
+    // Bhattacharyya merge done by `octree_subsample_merged` below;
+    // this function still ships single-rep for callers that want a
+    // raw index list (e.g. when sh_rest layout doesn't permit merge).
     std::vector<std::uint32_t> selected;
     selected.reserve(leaves.size());
     for (auto& leaf : leaves) {
@@ -2515,6 +2727,230 @@ inline std::vector<std::uint32_t> octree_subsample_indices(
         selected.push_back(best);
     }
     return selected;
+}
+
+// ─── Phase 6.4f.4.c — Bhattacharyya-style leaf merge ────────────────────
+//
+// For each octree leaf containing multiple gaussians, fit ONE merged
+// gaussian using importance-weighted moment matching:
+//
+//   weight_i  = opacity_i × |scale_x · scale_y · scale_z|
+//   W         = Σ weight_i
+//   μ         = Σ w_i · pos_i              / W       (1st moment)
+//   σ²(axis)  = Σ w_i · (pos_i.axis - μ.axis)²  / W   (spatial spread)
+//   scale*    = mean(scale_i) + sqrt(σ²)             (intrinsic + spread)
+//   color*    = Σ w_i · color_i             / W
+//   opacity*  = Σ w_i · opacity_i           / W
+//   rotation* = identity quaternion                  (rotation discarded)
+//   sh_rest*  = Σ w_i · sh_rest_i           / W       (per-coefficient)
+//
+// This is the simplified Bhattacharyya — true Bhattacharyya needs a
+// full 3×3 eigendecomposition of the summed covariance matrix to
+// recover an oriented ellipsoid. For LOD use, the isotropic-axis
+// approximation captures spatial extent well enough that thumbnails
+// retain silhouette and color, which is what users see at feed scale.
+// The full oriented merge is tracked as a follow-up if visual quality
+// at mid-distance LOD turns out to need it.
+//
+// The weighted-sum SH merge is exactly correct (SH is linear); only
+// the position/scale/rotation collapse is the approximation.
+//
+// Reference: Spark's `bhatt-lod` Rust tool ships a similar
+// importance-weighted moment match. PlayCanvas SOGS uses k-means
+// clustering with an analogous representative reconstruction.
+
+struct OctreeMergedResult {
+    std::vector<::aether::splat::GaussianParams> gaussians;
+    std::vector<float> sh_rest;  // PLY-native channel-major basis-major
+};
+
+inline OctreeMergedResult octree_subsample_merged(
+    const std::vector<::aether::splat::GaussianParams>& src,
+    const std::vector<float>& src_sh_rest,
+    std::uint32_t target_count,
+    std::uint32_t sh_degree,
+    std::uint32_t max_depth = 7u,
+    std::uint32_t leaf_max = 4u)
+{
+    OctreeMergedResult out;
+    const std::size_t N = src.size();
+    if (N == 0u || target_count == 0u || target_count >= N) {
+        out.gaussians = src;
+        out.sh_rest = src_sh_rest;
+        return out;
+    }
+
+    // Build the same octree leaves the index-only subsample produces,
+    // by re-running its core walker. Inline the BFS subdivide here
+    // (DRY-violating but keeps both paths self-contained).
+    OctNode root;
+    root.aabb_min[0] = root.aabb_min[1] = root.aabb_min[2] = 1e30f;
+    root.aabb_max[0] = root.aabb_max[1] = root.aabb_max[2] = -1e30f;
+    root.splat_indices.resize(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        root.splat_indices[i] = static_cast<std::uint32_t>(i);
+        for (int c = 0; c < 3; ++c) {
+            root.aabb_min[c] = std::min(root.aabb_min[c], src[i].position[c]);
+            root.aabb_max[c] = std::max(root.aabb_max[c], src[i].position[c]);
+        }
+    }
+
+    auto split = [&](OctNode& n) -> std::vector<OctNode> {
+        const float cx = (n.aabb_min[0] + n.aabb_max[0]) * 0.5f;
+        const float cy = (n.aabb_min[1] + n.aabb_max[1]) * 0.5f;
+        const float cz = (n.aabb_min[2] + n.aabb_max[2]) * 0.5f;
+        std::vector<OctNode> children(8);
+        for (int o = 0; o < 8; ++o) {
+            children[o].aabb_min[0] = (o & 1) ? cx : n.aabb_min[0];
+            children[o].aabb_max[0] = (o & 1) ? n.aabb_max[0] : cx;
+            children[o].aabb_min[1] = (o & 2) ? cy : n.aabb_min[1];
+            children[o].aabb_max[1] = (o & 2) ? n.aabb_max[1] : cy;
+            children[o].aabb_min[2] = (o & 4) ? cz : n.aabb_min[2];
+            children[o].aabb_max[2] = (o & 4) ? n.aabb_max[2] : cz;
+        }
+        for (auto idx : n.splat_indices) {
+            const auto& g = src[idx];
+            int o = 0;
+            if (g.position[0] >= cx) o |= 1;
+            if (g.position[1] >= cy) o |= 2;
+            if (g.position[2] >= cz) o |= 4;
+            children[o].splat_indices.push_back(idx);
+        }
+        std::vector<OctNode> kept;
+        kept.reserve(8);
+        for (auto& c : children) {
+            if (!c.splat_indices.empty()) kept.push_back(std::move(c));
+        }
+        return kept;
+    };
+
+    std::vector<OctNode> queue;
+    queue.push_back(std::move(root));
+    std::vector<OctNode> leaves;
+    leaves.reserve(target_count);
+
+    for (std::uint32_t depth = 0;
+         depth < max_depth && !queue.empty() &&
+             (leaves.size() + queue.size()) < target_count;
+         ++depth) {
+        std::vector<OctNode> next;
+        next.reserve(queue.size() * 4);
+        for (auto& n : queue) {
+            if (n.splat_indices.size() <= leaf_max ||
+                (leaves.size() + next.size() + queue.size()) >= target_count) {
+                leaves.push_back(std::move(n));
+                continue;
+            }
+            auto children = split(n);
+            if (children.size() <= 1u) {
+                leaves.push_back(std::move(n));
+                continue;
+            }
+            for (auto& c : children) next.push_back(std::move(c));
+        }
+        queue = std::move(next);
+    }
+    for (auto& n : queue) leaves.push_back(std::move(n));
+
+    // Merge each leaf into a single Bhattacharyya-fit gaussian.
+    const std::uint32_t non_dc_basis = (sh_degree == 0u) ? 0u
+                                       : (sh_degree == 1u) ? 3u
+                                       : (sh_degree == 2u) ? 8u
+                                       : 15u;
+    out.gaussians.reserve(leaves.size());
+    if (non_dc_basis > 0u && !src_sh_rest.empty()) {
+        out.sh_rest.reserve(static_cast<std::size_t>(leaves.size()) * 3u * non_dc_basis);
+    }
+
+    for (auto& leaf : leaves) {
+        const auto& idx_set = leaf.splat_indices;
+        if (idx_set.size() == 1u) {
+            // Singleton leaf — copy through unchanged.
+            const std::uint32_t i = idx_set[0];
+            out.gaussians.push_back(src[i]);
+            if (non_dc_basis > 0u && !src_sh_rest.empty()) {
+                const std::size_t src_off =
+                    static_cast<std::size_t>(i) * 3u * non_dc_basis;
+                out.sh_rest.insert(out.sh_rest.end(),
+                                   src_sh_rest.begin() + src_off,
+                                   src_sh_rest.begin() + src_off + 3u * non_dc_basis);
+            }
+            continue;
+        }
+
+        // Compute total weight; fall back to equal weights if importance
+        // sums to ~0 (all-degenerate scales / opacities).
+        double total_w = 0.0;
+        for (auto i : idx_set) total_w += visual_importance(src[i]);
+        const bool degenerate = !(total_w > 1e-12);
+        if (degenerate) total_w = static_cast<double>(idx_set.size());
+
+        // Weighted mean position, color, opacity, and per-coordinate
+        // intrinsic-scale average + spatial spread.
+        double mean_pos[3] = {0.0, 0.0, 0.0};
+        double mean_col[3] = {0.0, 0.0, 0.0};
+        double mean_op    = 0.0;
+        double mean_scale[3] = {0.0, 0.0, 0.0};
+        for (auto i : idx_set) {
+            const double w = degenerate ? 1.0 : visual_importance(src[i]);
+            const double wn = w / total_w;
+            for (int c = 0; c < 3; ++c) {
+                mean_pos[c]   += wn * src[i].position[c];
+                mean_col[c]   += wn * src[i].color[c];
+                mean_scale[c] += wn * src[i].scale[c];
+            }
+            mean_op += wn * src[i].opacity;
+        }
+
+        double var_pos[3] = {0.0, 0.0, 0.0};
+        for (auto i : idx_set) {
+            const double w = degenerate ? 1.0 : visual_importance(src[i]);
+            const double wn = w / total_w;
+            for (int c = 0; c < 3; ++c) {
+                const double dp = src[i].position[c] - mean_pos[c];
+                var_pos[c] += wn * dp * dp;
+            }
+        }
+
+        ::aether::splat::GaussianParams merged{};
+        for (int c = 0; c < 3; ++c) {
+            merged.position[c] = static_cast<float>(mean_pos[c]);
+            merged.color[c]    = static_cast<float>(mean_col[c]);
+            // intrinsic scale + sqrt(spatial variance) — captures both
+            // each splat's own footprint and the cluster's spread.
+            merged.scale[c]    = static_cast<float>(mean_scale[c] +
+                                                     std::sqrt(var_pos[c]));
+        }
+        merged.opacity = static_cast<float>(mean_op);
+        // Rotation discarded by the isotropic-axis approximation — the
+        // proper oriented merge requires eigendecomposition of the
+        // summed 3×3 covariance, deferred follow-up.
+        merged.rotation[0] = 1.0f;
+        merged.rotation[1] = 0.0f;
+        merged.rotation[2] = 0.0f;
+        merged.rotation[3] = 0.0f;
+        out.gaussians.push_back(merged);
+
+        if (non_dc_basis > 0u && !src_sh_rest.empty()) {
+            // Per-coefficient weighted average — SH is linear, so this
+            // is the *exact* fit for the merged gaussian's directional
+            // emission profile.
+            std::vector<double> sh_acc(static_cast<std::size_t>(3u * non_dc_basis), 0.0);
+            for (auto i : idx_set) {
+                const double w = degenerate ? 1.0 : visual_importance(src[i]);
+                const double wn = w / total_w;
+                const std::size_t src_off =
+                    static_cast<std::size_t>(i) * 3u * non_dc_basis;
+                for (std::size_t k = 0; k < 3u * non_dc_basis; ++k) {
+                    sh_acc[k] += wn * src_sh_rest[src_off + k];
+                }
+            }
+            for (auto v : sh_acc) {
+                out.sh_rest.push_back(static_cast<float>(v));
+            }
+        }
+    }
+    return out;
 }
 
 }  // namespace
@@ -2581,30 +3017,19 @@ static void apply_load_caps(
         sh_degree = static_cast<std::uint32_t>(max_sh_degree);
     }
 
-    // ── (2) Octree-based importance-weighted subsample (Phase 6.4f.3.d)
+    // ── (2) Octree subsample with Bhattacharyya leaf-merge ────────────
+    //
+    // Phase 6.4f.3.d shipped the index-only subsample (one
+    // representative splat per leaf, picked by visual importance).
+    // 6.4f.4.c upgrades this to a moment-matched merge of every
+    // leaf's members, which preserves color + spatial extent of dense
+    // clusters far better — visible improvement on crinkled surfaces
+    // (the lizard's scaled belly, dense vegetation).
     if (max_splats > 0u && gaussians.size() > max_splats) {
-        const std::vector<std::uint32_t> indices =
-            octree_subsample_indices(gaussians, max_splats);
-        std::vector<::aether::splat::GaussianParams> kept;
-        kept.reserve(indices.size());
-        const std::uint32_t basis = coeffs_per_basis(sh_degree);
-        std::vector<float> sh_kept;
-        if (basis > 0u && !sh_rest.empty()) {
-            sh_kept.reserve(indices.size() * 3u * basis);
-        }
-        for (auto i : indices) {
-            kept.push_back(gaussians[i]);
-            if (basis > 0u && !sh_rest.empty()) {
-                const std::size_t src = static_cast<std::size_t>(i) * 3u * basis;
-                for (std::uint32_t c = 0; c < 3u; ++c) {
-                    for (std::uint32_t b = 0; b < basis; ++b) {
-                        sh_kept.push_back(sh_rest[src + c * basis + b]);
-                    }
-                }
-            }
-        }
-        gaussians = std::move(kept);
-        sh_rest = std::move(sh_kept);
+        auto merged = octree_subsample_merged(gaussians, sh_rest,
+                                               max_splats, sh_degree);
+        gaussians = std::move(merged.gaussians);
+        sh_rest   = std::move(merged.sh_rest);
     }
 }
 
@@ -2636,6 +3061,29 @@ static std::string make_cache_key(const char* ext,
     return std::string(buf);
 }
 
+// Phase 6.4f hotfix — path+mtime-only key for the DecodedSplatCache.
+// Same file → same decoded data regardless of caps; the SH cap is
+// applied as an effective_sh_degree at upload time without modifying
+// the cached vectors.
+static std::string make_decoded_cache_key(const char* ext, const char* path) {
+    std::int64_t mtime = 0;
+    struct stat st{};
+    if (path && stat(path, &st) == 0) {
+#if defined(__APPLE__)
+        mtime = static_cast<std::int64_t>(st.st_mtimespec.tv_sec) * 1'000'000'000LL +
+                static_cast<std::int64_t>(st.st_mtimespec.tv_nsec);
+#else
+        mtime = static_cast<std::int64_t>(st.st_mtime);
+#endif
+    }
+    char buf[1024];
+    std::snprintf(buf, sizeof(buf), "decoded|%s|%s|%lld",
+                  ext ? ext : "?",
+                  path ? path : "",
+                  static_cast<long long>(mtime));
+    return std::string(buf);
+}
+
 static bool load_ply_into_renderer(
     AetherSceneRenderer* r,
     const char* ply_path,
@@ -2643,32 +3091,111 @@ static bool load_ply_into_renderer(
     std::uint8_t max_sh_degree)
 {
     if (!r || !ply_path) return false;
-    ::aether::splat::PlyLoadResult result;
-    auto status = ::aether::splat::load_ply(ply_path, result);
-    if (!::aether::core::is_ok(status)) {
-        scene_log("load_ply: parse failed status=%d path='%s'",
-                  static_cast<int>(status), ply_path);
-        return false;
+    // DecodedSplatCache lookup, same pattern as load_spz_into_renderer.
+    const std::string decoded_key = make_decoded_cache_key("ply", ply_path);
+    std::shared_ptr<DecodedSplatData> decoded =
+        DecodedSplatCache::instance().get(decoded_key);
+    bool decoded_cache_hit = (decoded != nullptr);
+
+    if (!decoded) {
+        ::aether::splat::PlyLoadResult result;
+        auto status = ::aether::splat::load_ply(ply_path, result);
+        if (!::aether::core::is_ok(status)) {
+            scene_log("load_ply: parse failed status=%d path='%s'",
+                      static_cast<int>(status), ply_path);
+            return false;
+        }
+        if (result.gaussians.empty()) {
+            scene_log("load_ply: no gaussians in '%s'", ply_path);
+            return false;
+        }
+        decoded = std::make_shared<DecodedSplatData>();
+        decoded->gaussians = std::move(result.gaussians);
+        decoded->sh_rest   = std::move(result.sh_rest);
+        decoded->sh_degree = result.sh_degree;
+        const std::size_t Norig = decoded->gaussians.size();
+        if (Norig >= 100u) {
+            std::vector<float> coord_buf(Norig);
+            for (int c = 0; c < 3; ++c) {
+                for (std::size_t i = 0; i < Norig; ++i) {
+                    coord_buf[i] = decoded->gaussians[i].position[c];
+                }
+                const std::size_t lo_idx = Norig * 5u / 100u;
+                const std::size_t hi_idx = Norig * 95u / 100u;
+                std::nth_element(coord_buf.begin(),
+                                 coord_buf.begin() + lo_idx,
+                                 coord_buf.end());
+                decoded->bounds_min_pre[c] = coord_buf[lo_idx];
+                std::nth_element(coord_buf.begin() + lo_idx + 1,
+                                 coord_buf.begin() + hi_idx,
+                                 coord_buf.end());
+                decoded->bounds_max_pre[c] = coord_buf[hi_idx];
+            }
+            decoded->has_bounds_pre = true;
+        }
+        DecodedSplatCache::instance().put(decoded_key, decoded);
     }
-    if (result.gaussians.empty()) {
-        scene_log("load_ply: no gaussians in '%s'", ply_path);
-        return false;
+
+    std::uint32_t sh_degree = decoded->sh_degree;
+
+    // Same stride decimation + SH cap fast path as load_spz_into_renderer.
+    // See that function for the why-not-octree-merge rationale.
+    std::vector<::aether::splat::GaussianParams> work_gaussians_local;
+    std::vector<float> work_sh_rest_local;
+    const std::vector<::aether::splat::GaussianParams>* work_gaussians =
+        &decoded->gaussians;
+    const std::vector<float>* work_sh_rest = &decoded->sh_rest;
+    std::uint32_t effective_sh_degree = sh_degree;
+
+    // Same stride-only subset as load_spz_into_renderer (no position
+    // filter). Halo splats are dropped in the shader by lod_extent_max.
+    const std::size_t Norig = decoded->gaussians.size();
+    if (max_splats > 0u && Norig > max_splats) {
+        const std::size_t k = (Norig + max_splats - 1u) / max_splats;
+        const std::size_t out_n = (Norig + k - 1u) / k;
+        work_gaussians_local.reserve(out_n);
+        const std::uint32_t orig_basis_per_splat =
+              (sh_degree == 0u) ? 0u
+            : (sh_degree == 1u) ? 9u
+            : (sh_degree == 2u) ? 24u
+            : 45u;
+        if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+            work_sh_rest_local.reserve(out_n * orig_basis_per_splat);
+        }
+        for (std::size_t i = 0; i < Norig; i += k) {
+            work_gaussians_local.push_back(decoded->gaussians[i]);
+            if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+                const std::size_t off = i * orig_basis_per_splat;
+                work_sh_rest_local.insert(
+                    work_sh_rest_local.end(),
+                    decoded->sh_rest.begin() + off,
+                    decoded->sh_rest.begin() + off + orig_basis_per_splat);
+            }
+        }
+        work_gaussians = &work_gaussians_local;
+        work_sh_rest = &work_sh_rest_local;
     }
-    std::uint32_t sh_degree = result.sh_degree;
-    apply_load_caps(result.gaussians, result.sh_rest, sh_degree,
-                    max_splats, max_sh_degree);
-    const float* sh_rest = result.sh_rest.empty() ? nullptr : result.sh_rest.data();
+    if (max_sh_degree < effective_sh_degree) {
+        effective_sh_degree = static_cast<std::uint32_t>(max_sh_degree);
+    }
+
+    const float* sh_rest_ptr = work_sh_rest->empty()
+        ? nullptr : work_sh_rest->data();
     const std::string key = make_cache_key("ply", ply_path,
                                             max_splats, max_sh_degree);
-    if (!build_splat_scene_from_gaussians(r, result.gaussians,
-                                           sh_degree, sh_rest, key)) {
+    if (!build_splat_scene_from_gaussians(r, *work_gaussians,
+                                           effective_sh_degree, sh_rest_ptr, key,
+                                           decoded->has_bounds_pre ? decoded->bounds_min_pre : nullptr,
+                                           decoded->has_bounds_pre ? decoded->bounds_max_pre : nullptr)) {
         scene_log("load_ply: build_splat_scene failed for '%s'", ply_path);
         return false;
     }
-    scene_log("load_ply: '%s' kept=%zu sh_degree=%u (cap max_splats=%u max_sh=%u)",
-              ply_path, result.gaussians.size(),
-              static_cast<unsigned>(sh_degree),
-              max_splats, static_cast<unsigned>(max_sh_degree));
+    if (r->splat_scene) r->splat_scene->decoded = decoded;
+    scene_log("load_ply: '%s' kept=%zu sh_degree=%u (cap max_splats=%u max_sh=%u)%s",
+              ply_path, work_gaussians->size(),
+              static_cast<unsigned>(effective_sh_degree),
+              max_splats, static_cast<unsigned>(max_sh_degree),
+              decoded_cache_hit ? " [DECODED CACHE HIT]" : "");
     return true;
 }
 
@@ -2679,33 +3206,188 @@ static bool load_spz_into_renderer(
     std::uint8_t max_sh_degree)
 {
     if (!r || !spz_path) return false;
-    ::aether::splat::SpzDecodeResult spz_result;
-    auto status = ::aether::splat::load_spz(spz_path, spz_result);
-    if (!::aether::core::is_ok(status)) {
-        scene_log("load_spz: parse/decode failed status=%d path='%s'",
-                  static_cast<int>(status), spz_path);
-        return false;
+    // Phase 6.4f hotfix — per-stage timing instrumentation.
+    // User reports ~10 s end-to-end load on iPhone 14 Pro for the
+    // 17 MB hornedlizard.spz. Break it down so we know which stage
+    // to optimize next.
+    using clk = std::chrono::steady_clock;
+    const auto t_load_begin = clk::now();
+    auto ms_since = [](clk::time_point a) {
+        return std::chrono::duration<double, std::milli>(clk::now() - a).count();
+    };
+
+    // Phase 6.4f hotfix — DecodedSplatCache lookup. Same file (path +
+    // mtime) → reuse decoded gaussians + sh_rest + pre-cap bounds even
+    // if max_sh_degree differs (feed cap=0 vs detail cap=3). Saves
+    // ~3 s per re-load on second + later opens of the same file.
+    const std::string decoded_key = make_decoded_cache_key("spz", spz_path);
+    std::shared_ptr<DecodedSplatData> decoded =
+        DecodedSplatCache::instance().get(decoded_key);
+    bool decoded_cache_hit = (decoded != nullptr);
+    double t_decode_ms = 0.0;
+    double t_bounds_ms = 0.0;
+
+    if (!decoded) {
+        ::aether::splat::SpzDecodeResult spz_result;
+        auto status = ::aether::splat::load_spz(spz_path, spz_result);
+        if (!::aether::core::is_ok(status)) {
+            scene_log("load_spz: parse/decode failed status=%d path='%s'",
+                      static_cast<int>(status), spz_path);
+            return false;
+        }
+        if (spz_result.gaussians.empty()) {
+            scene_log("load_spz: no gaussians in '%s'", spz_path);
+            return false;
+        }
+        t_decode_ms = ms_since(t_load_begin);
+        const auto t_after_decode = clk::now();
+
+        // Phase 6.4f.5 — per-stage decode timing breakdown so we
+        // know which stage (gunzip / position read / SH unpack) is
+        // the dominant cost. Logged once per cold load (subsequent
+        // loads of the same SPZ file hit DecodedSplatCache and skip
+        // the entire decode pipeline).
+        const auto& tt = spz_result.timings;
+        scene_log("load_spz: DECODE BREAKDOWN file_io=%.1fms gunzip=%.1fms "
+                  "header=%.1fms pos=%.1fms alpha=%.1fms color=%.1fms "
+                  "scale=%.1fms rot=%.1fms sh=%.1fms (raw_total=%.1fms)",
+                  tt.file_io_ms, tt.gunzip_ms,
+                  tt.header_parse_ms, tt.position_read_ms,
+                  tt.alpha_read_ms, tt.color_read_ms,
+                  tt.scale_read_ms, tt.rotation_read_ms,
+                  tt.sh_unpack_ms, tt.raw_decode_total_ms);
+
+        // Phase 6.4f hotfix: compute percentile bounds on the ORIGINAL,
+        // uncapped gaussians. apply_load_caps below runs an octree merge
+        // that re-balances the position distribution (each leaf becomes one
+        // representative regardless of how many splats fed it), so a
+        // post-cap percentile gets pulled toward the outlier ring. Pre-cap,
+        // 786k Niantic-style gaussians are typically ~92% on-subject + 7%
+        // background tail; 5%/95% percentile cleanly drops the tail.
+        decoded = std::make_shared<DecodedSplatData>();
+        decoded->gaussians = std::move(spz_result.gaussians);
+        decoded->sh_rest   = std::move(spz_result.sh_rest);
+        decoded->sh_degree = static_cast<std::uint32_t>(spz_result.sh_degree);
+        const std::size_t Norig = decoded->gaussians.size();
+        if (Norig >= 100u) {
+            std::vector<float> coord_buf(Norig);
+            for (int c = 0; c < 3; ++c) {
+                for (std::size_t i = 0; i < Norig; ++i) {
+                    coord_buf[i] = decoded->gaussians[i].position[c];
+                }
+                // 5%/95% per-axis — Niantic/Polycam/KIRI captures all
+                // have a heavy outlier tail (~5%) at ±20× the subject;
+                // tighter percentiles clip legitimate subject extents.
+                const std::size_t lo_idx = Norig * 5u / 100u;
+                const std::size_t hi_idx = Norig * 95u / 100u;
+                std::nth_element(coord_buf.begin(),
+                                 coord_buf.begin() + lo_idx,
+                                 coord_buf.end());
+                decoded->bounds_min_pre[c] = coord_buf[lo_idx];
+                std::nth_element(coord_buf.begin() + lo_idx + 1,
+                                 coord_buf.begin() + hi_idx,
+                                 coord_buf.end());
+                decoded->bounds_max_pre[c] = coord_buf[hi_idx];
+            }
+            decoded->has_bounds_pre = true;
+        }
+        t_bounds_ms = ms_since(t_after_decode);
+        DecodedSplatCache::instance().put(decoded_key, decoded);
     }
-    if (spz_result.gaussians.empty()) {
-        scene_log("load_spz: no gaussians in '%s'", spz_path);
-        return false;
+
+    const auto t_after_bounds = clk::now();
+    std::uint32_t sh_degree = decoded->sh_degree;
+
+    // Caps. SH-cap-only fast path: pass an effective_sh_degree to
+    // build_splat_scene below, which only reads non_dc_basis(deg)
+    // entries from sh_rest regardless of how much is allocated.
+    // Splat-count cap path: STRIDE decimation (every k-th splat),
+    // preserves each splat's authored scale — works well combined
+    // with splat_scale_multiplier=4 in feed mode (no octree-merge
+    // scale inflation that PR #97.c introduced).
+    //
+    // Why not octree_subsample_merged: the octree merge sets each
+    // representative's scale to mean(intrinsic) + sqrt(spatial_variance),
+    // which inflates 2-3× per leaf. Combined with the 4× viewer-side
+    // splat_scale_multiplier, splats become enormous blobs (16-30×
+    // their authored size) — looks like a halftone smear instead of
+    // a detailed surface. Stride decimation keeps each kept splat at
+    // its authored scale, so feed thumbnails read as a coherent
+    // (if slightly sparser) surface.
+    std::vector<::aether::splat::GaussianParams> work_gaussians_local;
+    std::vector<float> work_sh_rest_local;
+    const std::vector<::aether::splat::GaussianParams>* work_gaussians =
+        &decoded->gaussians;
+    const std::vector<float>* work_sh_rest = &decoded->sh_rest;
+    std::uint32_t effective_sh_degree = sh_degree;
+
+    // Stride decimation only — no position filter. Splat sharpness
+    // doesn't correlate with position (a sharp surrounding splat is
+    // just as valuable as a sharp subject splat). Halo / blur splats
+    // are filtered in project_forward.wgsl by their projected screen
+    // extent (lod_extent_max), which is the correct signal: anything
+    // covering >N pixels is a soft halo, anything smaller is detail.
+    const std::size_t Norig = decoded->gaussians.size();
+    if (max_splats > 0u && Norig > max_splats) {
+        const std::size_t k = (Norig + max_splats - 1u) / max_splats;
+        const std::size_t out_n = (Norig + k - 1u) / k;
+        work_gaussians_local.reserve(out_n);
+        const std::uint32_t orig_basis_per_splat =
+              (sh_degree == 0u) ? 0u
+            : (sh_degree == 1u) ? 9u
+            : (sh_degree == 2u) ? 24u
+            : 45u;
+        if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+            work_sh_rest_local.reserve(out_n * orig_basis_per_splat);
+        }
+        for (std::size_t i = 0; i < Norig; i += k) {
+            work_gaussians_local.push_back(decoded->gaussians[i]);
+            if (orig_basis_per_splat > 0u && !decoded->sh_rest.empty()) {
+                const std::size_t off = i * orig_basis_per_splat;
+                work_sh_rest_local.insert(
+                    work_sh_rest_local.end(),
+                    decoded->sh_rest.begin() + off,
+                    decoded->sh_rest.begin() + off + orig_basis_per_splat);
+            }
+        }
+        work_gaussians = &work_gaussians_local;
+        work_sh_rest = &work_sh_rest_local;
     }
-    // SPZ decoder doesn't unpack higher-order SH today (only DC). Force
-    // sh_degree=0 so project_visible doesn't read from a missing buffer.
-    // The cap helper still runs for stride-subsample side-effect.
-    std::uint32_t sh_degree = 0u;
-    std::vector<float> empty_sh;
-    apply_load_caps(spz_result.gaussians, empty_sh, sh_degree,
-                    max_splats, /*max_sh_degree=*/0u);
+    if (max_sh_degree < effective_sh_degree) {
+        effective_sh_degree = static_cast<std::uint32_t>(max_sh_degree);
+    }
+    const double t_caps_ms = ms_since(t_after_bounds);
+    const auto t_after_caps = clk::now();
+
+    const float* sh_rest_ptr = work_sh_rest->empty()
+        ? nullptr : work_sh_rest->data();
     const std::string key = make_cache_key("spz", spz_path,
                                             max_splats, max_sh_degree);
-    if (!build_splat_scene_from_gaussians(r, spz_result.gaussians,
-                                           /*sh_degree=*/0u, /*sh_rest=*/nullptr,
-                                           key)) {
+    if (!build_splat_scene_from_gaussians(r, *work_gaussians,
+                                           effective_sh_degree, sh_rest_ptr, key,
+                                           decoded->has_bounds_pre ? decoded->bounds_min_pre : nullptr,
+                                           decoded->has_bounds_pre ? decoded->bounds_max_pre : nullptr)) {
         scene_log("load_spz: build_splat_scene failed for '%s'", spz_path);
         return false;
     }
-    (void)max_sh_degree;  // SPZ SH unpack is a follow-up — see PHASE_BACKLOG.
+    // Pin the decoded cache entry to the rendered scene so the cache
+    // doesn't drop the entry while we're still using it.
+    if (r->splat_scene) r->splat_scene->decoded = decoded;
+    const double t_build_ms = ms_since(t_after_caps);
+    const double t_total_ms = ms_since(t_load_begin);
+    const std::size_t kept_count = work_gaussians->size();
+    sh_degree = effective_sh_degree;  // for the final log line below
+    scene_log("load_spz: '%s' kept=%zu sh_degree=%u (file_deg=%u, cap max_splats=%u max_sh=%u)%s",
+              spz_path, kept_count,
+              static_cast<unsigned>(sh_degree),
+              static_cast<unsigned>(decoded->sh_degree),
+              max_splats, static_cast<unsigned>(max_sh_degree),
+              decoded_cache_hit ? " [DECODED CACHE HIT]" : "");
+    // Phase 6.4f hotfix — per-stage breakdown so we know what to
+    // optimize when the user reports "10 s loading is unacceptable".
+    // decode + bounds will read 0.0 ms when DecodedSplatCache hit.
+    scene_log("load_spz: TIMING decode=%.1fms bounds=%.1fms caps=%.1fms build=%.1fms TOTAL=%.1fms",
+              t_decode_ms, t_bounds_ms, t_caps_ms, t_build_ms, t_total_ms);
     return true;
 }
 
@@ -2737,6 +3419,45 @@ extern "C" bool aether_scene_renderer_load_spz_capped(
     uint8_t max_sh_degree)
 {
     return load_spz_into_renderer(r, spz_path, max_splats, max_sh_degree);
+}
+
+extern "C" void aether_scene_renderer_set_lod_extent_min(
+    AetherSceneRenderer* r,
+    float pixel_extent_min)
+{
+    if (!r) return;
+    // Clamp to reasonable range. Negative would invert the cull (skip
+    // all splats) — clamp to 0; > 256 px is "kill the entire scene"
+    // territory, clamp at the smaller-than-thumbnail boundary so a UI
+    // glitch can't disappear someone's content.
+    if (pixel_extent_min < 0.0f) pixel_extent_min = 0.0f;
+    if (pixel_extent_min > 256.0f) pixel_extent_min = 256.0f;
+    r->lod_extent_min = pixel_extent_min;
+}
+
+extern "C" void aether_scene_renderer_set_splat_scale_multiplier(
+    AetherSceneRenderer* r,
+    float multiplier)
+{
+    if (!r) return;
+    // Clamp to a sane range. <= 0 falls back to 1.0 (sentinel handled
+    // shader-side too). > 16x would make every splat a screen-spanning
+    // blob — cap at 16 to keep the worst case from looking like a
+    // monochrome smear.
+    if (multiplier <= 0.0f) multiplier = 1.0f;
+    if (multiplier > 16.0f) multiplier = 16.0f;
+    r->splat_scale_multiplier = multiplier;
+}
+
+extern "C" void aether_scene_renderer_set_max_3d_scale(
+    AetherSceneRenderer* r,
+    float max_3d_scale)
+{
+    if (!r) return;
+    // 0 disables. Negative is meaningless. Generous upper clamp.
+    if (max_3d_scale < 0.0f) max_3d_scale = 0.0f;
+    if (max_3d_scale > 1024.0f) max_3d_scale = 1024.0f;
+    r->max_3d_scale = max_3d_scale;
 }
 
 extern "C" bool aether_scene_renderer_get_bounds(AetherSceneRenderer* r,
@@ -2830,7 +3551,47 @@ extern "C" void aether_scene_renderer_render_full(
     // vertical FOV — matches the mesh path's projection.
     if (r->has_splats && r->splat_scene) {
         RenderArgsStorage splat_u = make_empty_uniforms(r->width, r->height);
-        std::memcpy(splat_u.viewmat, view_matrix, 16 * sizeof(float));
+        // Phase 6.4f hotfix — convert OpenGL-convention view matrix to
+        // Brush splat shader convention (left-multiply by diag(1,-1,-1,1)).
+        //
+        // The Dart-side fit/orbit caller emits an OpenGL right-handed
+        // view matrix from `vector_math.makeViewMatrix`: in-front
+        // splats land at camera_z NEGATIVE, world +Y maps to screen
+        // top via the GL viewport's implicit Y-flip.
+        //
+        // The Brush splat shader (project_forward.wgsl line ~221)
+        // expects:
+        //   1) camera_z POSITIVE for in-front splats (it culls
+        //      `mean_c.z < 0.01`); without this fix every front-facing
+        //      splat gets discarded and we accidentally render only
+        //      the outlier tail behind the camera — making the pinch
+        //      gesture feel inverted (pinch-in moves camera away in
+        //      world coords but exposes more back-tail splats, so user
+        //      perceives the model "growing").
+        //   2) Pre-Y-flipped coords for the screen mapping
+        //      `mean2d_y = focal * y / z + height/2` (Metal /Vulkan
+        //      "screen y=0 is top" convention). Without flipping Y,
+        //      world up maps to screen bottom and the model renders
+        //      upside-down.
+        //
+        // diag(1,-1,-1,1) flips both Y and Z — equivalent to a 180°
+        // rotation around the X axis, which preserves handedness while
+        // converting between the two conventions.
+        //
+        // The mesh path keeps the original OpenGL view matrix because
+        // mesh_render.wgsl pairs it with a projection matrix that
+        // already handles the convention.
+        for (int i = 0; i < 16; ++i) splat_u.viewmat[i] = view_matrix[i];
+        // Negate rows 1 and 2 of every column (Y and Z components in
+        // the column-major 4x4 layout).
+        splat_u.viewmat[1]  = -splat_u.viewmat[1];
+        splat_u.viewmat[5]  = -splat_u.viewmat[5];
+        splat_u.viewmat[9]  = -splat_u.viewmat[9];
+        splat_u.viewmat[13] = -splat_u.viewmat[13];
+        splat_u.viewmat[2]  = -splat_u.viewmat[2];
+        splat_u.viewmat[6]  = -splat_u.viewmat[6];
+        splat_u.viewmat[10] = -splat_u.viewmat[10];
+        splat_u.viewmat[14] = -splat_u.viewmat[14];
         // Match the mesh-pass FOV = 60° vertical → focal_y = (h/2) / tan(30°)
         // ≈ h * 0.866. Apply same focal_x for square pixels (no anamorphism).
         const float fov_y_rad = 60.0f * 3.14159265f / 180.0f;
@@ -2860,6 +3621,13 @@ extern "C" void aether_scene_renderer_render_full(
         splat_u.camera_position[1] = cam_y;
         splat_u.camera_position[2] = cam_z;
         splat_u.camera_position[3] = 1.0f;
+        // Phase 6.4f.4.b — propagate the configured LOD threshold each
+        // frame. Cheap (write-coalesced into the same uniform write).
+        splat_u.lod_extent_min = r->lod_extent_min;
+        // Phase 6.4f hotfix — propagate the splat-scale multiplier.
+        splat_u.splat_scale_multiplier = r->splat_scale_multiplier;
+        // Phase 6.4f hotfix — propagate the halo-cull 3D-scale threshold.
+        splat_u.max_3d_scale = r->max_3d_scale;
         r->device->update_buffer(r->splat_uniforms_buf, &splat_u, 0, sizeof(splat_u));
     }
 

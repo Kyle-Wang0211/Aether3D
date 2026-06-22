@@ -1,5 +1,7 @@
 import UIKit
 import Flutter
+import Darwin
+import os
 
 // ─── Final iOS port — Flutter Texture plugin glue ─────────────────────
 //
@@ -158,9 +160,21 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                 let texture = try SharedNativeTexture(width: width, height: height)
                 let id = textures.register(texture)
                 registered[id] = texture
-                texture.render()
-                textures.textureFrameAvailable(id)
+                // Skip the synchronous priming render when the app is
+                // backgrounded (or about to be). iOS Metal refuses GPU
+                // submissions from background processes and floods stderr
+                // with `IOGPUMetalError: Insufficient Permission` when we
+                // try anyway. Texture stays dirty by default; the next
+                // display-link tick after foreground resume picks it up
+                // and renders it for free.
+                let isBackgrounded = UIApplication.shared.applicationState
+                    != .active
+                if !isPaused && !isBackgrounded {
+                    texture.render()
+                    textures.textureFrameAvailable(id)
+                }
                 startAnimation(textureId: id, texture: texture)
+                Self.logMemoryFootprint("register id=\(id) total=\(registered.count)")
                 result(NSNumber(value: id))
             } catch TextureCreateError.iosurfaceCreate {
                 result(FlutterError(
@@ -267,6 +281,12 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             // Phase 6.4f.3.b — accept memory caps from Dart side.
             let maxSplats = (args["maxSplats"] as? NSNumber)?.uint32Value ?? 0
             let maxShDegree = (args["maxShDegree"] as? NSNumber)?.uint8Value ?? 3
+            // Phase 6.4f hotfix — splat scale multiplier (see loadSpz).
+            let splatScale = (args["splatScaleMultiplier"] as? NSNumber)?.floatValue ?? 1.0
+            texture.setSplatScaleMultiplier(splatScale)
+            // Phase 6.4f hotfix — halo cull by 3D scale (see loadSpz).
+            let max3dScale = (args["max3dScale"] as? NSNumber)?.floatValue ?? 0.0
+            texture.setMax3dScale(max3dScale)
             if !texture.loadPly(path: path,
                                 maxSplats: maxSplats,
                                 maxShDegree: maxShDegree) {
@@ -317,6 +337,15 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             // Phase 6.4f.3.b — accept memory caps from Dart side.
             let maxSplats = (args["maxSplats"] as? NSNumber)?.uint32Value ?? 0
             let maxShDegree = (args["maxShDegree"] as? NSNumber)?.uint8Value ?? 3
+            // Phase 6.4f hotfix — splat scale multiplier (1.0 default
+            // honors file scale; PocketWorld feed thumbnails pass 4.0).
+            // Apply BEFORE loadSpz so the very first frame uses it.
+            let splatScale = (args["splatScaleMultiplier"] as? NSNumber)?.floatValue ?? 1.0
+            texture.setSplatScaleMultiplier(splatScale)
+            // Phase 6.4f hotfix — halo cull by 3D scale (drop large
+            // soft Gaussians authored as background context). 0 disables.
+            let max3dScale = (args["max3dScale"] as? NSNumber)?.floatValue ?? 0.0
+            texture.setMax3dScale(max3dScale)
             if !texture.loadSpz(path: path,
                                 maxSplats: maxSplats,
                                 maxShDegree: maxShDegree) {
@@ -326,6 +355,7 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
                     details: nil))
                 return
             }
+            Self.logMemoryFootprint("loadSpz id=\(id) path=\((path as NSString).lastPathComponent)")
             // Surface splat-scene AABB so AetherCppCardDemo can fit
             // the camera (same shape as loadGlb above). Without this,
             // Dart falls back to widget.fallbackCameraDistance and
@@ -372,6 +402,38 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
             )
             result(nil)
 
+        case "captureThumb":
+            // Phase 6.4f.10 — snapshot a SharedNativeTexture's IOSurface
+            // contents as JPEG bytes. Wired into the detail-page bake
+            // pipeline; see lib/community/thumb_baker.dart.
+            //
+            // The texture must have rendered at least one frame before
+            // this is called or the JPEG comes out solid black (default
+            // IOSurface fill). Dart-side `onFirstFrameReady` is the
+            // correct trigger; this method does no readiness-check.
+            guard let args = call.arguments as? [String: Any],
+                  let id = (args["textureId"] as? NSNumber)?.int64Value else {
+                result(FlutterError(
+                    code: "BAD_ARGS",
+                    message: "captureThumb requires {textureId: int}",
+                    details: nil))
+                return
+            }
+            guard let texture = registered[id] else {
+                // Texture already disposed (memory warning, scroll-out,
+                // navigation away). Surface as `null` not an error so
+                // the Dart caller can skip the bake quietly.
+                result(nil)
+                return
+            }
+            let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.85
+            let data = texture.captureAsJPEG(quality: CGFloat(quality))
+            if let data = data {
+                result(FlutterStandardTypedData(bytes: data))
+            } else {
+                result(nil)
+            }
+
         case "pauseRendering":
             pauseAnimation(reason: "dart lifecycle")
             result(nil)
@@ -405,6 +467,7 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         if registered.isEmpty {
             stopAnimation()
         }
+        Self.logMemoryFootprint("dispose id=\(id) remaining=\(registered.count)")
     }
 
     private func startAnimation(textureId: Int64, texture: SharedNativeTexture) {
@@ -467,6 +530,38 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         }
     }
 
+    // ─── Phase 6.4f.7 — memory instrumentation ──────────────────────────
+    //
+    // Cap-tuning telemetry. Logs phys_footprint (the figure jetsam
+    // compares against the per-process limit on iOS) and the
+    // os_proc_available_memory() headroom at every load/dispose so we
+    // can see the actual cost of one SPZ scene on real hardware.
+    // iPhone 12 floor analysis assumed ~380 MB unified per scene; this
+    // log line confirms or refutes that for whatever device the user
+    // is actually running.
+    //
+    // phys_footprint: mostly = anonymous + iokit + compressed pages,
+    //   counts unified-memory GPU allocations (Metal heaps, IOSurface).
+    // os_proc_available_memory(): returns bytes remaining before the
+    //   process hits its jetsam hard limit. Values < 200 MB are
+    //   typically minutes from a kill; the active Phase 6.4f.7
+    //   threshold for adaptive downgrade is 600 MB.
+    static func logMemoryFootprint(_ tag: String) {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr: kern_return_t = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reb in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), reb, &count)
+            }
+        }
+        let footprintMB: Double =
+            (kr == KERN_SUCCESS) ? Double(info.phys_footprint) / 1_048_576.0 : -1.0
+        let availableMB: Int = os_proc_available_memory() / (1024 * 1024)
+        NSLog("[AetherTexture] mem[%@] phys_footprint=%.1fMB available=%dMB",
+              tag, footprintMB, availableMB)
+    }
+
     @objc private func handleMemoryWarning() {
         // Selective LRU dispose: keep the most-recently-rendered
         // texture (= the focused card the user is actively looking at)
@@ -489,16 +584,35 @@ class AetherTexturePlugin: NSObject, FlutterPlugin {
         // has the newest.
         let total = registered.count
         guard total > 0 else { return }
-        var sortedByRecency = registered.sorted { lhs, rhs in
-            lhs.value.lastRenderTimestamp > rhs.value.lastRenderTimestamp
-        }
-        // Keep the most recent ONE (the focused card). Dispose the
-        // rest. Tighten this if memory pressure is severe (e.g. keep
-        // 0 in critical), but for typical iOS warnings 1 is enough.
-        let keepCount = 1
-        let disposeIds = sortedByRecency.dropFirst(keepCount).map { $0.key }
-        NSLog("[AetherTexture] memory warning — disposing %d/%d textures (keeping focused)",
-              disposeIds.count, total)
+        // Sort: NEWEST first. Swift can't infer the closure param
+        // types on Dictionary.sorted because the iterator yields
+        // anonymous (key:Int64, value:SharedNativeTexture) tuples,
+        // hence the explicit annotation.
+        let sortedByRecency: [(key: Int64, value: SharedNativeTexture)] =
+            registered.sorted { (lhs: (key: Int64, value: SharedNativeTexture),
+                                 rhs: (key: Int64, value: SharedNativeTexture)) -> Bool in
+                lhs.value.lastRenderTimestamp > rhs.value.lastRenderTimestamp
+            }
+        // Phase 6.4f.7: keepCount sized for iPhone 12 floor (4 GB RAM,
+        // ~2098 MB jetsam, ~1.3 GB sustainable budget). Per-scene cost
+        // in iOS unified memory is ~380-400 MB (16 MB IOSurface + ~150-
+        // 180 MB GPU vertex/SH + ~220 MB decoded blob, all counted
+        // toward phys_footprint). K=3 keeps focused + 2 neighbors,
+        // peak ~1.14 GB, leaving ~150 MB headroom.
+        //
+        // Adaptive downgrade: when os_proc_available_memory() reports
+        // < 600 MB free we're already too close to jetsam — drop to
+        // K=2 so the OS warning gives us breathing room before it
+        // escalates to a hard kill. Real-device measurements (the
+        // [AetherTexture] mem[...] log lines below) will refine these
+        // thresholds.
+        let availableBytes = os_proc_available_memory()
+        let availableMB = availableBytes / (1024 * 1024)
+        let keepCount = (availableMB > 0 && availableMB < 600) ? 2 : 3
+        let disposeIds: [Int64] = sortedByRecency.dropFirst(keepCount).map { $0.key }
+        NSLog("[AetherTexture] memory warning — keepCount=%d (available=%dMB) disposing %d/%d textures (keeping focused)",
+              keepCount, availableMB, disposeIds.count, total)
+        Self.logMemoryFootprint("memWarning")
         warningChannel?.invokeMethod("warning", arguments: [
             "kind": "memory",
             "disposedIds": disposeIds.map { NSNumber(value: $0) },

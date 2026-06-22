@@ -68,6 +68,123 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # Thermion's native framework needs iOS 13+. CocoaPods sometimes
+    # downgrades IPHONEOS_DEPLOYMENT_TARGET back to Flutter's stock
+    # 12.0 in the generated per-pod xcconfig; force it back so the
+    # framework's Info.plist matches our LSMinimumSystemVersion=13.0
+    # in Runner/Info.plist.
+    target.build_configurations.each do |config|
+      current = config.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
+      if current.nil? || current.to_f < 13.0
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+      end
+    end
   end
 
+  # Thermion 0.3.4's ios/thermion_flutter.podspec line 25 ships:
+  #   'OTHER_CFLAGS' => '"-fvisibility=default" "$(inherited)"'
+  # The quoted "$(inherited)" wraps every inherited flag (including the
+  # -fmodule-map-file=... chain CocoaPods generates for use_modular_headers!)
+  # into one giant argument with leading whitespace, which clang then
+  # tries to open as a file → "no such file or directory: ' -fmodule-map-file=...".
+  # Strip the quotes from the generated Pods-Runner/Pods-RunnerTests
+  # xcconfigs each pod install. Drop this hook when Thermion fixes upstream
+  # (file an issue at github.com/nmfisher/thermion if it lingers).
+  bad = '"-fvisibility=default" "$(inherited)"'
+  good = '-fvisibility=default'
+  Dir[File.join(installer.config.installation_root, 'Pods/Target Support Files/Pods-*/*.xcconfig')].each do |xcconfig|
+    contents = File.read(xcconfig)
+    if contents.include?(bad)
+      File.write(xcconfig, contents.gsub(bad, good))
+    end
+  end
+
+  # For App Store uploads, also run `bash ios/scripts/thermion_minos_fix.sh`
+  # AFTER `flutter build ios --release` and BEFORE `xcodebuild archive`.
+  # That script re-stamps MinimumOSVersion=13.0 inside the embedded
+  # thermion_dart.framework/Info.plist directly, which is what App Store
+  # Connect validates (and what the deployment-target override above
+  # cannot reach for prebuilt binary frameworks).
+
+  # ── onnxruntime-c force_load (MobileSAM via dart:ffi) ─────────────────
+  #
+  # The `onnxruntime` Flutter plugin (1.4.1) reaches into the
+  # onnxruntime C library at runtime via dart:ffi
+  # `DynamicLibrary.lookup('OrtSessionOptionsAppendExecutionProvider_CPU')`
+  # and friends. The onnxruntime-c pod ships those symbols inside
+  # `onnxruntime.xcframework`, and Pods-Runner.xcconfig already links
+  # `-framework "onnxruntime"` — that's enough to satisfy the static
+  # linker for any C function some Obj-C code (the onnxruntime-objc
+  # wrapper) references by name.
+  #
+  # But the wrapper doesn't reference every C symbol — only the ones
+  # its own Obj-C surface needs. The rest get dead-stripped, so
+  # `dlsym(RTLD_DEFAULT, "OrtSessionOptionsAppendExecutionProvider_CPU")`
+  # at Dart-side warmup returns NULL and `MobileSamInference.warmup()`
+  # explodes with `symbol not found`.
+  #
+  # `-force_load` tells the linker to retain every symbol in the
+  # specified framework binary, regardless of static reachability.
+  # Bloats the Runner binary by ~30 MB (the entire onnxruntime C
+  # runtime). Worth it — SAM is on the critical capture-quality path.
+  #
+  # We patch the generated xcconfig directly (not via
+  # `config.build_settings = ...` on the ruby Project) because
+  # CocoaPods writes the xcconfig in an earlier install phase than
+  # the post_install hook fires; setting build_settings here would
+  # update Pods.xcodeproj but not the .xcconfig the Runner target
+  # actually reads. Same pattern as the thermion CFLAGS patch above.
+  #
+  # SDK-conditional because the xcframework slices live in different
+  # subdirectories (device arm64 vs simulator arm64+x86_64).
+  device_force_load = '-force_load "$(PODS_ROOT)/onnxruntime-c/onnxruntime.xcframework/ios-arm64/onnxruntime.framework/onnxruntime"'
+  sim_force_load = '-force_load "$(PODS_ROOT)/onnxruntime-c/onnxruntime.xcframework/ios-arm64_x86_64-simulator/onnxruntime.framework/onnxruntime"'
+  marker = 'onnxruntime.xcframework'
+  Dir[File.join(installer.config.installation_root, 'Pods/Target Support Files/Pods-Runner/*.xcconfig')].each do |xcconfig|
+    contents = File.read(xcconfig)
+    appended = contents.dup
+
+    # 1) Strip `-l"onnxruntime-objc"`. The `onnxruntime` Flutter plugin
+    #    1.4.1 has zero Obj-C / Swift source files in its iOS folder —
+    #    it goes straight to C via dart:ffi. The podspec declares
+    #    onnxruntime-objc as a dependency only to transitively pull in
+    #    onnxruntime-c. CocoaPods then dutifully adds
+    #    `-l"onnxruntime-objc"` to Pods-Runner's OTHER_LDFLAGS,
+    #    re-importing the C ABI a second time. Combined with our
+    #    `-force_load` of onnxruntime.framework below, that produces
+    #    duplicate-symbol linker errors.
+    #    Dropping the `-l onnxruntime-objc` is safe: no Obj-C code in
+    #    this app references the wrapper's classes, and the C surface
+    #    is provided by the framework we force-load.
+    appended = appended.gsub(/ -l"onnxruntime-objc"/, '')
+
+    # 1b) Strip `-framework "onnxruntime"`. CocoaPods adds it because
+    #     onnxruntime-c declares the framework as a `vendored_framework`,
+    #     and the `-framework F` linker flag resolves to exactly the
+    #     same `onnxruntime.framework/onnxruntime` binary that our
+    #     `-force_load` below also pulls in. Linker sees the same
+    #     archive listed twice → 25 duplicate symbols. force_load alone
+    #     is enough: it both resolves the framework and retains every
+    #     symbol for dart:ffi lookup.
+    appended = appended.gsub(/ -framework "onnxruntime"/, '')
+
+    # 2) Append force_load only if not already there (idempotent on
+    #    repeat `pod install`).
+    unless contents.include?(marker)
+      [
+        [/^OTHER_LDFLAGS\[sdk=iphoneos\*\] = (.*)$/, device_force_load],
+        [/^OTHER_LDFLAGS\[sdk=iphonesimulator\*\] = (.*)$/, sim_force_load],
+      ].each do |pattern, flag|
+        if appended.match?(pattern)
+          appended = appended.sub(pattern) { |m| "#{m} #{flag}" }
+        else
+          sdk = flag.include?('simulator') ? 'iphonesimulator*' : 'iphoneos*'
+          appended += "\nOTHER_LDFLAGS[sdk=#{sdk}] = $(inherited) #{flag}\n"
+        end
+      end
+    end
+
+    File.write(xcconfig, appended) if appended != contents
+  end
 end

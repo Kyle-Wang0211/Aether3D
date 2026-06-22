@@ -104,18 +104,26 @@ cp "$DIST_DIR/aether3d_ffi.xcframework/ios-arm64-simulator/libaether3d_ffi.a" \
 
 # Sanity: verify both libs carry the FFI symbol — without this, 5.4's
 # AetherFfi.versionString() will dlsym-fail at runtime with no link error.
-echo "==> Verifying _aether_version_string symbol in extracted slices..."
+echo "==> Verifying FFI symbols in extracted slices..."
+REQUIRED_FFI_SYMBOLS=(
+    _aether_version_string
+    _aether_scene_renderer_create
+    # Phase 4 — glb_norm C ABI. Verified here so a regression in
+    # AETHER_FFI_SOURCES (e.g. someone drops glb_normalize_c_api.cpp)
+    # fails the build instead of silently shipping a broken pod.
+    _aether_glb_norm_run
+    _aether_glb_norm_options_default
+    _aether_glb_norm_buffer_free
+    _aether_glb_norm_result_str
+)
 for slice in ios-arm64 ios-arm64-simulator; do
-    if ! nm "$LIBS_DIR/$slice/libaether3d_ffi.a" 2>/dev/null \
-        | grep -q "T _aether_version_string"; then
-        echo "ERROR: _aether_version_string missing from $slice slice" >&2
-        exit 1
-    fi
-    if ! nm "$LIBS_DIR/$slice/libaether3d_ffi.a" 2>/dev/null \
-        | grep -q "T _aether_scene_renderer_create"; then
-        echo "ERROR: _aether_scene_renderer_create missing from $slice slice" >&2
-        exit 1
-    fi
+    for sym in "${REQUIRED_FFI_SYMBOLS[@]}"; do
+        if ! nm "$LIBS_DIR/$slice/libaether3d_ffi.a" 2>/dev/null \
+            | grep -q "T ${sym}"; then
+            echo "ERROR: ${sym} missing from ${slice} slice" >&2
+            exit 1
+        fi
+    done
 done
 
 echo "==> Per-arch libs ready:"

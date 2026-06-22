@@ -12,6 +12,7 @@
 // Cross-platform: pure Dart on top of supabase_flutter, runs identically
 // on iOS / Android / HarmonyOS / Web.
 
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'feed_models.dart';
@@ -195,5 +196,78 @@ class CommunityService {
   /// works so the public path is correct here.
   String modelUrlFor(String path) {
     return _client.storage.from('works').getPublicUrl(path);
+  }
+
+  /// Phase 6.4f.10 — bake-and-publish a thumbnail JPG for a work that
+  /// doesn't have one yet. Returns the storage path written on success,
+  /// or null if anything failed (RLS rejection, network error, etc.).
+  ///
+  /// This is the "first viewer wins" mechanic: when the work owner (or
+  /// a future authorized RPC) opens a work detail page that has no
+  /// thumbnail yet, the viewer captures the rendered IOSurface and
+  /// uploads it here. RLS on `works` only allows the owner to UPDATE,
+  /// so today this only succeeds when the user is the work owner —
+  /// good enough to fix our own SPZ test sample without a server-side
+  /// migration. Later we can add an RPC that lets any authenticated
+  /// user one-shot bake a missing thumb.
+  ///
+  /// Phase 6.4f.10.2 — path layout fix. The supabase `thumbnails`
+  /// bucket's storage RLS policy is the conventional
+  ///   (storage.foldername(name))[1] = auth.uid()::text
+  /// — i.e. the first path segment must be the caller's auth.uid.
+  /// The original 6.4f.10 layout `<work_id>/auto.jpg` violated this
+  /// (work_id ≠ user_id in our schema) and the upload returned 403
+  /// "new row violates row-level security policy" on real-device
+  /// testing 2026-05-04. The new layout `<uid>/<work_id>.jpg` mirrors
+  /// the [PublishService] convention `<uid>/<record_id>.jpg` and
+  /// satisfies the standard storage RLS policy. Bucket is public so
+  /// feed readers (any auth state, including anon) still get the JPG.
+  Future<String?> uploadAndSetThumbnail({
+    required String workId,
+    required Uint8List jpegBytes,
+  }) async {
+    try {
+      final uid = _client.auth.currentUser?.id;
+      if (uid == null) {
+        debugPrint(
+            '[CommunityService] uploadAndSetThumbnail($workId) skipped — '
+            'no signed-in user (anon RLS will reject upload anyway)');
+        return null;
+      }
+      // Phase 6.4f.10.2: path = <uid>/<work_id>.jpg, NOT <work_id>/auto.jpg.
+      // Required by the standard supabase storage RLS policy that pins
+      // the first folder segment to auth.uid().
+      final storagePath = '$uid/$workId.jpg';
+      // Storage upload. upsert=true so a re-bake replaces an older
+      // auto-generated thumbnail without 409.
+      await _client.storage.from('thumbnails').uploadBinary(
+            storagePath,
+            jpegBytes,
+            fileOptions: const FileOptions(
+              contentType: 'image/jpeg',
+              upsert: true,
+              cacheControl: '604800', // 7 days — JPG is content-addressed
+              // by work id; if a re-bake replaces it, supabase + CDN
+              // will rev the URL via the upsert.
+            ),
+          );
+      // Update the work row. RLS on the `works` table allows the owner
+      // to UPDATE; since the upload above just succeeded under the same
+      // auth, this should also succeed if owner==caller. Soft-fail
+      // (debugPrint + return null) preserves the bucket file for the
+      // next bake retry to discover.
+      await _client
+          .from('works')
+          .update({'thumbnail_storage_path': storagePath})
+          .eq('id', workId);
+      debugPrint(
+          '[CommunityService] thumbnail baked for $workId → $storagePath '
+          '(${(jpegBytes.lengthInBytes / 1024).toStringAsFixed(1)} KB)');
+      return storagePath;
+    } catch (e, s) {
+      debugPrint(
+          '[CommunityService] uploadAndSetThumbnail($workId) failed: $e\n$s');
+      return null;
+    }
   }
 }

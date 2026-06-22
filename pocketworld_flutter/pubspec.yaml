@@ -58,11 +58,111 @@ dependencies:
   # Pipeline / upload broker HTTP client.
   dio: ^5.7.0
 
+  # Background-capable file uploads (presigned-PUT to S3-style URLs).
+  # Used by aether_api_client.putFile/putBytes — replaces the prior
+  # foreground-only dio path that silently aborted when the user
+  # backgrounded the app or locked the screen mid-upload.
+  # On iOS this wraps URLSessionConfiguration.background, so uploads
+  # survive app→background, lock screen, and OS memory pressure
+  # eviction. Force-quit (swipe-up in App Switcher) still terminates
+  # them — that's an iOS platform constraint, not a plugin gap.
+  background_downloader: ^9.5.4
+
   # SHA256 for ArtifactManifest integrity checks.
   crypto: ^3.0.6
 
   # Temp path for video preparer, artifact download cache.
   path_provider: ^2.1.5
+
+  # Extracts a JPEG frame from the recorded .mov as the scan-card cover
+  # thumbnail. Called fire-and-forget from UploadCoordinator after the
+  # ScanRecord is persisted, so the gallery card animates from
+  # placeholder → real cover within ~500 ms of recording stop.
+  # iOS uses AVAssetImageGenerator under the hood; Android uses
+  # MediaMetadataRetriever — no additional native config required.
+  video_thumbnail: ^0.5.6
+
+  # Phase B community feed — cross-platform 3D renderer.
+  # Thermion wraps Google Filament (C++) and renders into a Flutter
+  # Texture, so the helmet pixels live inside Flutter's framebuffer
+  # — meaning liquid_glass_renderer's GPU shader can SAMPLE them for
+  # real refraction. (model_viewer_plus, the previous choice, drew
+  # via WKWebView as an iOS hardware overlay; LiquidGlass had no way
+  # to read its pixels and the plate fell back to a solid color.)
+  #
+  # Each ViewerWidget creates its own Filament View / Scene / Camera
+  # off the shared FilamentApp instance, so multiple cards can render
+  # live 3D simultaneously (matches model_viewer_plus's per-card-WebView
+  # behaviour). Throttled by the existing PostCard visibility threshold.
+  #
+  # Loads .glb at runtime via loadGltfFromBuffer(Uint8List) — bytes are
+  # downloaded with dio + cached on disk (lib/community/glb_cache.dart).
+  # iOS deployment target must be ≥ 13.0 (already 14.0 in our Podfile).
+  thermion_flutter: ^0.3.4
+
+  # Detects when a widget enters / leaves the viewport. Used by the
+  # community feed to identify the "centered" PostCard so we can flip
+  # its LiveModelView auto-rotate on, and to throttle live-3D mounting
+  # (cards far off-screen show a static thumbnail placeholder instead
+  # of a Filament viewer).
+  visibility_detector: ^0.4.0+2
+
+  # GPU shader-based glass with REAL refraction (refractiveIndex 1.0–2.0,
+  # iOS 26 "Liquid Glass" style). Used for the floating info plate over
+  # each PostCard's 3D model — translates the demos/glass.html
+  # MeshPhysicalMaterial parameters (thickness / IOR / glass color /
+  # squircle shape) into Flutter shader settings, far closer to the
+  # 3D-physical look than BackdropFilter blur.
+  #
+  # Caveats:
+  #   • Impeller-only (iOS / Android / macOS / HarmonyOS). On Web we
+  #     fall back to FakeGlass / BackdropFilter — same package supplies
+  #     FakeGlass so the call site swaps cleanly.
+  #   • Marked experimental upstream; cap concurrent instances via the
+  #     existing PostCard visibility-mount threshold (≤ 2 active).
+  liquid_glass_renderer: ^0.2.0-dev.4
+
+  # Capture-side device sensors. We integrate gyroscope deltas + read the
+  # accelerometer's gravity vector to drive the dome's yaw/pitch — the
+  # `motion_sensors` plugin would have given us absoluteOrientation
+  # directly but it's been stale on pub.dev for years (last release 0.1.0
+  # in 2019). The Flutter team's `sensors_plus` is the actively maintained
+  # alternative; we run a tiny Dart-side complementary filter on its raw
+  # streams in lib/capture/orientation_tracker.dart.
+  sensors_plus: ^7.0.0
+
+  # Camera preview + per-frame image stream for on-device sharpness
+  # (Laplacian variance) gating. CameraImage Y-plane bytes go straight
+  # into a `compute()` isolate so the UI thread stays at 60fps.
+  camera: ^0.12.0
+
+  # Phase 6: lets the user pick a .glb / .gltf from device storage to
+  # feed into ImportGlbCoordinator. Backed by UIDocumentPickerViewController
+  # on iOS (Files / iCloud Drive / third-party providers; no Photos
+  # permission needed) and SAF / ACTION_OPEN_DOCUMENT on Android.
+  file_picker: ^8.1.2
+
+  # Task 3: on-device subject masking via MobileSAM (Apache-2.0). Two
+  # ONNX sessions (encoder ~28 MB + decoder ~16 MB) bundled under
+  # assets/models/edgesam/ are loaded by lib/capture/sam/mobile_sam_inference.dart
+  # and run on a 5 Hz cadence in a background isolate so the ARKit /
+  # capture loop is not blocked. Each curated frame's `subject_mask`
+  # field in curated.json is then consumed by the worker's
+  # apply_subject_mask stage to white-out background pixels before VGGT.
+  #
+  # Platform support:
+  #   • iOS / Android / macOS / Linux / Windows: full inference
+  #   • Web: not supported by this package (1.4.1 — "Coming soon")
+  #     → segment() returns null, manifest omits subject_mask, worker
+  #     stage no-ops on that frame
+  #   • HarmonyOS: no published support → same graceful-degrade path
+  onnxruntime: ^1.4.1
+
+  # Pure-Dart image decoder/resizer used by MobileSAM input prep
+  # (resize to 1024x1024, write into the encoder's HWC uint8 tensor).
+  # Standard pub.dev package, no native deps so it runs in any isolate.
+  image: ^4.2.0
+
 
 dev_dependencies:
   flutter_test:
@@ -97,6 +197,26 @@ flutter:
     - assets/models/WaterBottle.glb
     - assets/models/Duck.glb
     - assets/models/Lantern.glb
+    # Neutral image-based light for the community viewer.
+    # 2.1MB cubemap copied verbatim from Thermion's example assets:
+    # https://github.com/nmfisher/thermion/blob/develop/examples/assets/default_env_ibl.ktx
+    # We use IBL-only (no directional lights) so PBR materials display
+    # close to their baked baseColor — matches Polycam / Luma AI / etc.'s
+    # "unlit-style scan viewer" feel without per-primitive material
+    # overrides (Thermion 0.3.4 has no MaterialInstance getter to read
+    # the original baseColorMap, so true KHR_materials_unlit override
+    # while preserving textures isn't expressible via its public API).
+    - assets/ibl/default_env_ibl.ktx
+    # MobileSAM (Apache-2.0) — on-device subject masking during capture.
+    # Two ONNX sessions: encoder (28.2 MB, runs once per frame) +
+    # decoder (16.5 MB, runs once per prompt point at center).
+    # Mask is RLE-packed into curated.json's per-frame `subject_mask`
+    # field; worker uses it to white-out background before VGGT.
+    # Tracked via Git LFS (.gitattributes `*.onnx filter=lfs`).
+    # Directory is named `edgesam/` for forward-compat with earlier
+    # session paths — contents are MobileSAM, see assets/models/edgesam/README.md.
+    - assets/models/edgesam/mobile_sam_image_encoder.onnx
+    - assets/models/edgesam/sam_mask_decoder_single.onnx
 
   # To add assets to your application, add an assets section, like this:
   # assets:

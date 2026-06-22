@@ -254,6 +254,17 @@ class _VaultPageState extends State<VaultPage> {
             AetherSpacing.lg,
             140,
           ),
+          // Phase 6.4f hotfix — keep ~2 screens of off-screen cards
+          // mounted so fast back-scroll doesn't re-mount the
+          // AetherCppCardDemo (which runs initState → createTexture →
+          // load → fit → first-render, ~500 ms even with caches hit).
+          // Default cacheExtent is ~250 logical px; 2000 covers ~3
+          // cards above and below the visible region. The memory
+          // warning LRU on the native side will still dispose
+          // non-focused textures under pressure, but they'll quickly
+          // recover from the SplatDataCache + DecodedSplatCache hits
+          // instead of paying the full SPZ decode again.
+          cacheExtent: 2000,
           itemCount: works.length,
           separatorBuilder: (_, _) =>
               const SizedBox(height: AetherSpacing.lg),

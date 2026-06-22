@@ -409,6 +409,13 @@ public:
         required_limits.maxComputeInvocationsPerWorkgroup = 512;
         required_limits.maxComputeWorkgroupSizeX = 512;
         required_limits.maxStorageBuffersPerShaderStage = 10;
+        // Phase 6.4f hotfix: SH non-DC coeffs for ~786k splats × 15 basis × 12 B
+        // is ~135 MB, above the 128 MB default. Apple-silicon adapters report
+        // 3 GB available, so 512 MB is a safe head-room cap (caller-side
+        // load_*_capped() with max_sh_degree=0 is the intended budget control —
+        // this limit is just to keep the device alive when callers haven't
+        // opted in yet).
+        required_limits.maxStorageBufferBindingSize = 512u * 1024u * 1024u;
 
         // Phase 6.4a: also request the SharedTextureMemoryIOSurface +
         // SharedFenceMTLSharedEvent feature pair. Both are needed for

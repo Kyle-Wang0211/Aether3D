@@ -1,0 +1,58 @@
+name: GlomapBench
+options:
+  bundleIdPrefix: com.kyle
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  GlomapBench:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: /Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/bench/glomap_bench.cc
+      - path: /Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/bench/colmap_bench.cc
+      - path: /Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/bench/dsp_sift_c.cc
+      - path: Resources
+        buildPhase: resources
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 26AH7V448L
+        PRODUCT_BUNDLE_IDENTIFIER: com.kyle.GlomapBench
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        CLANG_CXX_LIBRARY: "libc++"
+        ENABLE_BITCODE: NO
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "EIGEN_MPL2_ONLY"
+          - "GLOG_USE_GLOG_EXPORT"
+          - "GLOG_NO_ABBREVIATED_SEVERITIES"
+          - "GLOG_VERSION_MAJOR=0"
+          - "GLOG_VERSION_MINOR=7"
+        HEADER_SEARCH_PATHS:
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/colmap-src"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/stubs"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/glomap-src"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/poselib-src"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/glog-install/include"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/include"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/ceres-build-ios/include"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/config"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/eigen-install/include/eigen3"
+          - "/opt/homebrew/include"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/build-ios/libglomap_core.a"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/ceres-build-ios/lib/libceres.a"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/glog-install/lib/libglog.a"
+          - "-lsqlite3"
+          - "-framework Accelerate"
+          - "-framework Metal"
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: GlomapBench
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true

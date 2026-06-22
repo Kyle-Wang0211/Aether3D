@@ -112,6 +112,59 @@ bool aether_scene_renderer_load_spz_capped(
     uint32_t max_splats,
     uint8_t max_sh_degree);
 
+/// Phase 6.4f.4.b — runtime per-splat LOD cull.
+///
+/// Set the minimum projected 2D bounding-box extent (in pixels) below
+/// which a splat is dropped before the visible list is built. 0 (the
+/// default) disables the cull and matches pre-6.4f.4 behaviour.
+///
+/// Combined with the load-time octree subsample (Phase 6.4f.3.d /
+/// 6.4f.4.c), this gives a coarse two-level LOD: dense near-camera
+/// regions render at full splat density; far-away regions get culled
+/// per-splat once their projection drops below the configured pixel
+/// threshold. A typical feed-thumbnail value is 0.5–1.0; detail pages
+/// should leave this at 0.
+///
+/// This is *not* the full Octree-GS GPU per-node selection — that
+/// would need a select_lod kernel + active_indices binding feeding
+/// project_forward. This is the lightweight subset that fits inside
+/// project_forward's existing early-exit path.
+void aether_scene_renderer_set_lod_extent_min(
+    AetherSceneRenderer* r,
+    float pixel_extent_min);
+
+/// Phase 6.4f hotfix — global multiplier applied to every splat's
+/// scale before 3D→2D covariance projection. Niantic SPZ files are
+/// authored at AR-viewing density (sub-pixel splats at PocketWorld
+/// feed thumbnail resolution); a multiplier of 4× makes each splat
+/// overlap its neighbors enough to read as a continuous surface.
+///
+/// Default 1.0 honors the file's authored splat density. Detail page
+/// passes 1.0; feed thumbnails pass 4.0. Clamp range: (0, 16].
+/// Values <= 0 fall back to 1.0.
+void aether_scene_renderer_set_splat_scale_multiplier(
+    AetherSceneRenderer* r,
+    float multiplier);
+
+/// Phase 6.4f hotfix — drop splats whose 3D-space scale (max of
+/// xyz, in world units) exceeds this. Use to cull the "halo" splats
+/// that 3DGS photometric optimizers prefer to use for cheaply
+/// covering smooth low-frequency background regions (large soft
+/// Gaussians) around the subject in Niantic / Polycam captures.
+///
+/// Why 3D scale beats screen extent or opacity: 3D scale is a
+/// per-splat property (camera- and frame-invariant), so the kept
+/// splat set stays consistent under rotation. Halo splats are
+/// reliably large in 3D regardless of how transparent or opaque the
+/// authoring optimizer chose them to be.
+///
+/// Default 0 disables. 0.3-0.5 is a good starting threshold for
+/// hornedlizard-style captures (whose subject splats are typically
+/// 0.005-0.05 units). Clamp range: [0, 1024].
+void aether_scene_renderer_set_max_3d_scale(
+    AetherSceneRenderer* r,
+    float max_3d_scale);
+
 /// Per-frame render. View and model matrices are 16-float column-major
 /// arrays. The mesh applies BOTH matrices through its full PBR shader;
 /// the splat overlay currently ignores them visually (Phase 6.4f).

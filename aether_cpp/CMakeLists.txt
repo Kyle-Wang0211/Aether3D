@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(aether3d_cpp_core VERSION 0.1.0 LANGUAGES CXX OBJCXX)
+project(aether3d_cpp_core VERSION 0.1.0 LANGUAGES CXX)
+
+# Phase 4 — OBJCXX is Apple-only. The Android NDK + Emscripten + OHOS
+# toolchains don't supply an Objective-C++ compiler, so unconditionally
+# requiring OBJCXX in the project() call would fail configure on those
+# platforms. Enable it only on Apple platforms; per-source guards below
+# keep .mm files out of non-Apple compile graphs.
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,7 +50,19 @@ if(AETHER_ENABLE_DAWN AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dawn/C
     add_subdirectory(third_party/dawn EXCLUDE_FROM_ALL)
 endif()
 
-find_package(ZLIB REQUIRED)
+# Phase 4 — Emscripten ships zlib as a port activated via `-sUSE_ZLIB=1`,
+# not as a system library, so find_package(ZLIB REQUIRED) fails to resolve
+# it. Synthesize a ZLIB::ZLIB INTERFACE target that propagates the port
+# flag to consumers (aether3d_core, etc.). Other platforms still go
+# through the standard ZLIB find_package.
+if(EMSCRIPTEN)
+    add_library(ZLIB_emscripten_port INTERFACE)
+    target_compile_options(ZLIB_emscripten_port INTERFACE -sUSE_ZLIB=1)
+    target_link_options(ZLIB_emscripten_port INTERFACE -sUSE_ZLIB=1)
+    add_library(ZLIB::ZLIB ALIAS ZLIB_emscripten_port)
+else()
+    find_package(ZLIB REQUIRED)
+endif()
 
 set(AETHER_CORE_SOURCES
     src/tsdf_volume.cpp
@@ -50,6 +71,9 @@ set(AETHER_CORE_SOURCES
     src/core/version.cpp
     src/crypto/sha256.cpp
     src/evidence/smart_anti_boost_smoother.cpp
+    src/glb_norm/atlas_merger.cpp
+    src/glb_norm/glb_io.cpp
+    src/glb_norm/mesh_simplify.cpp
     src/memory/arena.cpp
     src/render/shader_source.cpp
     src/trainer/da3_depth_fuser.cpp
@@ -69,19 +93,38 @@ set(AETHER_CORE_SOURCES
     src/pipeline/local_subject_first_training.cpp
     src/pipeline/runtime_tsdf_gaussian_augmentation.cpp
     src/pipeline/pipeline_coordinator.cpp
-    src/pipeline/depth_inference_coreml.mm
     src/pipeline/coordinator_c_api.cpp
     src/pipeline/streaming_c_api.cpp
     src/thermal/thermal_predictor.cpp
     src/training/gaussian_training_engine.cpp
-    src/render/metal_gpu_device.mm
-    src/render/metal_c_api.mm
 )
+
+# Phase 4 — Apple-only sources (CoreML / Metal / IOSurface). These are
+# Objective-C++ (.mm) and reference Apple frameworks; on Android / OHOS /
+# Emscripten the NDK has no ObjC++ runtime, so these get gated out.
+if(APPLE)
+    list(APPEND AETHER_CORE_SOURCES
+        src/pipeline/depth_inference_coreml.mm
+        src/render/metal_gpu_device.mm
+        src/render/metal_c_api.mm)
+endif()
 
 set(AETHER_C_API_SOURCES
     src/mobile_whitebox_c_api.cpp
-    src/splat/splat_c_api.cpp
+    src/glb_norm/glb_normalize_c_api.cpp
 )
+
+# Phase 4 — splat_c_api.cpp wraps MTLCommandBuffer via
+# aether::render::wrap_metal_command_buffer, declared in metal_gpu_device.h
+# under `#if defined(__APPLE__)`. Compiling on Android NDK / OHOS / Web
+# fails with "no member named 'wrap_metal_command_buffer'", so gate the
+# whole TU to Apple platforms. Cross-platform splat consumption uses the
+# header-only ply_loader.h + the SPZ decoder; the Metal wrapper exists
+# only for Swift→C++ command-buffer interop on iOS.
+if(APPLE)
+    list(APPEND AETHER_C_API_SOURCES
+        src/splat/splat_c_api.cpp)
+endif()
 
 # ═══════════════════════════════════════════════════════════════════════
 # Phase 6.4a — WGSL bake (build-time .wgsl → .cpp constexpr)
@@ -143,6 +186,57 @@ target_include_directories(aether3d_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/incl
 target_link_libraries(aether3d_core PUBLIC ZLIB::ZLIB)
 target_compile_options(aether3d_core PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
 add_dependencies(aether3d_core aether_bake_wgsl)
+
+# ─── Phase 1: GLB normalizer atlas merger (unconditional) ──────────────
+# atlas_merger.cpp defines STB_RECT_PACK_IMPLEMENTATION and
+# STB_IMAGE_RESIZE_IMPLEMENTATION exactly once. glb_io.cpp (Phase 2)
+# defines STB_IMAGE_WRITE_IMPLEMENTATION exactly once, and conditionally
+# also CGLTF_IMPLEMENTATION + STB_IMAGE_IMPLEMENTATION when Dawn is OFF
+# (when Dawn is ON, src/pocketworld/glb_loader.cpp owns those impls
+# instead — see the Phase 6.4b block below). Single-header libs come
+# from third_party/stb + third_party/cgltf. Ships in every per-arch
+# slice (iOS / Android / HarmonyOS / Web wasm) so the GLB normalizer is
+# reachable everywhere.
+target_include_directories(aether3d_core PRIVATE
+    third_party/stb
+    third_party/cgltf)
+set_source_files_properties(src/glb_norm/atlas_merger.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-unused-function;-Wno-missing-prototypes;-Wno-double-promotion;-Wno-cast-qual;-Wno-sign-compare;-Wno-unused-but-set-variable")
+
+# Phase 4 — gaussian_training_engine.h has a private member that the
+# Android NDK r29 / Emscripten 4.x clang flag as unused-private-field
+# (Apple's older clang doesn't, so the macOS host build passes). The
+# field is genuinely reserved for future training-window code.
+# Additionally, the .cpp uses an 8 GiB literal (8ULL * 1024^3) as a
+# default device_ram sentinel; on armeabi-v7a (32-bit, size_t = uint32)
+# that constant overflows to 0, tripping -Wconstant-conversion. The
+# code path never executes on 32-bit (3D pipeline gated to 64-bit phones),
+# so the truncation is benign — but -Werror still rejects it. Suppress
+# both narrowly on this one TU to keep -Werror in effect elsewhere.
+# Header is only included by this .cpp (verified via grep).
+set_source_files_properties(src/training/gaussian_training_engine.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-unused-private-field;-Wno-constant-conversion")
+# glb_io.cpp pulls in cgltf (parser-only declarations or full impl,
+# depending on AETHER_ENABLE_DAWN) and stb_image_write. Both single-
+# header libs trip the strict -Wall -Wextra flags with unused-function
+# / missing-prototypes / double-promotion / cast-qual / sign-compare.
+# Same suppression set as atlas_merger.cpp.
+set_source_files_properties(src/glb_norm/glb_io.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-unused-function;-Wno-missing-prototypes;-Wno-double-promotion;-Wno-cast-qual;-Wno-sign-compare;-Wno-unused-but-set-variable;-Wno-unused-parameter;-Wno-implicit-fallthrough;-Wno-missing-field-initializers")
+
+# ─── Phase 3: meshoptimizer (mesh decimation) ──────────────────────────
+# Vendored copy of zeux/meshoptimizer v0.21 (MIT) at
+# third_party/meshoptimizer/. Multi-file pure-C++ static library — same
+# treatment as Dawn (third-party, doesn't inherit AETHER_STRICT_COMPILE_
+# OPTIONS, so its own warnings don't break -Werror). Linked PRIVATE into
+# aether3d_core; the only consumer is src/glb_norm/mesh_simplify.cpp,
+# which kicks in when the input GLB exceeds options.target_face_count.
+file(GLOB MESHOPTIMIZER_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/meshoptimizer/src/*.cpp)
+add_library(meshoptimizer STATIC ${MESHOPTIMIZER_SOURCES})
+target_include_directories(meshoptimizer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/meshoptimizer/src)
+target_link_libraries(aether3d_core PRIVATE meshoptimizer)
 
 # ─── Phase 6.2: Dawn backend source conditionally included ─────────────
 # When AETHER_ENABLE_DAWN is ON, link the DawnGPUDevice C++ implementation
@@ -439,6 +533,13 @@ add_executable(aether_render_policy_smoke
 target_include_directories(aether_render_policy_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(aether_render_policy_smoke PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
 
+# Phase 2 acceptance smoke — round-trip a multi-prim GLB through the
+# normalizer C ABI and verify the result is a single-prim GLB. Runs
+# against ~/Desktop/baseline_apr25.glb by default; CLI args can
+# override input + output paths.
+add_executable(aether_glb_norm_smoke tools/glb_norm_smoke.cpp)
+target_link_libraries(aether_glb_norm_smoke PRIVATE aether3d_c)
+
 # ============================================================================
 # Phase 3.4: aether3d_ffi shared library — dart:ffi-loadable surface
 #
@@ -457,6 +558,23 @@ set(AETHER_FFI_SOURCES
     src/pocketworld/background_download.cpp
     src/pocketworld/render_policy.cpp
     src/pocketworld/training_checkpoint.cpp
+    # Phase 4 — Client-side GLB normalizer C ABI. Phase 0 stub today
+    # (returns AETHER_GLB_NORM_ERR_UNSUPPORTED); Phases 1-3 fill in the
+    # cgltf/stb/meshoptimizer pipeline. Source has no aether3d_core
+    # dependencies, so it adds zero link-graph cost on iOS sim Dawn-OFF.
+    src/glb_norm/glb_normalize_c_api.cpp
+    # Plan G W1 D3 + W2 D1 — Tile-based DA3-LARGE-1.1 depth math + EdgeTAM
+    # mask post-process. Pure C++ algorithm (tile layout, conf-weighted
+    # blend with Method A 0.05 floor, sigmoid + IoU pick, bilinear resize).
+    # CoreML/TFLite/NNAPI inference itself stays in per-platform thin shims;
+    # this layer is the cross-platform deterministic math shared between
+    # iOS / Android / 鸿蒙 / Web. Ported from Tile2KWrapper.swift +
+    # EdgeTAMWrapper.swift — bit-equal verified on iPhone bench parity test.
+    src/pipeline/tile_layout.cpp
+    src/pipeline/tile_blend.cpp
+    src/pipeline/mask_post.cpp
+    src/pipeline/scale_align.cpp
+    src/pipeline/aether_depth_tile_c.cpp
 )
 
 # Phase 6.4b: PocketWorld scene IOSurface renderer (mesh PBR + splat
@@ -493,6 +611,37 @@ else()
     add_library(aether3d_ffi SHARED ${AETHER_FFI_SOURCES})
 endif()
 target_include_directories(aether3d_ffi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# ─── Phase 4 — GLB normalizer impls in FFI for static-archive ship paths ─
+# glb_normalize_c_api.cpp (already in AETHER_FFI_SOURCES) hard-references
+# aether::glb_norm::parse_glb / merge_atlases / write_glb / simplify_chart.
+# Those impls live in atlas_merger.cpp / glb_io.cpp / mesh_simplify.cpp,
+# which Phases 1-3 added to AETHER_CORE_SOURCES.
+#
+# On the iOS xcframework ship path (AETHER_FFI_BUILD_STATIC=ON), the FFI
+# archive does NOT link aether3d_core:
+#   - iOS device, AETHER_FFI_IOS_VIEWER_ONLY=TRUE → links Dawn directly,
+#     skips core (CoreML availability errors on iOS 14 strict build).
+#   - iOS simulator, Dawn=OFF → the Dawn-conditional link block is skipped
+#     entirely, so core is not linked there either.
+# Pod-consumer link would therefore fail with undefined references. Pull
+# the three impl TUs directly into the FFI archive on STATIC builds so the
+# xcframework + Android/OHOS/Web static archives ship a self-sufficient
+# GLB normalizer.
+#
+# Skipped for AETHER_FFI_BUILD_STATIC=OFF (macOS dylib smoke test) where
+# the existing Dawn=ON branch links aether3d_core; including these sources
+# in both the dylib and core would create duplicate-symbol errors.
+if(AETHER_FFI_BUILD_STATIC)
+    target_sources(aether3d_ffi PRIVATE
+        src/glb_norm/atlas_merger.cpp
+        src/glb_norm/glb_io.cpp
+        src/glb_norm/mesh_simplify.cpp)
+    target_include_directories(aether3d_ffi PRIVATE
+        third_party/stb
+        third_party/cgltf)
+    target_link_libraries(aether3d_ffi PRIVATE meshoptimizer)
+endif()
 # Phase 6.4b: scene_iosurface_renderer needs DawnGPUDevice internals
 # (the import_iosurface free function is in aether3d_core, plus the
 # narrow internal:: accessors declared in src/render/dawn_gpu_device_internal.h).
@@ -545,3 +694,16 @@ if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
     aether_test(noise_aware_trainer_test tests/trainer/noise_aware_trainer_test.cpp)
     aether_test(spatial_hash_table_test tests/tsdf/spatial_hash_table_test.cpp)
 endif()
+
+# ─── Phase 1: GLB normalizer atlas merger smoke (always available) ─────
+# Built and registered with CTest unconditionally so Phase 1 acceptance
+# (`cmake --build … --target test_atlas_merger && ctest -R atlas_merger`)
+# works against the same build_phase0 directory used in Phase 0 — that
+# directory was configured before AETHER_BUILD_MINIMAL_WHITEBOX_TESTS
+# was relevant, and re-configuring it just to flip the flag would
+# defeat the "Phase 1 reuses Phase 0 build" verification chain.
+enable_testing()
+add_executable(test_atlas_merger tests/glb_norm/test_atlas_merger.cpp)
+target_link_libraries(test_atlas_merger PRIVATE aether3d_core)
+target_compile_options(test_atlas_merger PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+add_test(NAME test_atlas_merger COMMAND test_atlas_merger)
