@@ -103,6 +103,71 @@ extern "C" int colmap_bench_perframe(const char* db_path,
   }
 }
 
+// On-DEVICE per-frame SLA bench: run the incremental pipeline on a prebuilt db
+// (features + matches already inside; extract_colors OFF so no images needed)
+// and return the PER-FRAME registration deltas — the real-hardware BA cost the
+// desktop sweep could only extrapolate. defer=1 mirrors the shipped device
+// config (all in-loop global BA deferred -> per-frame == local-BA only).
+extern "C" int aether_perframe_bench(const char* db_path,
+                                     const char* image_path,
+                                     int defer, int lnum, int liter, int mt,
+                                     int gref, int giter,
+                                     double* out_deltas_ms, int max_deltas,
+                                     int* out_n_deltas, double* out_reproj,
+                                     int* out_n_reg, double* out_total_ms) {
+  try {
+    auto options = std::make_shared<colmap::IncrementalPipelineOptions>();
+    options->min_num_matches = 15;
+    options->extract_colors = false;  // db-only; no images on device
+    options->defer_global_ba = (defer != 0);
+    if (lnum > 0) options->mapper.ba_local_num_images = lnum;
+    if (liter > 0) options->ba_local_max_num_iterations = liter;
+    if (mt > 0) options->ba_min_num_residuals_for_cpu_multi_threading = mt;
+    // PER-FRAME deltas (the BA-factor signal) are independent of the finalize
+    // caps — finalize runs AFTER the last NEXT_IMAGE_REG callback. So for the
+    // device TIMING run we may cap the finalize (gref1/giter15) to finish faster;
+    // reproj is then the capped value (ignore — full-finalize reproj is the
+    // desktop 1.1455). Pass gref/giter <=0 to keep the full defaults (5/50).
+    if (gref > 0) options->ba_global_max_refinements = gref;
+    if (giter > 0) options->ba_global_max_num_iterations = giter;
+
+    auto recon_manager = std::make_shared<colmap::ReconstructionManager>();
+    std::vector<double> stamps;
+    const double t0 = NowMs();
+    colmap::IncrementalPipeline pipeline(options, image_path, db_path,
+                                         recon_manager);
+    pipeline.AddCallback(
+        colmap::IncrementalPipeline::INITIAL_IMAGE_PAIR_REG_CALLBACK,
+        [&]() { stamps.push_back(NowMs() - t0); });
+    pipeline.AddCallback(colmap::IncrementalPipeline::NEXT_IMAGE_REG_CALLBACK,
+                         [&]() { stamps.push_back(NowMs() - t0); });
+    pipeline.Run();
+    const double total = NowMs() - t0;
+
+    size_t best_reg = 0;
+    double best_reproj = 0.0;
+    for (size_t i = 0; i < recon_manager->Size(); ++i) {
+      const auto& r = recon_manager->Get(i);
+      if (r->NumRegImages() > best_reg) {
+        best_reg = r->NumRegImages();
+        best_reproj = r->ComputeMeanReprojectionError();
+      }
+    }
+    int nd = 0;
+    for (size_t i = 1; i < stamps.size() && nd < max_deltas; ++i, ++nd) {
+      out_deltas_ms[nd] = stamps[i] - stamps[i - 1];
+    }
+    if (out_n_deltas) *out_n_deltas = nd;
+    if (out_reproj) *out_reproj = best_reproj;
+    if (out_n_reg) *out_n_reg = static_cast<int>(best_reg);
+    if (out_total_ms) *out_total_ms = total;
+    return 0;
+  } catch (const std::exception& e) {
+    if (out_n_deltas) *out_n_deltas = 0;
+    return 2;
+  }
+}
+
 #ifdef COLMAP_BENCH_MAIN
 // Parameterized desktop driver: sweep the global/local BA option fields via argv
 // + report the PER-FRAME registration deltas (the SLA growth curve) + reproj.

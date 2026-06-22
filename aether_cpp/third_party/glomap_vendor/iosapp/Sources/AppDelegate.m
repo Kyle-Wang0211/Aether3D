@@ -16,6 +16,24 @@ extern int aether_dsp_sift_selfcheck(const uint8_t* gray, int width, int height,
 extern int aether_gpu_match(const uint8_t*, int, const uint8_t*, int, double, int*);
 extern int aether_gpu_match_tiled(const uint8_t*, int, const uint8_t*, int, double, int*);
 extern int aether_gpu_match_gemm(const uint8_t*, int, const uint8_t*, int, double, int*);
+// Per-frame SLA bench: run incremental SfM on a prebuilt db, return per-frame
+// registration deltas (the real-hardware BA cost the desktop could only estimate).
+extern int aether_perframe_bench(const char* db_path, const char* image_path,
+                                 int defer, int lnum, int liter, int mt,
+                                 int gref, int giter, double* out_deltas_ms,
+                                 int max_deltas, int* out_n_deltas,
+                                 double* out_reproj, int* out_n_reg,
+                                 double* out_total_ms);
+
+static int cmp_d(const void* a, const void* b) {
+  double x = *(const double*)a, y = *(const double*)b;
+  return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+static double pctl(const double* s, int n, double p) {
+  if (n <= 0) return 0;
+  double k = (n - 1) * p / 100.0; int f = (int)k; int c = (f + 1 < n) ? f + 1 : f;
+  return s[f] + (s[c] - s[f]) * (k - f);
+}
 
 static uint8_t* DecodeGray(NSString* path, int maxEdge, int* outW, int* outH) {
   CGImageSourceRef src = CGImageSourceCreateWithURL(
@@ -70,13 +88,58 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
     printf("BENCH_START thermal=%ld\n", (long)pi.thermalState); fflush(stdout);
     os_log(OS_LOG_DEFAULT, "BENCH_START");
 
+    // ===== SFM_BENCH: per-frame registration cost on the real-res db =====
+    // db (features+matches, 396 frames @2048, 9555 kp/img) is pushed to the app's
+    // Documents container. defer=1 (shipped config). Finalize capped (gref1/giter15)
+    // for speed — per-frame deltas (the BA-factor we want) are unaffected; reproj
+    // is then the capped value (full-finalize reproj is the desktop 1.1455).
+    {
+      NSString* docs = NSSearchPathForDirectoriesInDomains(
+          NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_2048.db"];
+      if (![[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
+        printf("SFM_NO_DB path=%s\n", dbp.UTF8String); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "SFM_NO_DB %{public}s", dbp.UTF8String);
+      } else {
+        const int maxd = 512;
+        double* deltas = (double*)malloc(sizeof(double) * maxd);
+        double* srt = (double*)malloc(sizeof(double) * maxd);
+        struct { const char* label; int lnum; int liter; } cfgs[] = {
+          {"defer_lnum6", 0, 15},   // best reproj (1.1455), desktop max 511ms
+          {"defer_lnum4", 4, 15},   // margin (1.1574), desktop max 389ms
+        };
+        for (int c = 0; c < 2; ++c) {
+          int nd = 0, nreg = 0; double reproj = 0, total = 0;
+          printf("SFM_RUN cfg=%s start thermal=%ld\n", cfgs[c].label,
+                 (long)[NSProcessInfo processInfo].thermalState); fflush(stdout);
+          int rc = aether_perframe_bench(
+              dbp.UTF8String, docs.UTF8String, 1, cfgs[c].lnum, cfgs[c].liter,
+              6000, 1, 15, deltas, maxd, &nd, &reproj, &nreg, &total);
+          memcpy(srt, deltas, sizeof(double) * (nd > 0 ? nd : 1));
+          qsort(srt, nd, sizeof(double), cmp_d);
+          int over = 0; for (int i = 0; i < nd; ++i) if (deltas[i] > 2000) over++;
+          double mx = (nd > 0) ? srt[nd - 1] : 0;
+          printf("SFM_BENCH cfg=%s rc=%d nreg=%d total_ms=%.0f n=%d med=%.0f "
+                 "p90=%.0f p95=%.0f p99=%.0f max=%.0f over2s=%d\n",
+                 cfgs[c].label, rc, nreg, total, nd, pctl(srt,nd,50),
+                 pctl(srt,nd,90), pctl(srt,nd,95), pctl(srt,nd,99), mx, over);
+          fflush(stdout);
+          os_log(OS_LOG_DEFAULT, "SFM_BENCH cfg=%{public}s rc=%d nreg=%d total=%.0f "
+                 "med=%.0f p90=%.0f p95=%.0f p99=%.0f max=%.0f over2s=%d",
+                 cfgs[c].label, rc, nreg, total, pctl(srt,nd,50), pctl(srt,nd,90),
+                 pctl(srt,nd,95), pctl(srt,nd,99), mx, over);
+        }
+        free(deltas); free(srt);
+      }
+    }
+
     const int cap = 30000;
     NSString* jA = [[NSBundle mainBundle] pathForResource:@"sift_test" ofType:@"jpg"];
 
     // EXTRACT_BENCH: threaded DSP-SIFT vs serial. Correctness (bit-identical
     // selfcheck) + speedup at 2048 (recipe) and 4224 (target quality route).
     int resolutions[] = {2048, 4224};
-    for (int r = 0; r < 2; ++r) {
+    for (int r = 0; r < 0; ++r) {  // EXTRACT disabled this build (SFM_BENCH focus)
       const int res = resolutions[r];
       int w = 0, h = 0;
       uint8_t* gray = DecodeGray(jA, res, &w, &h);
