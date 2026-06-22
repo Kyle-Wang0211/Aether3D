@@ -24,6 +24,9 @@ extern int aether_perframe_bench(const char* db_path, const char* image_path,
                                  int max_deltas, int* out_n_deltas,
                                  double* out_reproj, int* out_n_reg,
                                  double* out_total_ms);
+// Async-finalize validation: local (instant) vs refined (background) time+reproj.
+extern int aether_async_bench(const char* db_path, const char* image_path,
+                              char* out_json, int out_cap);
 
 static int cmp_d(const void* a, const void* b) {
   double x = *(const double*)a, y = *(const double*)b;
@@ -88,6 +91,23 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
     printf("BENCH_START thermal=%ld\n", (long)pi.thermalState); fflush(stdout);
     os_log(OS_LOG_DEFAULT, "BENCH_START");
 
+    // ===== SFM_ASYNC: validate async-finalize (local instant vs bg refine) =====
+    {
+      NSString* docs = NSSearchPathForDirectoriesInDomains(
+          NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_2048.db"];
+      if ([[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
+        char j[512]; j[0] = 0;
+        printf("SFM_ASYNC start thermal=%ld\n",
+               (long)[NSProcessInfo processInfo].thermalState); fflush(stdout);
+        int rc = aether_async_bench(dbp.UTF8String, "", j, (int)sizeof(j));
+        printf("SFM_ASYNC rc=%d %s\n", rc, j); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "SFM_ASYNC rc=%d %{public}s", rc, j);
+      } else {
+        printf("SFM_ASYNC_NO_DB\n"); fflush(stdout);
+      }
+    }
+
     // ===== SFM_BENCH: per-frame registration cost on the real-res db =====
     // db (features+matches, 396 frames @2048, 9555 kp/img) is pushed to the app's
     // Documents container. defer=1 (shipped config). Finalize capped (gref1/giter15)
@@ -108,7 +128,7 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
           {"defer_lnum6", 0, 15},   // best reproj (1.1455), desktop max 511ms
           {"defer_lnum4", 4, 15},   // margin (1.1574), desktop max 389ms
         };
-        for (int c = 0; c < 2; ++c) {
+        for (int c = 0; c < 0; ++c) {  // per-frame SFM_BENCH gated off this build
           int nd = 0, nreg = 0; double reproj = 0, total = 0;
           printf("SFM_RUN cfg=%s start thermal=%ld\n", cfgs[c].label,
                  (long)[NSProcessInfo processInfo].thermalState); fflush(stdout);

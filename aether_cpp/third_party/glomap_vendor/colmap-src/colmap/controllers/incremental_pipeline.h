@@ -139,6 +139,14 @@ struct IncrementalPipelineOptions {
   // Pure scheduling flag — does not alter any BA math. Cross-platform safe.
   bool defer_global_ba = false;
 
+  // [AETHER] Also skip the single FINALIZE global BA, yielding a LOCAL-only
+  // reconstruction (poses + per-frame-triangulated points, no global solve).
+  // Used by the async-finalize phase 1: produce an instant local result, then
+  // run the global BA on a worker thread (TriangulateReconstruction) and splice
+  // the refined result back. Combined with defer_global_ba => zero global BA in
+  // pipeline.Run(). Pure scheduling flag — does not alter any BA math.
+  bool skip_finalize_global_ba = false;
+
   // Whether to use Ceres' CUDA sparse linear algebra library, if available.
   bool ba_use_gpu = false;
   std::string ba_gpu_index = "-1";
@@ -244,6 +252,15 @@ class IncrementalPipeline : public BaseController {
       Reconstruction& reconstruction);
 
   void TriangulateReconstruction(
+      const std::shared_ptr<Reconstruction>& reconstruction);
+
+  // [AETHER] Run ONLY the finalize global BA on an existing reconstruction —
+  // identical to the in-pipeline finalize (IterativeGlobalRefinement +
+  // FilterFrames), WITHOUT the aggressive per-image re-triangulation loop of
+  // TriangulateReconstruction (which inflates point count + mean reproj). Used
+  // by the async finalize worker so the refined result exactly matches what the
+  // synchronous defer-finalize would produce.
+  void RefineReconstruction(
       const std::shared_ptr<Reconstruction>& reconstruction);
 
   bool CheckRunGlobalRefinement(const Reconstruction& reconstruction,

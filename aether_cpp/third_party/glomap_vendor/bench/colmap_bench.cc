@@ -9,10 +9,12 @@
 
 #include <glog/logging.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 static double NowMs() {
@@ -164,6 +166,84 @@ extern "C" int aether_perframe_bench(const char* db_path,
     return 0;
   } catch (const std::exception& e) {
     if (out_n_deltas) *out_n_deltas = 0;
+    return 2;
+  }
+}
+
+// On-DEVICE async-finalize validation: exercise the SAME two-phase primitives the
+// production ABI (aether_sfm_finalize_async) uses — (1) skip_finalize_global_ba
+// for an instant LOCAL recon, (2) the heavy global BA on a WORKER thread via the
+// pipeline's public TriangulateReconstruction, splice-swapping the refined model.
+// Reports local time/reproj (what the UI sees instantly) vs refined time/reproj
+// (the background payoff). Proves the global BA is off the per-frame path.
+extern "C" int aether_async_bench(const char* db_path, const char* image_path,
+                                  char* out_json, int out_cap) {
+  try {
+    // ── phase 1: LOCAL-only (defer + skip_finalize) — instant ─────────
+    auto opts = std::make_shared<colmap::IncrementalPipelineOptions>();
+    opts->min_num_matches = 15;
+    opts->extract_colors = false;
+    opts->defer_global_ba = true;
+    opts->skip_finalize_global_ba = true;
+    opts->ba_local_max_num_iterations = 15;
+    opts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+    auto mgr = std::make_shared<colmap::ReconstructionManager>();
+    const double t0 = NowMs();
+    colmap::IncrementalPipeline p1(opts, image_path, db_path, mgr);
+    p1.Run();
+    const double local_ms = NowMs() - t0;
+    std::shared_ptr<colmap::Reconstruction> local;
+    size_t best = 0;
+    for (size_t i = 0; i < mgr->Size(); ++i) {
+      if (mgr->Get(i)->NumRegImages() >= best) {
+        best = mgr->Get(i)->NumRegImages();
+        local = mgr->Get(i);
+      }
+    }
+    if (!local) {
+      std::snprintf(out_json, out_cap, "{\"error\":\"no local recon\"}");
+      return 2;
+    }
+    const double local_reproj = local->ComputeMeanReprojectionError();
+    const int local_reg = static_cast<int>(local->NumRegImages());
+    const int local_pts = static_cast<int>(local->NumPoints3D());
+
+    // ── phase 2: global BA on a WORKER thread (off the critical path) ──
+    auto refined = std::make_shared<colmap::Reconstruction>(*local);
+    std::atomic<int> done{0};
+    double refine_ms = 0.0;
+    std::thread worker([&]() {
+      try {
+        const double tr = NowMs();
+        auto o2 = std::make_shared<colmap::IncrementalPipelineOptions>();
+        o2->min_num_matches = 15;
+        o2->extract_colors = false;
+        o2->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+        auto m2 = std::make_shared<colmap::ReconstructionManager>();
+        colmap::IncrementalPipeline p2(o2, image_path, db_path, m2);
+        p2.RefineReconstruction(refined);
+        refine_ms = NowMs() - tr;
+        done.store(1);
+      } catch (...) {
+        done.store(2);
+      }
+    });
+    worker.join();  // bench waits; in production the UI thread is free meanwhile
+    const bool ok = done.load() == 1;
+    const double refined_reproj = ok ? refined->ComputeMeanReprojectionError() : 0;
+    const int refined_reg = ok ? static_cast<int>(refined->NumRegImages()) : 0;
+    const int refined_pts = ok ? static_cast<int>(refined->NumPoints3D()) : 0;
+
+    std::snprintf(
+        out_json, out_cap,
+        "{\"local_ms\":%.0f,\"local_reproj\":%.4f,\"local_reg\":%d,"
+        "\"local_pts\":%d,\"refine_ms\":%.0f,\"refined_reproj\":%.4f,"
+        "\"refined_reg\":%d,\"refined_pts\":%d,\"done\":%d}",
+        local_ms, local_reproj, local_reg, local_pts, refine_ms, refined_reproj,
+        refined_reg, refined_pts, done.load());
+    return 0;
+  } catch (const std::exception& e) {
+    std::snprintf(out_json, out_cap, "{\"error\":\"%s\"}", e.what());
     return 2;
   }
 }

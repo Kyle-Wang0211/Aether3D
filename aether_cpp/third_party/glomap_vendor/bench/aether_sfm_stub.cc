@@ -94,6 +94,17 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
   return Unsupported(out_json, out_cap);
 }
 
+aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
+                                              char* out_json, int out_cap) {
+  (void)s;
+  return Unsupported(out_json, out_cap);
+}
+
+int aether_sfm_finalize_status(aether_sfm_session_t* s) {
+  (void)s;
+  return AETHER_SFM_FINALIZE_ERROR;
+}
+
 aether_sfm_result_t aether_sfm_get_poses(aether_sfm_session_t* s,
                                          aether_sfm_pose_t* out_poses, int cap,
                                          int* out_count) {

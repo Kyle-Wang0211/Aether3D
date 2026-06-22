@@ -38,12 +38,15 @@
 
 #include <glog/logging.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -109,6 +112,16 @@ struct aether_sfm_session {
   // Result of finalize()/run(): the largest reconstruction.
   std::shared_ptr<colmap::ReconstructionManager> recon_manager;
   std::shared_ptr<const colmap::Reconstruction> recon;  // best model, or null
+
+  // Async finalize (aether_sfm_finalize_async): phase 1 fills `recon` with a
+  // LOCAL-only result (instant), then `refine_thread` runs the global BA on a
+  // copy and atomically swaps `recon` to the refined model. `recon_mutex` guards
+  // every read/write of `recon` once the worker may be running; `finalize_status`
+  // is the lock-free progress flag the caller polls.
+  std::mutex recon_mutex;
+  std::thread refine_thread;
+  std::atomic<int> finalize_status{0};  // aether_sfm_finalize_status_t
+  double refine_ms = 0.0;               // worker global-BA wall time
 };
 
 namespace {
@@ -147,10 +160,13 @@ aether_sfm_result_t RunIncremental(
     const aether_sfm_options_t& opts,
     std::shared_ptr<colmap::ReconstructionManager>* out_manager,
     std::shared_ptr<const colmap::Reconstruction>* out_recon, char* out_json,
-    int out_cap) {
+    int out_cap, bool local_only = false) {
   try {
     auto pipeline_opts = std::make_shared<colmap::IncrementalPipelineOptions>();
     pipeline_opts->min_num_matches = 15;
+    // No images on device => no point colors to read; skip color extraction
+    // (avoids per-image "could not read image" warnings + the file I/O).
+    if (image_path.empty()) pipeline_opts->extract_colors = false;
     // [A] Defer ALL in-loop global BA (periodic + recovery) to the single
     // finalize solve. Grounded on the real-res bench (396 frames, 9555 kp/img,
     // 231k pts, host ceres): per-frame registration becomes LOCAL-BA-ONLY ->
@@ -163,6 +179,11 @@ aether_sfm_result_t RunIncremental(
     // Bonus: reproj IMPROVES 1.1651 -> 1.1455 — the single finalize global BA
     // over the complete model converges cleaner than incremental periodic refines.
     pipeline_opts->defer_global_ba = true;
+    // [ASYNC] local_only => also skip the finalize global BA, so Run() returns a
+    // LOCAL-only reconstruction (instant). The async-finalize worker then runs
+    // the global BA off the critical path. Batch/sync callers pass false and get
+    // the validated full-finalize result (reproj 1.1455).
+    if (local_only) pipeline_opts->skip_finalize_global_ba = true;
     // Local BA caps = the per-frame UI cost (the ONLY thing on the critical path
     // now). liter15 + mt6000 (multi-thread above 6k residuals). max 511ms desktop.
     pipeline_opts->ba_local_max_num_iterations = 15;
@@ -193,6 +214,38 @@ aether_sfm_result_t RunIncremental(
       std::snprintf(out_json, out_cap, "{\"error\":\"%s\"}", e.what());
     }
     return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
+// Async-finalize worker: deep-copy the local-only reconstruction, run the global
+// BA (retriangulation + global bundle adjustment) via the pipeline's PUBLIC
+// TriangulateReconstruction — the same validated plumbing the synchronous
+// finalize uses — then atomically swap the refined model into the session. Runs
+// off the UI thread so the caller already has the instant local result. db_path
+// must be readable (the session closed its handle before spawning this).
+void RefineGlobalBA(aether_sfm_session* s,
+                    std::shared_ptr<const colmap::Reconstruction> local) {
+  try {
+    const double t0 = NowMs();
+    auto refined = std::make_shared<colmap::Reconstruction>(*local);
+    auto popts = std::make_shared<colmap::IncrementalPipelineOptions>();
+    popts->min_num_matches = 15;
+    popts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+    // Global BA at FULL convergence (default gref5/giter50) = the validated
+    // finalize quality (reproj 1.1455). TriangulateReconstruction reads
+    // ba_global_* + Mapper() + Triangulation() from these options.
+    auto manager = std::make_shared<colmap::ReconstructionManager>();
+    colmap::IncrementalPipeline pipeline(popts, s->image_path, s->db_path,
+                                         manager);
+    pipeline.RefineReconstruction(refined);
+    {
+      std::lock_guard<std::mutex> lk(s->recon_mutex);
+      s->recon = refined;
+      s->refine_ms = NowMs() - t0;
+    }
+    s->finalize_status.store(2);  // AETHER_SFM_FINALIZE_REFINED
+  } catch (...) {
+    s->finalize_status.store(3);  // AETHER_SFM_FINALIZE_ERROR
   }
 }
 
@@ -424,13 +477,65 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
   }
 }
 
+// Two-phase async finalize. Phase 1 (synchronous, this call): incremental
+// register + local BA only -> LOCAL reconstruction is live in *recon the instant
+// this returns OK (status = LOCAL_READY), so the UI can show the model now.
+// Phase 2 (background thread): the heavy O(N) global BA runs off the critical
+// path; when it converges the refined model is atomically swapped into *recon
+// (status = REFINED). The getters always read whatever is current under the
+// mutex (local first, refined later). out_json carries the LOCAL summary.
+aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
+                                              char* out_json, int out_cap) {
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  if (s->refine_thread.joinable()) s->refine_thread.join();  // drain prior run
+  try {
+    if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
+    std::shared_ptr<colmap::ReconstructionManager> manager;
+    std::shared_ptr<const colmap::Reconstruction> local;
+    const aether_sfm_result_t rc =
+        RunIncremental(s->db_path, s->image_path, s->options, &manager, &local,
+                       out_json, out_cap, /*local_only=*/true);
+    if (rc != AETHER_SFM_OK) {
+      s->finalize_status.store(3);
+      return rc;
+    }
+    if (!local || local->NumRegImages() == 0) {
+      s->finalize_status.store(3);
+      return AETHER_SFM_ERR_NOT_REGISTERED;
+    }
+    {
+      std::lock_guard<std::mutex> lk(s->recon_mutex);
+      s->recon_manager = manager;
+      s->recon = local;
+    }
+    s->finalize_status.store(1);  // LOCAL_READY
+    s->refine_thread = std::thread(RefineGlobalBA, s, local);
+    return AETHER_SFM_OK;
+  } catch (const std::exception&) {
+    s->finalize_status.store(3);
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
+// Poll the background refinement: 0=IDLE, 1=LOCAL_READY (local live, refining),
+// 2=REFINED (global BA done, *recon swapped), 3=ERROR.
+int aether_sfm_finalize_status(aether_sfm_session_t* s) {
+  if (!s) return 3;
+  return s->finalize_status.load();
+}
+
 // ─── outputs ────────────────────────────────────────────────────────
 aether_sfm_result_t aether_sfm_get_poses(aether_sfm_session_t* s,
                                          aether_sfm_pose_t* out_poses, int cap,
                                          int* out_count) {
   if (!s || !out_count) return AETHER_SFM_ERR_INVALID_ARG;
-  if (!s->recon) return AETHER_SFM_ERR_NOT_REGISTERED;
-  const auto& images = s->recon->Images();
+  std::shared_ptr<const colmap::Reconstruction> recon;
+  {
+    std::lock_guard<std::mutex> lk(s->recon_mutex);
+    recon = s->recon;  // stable snapshot; survives an async swap
+  }
+  if (!recon) return AETHER_SFM_ERR_NOT_REGISTERED;
+  const auto& images = recon->Images();
   int written = 0;
   int total = 0;
   for (const auto& [image_id, image] : images) {
@@ -466,8 +571,13 @@ aether_sfm_result_t aether_sfm_get_points(aether_sfm_session_t* s,
                                           aether_sfm_point_t** out_points,
                                           int* out_count) {
   if (!s || !out_count) return AETHER_SFM_ERR_INVALID_ARG;
-  if (!s->recon) return AETHER_SFM_ERR_NOT_REGISTERED;
-  const auto& pts = s->recon->Points3D();
+  std::shared_ptr<const colmap::Reconstruction> recon;
+  {
+    std::lock_guard<std::mutex> lk(s->recon_mutex);
+    recon = s->recon;  // stable snapshot; survives an async swap
+  }
+  if (!recon) return AETHER_SFM_ERR_NOT_REGISTERED;
+  const auto& pts = recon->Points3D();
   const int n = static_cast<int>(pts.size());
   *out_count = n;
   if (!out_points) return AETHER_SFM_OK;  // count-only query
@@ -496,6 +606,8 @@ void aether_sfm_points_free(aether_sfm_point_t* points) {
 
 void aether_sfm_free(aether_sfm_session_t* s) {
   if (!s) return;
+  // The async-finalize worker captures `s`; it MUST finish before we delete.
+  if (s->refine_thread.joinable()) s->refine_thread.join();
   if (s->db) {
     try {
       s->db->Close();

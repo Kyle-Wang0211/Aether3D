@@ -547,7 +547,9 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
   }
 
   // Only run final global BA, if last incremental BA was not global.
-  if (reconstruction->NumRegFrames() > 0 &&
+  // [AETHER] skip_finalize_global_ba => local-only result (async finalize phase 1).
+  if (!options_->skip_finalize_global_ba &&
+      reconstruction->NumRegFrames() > 0 &&
       reconstruction->NumRegFrames() != ba_prev_num_reg_frames &&
       reconstruction->NumPoints3D() != ba_prev_num_points) {
     IterativeGlobalRefinement(*options_, mapper_options, mapper);
@@ -684,6 +686,26 @@ void IncrementalPipeline::TriangulateReconstruction(
 
   LOG(INFO) << "Extracting colors";
   reconstruction->ExtractColorsForAllImages(image_path_);
+}
+
+void IncrementalPipeline::RefineReconstruction(
+    const std::shared_ptr<Reconstruction>& reconstruction) {
+  // [AETHER] Exactly the in-pipeline finalize global BA (see line ~553 +
+  // IterativeGlobalRefinement free fn), run standalone on an existing recon for
+  // the async-finalize worker. No per-image triangulation loop — matches what
+  // the synchronous defer-finalize produces (reproj 1.1455 on the real-res db).
+  THROW_CHECK(LoadDatabase());
+  IncrementalMapper mapper(database_cache_);
+  mapper.BeginReconstruction(reconstruction);
+  mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
+                                   options_->ba_global_max_refinement_change,
+                                   options_->Mapper(),
+                                   options_->GlobalBundleAdjustment(),
+                                   options_->Triangulation(),
+                                   /*normalize_reconstruction=*/false);
+  mapper.FilterFrames(options_->Mapper());
+  mapper.EndReconstruction(/*discard=*/false);
+  reconstruction->UpdatePoint3DErrors();
 }
 
 bool IncrementalPipeline::ReachedMaxRuntime() const {
