@@ -503,7 +503,8 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
                                       options_->Triangulation(),
                                       next_image_id);
 
-      if (CheckRunGlobalRefinement(
+      if (!options_->defer_global_ba &&
+          CheckRunGlobalRefinement(
               *reconstruction, ba_prev_num_reg_frames, ba_prev_num_points)) {
         IterativeGlobalRefinement(*options_, mapper_options, mapper);
         ba_prev_num_points = reconstruction->NumPoints3D();
@@ -535,7 +536,8 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     // If no image could be registered, try a single final global iterative
     // bundle adjustment and try again to register one image. If this fails
     // once, then exit the incremental mapping.
-    if (!reg_next_success && prev_reg_next_success) {
+    if (!options_->defer_global_ba && !reg_next_success &&
+        prev_reg_next_success) {
       IterativeGlobalRefinement(*options_, mapper_options, mapper);
     }
   } while (reg_next_success || prev_reg_next_success);

@@ -151,18 +151,32 @@ aether_sfm_result_t RunIncremental(
   try {
     auto pipeline_opts = std::make_shared<colmap::IncrementalPipelineOptions>();
     pipeline_opts->min_num_matches = 15;
-    // E4 BA caps (grounded on the 414-frame bench, host ceres): the periodic
-    // global BA is the only O(N) term + the per-frame SLA breaker. Capping
-    // refinements 5->1, global iters 50->15, local iters 25->15, firing less
-    // often (ratio 1.1->1.4), and multi-threading the local BA cut the worst
-    // per-frame registration from 11233ms -> 2425ms (4.6x) with reproj UNCHANGED
-    // (0.6794 -> 0.6785). Warm-started incremental BA converges well under these
-    // caps. Pure option fields => cross-platform + on-device, zero quality cost.
-    pipeline_opts->ba_global_max_refinements = 1;
-    pipeline_opts->ba_global_max_num_iterations = 15;
-    pipeline_opts->ba_global_frames_ratio = 1.4;
+    // [A] Defer ALL in-loop global BA (periodic + recovery) to the single
+    // finalize solve. Grounded on the real-res bench (396 frames, 9555 kp/img,
+    // 231k pts, host ceres): per-frame registration becomes LOCAL-BA-ONLY ->
+    // worst single frame 16122ms (periodic, 19 frames >2s) collapses to 511ms,
+    // ZERO frames >2s. The periodic global BA is the only O(N)-growing term and
+    // the per-frame SLA breaker; the EARLIER periodic caps (gref1/giter15) were
+    // NOT enough at real resolution (in-loop + recovery solves still spiked to
+    // 17s). Deferring takes every O(N) global solve off the per-frame critical
+    // path so capture-time UI latency stays local-only regardless of N.
+    // Bonus: reproj IMPROVES 1.1651 -> 1.1455 — the single finalize global BA
+    // over the complete model converges cleaner than incremental periodic refines.
+    pipeline_opts->defer_global_ba = true;
+    // Local BA caps = the per-frame UI cost (the ONLY thing on the critical path
+    // now). liter15 + mt6000 (multi-thread above 6k residuals). max 511ms desktop.
     pipeline_opts->ba_local_max_num_iterations = 15;
     pipeline_opts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+    // [B] Per-frame margin knob, GATED on the iPhone BA-factor measurement:
+    // ba_local_num_images 6->4 cuts per-frame max 511->389ms but costs reproj
+    // 1.1455->1.1574. Default keeps 6 (best reproj); drop to 4 ONLY if the device
+    // cannot hold a 511ms local BA under the 2s SLA. (Memory-bound BA likely runs
+    // ~3-5x desktop, not the ~6x of compute-bound extraction -> 511ms*4 ~ 2s.)
+    //
+    // Finalize global BA is now the ONLY global solve -> it MUST run FULL
+    // (default gref5/giter50) to converge; the old E4 periodic caps under-converge
+    // it (reproj 1.1847). Cost ~103s desktop (~5-8min device) is a one-time
+    // POST-capture price, async-able onto a worker thread later. Left at defaults.
     auto manager = std::make_shared<colmap::ReconstructionManager>();
 
     const double t0 = NowMs();

@@ -133,6 +133,12 @@ struct IncrementalPipelineOptions {
   int ba_global_max_refinements = 5;
   double ba_global_max_refinement_change = 0.0005;
 
+  // [AETHER] Defer ALL in-loop global bundle adjustment (periodic + recovery) to
+  // the single finalize solve. On-device per-frame UI then pays local-BA-only
+  // latency; the heavy O(N) global solve runs once post-capture (or async).
+  // Pure scheduling flag — does not alter any BA math. Cross-platform safe.
+  bool defer_global_ba = false;
+
   // Whether to use Ceres' CUDA sparse linear algebra library, if available.
   bool ba_use_gpu = false;
   std::string ba_gpu_index = "-1";

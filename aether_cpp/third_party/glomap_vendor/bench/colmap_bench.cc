@@ -157,6 +157,10 @@ int main(int argc, char** argv) {
   options->ba_min_num_residuals_for_cpu_multi_threading =
       g_arg_i(argc, argv, "--mt",
               options->ba_min_num_residuals_for_cpu_multi_threading);
+  options->mapper.ba_local_num_images =
+      g_arg_i(argc, argv, "--lnum", options->mapper.ba_local_num_images);
+  options->defer_global_ba =
+      g_arg_i(argc, argv, "--defer", options->defer_global_ba ? 1 : 0) != 0;
 
   auto recon_manager = std::make_shared<colmap::ReconstructionManager>();
   std::vector<double> stamps;
@@ -182,11 +186,13 @@ int main(int argc, char** argv) {
     }
   }
   std::printf(
-      "CFG gref=%d giter=%d gratio=%.2f liter=%d lref=%d mt=%d\n",
+      "CFG gref=%d giter=%d gratio=%.2f liter=%d lref=%d mt=%d lnum=%d "
+      "defer=%d\n",
       options->ba_global_max_refinements, options->ba_global_max_num_iterations,
       options->ba_global_frames_ratio, options->ba_local_max_num_iterations,
       options->ba_local_max_refinements,
-      options->ba_min_num_residuals_for_cpu_multi_threading);
+      options->ba_min_num_residuals_for_cpu_multi_threading,
+      options->mapper.ba_local_num_images, options->defer_global_ba ? 1 : 0);
   std::printf(
       "RESULT total_ms=%.0f n_reg=%zu n_pts=%zu reproj=%.4f n_steps=%zu\n",
       total, best_reg, best_pts, best_reproj, stamps.size());
