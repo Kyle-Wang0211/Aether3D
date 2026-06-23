@@ -2,37 +2,45 @@
 // scans, plus the publish-to-community workflow.
 //
 // Three states the page handles:
-//   • running — job is still queued/reconstructing/training/packaging.
-//                Shows a spinner with the lifecycle status; no GLB yet.
-//   • viewable — artifactPath points at a local file:// URL. Renders
-//                LiveModelView (orbit on, manipulator drives camera).
-//                "Publish" button is enabled.
-//   • failed — job came back failed; shows reason + a retry-from-this-
-//                record button (TODO; v1 just shows the message).
+//   • running — no artifact yet; shows a processing placeholder.
+//   • viewable — artifactPath points at a local file:// URL. Renders the
+//                aether_cpp viewer (orbit + pinch). "Publish" is enabled
+//                when signed in AND not already published.
+//   • published — cloudWorkId is set; the publish action shows "已发布".
 //
-// Publish flow:
-//   tap publish action → bottom sheet with title (1..100, required) and
-//   description (0..5000, optional) → tap confirm → PublishService
-//   uploads the GLB to `works/<uid>/<recordId>.glb` and inserts a
-//   `works` row with visibility='public' and published_at=now(). On
-//   success the page re-renders with a "published" pill instead of the
-//   button; tap that pill to edit/unpublish.
+// Publish flow (re-introduced 2026-06-23 per
+//   docs/superpowers/specs/2026-06-23-publish-to-community-design.md):
+//   tap publish → _PublishForm bottom sheet (title + optional desc) →
+//   capture a thumbnail frame from the live viewer → PublishService
+//   orchestrates normalize → upload → insert → thumbnail → mark the
+//   local record cloudWorkId → success SnackBar.
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../community/publish_service.dart';
 import '../../l10n/app_localizations.dart';
-import '../../me/publish_service.dart';
 import '../../me/scan_record_store.dart';
-import '../community/live_model_view.dart';
+import '../community/aether_cpp_card_demo.dart';
+import '../community/viewer_impl.dart';
 import '../design_system.dart';
 import '../scan_record.dart';
 
 class MyWorkDetailPage extends StatefulWidget {
   final String recordId;
 
-  const MyWorkDetailPage({super.key, required this.recordId});
+  /// Injectable for tests; defaults to a fresh PublishService wired to
+  /// the live Supabase client + a fresh CommunityService.
+  final PublishService? publishService;
+
+  const MyWorkDetailPage({
+    super.key,
+    required this.recordId,
+    this.publishService,
+  });
 
   @override
   State<MyWorkDetailPage> createState() => _MyWorkDetailPageState();
@@ -40,8 +48,17 @@ class MyWorkDetailPage extends StatefulWidget {
 
 class _MyWorkDetailPageState extends State<MyWorkDetailPage> {
   late final ScanRecordStore _store = ScanRecordStore.instance;
+  late final PublishService _publishService =
+      widget.publishService ?? PublishService();
   StreamSubscription<List<ScanRecord>>? _sub;
   ScanRecord? _record;
+
+  /// Live viewer captured via onViewerReady — used to snapshot a
+  /// thumbnail frame at publish time.
+  AetherCppViewerImpl? _viewer;
+
+  /// Double-tap / re-entry guard.
+  bool _publishing = false;
 
   @override
   void initState() {
@@ -59,6 +76,14 @@ class _MyWorkDetailPageState extends State<MyWorkDetailPage> {
     super.dispose();
   }
 
+  bool get _canPublish {
+    final r = _record;
+    if (r == null) return false;
+    return r.artifactPath != null &&
+        r.cloudWorkId == null &&
+        Supabase.instance.client.auth.currentUser != null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = AppL10n.of(context);
@@ -70,6 +95,7 @@ class _MyWorkDetailPageState extends State<MyWorkDetailPage> {
         body: Center(child: Text(l.meDetailRecordNotFound)),
       );
     }
+    final published = r.cloudWorkId != null;
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
@@ -91,156 +117,175 @@ class _MyWorkDetailPageState extends State<MyWorkDetailPage> {
           ),
         ),
         centerTitle: true,
+        actions: [
+          if (r.artifactPath != null)
+            if (published)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Center(
+                  child: Text(
+                    l.meDetailPublished,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: AetherColors.textSecondary,
+                    ),
+                  ),
+                ),
+              )
+            else
+              TextButton(
+                onPressed: _canPublish && !_publishing ? _onPublishTap : null,
+                child: Text(
+                  l.meDetailPublish,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+        ],
       ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(child: _buildBody(r)),
-            _buildBottomBar(r, l),
-          ],
-        ),
-      ),
+      body: SafeArea(child: _buildBody(r)),
     );
   }
 
   Widget _buildBody(ScanRecord r) {
-    if (r.jobStatus == ScanJobStatus.failed) {
-      return _FailedState(message: r.failureMessage);
-    }
-    if (r.isRunningTask) {
-      return _RunningState(record: r);
-    }
     final url = r.artifactPath;
     if (url == null) {
+      // "No artifact yet" = the local W3 pipeline hasn't run on this
+      // capture's photos directory; show a generic processing placeholder.
       return const _RunningState();
     }
-    return LiveModelView(
-      key: ValueKey('mywork-${r.id}'),
+    return AetherCppCardDemo(
+      key: ValueKey('mywork-aether-${r.id}'),
       modelUrl: url,
       interactive: true,
-      cameraDistance: 5.0,
-      // Captured scans ship baked lighting in their baseColor — adding
-      // an environment IBL on top would double-light them.
-      useEnvironmentLighting: false,
+      onViewerReady: (viewer) => _viewer = viewer,
     );
   }
 
-  Widget _buildBottomBar(ScanRecord r, AppL10n l) {
-    final canPublish =
-        r.artifactPath != null && r.jobStatus == null && !r.needsAttention;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          top: BorderSide(color: AetherColors.border, width: 0.5),
-        ),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              r.publishedWorkId == null
-                  ? l.meDetailVisibilityPrivate
-                  : l.meDetailPublishedBadge,
-              style: AetherTextStyles.bodySm,
-            ),
-          ),
-          if (r.publishedWorkId == null)
-            FilledButton(
-              onPressed: canPublish ? () => _openPublishSheet(r) : null,
-              style: FilledButton.styleFrom(
-                backgroundColor: AetherColors.primary,
-                disabledBackgroundColor: AetherColors.borderStrong,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AetherRadii.pill),
-                ),
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              ),
-              child: Text(l.meDetailActionPublish,
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-            )
-          else
-            OutlinedButton(
-              onPressed: () => _openPublishSheet(r),
-              style: OutlinedButton.styleFrom(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AetherRadii.pill),
-                ),
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                side: const BorderSide(color: AetherColors.border),
-              ),
-              child: Text(l.meDetailActionEdit,
-                  style: const TextStyle(
-                    color: AetherColors.textPrimary,
-                    fontWeight: FontWeight.w700,
-                  )),
-            ),
-        ],
-      ),
-    );
-  }
+  Future<void> _onPublishTap() async {
+    final r = _record;
+    if (r == null || !_canPublish || _publishing) return;
 
-  Future<void> _openPublishSheet(ScanRecord r) async {
-    final result = await showModalBottomSheet<_PublishFormResult>(
+    final formResult = await showModalBottomSheet<_PublishFormResult>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (context) => _PublishForm(record: r),
+      builder: (_) => _PublishForm(defaultTitle: r.name),
     );
-    if (result == null || !mounted) return;
+    if (formResult == null || !mounted) return;
+
+    await _runPublish(
+      record: r,
+      title: formResult.title,
+      description: formResult.description,
+    );
+  }
+
+  Future<void> _runPublish({
+    required ScanRecord record,
+    required String title,
+    String? description,
+  }) async {
+    if (_publishing) return;
+    setState(() => _publishing = true);
+
     final l = AppL10n.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    final progress = ValueNotifier<PublishProgress>(
+      const PublishProgress(phase: 'reading', fraction: 0.0),
+    );
+    // Non-dismissible modal progress overlay.
+    unawaited(showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _PublishProgressDialog(progress: progress),
+    ));
+
+    PublishResult? result;
+    Object? error;
     try {
-      if (r.publishedWorkId == null) {
-        await PublishService.instance.publish(
-          record: r,
-          title: result.title,
-          description: result.description,
-        );
-        messenger.showSnackBar(SnackBar(
-          content: Text(l.meDetailToastPublished),
-          behavior: SnackBarBehavior.floating,
-        ));
-      } else {
-        await PublishService.instance.editPublished(
-          workId: r.publishedWorkId!,
-          title: result.title,
-          description: result.description,
-          recordId: r.id,
-        );
-        messenger.showSnackBar(SnackBar(
-          content: Text(l.meDetailToastUpdated),
-          behavior: SnackBarBehavior.floating,
-        ));
+      // Best-effort thumbnail from the live viewer's last-seen frame.
+      Uint8List? jpeg;
+      try {
+        jpeg = await _viewer?.captureThumb(quality: 0.85);
+      } catch (_) {
+        jpeg = null;
       }
-    } on PublishException catch (e) {
-      messenger.showSnackBar(SnackBar(
-        content: Text(l.meDetailToastPublishFailed(e.detail ?? e.code)),
-        behavior: SnackBarBehavior.floating,
-      ));
+
+      result = await _publishService.publish(
+        record: record,
+        title: title,
+        description: description,
+        thumbnailJpeg: jpeg,
+        onProgress: (p) => progress.value = p,
+      );
     } catch (e) {
-      messenger.showSnackBar(SnackBar(
-        content: Text(l.meDetailToastPublishFailed(e.toString())),
-        behavior: SnackBarBehavior.floating,
-      ));
+      error = e;
     }
+
+    // Dismiss the progress dialog.
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    progress.dispose();
+
+    if (!mounted) {
+      _publishing = false;
+      return;
+    }
+
+    if (result != null) {
+      // Mark the local record published so the button flips to "已发布".
+      final cur = _store.byId(record.id);
+      if (cur != null) {
+        await _store.addOrUpdate(cur.copyWith(cloudWorkId: result.workId));
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l.meDetailPublishSuccess)),
+        );
+      }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_publishErrorMessage(l, error))),
+      );
+    }
+
+    if (mounted) setState(() => _publishing = false);
+  }
+
+  String _publishErrorMessage(AppL10n l, Object? error) {
+    if (error is PublishException) {
+      switch (error.phase) {
+        case 'reading':
+          return l.meDetailPublishErrorReading;
+        case 'normalizing':
+          return l.meDetailPublishErrorNormalizing;
+        case 'uploading':
+          return l.meDetailPublishErrorUploading;
+        case 'inserting':
+          return l.meDetailPublishErrorGeneric;
+      }
+    }
+    return l.meDetailPublishErrorGeneric;
   }
 }
 
+/// Result returned by [_PublishForm].
 class _PublishFormResult {
   final String title;
   final String? description;
   const _PublishFormResult({required this.title, this.description});
 }
 
+/// Modal bottom sheet collecting the work title (required, 1–100 chars)
+/// and an optional description (≤5000 chars).
 class _PublishForm extends StatefulWidget {
-  final ScanRecord record;
-
-  const _PublishForm({required this.record});
+  final String defaultTitle;
+  const _PublishForm({required this.defaultTitle});
 
   @override
   State<_PublishForm> createState() => _PublishFormState();
@@ -248,14 +293,8 @@ class _PublishForm extends StatefulWidget {
 
 class _PublishFormState extends State<_PublishForm> {
   late final TextEditingController _titleCtrl =
-      TextEditingController(text: widget.record.name);
-  late final TextEditingController _descCtrl =
-      TextEditingController(text: widget.record.caption ?? '');
-  final _formKey = GlobalKey<FormState>();
-  bool _submitting = false;
-
-  static const int _maxTitle = 100;
-  static const int _maxDescription = 5000;
+      TextEditingController(text: widget.defaultTitle);
+  final TextEditingController _descCtrl = TextEditingController();
 
   @override
   void dispose() {
@@ -264,149 +303,160 @@ class _PublishFormState extends State<_PublishForm> {
     super.dispose();
   }
 
+  bool get _titleValid {
+    final t = _titleCtrl.text.trim();
+    return t.isNotEmpty && t.length <= 100;
+  }
+
+  void _submit() {
+    final title = _titleCtrl.text.trim();
+    final desc = _descCtrl.text.trim();
+    Navigator.of(context).pop(
+      _PublishFormResult(
+        title: title,
+        description: desc.isEmpty ? null : desc,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = AppL10n.of(context);
-    final isEdit = widget.record.publishedWorkId != null;
-    final viewInsets = MediaQuery.of(context).viewInsets;
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     return Padding(
-      padding: EdgeInsets.only(bottom: viewInsets.bottom),
-      child: Form(
-        key: _formKey,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 20,
+        bottom: 20 + bottomInset,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            l.meDetailPublishFormTitle,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              color: AetherColors.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _titleCtrl,
+            maxLength: 100,
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: l.meDetailPublishTitleLabel,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _descCtrl,
+            maxLength: 5000,
+            maxLines: 3,
+            decoration: InputDecoration(
+              labelText: l.meDetailPublishDescLabel,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
             children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: AetherColors.border,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
+              Expanded(
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(l.meDetailPublishCancel),
                 ),
               ),
-              const SizedBox(height: 18),
-              Text(
-                isEdit ? l.meDetailSheetTitleEdit : l.meDetailSheetTitlePublish,
-                style: AetherTextStyles.h2,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                isEdit
-                    ? l.meDetailSheetSubtitleEdit
-                    : l.meDetailSheetSubtitlePublish,
-                style: AetherTextStyles.bodySm,
-              ),
-              const SizedBox(height: 20),
-              TextFormField(
-                controller: _titleCtrl,
-                maxLength: _maxTitle,
-                textInputAction: TextInputAction.next,
-                decoration: InputDecoration(
-                  labelText: l.meDetailLabelTitle,
-                  hintText: l.meDetailHintTitle,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AetherRadii.md),
-                  ),
-                ),
-                validator: (v) {
-                  final t = v?.trim() ?? '';
-                  if (t.isEmpty) return l.meDetailValidationTitleEmpty;
-                  if (t.length > _maxTitle) {
-                    return l.meDetailValidationTitleTooLong(_maxTitle);
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _descCtrl,
-                maxLines: 5,
-                maxLength: _maxDescription,
-                textInputAction: TextInputAction.newline,
-                decoration: InputDecoration(
-                  labelText: l.meDetailLabelDescription,
-                  hintText: l.meDetailHintDescription(_maxDescription),
-                  alignLabelWithHint: true,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AetherRadii.md),
-                  ),
-                ),
-                validator: (v) {
-                  final t = v?.trim() ?? '';
-                  if (t.length > _maxDescription) {
-                    return l.meDetailValidationDescriptionTooLong(
-                        _maxDescription);
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
+              const SizedBox(width: 12),
+              Expanded(
                 child: FilledButton(
-                  onPressed: _submitting ? null : _submit,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AetherColors.primary,
-                    disabledBackgroundColor: AetherColors.borderStrong,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(AetherRadii.pill),
-                    ),
-                  ),
-                  child: _submitting
-                      ? const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor:
-                                AlwaysStoppedAnimation<Color>(Colors.white),
-                          ),
-                        )
-                      : Text(
-                          isEdit
-                              ? l.meDetailButtonSave
-                              : l.meDetailButtonPublish,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 15,
-                          ),
-                        ),
+                  onPressed: _titleValid ? _submit : null,
+                  child: Text(l.meDetailPublishConfirm),
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Non-dismissible modal progress overlay driven by [PublishProgress].
+class _PublishProgressDialog extends StatelessWidget {
+  final ValueListenable<PublishProgress> progress;
+  const _PublishProgressDialog({required this.progress});
+
+  static String _label(AppL10n l, PublishProgress p) {
+    switch (p.phase) {
+      case 'reading':
+        return l.meDetailPublishPhaseReading;
+      case 'normalizing':
+        return p.detail == null
+            ? l.meDetailPublishPhaseNormalizing
+            : l.meDetailPublishPhaseNormalizingDetail(p.detail!);
+      case 'uploading':
+        return l.meDetailPublishPhaseUploading;
+      case 'inserting':
+        return l.meDetailPublishPhaseInserting;
+      case 'thumbnail':
+        return l.meDetailPublishPhaseThumbnail;
+      case 'done':
+        return l.meDetailPublishPhaseDone;
+      default:
+        return l.meDetailPublishPhaseProcessing;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppL10n.of(context);
+    return PopScope(
+      canPop: false,
+      child: Dialog(
+        backgroundColor: Colors.white,
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: ValueListenableBuilder<PublishProgress>(
+            valueListenable: progress,
+            builder: (context, p, _) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    _label(l, p),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: AetherColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  LinearProgressIndicator(
+                    value: p.fraction.clamp(0.0, 1.0),
+                  ),
+                ],
+              );
+            },
           ),
         ),
       ),
     );
   }
-
-  void _submit() {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
-    setState(() => _submitting = true);
-    Navigator.of(context).pop(_PublishFormResult(
-      title: _titleCtrl.text.trim(),
-      description:
-          _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim(),
-    ));
-  }
 }
 
 class _RunningState extends StatelessWidget {
-  final ScanRecord? record;
-  const _RunningState({this.record});
+  const _RunningState();
 
   @override
   Widget build(BuildContext context) {
     final l = AppL10n.of(context);
-    final stage =
-        record?.jobStatus?.localizedTitle(l) ?? l.meDetailRunningProcessing;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -417,53 +467,8 @@ class _RunningState extends StatelessWidget {
             child: CircularProgressIndicator(strokeWidth: 2),
           ),
           const SizedBox(height: AetherSpacing.md),
-          Text(stage, style: AetherTextStyles.bodySm),
-          if (record?.pipelineStage != null) ...[
-            const SizedBox(height: 4),
-            Text(record!.pipelineStage!, style: AetherTextStyles.caption),
-          ],
+          Text(l.meDetailRunningProcessing, style: AetherTextStyles.bodySm),
         ],
-      ),
-    );
-  }
-}
-
-class _FailedState extends StatelessWidget {
-  final String? message;
-  const _FailedState({this.message});
-
-  @override
-  Widget build(BuildContext context) {
-    final l = AppL10n.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: AetherSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(
-              Icons.error_outline_rounded,
-              size: 56,
-              color: AetherColors.danger,
-            ),
-            const SizedBox(height: AetherSpacing.md),
-            Text(
-              l.meDetailFailedTitle,
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
-                color: AetherColors.textPrimary,
-              ),
-            ),
-            const SizedBox(height: 6),
-            if (message != null)
-              Text(
-                message!,
-                textAlign: TextAlign.center,
-                style: AetherTextStyles.bodySm,
-              ),
-          ],
-        ),
       ),
     );
   }

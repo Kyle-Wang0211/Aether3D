@@ -318,5 +318,32 @@
   "commonOk": "OK",
   "commonConfirm": "Confirm",
   "commonRetry": "Retry",
-  "commonRetrying": "Retrying…"
+  "commonRetrying": "Retrying…",
+  "meDetailPublished": "Published",
+  "meDetailPublish": "Publish",
+  "meDetailPublishSuccess": "Published to community",
+  "meDetailPublishErrorReading": "Couldn't read the model. Please try again.",
+  "meDetailPublishErrorNormalizing": "Optimization failed. Please try again.",
+  "meDetailPublishErrorUploading": "Upload failed. Please check your connection.",
+  "meDetailPublishErrorGeneric": "Publishing failed. Please try again.",
+  "meDetailPublishFormTitle": "Publish to community",
+  "meDetailPublishTitleLabel": "Title",
+  "meDetailPublishDescLabel": "Description (optional)",
+  "meDetailPublishCancel": "Cancel",
+  "meDetailPublishConfirm": "Publish",
+  "meDetailPublishPhaseReading": "Reading model",
+  "meDetailPublishPhaseNormalizing": "Optimizing model",
+  "meDetailPublishPhaseNormalizingDetail": "Optimizing model · {detail}",
+  "@meDetailPublishPhaseNormalizingDetail": {
+    "placeholders": {
+      "detail": {
+        "type": "String"
+      }
+    }
+  },
+  "meDetailPublishPhaseUploading": "Uploading",
+  "meDetailPublishPhaseInserting": "Publishing",
+  "meDetailPublishPhaseThumbnail": "Generating cover",
+  "meDetailPublishPhaseDone": "Done",
+  "meDetailPublishPhaseProcessing": "Processing"
 }

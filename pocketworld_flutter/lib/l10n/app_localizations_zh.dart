@@ -738,4 +738,66 @@ class AppL10nZh extends AppL10n {
 
   @override
   String get commonRetrying => '重试中…';
+
+  @override
+  String get meDetailPublished => '已发布';
+
+  @override
+  String get meDetailPublish => '发布';
+
+  @override
+  String get meDetailPublishSuccess => '已发布到社区';
+
+  @override
+  String get meDetailPublishErrorReading => '读取模型失败，请重试';
+
+  @override
+  String get meDetailPublishErrorNormalizing => '优化失败，请重试';
+
+  @override
+  String get meDetailPublishErrorUploading => '上传失败，请检查网络';
+
+  @override
+  String get meDetailPublishErrorGeneric => '发布失败，请重试';
+
+  @override
+  String get meDetailPublishFormTitle => '发布到社区';
+
+  @override
+  String get meDetailPublishTitleLabel => '标题';
+
+  @override
+  String get meDetailPublishDescLabel => '描述（可选）';
+
+  @override
+  String get meDetailPublishCancel => '取消';
+
+  @override
+  String get meDetailPublishConfirm => '发布';
+
+  @override
+  String get meDetailPublishPhaseReading => '读取模型';
+
+  @override
+  String get meDetailPublishPhaseNormalizing => '优化模型';
+
+  @override
+  String meDetailPublishPhaseNormalizingDetail(String detail) {
+    return '优化模型 · $detail';
+  }
+
+  @override
+  String get meDetailPublishPhaseUploading => '上传中';
+
+  @override
+  String get meDetailPublishPhaseInserting => '发布中';
+
+  @override
+  String get meDetailPublishPhaseThumbnail => '生成封面';
+
+  @override
+  String get meDetailPublishPhaseDone => '完成';
+
+  @override
+  String get meDetailPublishPhaseProcessing => '处理中';
 }

@@ -229,5 +229,32 @@
   "commonOk": "确定",
   "commonConfirm": "确认",
   "commonRetry": "重试",
-  "commonRetrying": "重试中…"
+  "commonRetrying": "重试中…",
+  "meDetailPublished": "已发布",
+  "meDetailPublish": "发布",
+  "meDetailPublishSuccess": "已发布到社区",
+  "meDetailPublishErrorReading": "读取模型失败，请重试",
+  "meDetailPublishErrorNormalizing": "优化失败，请重试",
+  "meDetailPublishErrorUploading": "上传失败，请检查网络",
+  "meDetailPublishErrorGeneric": "发布失败，请重试",
+  "meDetailPublishFormTitle": "发布到社区",
+  "meDetailPublishTitleLabel": "标题",
+  "meDetailPublishDescLabel": "描述（可选）",
+  "meDetailPublishCancel": "取消",
+  "meDetailPublishConfirm": "发布",
+  "meDetailPublishPhaseReading": "读取模型",
+  "meDetailPublishPhaseNormalizing": "优化模型",
+  "meDetailPublishPhaseNormalizingDetail": "优化模型 · {detail}",
+  "@meDetailPublishPhaseNormalizingDetail": {
+    "placeholders": {
+      "detail": {
+        "type": "String"
+      }
+    }
+  },
+  "meDetailPublishPhaseUploading": "上传中",
+  "meDetailPublishPhaseInserting": "发布中",
+  "meDetailPublishPhaseThumbnail": "生成封面",
+  "meDetailPublishPhaseDone": "完成",
+  "meDetailPublishPhaseProcessing": "处理中"
 }

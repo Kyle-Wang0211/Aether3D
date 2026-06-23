@@ -1420,6 +1420,126 @@ abstract class AppL10n {
   /// In en, this message translates to:
   /// **'Retrying…'**
   String get commonRetrying;
+
+  /// No description provided for @meDetailPublished.
+  ///
+  /// In en, this message translates to:
+  /// **'Published'**
+  String get meDetailPublished;
+
+  /// No description provided for @meDetailPublish.
+  ///
+  /// In en, this message translates to:
+  /// **'Publish'**
+  String get meDetailPublish;
+
+  /// No description provided for @meDetailPublishSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Published to community'**
+  String get meDetailPublishSuccess;
+
+  /// No description provided for @meDetailPublishErrorReading.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t read the model. Please try again.'**
+  String get meDetailPublishErrorReading;
+
+  /// No description provided for @meDetailPublishErrorNormalizing.
+  ///
+  /// In en, this message translates to:
+  /// **'Optimization failed. Please try again.'**
+  String get meDetailPublishErrorNormalizing;
+
+  /// No description provided for @meDetailPublishErrorUploading.
+  ///
+  /// In en, this message translates to:
+  /// **'Upload failed. Please check your connection.'**
+  String get meDetailPublishErrorUploading;
+
+  /// No description provided for @meDetailPublishErrorGeneric.
+  ///
+  /// In en, this message translates to:
+  /// **'Publishing failed. Please try again.'**
+  String get meDetailPublishErrorGeneric;
+
+  /// No description provided for @meDetailPublishFormTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Publish to community'**
+  String get meDetailPublishFormTitle;
+
+  /// No description provided for @meDetailPublishTitleLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Title'**
+  String get meDetailPublishTitleLabel;
+
+  /// No description provided for @meDetailPublishDescLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Description (optional)'**
+  String get meDetailPublishDescLabel;
+
+  /// No description provided for @meDetailPublishCancel.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get meDetailPublishCancel;
+
+  /// No description provided for @meDetailPublishConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Publish'**
+  String get meDetailPublishConfirm;
+
+  /// No description provided for @meDetailPublishPhaseReading.
+  ///
+  /// In en, this message translates to:
+  /// **'Reading model'**
+  String get meDetailPublishPhaseReading;
+
+  /// No description provided for @meDetailPublishPhaseNormalizing.
+  ///
+  /// In en, this message translates to:
+  /// **'Optimizing model'**
+  String get meDetailPublishPhaseNormalizing;
+
+  /// No description provided for @meDetailPublishPhaseNormalizingDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Optimizing model · {detail}'**
+  String meDetailPublishPhaseNormalizingDetail(String detail);
+
+  /// No description provided for @meDetailPublishPhaseUploading.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading'**
+  String get meDetailPublishPhaseUploading;
+
+  /// No description provided for @meDetailPublishPhaseInserting.
+  ///
+  /// In en, this message translates to:
+  /// **'Publishing'**
+  String get meDetailPublishPhaseInserting;
+
+  /// No description provided for @meDetailPublishPhaseThumbnail.
+  ///
+  /// In en, this message translates to:
+  /// **'Generating cover'**
+  String get meDetailPublishPhaseThumbnail;
+
+  /// No description provided for @meDetailPublishPhaseDone.
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get meDetailPublishPhaseDone;
+
+  /// No description provided for @meDetailPublishPhaseProcessing.
+  ///
+  /// In en, this message translates to:
+  /// **'Processing'**
+  String get meDetailPublishPhaseProcessing;
 }
 
 class _AppL10nDelegate extends LocalizationsDelegate<AppL10n> {

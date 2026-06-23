@@ -753,4 +753,70 @@ class AppL10nEn extends AppL10n {
 
   @override
   String get commonRetrying => 'Retrying…';
+
+  @override
+  String get meDetailPublished => 'Published';
+
+  @override
+  String get meDetailPublish => 'Publish';
+
+  @override
+  String get meDetailPublishSuccess => 'Published to community';
+
+  @override
+  String get meDetailPublishErrorReading =>
+      'Couldn\'t read the model. Please try again.';
+
+  @override
+  String get meDetailPublishErrorNormalizing =>
+      'Optimization failed. Please try again.';
+
+  @override
+  String get meDetailPublishErrorUploading =>
+      'Upload failed. Please check your connection.';
+
+  @override
+  String get meDetailPublishErrorGeneric =>
+      'Publishing failed. Please try again.';
+
+  @override
+  String get meDetailPublishFormTitle => 'Publish to community';
+
+  @override
+  String get meDetailPublishTitleLabel => 'Title';
+
+  @override
+  String get meDetailPublishDescLabel => 'Description (optional)';
+
+  @override
+  String get meDetailPublishCancel => 'Cancel';
+
+  @override
+  String get meDetailPublishConfirm => 'Publish';
+
+  @override
+  String get meDetailPublishPhaseReading => 'Reading model';
+
+  @override
+  String get meDetailPublishPhaseNormalizing => 'Optimizing model';
+
+  @override
+  String meDetailPublishPhaseNormalizingDetail(String detail) {
+    return 'Optimizing model · $detail';
+  }
+
+  @override
+  String get meDetailPublishPhaseUploading => 'Uploading';
+
+  @override
+  String get meDetailPublishPhaseInserting => 'Publishing';
+
+  @override
+  String get meDetailPublishPhaseThumbnail => 'Generating cover';
+
+  @override
+  String get meDetailPublishPhaseDone => 'Done';
+
+  @override
+  String get meDetailPublishPhaseProcessing => 'Processing';
 }
