@@ -188,6 +188,26 @@ aether_sfm_result_t RunIncremental(
     // now). liter15 + mt6000 (multi-thread above 6k residuals). max 511ms desktop.
     pipeline_opts->ba_local_max_num_iterations = 15;
     pipeline_opts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+    // [AETHER ship config 2026-06-24] Wire the grounded BA optimizations (were only
+    // in the bench before; production was using default SOFT_L1 local / TRIVIAL
+    // global = the useless ~local-floor finalize):
+    //  - CAUCHY local+global: the finalize's ENTIRE value. A1 experiment: TRIVIAL
+    //    finalize reproj 0.938 ~= local floor; CAUCHY -> 0.84. NOT droppable.
+    //  - global CAUCHY routes to DENSE_SCHUR (override in incremental_pipeline.cc):
+    //    Eigen dense Cholesky (Accelerate sparse fails on CAUCHY). Device finalize
+    //    192s(ITERATIVE) -> 53s(DENSE) -> 43s(+gftol). Full quality.
+    //  - gftol=1e-6: each solve stops on convergence instead of burning the giter
+    //    cap (function_tolerance was 0). -30% time, quality within +-0.003 noise.
+    //  - keep-CAUCHY local pass-2 (incremental_mapper.cc) + lnum=10: better preview
+    //    (0.936->0.86) + lower drift (2.08%/7.12% -> 1.42%/4.87%). Device 2s-gate
+    //    1695ms (the per-frame SLA only binds the FUTURE streaming path; current
+    //    production runs pipeline.Run() as ONE post-capture batch -> no per-frame gate).
+    pipeline_opts->ba_local_loss_type = 2;     // CAUCHY
+    pipeline_opts->ba_local_loss_scale = 1.0;
+    pipeline_opts->ba_global_loss_type = 2;    // CAUCHY (-> DENSE_SCHUR via override)
+    pipeline_opts->ba_global_loss_scale = 1.0;
+    pipeline_opts->ba_global_function_tolerance = 1e-6;  // converge-stop
+    pipeline_opts->mapper.ba_local_num_images = 10;
     // [B] Per-frame margin knob, GATED on the iPhone BA-factor measurement:
     // ba_local_num_images 6->4 cuts per-frame max 511->389ms but costs reproj
     // 1.1455->1.1574. Default keeps 6 (best reproj); drop to 4 ONLY if the device
@@ -383,8 +403,15 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                             &n);
     if (erc != 0 || n <= 0) return AETHER_SFM_ERR_EXTRACT;
 
-    // 2) Register camera once (SIMPLE_PINHOLE: f, cx, cy). Reuse across frames
-    //    that share intrinsics (ARKit intrinsics are per-frame but ~constant).
+    // 2) Single shared camera (SIMPLE_PINHOLE: f, cx, cy), self-calibrated by
+    //    BA — the RealityScan/RealityCapture default (soft-prior, refined per
+    //    calibration group), and the only intrinsics model that is valid and
+    //    identical across iOS/Android/HarmonyOS once FOCUS IS LOCKED at capture
+    //    (cross-platform research 2026-06-23: ARCore does NOT report
+    //    focus-varying per-frame intrinsics — github.com/google-ar #1239 — so a
+    //    per-frame-intrinsics design is iOS-only and breaks 3-platform parity).
+    //    Locking focus makes one shared focal physically correct for the whole
+    //    session; BA refines it from the ARKit value as a soft prior.
     if (s->camera_id == 0) {
       colmap::Camera camera = colmap::Camera::CreateFromModelId(
           colmap::kInvalidCameraId, colmap::SimplePinholeCameraModel::model_id,
