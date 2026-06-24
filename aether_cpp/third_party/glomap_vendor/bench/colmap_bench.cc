@@ -4,6 +4,8 @@
 // C ABI for Dart FFI / native harness.
 
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/estimators/alignment.h"
+#include "colmap/geometry/sim3.h"
 #include "colmap/scene/reconstruction.h"
 #include "colmap/scene/reconstruction_manager.h"
 
@@ -187,7 +189,7 @@ extern "C" int aether_perframe_bench(const char* db_path,
 // Reports local time/reproj (what the UI sees instantly) vs refined time/reproj
 // (the background payoff). Proves the global BA is off the per-frame path.
 extern "C" int aether_async_bench(const char* db_path, const char* image_path,
-                                  int gref, int giter, int gloss,
+                                  int gref, int giter, int gloss, double gftol,
                                   int (*thermal_fn)(),
                                   char* out_json, int out_cap) {
   try {
@@ -241,6 +243,9 @@ extern "C" int aether_async_bench(const char* db_path, const char* image_path,
         o2->ba_global_loss_scale = 1.0;
         if (gref > 0) o2->ba_global_max_refinements = gref;
         if (giter > 0) o2->ba_global_max_num_iterations = giter;
+        // [AETHER] nonzero function_tolerance lets each BA solve stop on convergence
+        // instead of burning the full giter budget (default 0 = run to cap).
+        if (gftol > 0) o2->ba_global_function_tolerance = gftol;
         o2->ba_min_num_residuals_for_cpu_multi_threading = 6000;
         auto m2 = std::make_shared<colmap::ReconstructionManager>();
         colmap::IncrementalPipeline p2(o2, image_path, db_path, m2);
@@ -258,14 +263,52 @@ extern "C" int aether_async_bench(const char* db_path, const char* image_path,
     const int refined_reg = ok ? static_cast<int>(refined->NumRegImages()) : 0;
     const int refined_pts = ok ? static_cast<int>(refined->NumPoints3D()) : 0;
 
+    // [AETHER] DRIFT CHECK: how far does the finalize MOVE the cameras? Align local
+    // -> refined via projection centers (removes gauge/scale), then per-camera center
+    // deviation / scene radius = the REAL drift the global BA corrects. reproj alone
+    // can be masked by local CAUCHY downweighting drift-revealing observations.
+    double drift_mean_pct = -1.0, drift_max_pct = -1.0;
+    if (ok && local && refined) {
+      colmap::Sim3d refined_from_local;
+      if (colmap::AlignReconstructionsViaProjCenters(
+              *local, *refined, /*max_proj_center_error=*/1e9,
+              &refined_from_local)) {
+        std::vector<double> devs;
+        std::vector<Eigen::Vector3d> rc;
+        Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+        for (const auto& id_pair : local->FindCommonRegImageIds(*refined)) {
+          const Eigen::Vector3d c_loc =
+              refined_from_local * local->Image(id_pair.first).ProjectionCenter();
+          const Eigen::Vector3d c_ref =
+              refined->Image(id_pair.second).ProjectionCenter();
+          devs.push_back((c_loc - c_ref).norm());
+          rc.push_back(c_ref);
+          centroid += c_ref;
+        }
+        if (!devs.empty()) {
+          centroid /= static_cast<double>(rc.size());
+          double radius = 0, mean_dev = 0, max_dev = 0;
+          for (const auto& c : rc) radius += (c - centroid).norm();
+          radius /= static_cast<double>(rc.size());
+          for (double d : devs) { mean_dev += d; max_dev = std::max(max_dev, d); }
+          mean_dev /= static_cast<double>(devs.size());
+          if (radius > 1e-9) {
+            drift_mean_pct = 100.0 * mean_dev / radius;
+            drift_max_pct = 100.0 * max_dev / radius;
+          }
+        }
+      }
+    }
+
     std::snprintf(
         out_json, out_cap,
         "{\"local_ms\":%.0f,\"local_reproj\":%.4f,\"local_reg\":%d,"
         "\"local_pts\":%d,\"refine_ms\":%.0f,\"refined_reproj\":%.4f,"
         "\"refined_reg\":%d,\"refined_pts\":%d,\"gref\":%d,\"giter\":%d,"
-        "\"gloss\":%d,\"th_start\":%d,\"th_local\":%d,\"th_refine\":%d,\"done\":%d}",
+        "\"gloss\":%d,\"drift_mean_pct\":%.3f,\"drift_max_pct\":%.3f,"
+        "\"th_start\":%d,\"th_local\":%d,\"th_refine\":%d,\"done\":%d}",
         local_ms, local_reproj, local_reg, local_pts, refine_ms, refined_reproj,
-        refined_reg, refined_pts, gref, giter, gloss,
+        refined_reg, refined_pts, gref, giter, gloss, drift_mean_pct, drift_max_pct,
         thermal_start, thermal_local, thermal_refine, done.load());
     return 0;
   } catch (const std::exception& e) {
@@ -444,7 +487,8 @@ int main(int argc, char** argv) {
     int gref = g_arg_i(argc, argv, "--gref", 5);
     int giter = g_arg_i(argc, argv, "--giter", 50);
     int gloss = g_arg_i(argc, argv, "--gloss", 2);  // 0=TRIVIAL 1=SOFT_L1 2=CAUCHY
-    aether_async_bench(db_path, image_path, gref, giter, gloss, nullptr, j,
+    double gftol = g_arg_d(argc, argv, "--gftol", 0.0);  // 0 = run to giter cap
+    aether_async_bench(db_path, image_path, gref, giter, gloss, gftol, nullptr, j,
                        (int)sizeof(j));
     std::printf("ASYNC %s\n", j);
     return 0;

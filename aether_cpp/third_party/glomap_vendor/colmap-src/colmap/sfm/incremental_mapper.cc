@@ -1190,9 +1190,15 @@ void IncrementalMapper::IterativeLocalRefinement(
     if (changed < max_refinement_change) {
       break;
     }
-    // Only use robust cost function for first iteration.
-    custom_ba_options.loss_function_type =
-        BundleAdjustmentOptions::LossFunctionType::TRIVIAL;
+    // Only use robust cost function for first iteration -- UNLESS configured loss is
+    // CAUCHY. [AETHER] For clean single-object orbit data the robust kernel helps on
+    // every local pass (drift-affected cross-view obs have 2-5px residuals even at
+    // ~1px mean); keep it on instead of re-injecting their leverage via TRIVIAL.
+    if (ba_options.loss_function_type !=
+        BundleAdjustmentOptions::LossFunctionType::CAUCHY) {
+      custom_ba_options.loss_function_type =
+          BundleAdjustmentOptions::LossFunctionType::TRIVIAL;
+    }
   }
   ClearModifiedPoints3D();
 }

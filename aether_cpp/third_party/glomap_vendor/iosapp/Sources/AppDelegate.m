@@ -27,8 +27,8 @@ extern int aether_perframe_bench(const char* db_path, const char* image_path,
 // Async-finalize validation: local (instant) vs refined (background) time+reproj.
 // gref/giter = global-BA finalize iteration cap; thermal_fn samples NSProcessInfo.
 extern int aether_async_bench(const char* db_path, const char* image_path,
-                              int gref, int giter, int gloss, int (*thermal_fn)(),
-                              char* out_json, int out_cap);
+                              int gref, int giter, int gloss, double gftol,
+                              int (*thermal_fn)(), char* out_json, int out_cap);
 // Real-scenario streaming sim: frame-paced register+BA, per-frame RSS+thermal.
 extern int aether_realsim_bench(const char* db_path, const char* image_path,
                                 int defer, int skipfin, int frame_interval_ms,
@@ -137,7 +137,8 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
         // Eigen dense Cholesky succeed + real refine_ms + thermal? gref=5 full quality.
         j[0] = 0;
         int rc = aether_async_bench(dbp.UTF8String, "", 5, 50, 2 /*CAUCHY->DENSE*/,
-                                    read_thermal, j, (int)sizeof(j));
+                                    1e-6 /*gftol: converge-stop*/, read_thermal, j,
+                                    (int)sizeof(j));
         printf("SFM_ASYNC cauchy_dense rc=%d %s\n", rc, j); fflush(stdout);
         os_log(OS_LOG_DEFAULT, "SFM_ASYNC cauchy_dense %{public}s", j);
       } else {
