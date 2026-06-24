@@ -133,6 +133,12 @@ bool GlobalMapper::Solve(const colmap::Database& database,
     LOG(INFO) << "Before filtering: " << tracks_full.size()
               << ", after filtering: " << num_tracks << std::endl;
 
+    // [AETHER] iOS memory: release the pre-filter track superset NOW (only the
+    // filtered `tracks` feed global positioning/BA downstream). At 396-frame dense
+    // this superset is ~2x the filtered set (88736 vs 43025) -> frees the peak before
+    // the global-positioning Ceres problem (the 3.2GB hotspot) is built.
+    { std::unordered_map<track_t, Track>().swap(tracks_full); }
+
     run_timer.PrintSeconds();
   }
 

@@ -167,18 +167,18 @@ BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
       BundleAdjustmentOptions::LossFunctionType::SOFT_L1,
       BundleAdjustmentOptions::LossFunctionType::CAUCHY};
   options.loss_function_type = kGLossMap[ba_global_loss_type % 3];  // default TRIVIAL
-  // [AETHER] iOS fix: CAUCHY-reweighted normal equations are near-indefinite, so Apple
-  // Accelerate SPARSE_SCHUR Cholesky fails (SparseFactorizationFailed). But CAUCHY does
-  // NOT break the DENSE Cholesky path (Eigen, not Accelerate). A1 experiment showed
-  // CAUCHY is essential (TRIVIAL finalize reproj 0.938 ~= local floor; CAUCHY 0.846),
-  // and the 192s was ITERATIVE_SCHUR (CG burning its full budget). So for CAUCHY route a
-  // compact selected-region recon to DENSE_SCHUR (O(n^3) but tiny at <=~200 frames,
-  // est ~20s vs 77s iterative) and only fall to ITERATIVE for large recons (NEVER
-  // SPARSE -> Accelerate crash). Non-CAUCHY keeps COLMAP defaults (fast SPARSE).
+  // [AETHER] iOS solver routing for CAUCHY-reweighted finalize. The indefinite/near-
+  // singular Schur complement only crashes Apple's Accelerate sparse Cholesky
+  // (SparseFactorizationFailed) -- NOT sparse Cholesky in general. bundle_adjustment.cc
+  // now forces EIGEN_SPARSE (Eigen SimplicialLDLT) for the CPU sparse path, which
+  // factorizes the indefinite system fine. So CAUCHY can use the FAST SPARSE_SCHUR after
+  // all (the earlier ITERATIVE forcing was a workaround for the wrong backend). Route:
+  //   <=200 frames    -> DENSE_SCHUR  (tiny, O(n^3) but fastest at small scale)
+  //   201..5000        -> SPARSE_SCHUR (EIGEN_SPARSE; full-capture finalize lands here)
+  //   >5000            -> ITERATIVE_SCHUR (CLUSTER_JACOBI; only enormous recons)
   if (ba_global_loss_type % 3 == 2) {  // CAUCHY only
-    options.max_num_images_direct_dense_cpu_solver = 200;   // <=200 frames -> DENSE
-    options.max_num_images_direct_sparse_cpu_solver = 201;  // skip SPARSE (crashes);
-                                                            // >201 -> ITERATIVE
+    options.max_num_images_direct_dense_cpu_solver = 200;
+    options.max_num_images_direct_sparse_cpu_solver = 5000;
   }
   options.use_gpu = ba_use_gpu;
   options.gpu_index = ba_gpu_index;

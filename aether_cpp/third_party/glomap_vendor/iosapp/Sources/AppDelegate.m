@@ -1,6 +1,9 @@
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
 #import <os/log.h>
+#import <unistd.h>
+#import <stdio.h>
+#import <mach/mach.h>
 
 extern int aether_dsp_sift_extract(const uint8_t* gray, int width, int height,
                                    int max_features, float* out_xy,
@@ -82,6 +85,74 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
   free(gray); free(xy); return n;
 }
 
+// [AETHER] On-screen real-time console — mirror stdout+stderr (printf + glog progress +
+// the final SFM_ASYNC line) to a full-screen UITextView so device-test logs are read
+// directly off the phone screen. No USB stream / os_log / root needed (those drop on
+// flaky USB and were losing results). STANDARD for ALL device tests going forward.
+static UITextView* g_logView = nil;
+static dispatch_source_t g_logSrc = nil;
+static void AppendScreenLog(NSString* s) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (!g_logView || !s) return;
+    NSString* t = [g_logView.text stringByAppendingString:s];
+    if (t.length > 240000) t = [t substringFromIndex:t.length - 160000];  // cap buffer
+    g_logView.text = t;
+    [g_logView scrollRangeToVisible:NSMakeRange(t.length, 0)];  // autoscroll
+  });
+}
+static FILE* g_logFile = NULL;
+static void StartScreenLogMirror(void) {
+  // [AETHER] also tee the full console to Documents/aether_console.log so the COMPLETE
+  // log can be pulled off-device after a run (devicectl device copy from) — no root, no
+  // live stream, survives USB drops. The on-screen view is capped/scrolling; this file
+  // is the full record.
+  NSString* docs = NSSearchPathForDirectoriesInDomains(
+      NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+  g_logFile = fopen(
+      [docs stringByAppendingPathComponent:@"aether_console.log"].UTF8String, "w");
+  int fds[2];
+  if (pipe(fds) != 0) return;
+  dup2(fds[1], STDOUT_FILENO);
+  dup2(fds[1], STDERR_FILENO);
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+  const int rfd = fds[0];  // scalar capture (blocks can't capture C arrays)
+  g_logSrc = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, rfd, 0,
+      dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+  dispatch_source_set_event_handler(g_logSrc, ^{
+    char buf[8192];
+    ssize_t n = read(rfd, buf, sizeof(buf) - 1);
+    if (n > 0) {
+      if (g_logFile) { fwrite(buf, 1, (size_t)n, g_logFile); fflush(g_logFile); }
+      NSString* s = [[NSString alloc] initWithBytes:buf length:n
+                                           encoding:NSUTF8StringEncoding];
+      AppendScreenLog(s);
+    }
+  });
+  dispatch_resume(g_logSrc);
+}
+
+// [AETHER] continuous phys_footprint sampler — peak device memory (≈ the iOS jetsam
+// metric) for on-device tests. Prints PEAK_MEM_MB after each bench. STANDARD harness.
+static volatile double g_peak_mb = 0.0;
+static double CurrentFootprintMB(void) {
+  task_vm_info_data_t info;
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) ==
+      KERN_SUCCESS)
+    return (double)info.phys_footprint / (1024.0 * 1024.0);
+  return -1.0;
+}
+static void StartMemSampler(void) {
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
+    for (;;) {
+      double m = CurrentFootprintMB();
+      if (m > g_peak_mb) g_peak_mb = m;
+      usleep(300000);  // 300ms
+    }
+  });
+}
+
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property(strong, nonatomic) UIWindow* window;
 @end
@@ -93,6 +164,23 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
   vc.view.backgroundColor = [UIColor blackColor];
   self.window.rootViewController = vc;
   [self.window makeKeyAndVisible];
+
+  // [AETHER] full-screen on-screen console (read device-test logs off the phone screen)
+  UITextView* tv = [[UITextView alloc] initWithFrame:vc.view.bounds];
+  tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  tv.backgroundColor = [UIColor blackColor];
+  tv.textColor = [UIColor greenColor];
+  tv.font = [UIFont fontWithName:@"Menlo" size:9.0] ?: [UIFont systemFontOfSize:9.0];
+  tv.editable = NO;
+  tv.text = @"[AETHER on-screen console]\n";
+  if (@available(iOS 11.0, *)) {
+    tv.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+  }
+  [vc.view addSubview:tv];
+  g_logView = tv;
+  StartScreenLogMirror();
+  StartMemSampler();
+
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     NSProcessInfo* pi = [NSProcessInfo processInfo];
     // [AETHER] WAIT_COOL gate REMOVED — extreme-environment stress test: run NOW at
@@ -132,16 +220,19 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
       NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];
       if ([[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
         char j[512];
-        // [AETHER] THE FIX: CAUCHY (gloss=2) now routes to DENSE_SCHUR (Eigen, not the
-        // Accelerate sparse Cholesky that crashed) for <=200-frame selected regions.
-        // Mac: 22s @ reproj 0.8415 (vs ITERATIVE 76s/0.8459). Validate on device: does
-        // Eigen dense Cholesky succeed + real refine_ms + thermal? gref=5 full quality.
+        // [AETHER] CAUCHY (gloss=2) finalize. Full-scene (>200 reg frames) routes to
+        // SPARSE_SCHUR + EIGEN_SPARSE (Eigen LDLT — Apple Accelerate's sparse Cholesky
+        // crashed; EIGEN does not). Device-validated: 396f real414 finalize 959s / reproj
+        // 0.9608 / 5 passes / no crash / thermal 2. gref=5 full quality.
         j[0] = 0;
-        int rc = aether_async_bench(dbp.UTF8String, "", 5, 50, 2 /*CAUCHY->DENSE*/,
+        g_peak_mb = 0.0;  // reset peak so PEAK_MEM_MB reflects this run's finalize
+        int rc = aether_async_bench(dbp.UTF8String, "", 5, 50, 2 /*CAUCHY*/,
                                     1e-6 /*gftol: converge-stop*/, read_thermal, j,
                                     (int)sizeof(j));
-        printf("SFM_ASYNC cauchy_dense rc=%d %s\n", rc, j); fflush(stdout);
-        os_log(OS_LOG_DEFAULT, "SFM_ASYNC cauchy_dense %{public}s", j);
+        printf("SFM_ASYNC cauchy_eigen rc=%d %s\n", rc, j); fflush(stdout);
+        printf("SFM_ASYNC_PEAK_MEM_MB=%.1f\n", g_peak_mb); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "SFM_ASYNC cauchy_eigen %{public}s peak_mb=%.1f", j,
+               g_peak_mb);
       } else {
         printf("SFM_ASYNC_NO_DB\n"); fflush(stdout);
       }

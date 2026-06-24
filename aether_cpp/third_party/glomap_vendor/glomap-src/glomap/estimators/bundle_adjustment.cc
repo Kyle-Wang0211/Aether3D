@@ -91,17 +91,20 @@ bool BundleAdjuster::Solve(std::unordered_map<rig_t, Rig>& rigs,
   }
 #endif  // GLOMAP_CUDA_ENABLED
 
-  // [AETHER] iOS solver routing (mirrors COLMAP incremental_pipeline.cc): Apple
-  // Accelerate SPARSE Cholesky FAILS on robust-reweighted near-indefinite normal
-  // equations (SparseFactorizationFailed crash; on Mac SuiteSparse it surfaced as
-  // "CHOLMOD: Matrix not positive definite -> Termination: FAILURE"). NEVER SPARSE_SCHUR
-  // on iOS. DENSE_SCHUR (Eigen dense, can't fail) for compact recons <=200 imgs;
-  // ITERATIVE_SCHUR (no factorization) above.
+  // [AETHER] iOS solver routing (mirrors COLMAP). The indefinite/near-singular Schur
+  // complement from robust-reweighted normal equations only crashes Apple Accelerate's
+  // sparse Cholesky (SparseFactorizationFailed) -- NOT sparse Cholesky in general.
+  // Forcing EIGEN_SPARSE (Eigen SimplicialLDLT) factorizes it fine and is FASTER than
+  // ITERATIVE_SCHUR (COLMAP path: SPARSE+EIGEN 509-538s vs ITERATIVE 679-879s on the
+  // same 396-frame problem). So reclaim GLOMAP's fast SPARSE_SCHUR, iOS-safe:
+  //   <=200 frames -> DENSE_SCHUR (fastest at small scale)
+  //   >200         -> SPARSE_SCHUR + EIGEN_SPARSE (full-capture; CLUSTER_JACOBI was an
+  //                   ITERATIVE preconditioner, irrelevant for a direct sparse solve)
   if (num_images <= 200) {
     options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
   } else {
-    options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
-    options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+    options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+    options_.solver_options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
   }
 
   options_.solver_options.minimizer_progress_to_stdout = VLOG_IS_ON(2);

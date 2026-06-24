@@ -4,6 +4,7 @@
 // wall time and reconstruction size. C ABI for Dart FFI; main() for standalone.
 
 #include "colmap/scene/database.h"
+#include "colmap/scene/reconstruction.h"
 #include "colmap/util/timer.h"
 
 #include "glomap/controllers/global_mapper.h"
@@ -77,12 +78,25 @@ extern "C" int glomap_bench(const char* db_path, char* out_json, int out_cap) {
     for (const auto& [id, img] : images)
       if (img.IsRegistered()) ++n_reg;
 
+    // [AETHER] mean reprojection error (glomap_bench previously didn't output it, so
+    // GLOMAP runs had no reproj for the COLMAP-vs-GLOMAP comparison). Convert the GLOMAP
+    // result to a colmap::Reconstruction and reuse COLMAP's reproj computation so the
+    // number is directly comparable to the COLMAP path.
+    double mean_reproj = -1.0;
+    try {
+      colmap::Reconstruction recon;
+      ConvertGlomapToColmap(rigs, cameras, frames, images, tracks, recon);
+      mean_reproj = recon.ComputeMeanReprojectionError();
+    } catch (const std::exception&) {
+      mean_reproj = -1.0;
+    }
+
     std::snprintf(out_json, out_cap,
                   "{\"db_load_ms\":%.1f,\"solve_ms\":%.1f,\"n_images\":%zu,"
                   "\"n_registered\":%zu,\"n_pairs\":%zu,\"n_tracks\":%zu,"
-                  "\"n_cameras\":%zu}",
+                  "\"n_cameras\":%zu,\"reproj\":%.4f}",
                   t_load_ms, t_solve_ms, images.size(), n_reg, n_pairs,
-                  tracks.size(), cameras.size());
+                  tracks.size(), cameras.size(), mean_reproj);
     return 0;
   } catch (const std::exception& e) {
     std::snprintf(out_json, out_cap, "{\"error\":\"%s\"}", e.what());

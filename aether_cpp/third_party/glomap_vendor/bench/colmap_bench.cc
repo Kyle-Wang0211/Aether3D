@@ -247,6 +247,10 @@ extern "C" int aether_async_bench(const char* db_path, const char* image_path,
         // instead of burning the full giter budget (default 0 = run to cap).
         if (gftol > 0) o2->ba_global_function_tolerance = gftol;
         o2->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+        // [AETHER] REVERTED ignore_redundant_points3D + freeze-intrinsics: they cut RAM
+        // 2.36->1.45GB & time 4x BUT cost reproj 0.955->0.9952 (~4%). User constraint =
+        // ZERO quality loss. Keep only quality-NEUTRAL memory fixes (ITERATIVE routing,
+        // which doesn't change the converged optimum). Full intrinsic refinement stays on.
         auto m2 = std::make_shared<colmap::ReconstructionManager>();
         colmap::IncrementalPipeline p2(o2, image_path, db_path, m2);
         p2.RefineReconstruction(refined);

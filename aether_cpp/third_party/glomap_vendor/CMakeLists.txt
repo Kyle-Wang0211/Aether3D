@@ -106,8 +106,8 @@ if(BUILD_BENCH)
   target_compile_options(glomap_bench_exe PRIVATE -w)
   target_link_libraries(glomap_bench_exe PRIVATE
     glomap_core
-    ${CERESB}/lib/libceres.a
-    ${AT}/glog-install/lib/libglog.a
+    /opt/homebrew/lib/libceres.dylib    # [AETHER] host ceres (was iOS ${CERESB} -> arch mismatch); glomap_bench_exe is HOST-only
+    /opt/homebrew/lib/libglog.dylib
     "-lsqlite3"
     ${ACCELERATE_FW})
 

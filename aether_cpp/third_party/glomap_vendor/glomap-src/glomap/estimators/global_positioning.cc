@@ -548,14 +548,16 @@ void GlobalPositioner::ParameterizeVariables(
   }
 #endif  // GLOMAP_CUDA_ENABLED
 
-  // [AETHER] iOS solver routing: never SPARSE on Apple Accelerate (crash). DENSE for
-  // compact recons (<=200 imgs), ITERATIVE above; tracks==0 -> DENSE_NORMAL_CHOLESKY.
+  // [AETHER] iOS solver routing (mirrors COLMAP fix): force EIGEN_SPARSE for the sparse
+  // path -- Apple Accelerate's sparse Cholesky fails on the indefinite/near-singular
+  // Schur complement, Eigen SimplicialLDLT handles it and beats ITERATIVE. tracks==0 has
+  // no Schur complement (direct normal eqs) so it stays DENSE_NORMAL_CHOLESKY.
   if (tracks.size() > 0) {
     if (num_images <= 200) {
       options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
     } else {
-      options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
-      options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+      options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+      options_.solver_options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
     }
   } else {
     options_.solver_options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;

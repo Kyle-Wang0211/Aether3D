@@ -208,6 +208,12 @@ aether_sfm_result_t RunIncremental(
     pipeline_opts->ba_global_loss_scale = 1.0;
     pipeline_opts->ba_global_function_tolerance = 1e-6;  // converge-stop
     pipeline_opts->mapper.ba_local_num_images = 10;
+    // [AETHER] NOTE: ignore_redundant_points3D + freeze-intrinsics were tried (RAM
+    // 2.36->1.45GB, 4x faster) but cost reproj 0.955->0.9952 (~4%) -> REVERTED per the
+    // zero-quality-loss requirement. Full intrinsic refinement + all points stay.
+    // Quality-neutral memory wins only: ITERATIVE routing (device-safe, same optimum)
+    // + (GLOMAP) tracks_full release. Full-scene fit relies on moderate (non-exhaustive)
+    // match density, not on dropping points/intrinsics.
     // [B] Per-frame margin knob, GATED on the iPhone BA-factor measurement:
     // ba_local_num_images 6->4 cuts per-frame max 511->389ms but costs reproj
     // 1.1455->1.1574. Default keeps 6 (best reproj); drop to 4 ONLY if the device

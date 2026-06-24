@@ -357,13 +357,26 @@ ceres::Solver::Options BundleAdjustmentOptions::CreateSolverOptions(
   }
 #endif  // COLMAP_CUDA_ENABLED
 
+  // [AETHER] Force EIGEN_SPARSE (Eigen SimplicialLDLT) for the CPU sparse path. Apple
+  // Accelerate's sparse Cholesky FAILS (SparseFactorizationFailed) on the indefinite/
+  // near-singular CAUCHY-reweighted Schur complement; Eigen's LDLT factorization handles
+  // it. THIS is the real fix -- the earlier ITERATIVE_SCHUR forcing was a workaround for
+  // using the wrong (Accelerate, default-priority) backend, not an algorithm limit.
+  if (!use_gpu) {
+    custom_solver_options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+  }
+
   if (num_images <= max_num_images_direct_dense_solver) {
     custom_solver_options.linear_solver_type = ceres::DENSE_SCHUR;
   } else if (has_sparse && num_images <= max_num_images_direct_sparse_solver) {
     custom_solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
   } else {  // Indirect sparse (preconditioned CG) solver.
     custom_solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
-    custom_solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+    // [AETHER] A1 quality-neutral speedup: CLUSTER_JACOBI is a stronger preconditioner
+    // than SCHUR_JACOBI -> fewer CG inner iterations -> faster convergence to the SAME
+    // optimum (no quality change). Matters for the full-scene (>200 img) ITERATIVE path
+    // that CAUCHY forces on iOS (Accelerate can't do SPARSE on robust-reweighted eqns).
+    custom_solver_options.preconditioner_type = ceres::CLUSTER_JACOBI;
   }
 
   if (problem.NumResiduals() < min_num_residuals_for_cpu_multi_threading) {
@@ -757,6 +770,15 @@ class DefaultBundleAdjuster : public BundleAdjuster {
         options_.CreateSolverOptions(config_, *problem_);
 
     ceres::Solve(solver_options, problem_.get(), &summary);
+
+    // [AETHER] Unconditionally log which linear solver + sparse backend Ceres ACTUALLY
+    // used. Confirms the iOS EIGEN_SPARSE fix: for the full-capture CAUCHY finalize this
+    // must read SPARSE_SCHUR + EIGEN_SPARSE (NOT ITERATIVE_SCHUR, NOT SUITE_SPARSE/
+    // ACCELERATE which crash on the indefinite Schur complement).
+    LOG(INFO) << "[AETHER] solver_used="
+              << ceres::LinearSolverTypeToString(summary.linear_solver_type_used)
+              << " sparse_backend=" << ceres::SparseLinearAlgebraLibraryTypeToString(
+                     summary.sparse_linear_algebra_library_type);
 
     if (options_.print_summary || VLOG_IS_ON(1)) {
       PrintSolverSummary(summary, "Bundle adjustment report");
