@@ -329,6 +329,7 @@ extern "C" int aether_realsim_bench(const char* db_path, const char* image_path,
                                     int defer, int skipfin, int frame_interval_ms,
                                     int local_loss_type, double local_loss_scale,
                                     int global_loss_type, double global_loss_scale,
+                                    int lnum,
                                     int (*thermal_fn)(), char* out_json,
                                     int out_cap) {
   try {
@@ -343,6 +344,7 @@ extern "C" int aether_realsim_bench(const char* db_path, const char* image_path,
     options->ba_global_loss_type = global_loss_type;
     options->ba_global_loss_scale = global_loss_scale;
     options->ba_local_max_num_iterations = 15;
+    if (lnum > 0) options->mapper.ba_local_num_images = lnum;  // [AETHER] local window
     options->ba_min_num_residuals_for_cpu_multi_threading = 6000;
     auto mgr = std::make_shared<colmap::ReconstructionManager>();
 

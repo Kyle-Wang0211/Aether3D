@@ -34,6 +34,7 @@ extern int aether_realsim_bench(const char* db_path, const char* image_path,
                                 int defer, int skipfin, int frame_interval_ms,
                                 int local_loss_type, double local_loss_scale,
                                 int global_loss_type, double global_loss_scale,
+                                int lnum,
                                 int (*thermal_fn)(), char* out_json, int out_cap);
 static int read_thermal(void) {
   return (int)[NSProcessInfo processInfo].thermalState;  // 0=nominal..3=critical
@@ -114,7 +115,9 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
         printf("REALSIM_GROUP clean  cauchy1.0 ONLY (CAUCHY@1.0 local+global)\n");
         fflush(stdout);
         j[0] = 0;
-        aether_realsim_bench(dbp.UTF8String, "", 1, 0, 2000, 2, 1.0, 2, 1.0,
+        // [AETHER] lnum=10: bigger local window (better preview reproj) — verify it
+        // still clears the 2s gate on device (lnum=6 was max 1312ms).
+        aether_realsim_bench(dbp.UTF8String, "", 1, 0, 2000, 2, 1.0, 2, 1.0, 10,
                              read_thermal, j, (int)sizeof(j));
         printf("REALSIM_RESULT cauchy1.0 %s\n", j); fflush(stdout);
         os_log(OS_LOG_DEFAULT, "REALSIM_RESULT cauchy1.0 %{public}s", j);
