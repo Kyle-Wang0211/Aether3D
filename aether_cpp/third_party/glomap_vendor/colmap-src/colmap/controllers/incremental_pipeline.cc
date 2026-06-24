@@ -125,9 +125,12 @@ BundleAdjustmentOptions IncrementalPipelineOptions::LocalBundleAdjustment()
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
   options.min_num_residuals_for_cpu_multi_threading =
       ba_min_num_residuals_for_cpu_multi_threading;
-  options.loss_function_scale = 1.0;
-  options.loss_function_type =
-      BundleAdjustmentOptions::LossFunctionType::SOFT_L1;
+  options.loss_function_scale = ba_local_loss_scale;  // [AETHER] R1 sweep (was 1.0)
+  static const BundleAdjustmentOptions::LossFunctionType kLossMap[3] = {
+      BundleAdjustmentOptions::LossFunctionType::TRIVIAL,
+      BundleAdjustmentOptions::LossFunctionType::SOFT_L1,
+      BundleAdjustmentOptions::LossFunctionType::CAUCHY};
+  options.loss_function_type = kLossMap[ba_local_loss_type % 3];  // default SOFT_L1
   options.use_gpu = ba_use_gpu;
   options.gpu_index = ba_gpu_index;
   return options;
@@ -158,8 +161,19 @@ BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
   options.min_num_residuals_for_cpu_multi_threading =
       ba_min_num_residuals_for_cpu_multi_threading;
-  options.loss_function_type =
-      BundleAdjustmentOptions::LossFunctionType::TRIVIAL;
+  options.loss_function_scale = ba_global_loss_scale;  // [AETHER] P4 sweep
+  static const BundleAdjustmentOptions::LossFunctionType kGLossMap[3] = {
+      BundleAdjustmentOptions::LossFunctionType::TRIVIAL,
+      BundleAdjustmentOptions::LossFunctionType::SOFT_L1,
+      BundleAdjustmentOptions::LossFunctionType::CAUCHY};
+  options.loss_function_type = kGLossMap[ba_global_loss_type % 3];  // default TRIVIAL
+  // [AETHER] iOS fix: CAUCHY-reweighted normal equations are near-indefinite;
+  // Apple Accelerate SPARSE_SCHUR Cholesky fails (SparseFactorizationFailed). DENSE_SCHUR
+  // avoids the crash but is O(n^3) -> 18min+ on full 407 frames at Critical thermal.
+  // Use ITERATIVE_SCHUR (preconditioned CG, no factorization -> can't fail, O(n) per iter):
+  // force it by dense=0 < sparse=1 (so any num_images>0 falls to the iterative branch).
+  options.max_num_images_direct_dense_cpu_solver = 0;
+  options.max_num_images_direct_sparse_cpu_solver = 1;
   options.use_gpu = ba_use_gpu;
   options.gpu_index = ba_gpu_index;
   return options;

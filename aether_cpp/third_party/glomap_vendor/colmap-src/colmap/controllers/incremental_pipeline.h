@@ -133,6 +133,14 @@ struct IncrementalPipelineOptions {
   int ba_global_max_refinements = 5;
   double ba_global_max_refinement_change = 0.0005;
 
+  // [AETHER] Tunable BA loss config for R1/P4 sweeps. Defaults below reproduce
+  // stock COLMAP exactly (local SOFT_L1@1.0, global TRIVIAL).
+  // loss type: 0=TRIVIAL 1=SOFT_L1 2=CAUCHY
+  double ba_local_loss_scale = 1.0;
+  int ba_local_loss_type = 1;
+  double ba_global_loss_scale = 1.0;
+  int ba_global_loss_type = 0;
+
   // [AETHER] Defer ALL in-loop global bundle adjustment (periodic + recovery) to
   // the single finalize solve. On-device per-frame UI then pays local-BA-only
   // latency; the heavy O(N) global solve runs once post-capture (or async).

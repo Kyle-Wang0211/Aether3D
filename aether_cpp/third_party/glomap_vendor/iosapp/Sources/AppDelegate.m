@@ -25,8 +25,19 @@ extern int aether_perframe_bench(const char* db_path, const char* image_path,
                                  double* out_reproj, int* out_n_reg,
                                  double* out_total_ms);
 // Async-finalize validation: local (instant) vs refined (background) time+reproj.
+// gref/giter = global-BA finalize iteration cap; thermal_fn samples NSProcessInfo.
 extern int aether_async_bench(const char* db_path, const char* image_path,
+                              int gref, int giter, int (*thermal_fn)(),
                               char* out_json, int out_cap);
+// Real-scenario streaming sim: frame-paced register+BA, per-frame RSS+thermal.
+extern int aether_realsim_bench(const char* db_path, const char* image_path,
+                                int defer, int skipfin, int frame_interval_ms,
+                                int local_loss_type, double local_loss_scale,
+                                int global_loss_type, double global_loss_scale,
+                                int (*thermal_fn)(), char* out_json, int out_cap);
+static int read_thermal(void) {
+  return (int)[NSProcessInfo processInfo].thermalState;  // 0=nominal..3=critical
+}
 
 static int cmp_d(const void* a, const void* b) {
   double x = *(const double*)a, y = *(const double*)b;
@@ -83,26 +94,49 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
   [self.window makeKeyAndVisible];
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     NSProcessInfo* pi = [NSProcessInfo processInfo];
-    int waited = 0;
-    while (pi.thermalState >= NSProcessInfoThermalStateCritical && waited < 1200) {
-      printf("WAIT_COOL thermal=%ld\n", (long)pi.thermalState); fflush(stdout);
-      [NSThread sleepForTimeInterval:10]; waited += 10;
-    }
-    printf("BENCH_START thermal=%ld\n", (long)pi.thermalState); fflush(stdout);
+    // [AETHER] WAIT_COOL gate REMOVED — extreme-environment stress test: run NOW at
+    // whatever thermal state the device is in (incl. Critical=3). Validates the app
+    // works hot (real users in hot conditions), not just from a cool baseline.
+    printf("BENCH_START thermal=%ld (STRESS: no cool-wait)\n", (long)pi.thermalState); fflush(stdout);
     os_log(OS_LOG_DEFAULT, "BENCH_START");
 
-    // ===== SFM_ASYNC: validate async-finalize (local instant vs bg refine) =====
+    // ===== SFM_REALSIM: real-scenario streaming sim — frame every 2s × 396,
+    // per-frame RSS+proc+thermal, both backends (full-periodic vs local+defer).
+    if (0)  // disabled — async-finalize (production-exact) focus this build
     {
       NSString* docs = NSSearchPathForDirectoriesInDomains(
           NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_2048.db"];
+      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];
+      if ([[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
+        char j[512];
+        // CLEAN single-config run: CAUCHY@1.0 ONLY in a fresh process (no orig
+        // residual memory / no thermal carryover). defer=1 = local per-frame +
+        // global at finalize. Gives clean per-frame proc + RSS + thermal + the
+        // location of the big global-BA spike (which frame i= it lands on).
+        printf("REALSIM_GROUP clean  cauchy1.0 ONLY (CAUCHY@1.0 local+global)\n");
+        fflush(stdout);
+        j[0] = 0;
+        aether_realsim_bench(dbp.UTF8String, "", 1, 0, 2000, 2, 1.0, 2, 1.0,
+                             read_thermal, j, (int)sizeof(j));
+        printf("REALSIM_RESULT cauchy1.0 %s\n", j); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "REALSIM_RESULT cauchy1.0 %{public}s", j);
+      } else {
+        printf("REALSIM_NO_DB\n"); fflush(stdout);
+      }
+    }
+    if (1)  // SFM_ASYNC: production-exact (instant local + async RefineReconstruction)
+    {
+      NSString* docs = NSSearchPathForDirectoriesInDomains(
+          NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];
       if ([[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
         char j[512]; j[0] = 0;
-        printf("SFM_ASYNC start thermal=%ld\n",
-               (long)[NSProcessInfo processInfo].thermalState); fflush(stdout);
-        int rc = aether_async_bench(dbp.UTF8String, "", j, (int)sizeof(j));
-        printf("SFM_ASYNC rc=%d %s\n", rc, j); fflush(stdout);
-        os_log(OS_LOG_DEFAULT, "SFM_ASYNC rc=%d %{public}s", rc, j);
+        // gref=5 full-quality finalize (user-locked: NO cap). thermal sampled at
+        // start / after local / after refine to settle the cold->thermal=3 worry.
+        int rc = aether_async_bench(dbp.UTF8String, "", 5, 50, read_thermal, j,
+                                    (int)sizeof(j));
+        printf("SFM_ASYNC gref5 rc=%d %s\n", rc, j); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "SFM_ASYNC gref5 %{public}s", j);
       } else {
         printf("SFM_ASYNC_NO_DB\n"); fflush(stdout);
       }
@@ -116,7 +150,7 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
     {
       NSString* docs = NSSearchPathForDirectoriesInDomains(
           NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_2048.db"];
+      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];
       if (![[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
         printf("SFM_NO_DB path=%s\n", dbp.UTF8String); fflush(stdout);
         os_log(OS_LOG_DEFAULT, "SFM_NO_DB %{public}s", dbp.UTF8String);
