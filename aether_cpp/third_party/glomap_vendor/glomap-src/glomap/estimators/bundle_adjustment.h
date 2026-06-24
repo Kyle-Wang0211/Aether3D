@@ -26,13 +26,23 @@ struct BundleAdjusterOptions : public OptimizationBaseOptions {
   // Constrain the minimum number of views per track
   int min_num_view_per_track = 3;
 
+  // [AETHER] loss kernel selector — replicate COLMAP's CAUCHY (default) while keeping
+  // Huber switchable for the global-SfM A/B (Cauchy's heavier down-weighting can
+  // under-constrain a rough global init -> measure before locking; see port plan Risk #2).
+  int loss_type = 2;  // 0=Trivial(squared) 1=Huber 2=Cauchy
+
   BundleAdjusterOptions() : OptimizationBaseOptions() {
     thres_loss_function = 1.;
     solver_options.max_num_iterations = 200;
+    solver_options.function_tolerance = 1e-6;  // [AETHER] converge-stop (mirror COLMAP)
   }
 
   std::shared_ptr<ceres::LossFunction> CreateLossFunction() {
-    return std::make_shared<ceres::HuberLoss>(thres_loss_function);
+    switch (loss_type) {
+      case 0: return nullptr;  // TRIVIAL (squared loss)
+      case 1: return std::make_shared<ceres::HuberLoss>(thres_loss_function);
+      default: return std::make_shared<ceres::CauchyLoss>(thres_loss_function);
+    }
   }
 };
 class BundleAdjuster {

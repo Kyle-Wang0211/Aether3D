@@ -91,9 +91,18 @@ bool BundleAdjuster::Solve(std::unordered_map<rig_t, Rig>& rigs,
   }
 #endif  // GLOMAP_CUDA_ENABLED
 
-  // Do not use the iterative solver, as it does not seem to be helpful
-  options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
-  options_.solver_options.preconditioner_type = ceres::CLUSTER_TRIDIAGONAL;
+  // [AETHER] iOS solver routing (mirrors COLMAP incremental_pipeline.cc): Apple
+  // Accelerate SPARSE Cholesky FAILS on robust-reweighted near-indefinite normal
+  // equations (SparseFactorizationFailed crash; on Mac SuiteSparse it surfaced as
+  // "CHOLMOD: Matrix not positive definite -> Termination: FAILURE"). NEVER SPARSE_SCHUR
+  // on iOS. DENSE_SCHUR (Eigen dense, can't fail) for compact recons <=200 imgs;
+  // ITERATIVE_SCHUR (no factorization) above.
+  if (num_images <= 200) {
+    options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
+  } else {
+    options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+    options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+  }
 
   options_.solver_options.minimizer_progress_to_stdout = VLOG_IS_ON(2);
   ceres::Solve(options_.solver_options, problem_.get(), &summary);

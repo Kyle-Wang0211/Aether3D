@@ -103,7 +103,7 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
 
     // ===== SFM_REALSIM: real-scenario streaming sim — frame every 2s × 396,
     // per-frame RSS+proc+thermal, both backends (full-periodic vs local+defer).
-    if (1)  // 2s-gate check for keep-CAUCHY local (per-frame) + DENSE finalize
+    if (0)  // realsim off — full-414 async (build+finalize) focus this build
     {
       NSString* docs = NSSearchPathForDirectoriesInDomains(
           NSDocumentDirectory, NSUserDomainMask, YES).firstObject;

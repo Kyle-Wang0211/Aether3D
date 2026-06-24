@@ -548,13 +548,17 @@ void GlobalPositioner::ParameterizeVariables(
   }
 #endif  // GLOMAP_CUDA_ENABLED
 
-  // Set up the options for the solver
-  // Do not use iterative solvers, for its suboptimal performance.
+  // [AETHER] iOS solver routing: never SPARSE on Apple Accelerate (crash). DENSE for
+  // compact recons (<=200 imgs), ITERATIVE above; tracks==0 -> DENSE_NORMAL_CHOLESKY.
   if (tracks.size() > 0) {
-    options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
-    options_.solver_options.preconditioner_type = ceres::CLUSTER_TRIDIAGONAL;
+    if (num_images <= 200) {
+      options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
+    } else {
+      options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+      options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+    }
   } else {
-    options_.solver_options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    options_.solver_options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
     options_.solver_options.preconditioner_type = ceres::JACOBI;
   }
 }
