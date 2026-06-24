@@ -187,7 +187,8 @@ extern "C" int aether_perframe_bench(const char* db_path,
 // Reports local time/reproj (what the UI sees instantly) vs refined time/reproj
 // (the background payoff). Proves the global BA is off the per-frame path.
 extern "C" int aether_async_bench(const char* db_path, const char* image_path,
-                                  int gref, int giter, int (*thermal_fn)(),
+                                  int gref, int giter, int gloss,
+                                  int (*thermal_fn)(),
                                   char* out_json, int out_cap) {
   try {
     const int thermal_start = thermal_fn ? thermal_fn() : -1;
@@ -234,8 +235,9 @@ extern "C" int aether_async_bench(const char* db_path, const char* image_path,
         auto o2 = std::make_shared<colmap::IncrementalPipelineOptions>();
         o2->min_num_matches = 15;
         o2->extract_colors = false;
-        // [AETHER] CAUCHY@1.0 global + finalize iteration cap (speed lever)
-        o2->ba_global_loss_type = 2;
+        // [AETHER] global loss configurable (gloss: 0=TRIVIAL 1=SOFT_L1 2=CAUCHY) +
+        // finalize iteration cap. Non-CAUCHY unlocks the fast direct SPARSE_SCHUR.
+        o2->ba_global_loss_type = gloss;
         o2->ba_global_loss_scale = 1.0;
         if (gref > 0) o2->ba_global_max_refinements = gref;
         if (giter > 0) o2->ba_global_max_num_iterations = giter;
@@ -261,9 +263,9 @@ extern "C" int aether_async_bench(const char* db_path, const char* image_path,
         "{\"local_ms\":%.0f,\"local_reproj\":%.4f,\"local_reg\":%d,"
         "\"local_pts\":%d,\"refine_ms\":%.0f,\"refined_reproj\":%.4f,"
         "\"refined_reg\":%d,\"refined_pts\":%d,\"gref\":%d,\"giter\":%d,"
-        "\"th_start\":%d,\"th_local\":%d,\"th_refine\":%d,\"done\":%d}",
+        "\"gloss\":%d,\"th_start\":%d,\"th_local\":%d,\"th_refine\":%d,\"done\":%d}",
         local_ms, local_reproj, local_reg, local_pts, refine_ms, refined_reproj,
-        refined_reg, refined_pts, gref, giter,
+        refined_reg, refined_pts, gref, giter, gloss,
         thermal_start, thermal_local, thermal_refine, done.load());
     return 0;
   } catch (const std::exception& e) {
@@ -441,7 +443,8 @@ int main(int argc, char** argv) {
     j[0] = 0;
     int gref = g_arg_i(argc, argv, "--gref", 5);
     int giter = g_arg_i(argc, argv, "--giter", 50);
-    aether_async_bench(db_path, image_path, gref, giter, nullptr, j,
+    int gloss = g_arg_i(argc, argv, "--gloss", 2);  // 0=TRIVIAL 1=SOFT_L1 2=CAUCHY
+    aether_async_bench(db_path, image_path, gref, giter, gloss, nullptr, j,
                        (int)sizeof(j));
     std::printf("ASYNC %s\n", j);
     return 0;

@@ -167,13 +167,19 @@ BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
       BundleAdjustmentOptions::LossFunctionType::SOFT_L1,
       BundleAdjustmentOptions::LossFunctionType::CAUCHY};
   options.loss_function_type = kGLossMap[ba_global_loss_type % 3];  // default TRIVIAL
-  // [AETHER] iOS fix: CAUCHY-reweighted normal equations are near-indefinite;
-  // Apple Accelerate SPARSE_SCHUR Cholesky fails (SparseFactorizationFailed). DENSE_SCHUR
-  // avoids the crash but is O(n^3) -> 18min+ on full 407 frames at Critical thermal.
-  // Use ITERATIVE_SCHUR (preconditioned CG, no factorization -> can't fail, O(n) per iter):
-  // force it by dense=0 < sparse=1 (so any num_images>0 falls to the iterative branch).
-  options.max_num_images_direct_dense_cpu_solver = 0;
-  options.max_num_images_direct_sparse_cpu_solver = 1;
+  // [AETHER] iOS fix: CAUCHY-reweighted normal equations are near-indefinite, so Apple
+  // Accelerate SPARSE_SCHUR Cholesky fails (SparseFactorizationFailed). But CAUCHY does
+  // NOT break the DENSE Cholesky path (Eigen, not Accelerate). A1 experiment showed
+  // CAUCHY is essential (TRIVIAL finalize reproj 0.938 ~= local floor; CAUCHY 0.846),
+  // and the 192s was ITERATIVE_SCHUR (CG burning its full budget). So for CAUCHY route a
+  // compact selected-region recon to DENSE_SCHUR (O(n^3) but tiny at <=~200 frames,
+  // est ~20s vs 77s iterative) and only fall to ITERATIVE for large recons (NEVER
+  // SPARSE -> Accelerate crash). Non-CAUCHY keeps COLMAP defaults (fast SPARSE).
+  if (ba_global_loss_type % 3 == 2) {  // CAUCHY only
+    options.max_num_images_direct_dense_cpu_solver = 200;   // <=200 frames -> DENSE
+    options.max_num_images_direct_sparse_cpu_solver = 201;  // skip SPARSE (crashes);
+                                                            // >201 -> ITERATIVE
+  }
   options.use_gpu = ba_use_gpu;
   options.gpu_index = ba_gpu_index;
   return options;

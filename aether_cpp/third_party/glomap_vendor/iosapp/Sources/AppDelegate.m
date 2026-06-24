@@ -27,7 +27,7 @@ extern int aether_perframe_bench(const char* db_path, const char* image_path,
 // Async-finalize validation: local (instant) vs refined (background) time+reproj.
 // gref/giter = global-BA finalize iteration cap; thermal_fn samples NSProcessInfo.
 extern int aether_async_bench(const char* db_path, const char* image_path,
-                              int gref, int giter, int (*thermal_fn)(),
+                              int gref, int giter, int gloss, int (*thermal_fn)(),
                               char* out_json, int out_cap);
 // Real-scenario streaming sim: frame-paced register+BA, per-frame RSS+thermal.
 extern int aether_realsim_bench(const char* db_path, const char* image_path,
@@ -130,13 +130,16 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
           NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
       NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];
       if ([[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
-        char j[512]; j[0] = 0;
-        // gref=5 full-quality finalize (user-locked: NO cap). thermal sampled at
-        // start / after local / after refine to settle the cold->thermal=3 worry.
-        int rc = aether_async_bench(dbp.UTF8String, "", 5, 50, read_thermal, j,
-                                    (int)sizeof(j));
-        printf("SFM_ASYNC gref5 rc=%d %s\n", rc, j); fflush(stdout);
-        os_log(OS_LOG_DEFAULT, "SFM_ASYNC gref5 %{public}s", j);
+        char j[512];
+        // [AETHER] THE FIX: CAUCHY (gloss=2) now routes to DENSE_SCHUR (Eigen, not the
+        // Accelerate sparse Cholesky that crashed) for <=200-frame selected regions.
+        // Mac: 22s @ reproj 0.8415 (vs ITERATIVE 76s/0.8459). Validate on device: does
+        // Eigen dense Cholesky succeed + real refine_ms + thermal? gref=5 full quality.
+        j[0] = 0;
+        int rc = aether_async_bench(dbp.UTF8String, "", 5, 50, 2 /*CAUCHY->DENSE*/,
+                                    read_thermal, j, (int)sizeof(j));
+        printf("SFM_ASYNC cauchy_dense rc=%d %s\n", rc, j); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "SFM_ASYNC cauchy_dense %{public}s", j);
       } else {
         printf("SFM_ASYNC_NO_DB\n"); fflush(stdout);
       }
