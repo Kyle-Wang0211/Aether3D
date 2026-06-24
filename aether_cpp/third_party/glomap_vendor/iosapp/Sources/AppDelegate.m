@@ -102,17 +102,15 @@ static int ExtractFrame(NSString* jpg, int maxEdge, uint8_t* desc, int cap) {
 
     // ===== SFM_REALSIM: real-scenario streaming sim — frame every 2s × 396,
     // per-frame RSS+proc+thermal, both backends (full-periodic vs local+defer).
-    if (0)  // disabled — async-finalize (production-exact) focus this build
+    if (1)  // 2s-gate check for keep-CAUCHY local (per-frame) + DENSE finalize
     {
       NSString* docs = NSSearchPathForDirectoriesInDomains(
           NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
       NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];
       if ([[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
         char j[512];
-        // CLEAN single-config run: CAUCHY@1.0 ONLY in a fresh process (no orig
-        // residual memory / no thermal carryover). defer=1 = local per-frame +
-        // global at finalize. Gives clean per-frame proc + RSS + thermal + the
-        // location of the big global-BA spike (which frame i= it lands on).
+        // [AETHER] keep-CAUCHY local pass-2 now raises per-frame cost; verify the live
+        // 2s gate on device. local CAUCHY@1.0 (keep-CAUCHY) + global CAUCHY->DENSE.
         printf("REALSIM_GROUP clean  cauchy1.0 ONLY (CAUCHY@1.0 local+global)\n");
         fflush(stdout);
         j[0] = 0;
