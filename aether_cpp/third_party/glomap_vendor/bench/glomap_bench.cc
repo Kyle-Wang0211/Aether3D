@@ -65,8 +65,11 @@ extern "C" int glomap_bench(const char* db_path, char* out_json, int out_cap) {
     }
 
     GlobalMapperOptions options;
-    options.skip_retriangulation = true;  // core = RA + GP + BA only
-    options.skip_pruning = true;
+    // [AETHER] full GLOMAP (RA + GP + BA + retriangulation + pruning) so reproj is
+    // directly comparable to the COLMAP incremental path. (Core-only RA+GP+BA gave an
+    // unfairly high reproj 1.35 because it skips track refinement.)
+    options.skip_retriangulation = false;
+    options.skip_pruning = false;
     GlobalMapper global_mapper(options);
 
     const double t_solve0 = NowMs();

@@ -556,8 +556,13 @@ void GlobalPositioner::ParameterizeVariables(
     if (num_images <= 200) {
       options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
     } else {
-      options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
-      options_.solver_options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+      // [AETHER] GP device-OOM salvage: ITERATIVE_SCHUR (CG, NO factorization/fill-in)
+      // for the >200 global-positioning solve. SPARSE_SCHUR+EIGEN_SPARSE here OOM'd on
+      // device (jetsam during "Solving the global positioner problem"; the Eigen LDLT
+      // fill-in on the GP Schur blew past the 4.1GB limit). CG is low-memory. (BA stays
+      // SPARSE+EIGEN — its problem is smaller/sparser and fit at 3.07GB for COLMAP.)
+      options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+      options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
     }
   } else {
     options_.solver_options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;

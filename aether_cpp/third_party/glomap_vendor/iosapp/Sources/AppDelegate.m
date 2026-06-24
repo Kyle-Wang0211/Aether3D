@@ -39,6 +39,9 @@ extern int aether_realsim_bench(const char* db_path, const char* image_path,
                                 int global_loss_type, double global_loss_scale,
                                 int lnum,
                                 int (*thermal_fn)(), char* out_json, int out_cap);
+// [AETHER] GLOMAP full global SfM bench (C ABI from bench/glomap_bench.cc) — device
+// A/B vs COLMAP incremental: same db, RA+GP+BA+retriangulation, time+mem+reproj.
+extern int glomap_bench(const char* db_path, char* out_json, int out_cap);
 static int read_thermal(void) {
   return (int)[NSProcessInfo processInfo].thermalState;  // 0=nominal..3=critical
 }
@@ -213,7 +216,7 @@ static void StartMemSampler(void) {
         printf("REALSIM_NO_DB\n"); fflush(stdout);
       }
     }
-    if (1)  // SFM_ASYNC: production-exact (instant local + async RefineReconstruction)
+    if (1)  // SFM_ASYNC (COLMAP) — the chosen on-device engine (default)
     {
       NSString* docs = NSSearchPathForDirectoriesInDomains(
           NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -222,8 +225,8 @@ static void StartMemSampler(void) {
         char j[512];
         // [AETHER] CAUCHY (gloss=2) finalize. Full-scene (>200 reg frames) routes to
         // SPARSE_SCHUR + EIGEN_SPARSE (Eigen LDLT — Apple Accelerate's sparse Cholesky
-        // crashed; EIGEN does not). Device-validated: 396f real414 finalize 959s / reproj
-        // 0.9608 / 5 passes / no crash / thermal 2. gref=5 full quality.
+        // crashed; EIGEN does not). Device-validated: 396f real414 finalize 959-1044s /
+        // reproj 0.9606-0.9608 / 5 passes / no crash / thermal 2 / peak 3.07GB.
         j[0] = 0;
         g_peak_mb = 0.0;  // reset peak so PEAK_MEM_MB reflects this run's finalize
         int rc = aether_async_bench(dbp.UTF8String, "", 5, 50, 2 /*CAUCHY*/,
@@ -235,6 +238,23 @@ static void StartMemSampler(void) {
                g_peak_mb);
       } else {
         printf("SFM_ASYNC_NO_DB\n"); fflush(stdout);
+      }
+    }
+    if (0)  // GLOMAP_BENCH: kept (gated off) as record. GLOMAP is OUT on device — it
+    {       // dies at global positioning (OOM/crash, both SPARSE+EIGEN and ITERATIVE).
+      NSString* docs = NSSearchPathForDirectoriesInDomains(
+          NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+      NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];
+      if ([[NSFileManager defaultManager] fileExistsAtPath:dbp]) {
+        char gj[1024];
+        gj[0] = 0;
+        g_peak_mb = 0.0;
+        int grc = glomap_bench(dbp.UTF8String, gj, (int)sizeof(gj));
+        printf("GLOMAP_BENCH rc=%d %s\n", grc, gj); fflush(stdout);
+        printf("GLOMAP_BENCH_PEAK_MEM_MB=%.1f\n", g_peak_mb); fflush(stdout);
+        os_log(OS_LOG_DEFAULT, "GLOMAP_BENCH %{public}s peak_mb=%.1f", gj, g_peak_mb);
+      } else {
+        printf("GLOMAP_BENCH_NO_DB\n"); fflush(stdout);
       }
     }
 
