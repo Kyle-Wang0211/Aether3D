@@ -6,6 +6,7 @@
 #include "colmap/controllers/incremental_pipeline.h"
 #include "colmap/estimators/alignment.h"
 #include "colmap/geometry/sim3.h"
+#include "colmap/scene/database.h"  // [MIGRATION 4.0.4] Database::Open for the new ctor
 #include "colmap/scene/reconstruction.h"
 #include "colmap/scene/reconstruction_manager.h"
 
@@ -44,8 +45,9 @@ extern "C" int colmap_bench(const char* db_path,
     auto recon_manager = std::make_shared<colmap::ReconstructionManager>();
 
     const double t0 = NowMs();
-    colmap::IncrementalPipeline pipeline(options, image_path, db_path,
-                                         recon_manager);
+    options->image_path = image_path;  // [MIGRATION 4.0.4] image_path moved into options
+    colmap::IncrementalPipeline pipeline(
+        options, colmap::Database::Open(db_path), recon_manager);
     pipeline.Run();
     const double solve_ms = NowMs() - t0;
 
@@ -87,8 +89,9 @@ extern "C" int colmap_bench_perframe(const char* db_path,
   try {
     auto options = std::make_shared<colmap::IncrementalPipelineOptions>();
     auto recon_manager = std::make_shared<colmap::ReconstructionManager>();
-    colmap::IncrementalPipeline pipeline(options, image_path, db_path,
-                                         recon_manager);
+    options->image_path = image_path;  // [MIGRATION 4.0.4] image_path moved into options
+    colmap::IncrementalPipeline pipeline(
+        options, colmap::Database::Open(db_path), recon_manager);
     std::vector<double> stamps;
     const double t0 = NowMs();
     pipeline.AddCallback(
@@ -148,8 +151,9 @@ extern "C" int aether_perframe_bench(const char* db_path,
     auto recon_manager = std::make_shared<colmap::ReconstructionManager>();
     std::vector<double> stamps;
     const double t0 = NowMs();
-    colmap::IncrementalPipeline pipeline(options, image_path, db_path,
-                                         recon_manager);
+    options->image_path = image_path;  // [MIGRATION 4.0.4] image_path moved into options
+    colmap::IncrementalPipeline pipeline(
+        options, colmap::Database::Open(db_path), recon_manager);
     pipeline.AddCallback(
         colmap::IncrementalPipeline::INITIAL_IMAGE_PAIR_REG_CALLBACK,
         [&]() { stamps.push_back(NowMs() - t0); });
@@ -207,7 +211,8 @@ extern "C" int aether_async_bench(const char* db_path, const char* image_path,
     opts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
     auto mgr = std::make_shared<colmap::ReconstructionManager>();
     const double t0 = NowMs();
-    colmap::IncrementalPipeline p1(opts, image_path, db_path, mgr);
+    opts->image_path = image_path;  // [MIGRATION 4.0.4] image_path moved into options
+    colmap::IncrementalPipeline p1(opts, colmap::Database::Open(db_path), mgr);
     p1.Run();
     const double local_ms = NowMs() - t0;
     const int thermal_local = thermal_fn ? thermal_fn() : -1;
@@ -252,7 +257,8 @@ extern "C" int aether_async_bench(const char* db_path, const char* image_path,
         // ZERO quality loss. Keep only quality-NEUTRAL memory fixes (ITERATIVE routing,
         // which doesn't change the converged optimum). Full intrinsic refinement stays on.
         auto m2 = std::make_shared<colmap::ReconstructionManager>();
-        colmap::IncrementalPipeline p2(o2, image_path, db_path, m2);
+        o2->image_path = image_path;  // [MIGRATION 4.0.4] image_path moved into options
+        colmap::IncrementalPipeline p2(o2, colmap::Database::Open(db_path), m2);
         p2.RefineReconstruction(refined);
         refine_ms = NowMs() - tr;
         done.store(1);
@@ -356,7 +362,9 @@ extern "C" int aether_realsim_bench(const char* db_path, const char* image_path,
     double peak_rss = 0, max_proc = 0;
     int n_over_2s = 0;
     double frame_start = NowMs();
-    colmap::IncrementalPipeline pipeline(options, image_path, db_path, mgr);
+    options->image_path = image_path;  // [MIGRATION 4.0.4] image_path moved into options
+    colmap::IncrementalPipeline pipeline(
+        options, colmap::Database::Open(db_path), mgr);
     auto cb = [&]() {
       const double proc_ms = NowMs() - frame_start;
       const double rss = RssMB();
@@ -503,8 +511,9 @@ int main(int argc, char** argv) {
   auto recon_manager = std::make_shared<colmap::ReconstructionManager>();
   std::vector<double> stamps;
   const double t0 = NowMs();
-  colmap::IncrementalPipeline pipeline(options, image_path, db_path,
-                                       recon_manager);
+  options->image_path = image_path;  // [MIGRATION 4.0.4] image_path moved into options
+  colmap::IncrementalPipeline pipeline(
+      options, colmap::Database::Open(db_path), recon_manager);
   pipeline.AddCallback(
       colmap::IncrementalPipeline::INITIAL_IMAGE_PAIR_REG_CALLBACK,
       [&]() { stamps.push_back(NowMs() - t0); });

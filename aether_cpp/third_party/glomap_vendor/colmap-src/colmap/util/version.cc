@@ -30,16 +30,36 @@
 
 #include "colmap/util/version.h"
 
+#include "colmap/util/logging.h"
 #include "colmap/util/string.h"
 
 namespace colmap {
 namespace {
 
-const char* COLMAP_VERSION = "3.14.0.dev0";
-const char* COLMAP_COMMIT_ID = "b6b7b54e";
-const char* COLMAP_COMMIT_DATE = "2025-11-20";
+const char* COLMAP_VERSION = "4.0.4";
+const char* COLMAP_COMMIT_ID = "9c23f69";
+const char* COLMAP_COMMIT_DATE = "2026-04-27";
+
+constexpr int kVersionMajor = 4;
+constexpr int kVersionMinor = 0;
+constexpr int kVersionPatch = 4;
+
+// Increment for database schema changes within a release.
+constexpr int kDatabaseSchemaRevision = 0;
 
 }  // namespace
+
+int MakeDatabaseVersionNumber(int major, int minor, int patch, int revision) {
+  THROW_CHECK_LT(minor, 100);
+  THROW_CHECK_LT(patch, 100);
+  THROW_CHECK_LT(revision, 100);
+  return major * 1000000 + minor * 10000 + patch * 100 + revision;
+}
+
+int GetDatabaseVersionNumber() {
+  return MakeDatabaseVersionNumber(
+      kVersionMajor, kVersionMinor, kVersionPatch, kDatabaseSchemaRevision);
+}
 
 std::string GetVersionInfo() {
   return StringPrintf("COLMAP %s", COLMAP_VERSION);

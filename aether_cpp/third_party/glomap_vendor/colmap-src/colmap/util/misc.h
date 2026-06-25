@@ -29,7 +29,11 @@
 
 #pragma once
 
+#include "colmap/util/logging.h"
+#include "colmap/util/string.h"
+
 #include <algorithm>
+#include <locale>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -41,11 +45,13 @@ namespace colmap {
 #define STRINGIFY_(s) #s
 #endif  // STRINGIFY
 
-// Log first-order heading with over- and underscores.
-void PrintHeading1(const std::string& heading);
+#ifndef LOG_HEADING1
+#define LOG_HEADING1(message) LOG(INFO) << "=== " << (message) << " ===";
+#endif  // LOG_HEADING1
 
-// Log second-order heading with underscores.
-void PrintHeading2(const std::string& heading);
+#ifndef LOG_HEADING2
+#define LOG_HEADING2(message) LOG(INFO) << "--- " << (message) << " ---";
+#endif  // LOG_HEADING2
 
 // Check if vector contains elements.
 template <typename T>
@@ -90,12 +96,46 @@ std::string VectorToCSV(const std::vector<T>& values) {
   }
 
   std::ostringstream stream;
+  stream.imbue(std::locale::classic());
   for (const T& value : values) {
     stream << value << ", ";
   }
   std::string buf = stream.str();
   buf.resize(buf.size() - 2);
   return buf;
+}
+
+template <typename T>
+std::vector<T> CSVToVector(const std::string& csv) {
+  auto elems = StringSplit(csv, ",;");
+  std::vector<T> values;
+  values.reserve(elems.size());
+  for (auto& elem : elems) {
+    StringTrim(&elem);
+    if (elem.empty()) {
+      continue;
+    }
+    try {
+      static_assert(std::is_same<T, std::string>::value ||  //
+                        std::is_same<T, int>::value ||      //
+                        std::is_same<T, float>::value ||    //
+                        std::is_same<T, double>::value,     //
+                    "Unsupported type");
+      if constexpr (std::is_same<T, std::string>::value) {
+        values.push_back(std::move(elem));
+      } else if constexpr (std::is_same<T, int>::value) {
+        values.push_back(std::stoi(elem));
+      } else if constexpr (std::is_same<T, float>::value) {
+        values.push_back(static_cast<float>(StringToDouble(elem)));
+      } else if constexpr (std::is_same<T, double>::value) {
+        values.push_back(StringToDouble(elem));
+      }
+    } catch (const std::invalid_argument&) {
+      LOG(ERROR) << "Failed to convert CSV element: " << elem;
+      return {};
+    }
+  }
+  return values;
 }
 
 }  // namespace colmap

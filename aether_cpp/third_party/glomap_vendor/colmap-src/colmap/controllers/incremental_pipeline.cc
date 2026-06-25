@@ -30,12 +30,49 @@
 #include "colmap/controllers/incremental_pipeline.h"
 
 #include "colmap/estimators/alignment.h"
+#include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/scene/database.h"
 #include "colmap/util/file.h"
 #include "colmap/util/timer.h"
 
+#include <cstdlib>  // [AETHER] std::getenv/std::atoi for env threshold overrides
+
 namespace colmap {
 namespace {
+
+void CustomizeIncrementalPipelineOptions(const DatabaseCache& database_cache,
+                                         IncrementalPipelineOptions& options) {
+  // If the total number of images is small then do not enforce the
+  // minimum model size so that we can reconstruct small image
+  // collections, i.e., if the model is at least half of the total number
+  // of images, we always keep it.
+  options.min_model_size = std::min<size_t>(0.5 * database_cache.NumImages(),
+                                            options.min_model_size);
+}
+
+DatabaseCache::Options CreateDatabaseCacheOptions(
+    const IncrementalPipelineOptions& options,
+    const ReconstructionManager& reconstruction_manager) {
+  DatabaseCache::Options database_cache_options;
+  database_cache_options.min_num_matches =
+      static_cast<size_t>(options.min_num_matches);
+  database_cache_options.ignore_watermarks = options.ignore_watermarks;
+  database_cache_options.image_names = {options.image_names.begin(),
+                                        options.image_names.end()};
+  // Make sure images of the given reconstruction are also included when
+  // manually specifying images for the reconstruction procedure.
+  if (reconstruction_manager.Size() == 1 && !options.image_names.empty()) {
+    const auto& reconstruction = reconstruction_manager.Get(0);
+    for (const image_t image_id : reconstruction->RegImageIds()) {
+      const auto& image = reconstruction->Image(image_id);
+      database_cache_options.image_names.insert(image.Name());
+    }
+  }
+  database_cache_options.load_all_images = options.load_all_images;
+  database_cache_options.convert_pose_priors_to_enu =
+      options.use_prior_position;
+  return database_cache_options;
+}
 
 void IterativeGlobalRefinement(const IncrementalPipelineOptions& options,
                                const IncrementalMapper::Options& mapper_options,
@@ -49,18 +86,18 @@ void IterativeGlobalRefinement(const IncrementalPipelineOptions& options,
   mapper.FilterFrames(mapper_options);
 }
 
-void ExtractColors(const std::string& image_path,
+void ExtractColors(const std::filesystem::path& image_path,
                    const image_t image_id,
                    Reconstruction& reconstruction) {
   if (!reconstruction.ExtractColorsForImage(image_id, image_path)) {
-    LOG(WARNING) << StringPrintf("Could not read image %s at path %s.",
-                                 reconstruction.Image(image_id).Name().c_str(),
-                                 image_path.c_str());
+    LOG(WARNING) << "Could not read image "
+                 << reconstruction.Image(image_id).Name() << " at path "
+                 << image_path << ".";
   }
 }
 
 void WriteSnapshot(const Reconstruction& reconstruction,
-                   const std::string& snapshot_path) {
+                   const std::filesystem::path& snapshot_path) {
   LOG(INFO) << "Creating snapshot";
   // Get the current timestamp in milliseconds.
   const size_t timestamp =
@@ -68,11 +105,26 @@ void WriteSnapshot(const Reconstruction& reconstruction,
           std::chrono::high_resolution_clock::now().time_since_epoch())
           .count();
   // Write reconstruction to unique path with current timestamp.
-  const std::string path =
-      JoinPaths(snapshot_path, StringPrintf("%010zu", timestamp));
+  const auto path = snapshot_path / StringPrintf("%010zu", timestamp);
   CreateDirIfNotExists(path);
   VLOG(1) << "=> Writing to " << path;
   reconstruction.Write(path);
+}
+
+bool HasUnknownSensorFromRig(const Reconstruction& reconstruction) {
+  std::unordered_set<const Rig*> parameterized_rigs;
+  for (const auto& [_, image] : reconstruction.Images()) {
+    parameterized_rigs.insert(image.FramePtr()->RigPtr());
+  }
+  for (const Rig* rig : parameterized_rigs) {
+    for (const auto& [sensor_id, sensor_from_rig] : rig->NonRefSensors()) {
+      if (sensor_id.type == SensorType::CAMERA &&
+          !sensor_from_rig.has_value()) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -108,94 +160,105 @@ IncrementalTriangulator::Options IncrementalPipelineOptions::Triangulation()
 BundleAdjustmentOptions IncrementalPipelineOptions::LocalBundleAdjustment()
     const {
   BundleAdjustmentOptions options;
-  options.solver_options.function_tolerance = ba_local_function_tolerance;
-  options.solver_options.gradient_tolerance = 10.0;
-  options.solver_options.parameter_tolerance = 0.0;
-  options.solver_options.max_num_iterations = ba_local_max_num_iterations;
-  options.solver_options.max_linear_solver_iterations = 100;
-  options.solver_options.logging_type = ceres::LoggingType::SILENT;
-  options.solver_options.num_threads = num_threads;
-#if CERES_VERSION_MAJOR < 2
-  options.solver_options.num_linear_solver_threads = num_threads;
-#endif  // CERES_VERSION_MAJOR
   options.print_summary = false;
   options.refine_focal_length = ba_refine_focal_length;
   options.refine_principal_point = ba_refine_principal_point;
   options.refine_extra_params = ba_refine_extra_params;
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
-  options.min_num_residuals_for_cpu_multi_threading =
-      ba_min_num_residuals_for_cpu_multi_threading;
-  options.loss_function_scale = ba_local_loss_scale;  // [AETHER] R1 sweep (was 1.0)
-  static const BundleAdjustmentOptions::LossFunctionType kLossMap[3] = {
-      BundleAdjustmentOptions::LossFunctionType::TRIVIAL,
-      BundleAdjustmentOptions::LossFunctionType::SOFT_L1,
-      BundleAdjustmentOptions::LossFunctionType::CAUCHY};
-  options.loss_function_type = kLossMap[ba_local_loss_type % 3];  // default SOFT_L1
-  options.use_gpu = ba_use_gpu;
-  options.gpu_index = ba_gpu_index;
+  if (options.ceres) {
+    options.ceres->solver_options.function_tolerance =
+        ba_local_function_tolerance;
+    options.ceres->solver_options.gradient_tolerance = 10.0;
+    options.ceres->solver_options.parameter_tolerance = 0.0;
+    options.ceres->solver_options.max_num_iterations =
+        ba_local_max_num_iterations;
+    options.ceres->solver_options.max_linear_solver_iterations = 100;
+    options.ceres->solver_options.logging_type = ceres::LoggingType::SILENT;
+    options.ceres->solver_options.num_threads = num_threads;
+#if CERES_VERSION_MAJOR < 2
+    options.ceres->solver_options.num_linear_solver_threads = num_threads;
+#endif  // CERES_VERSION_MAJOR
+    options.ceres->min_num_residuals_for_cpu_multi_threading =
+        ba_min_num_residuals_for_cpu_multi_threading;
+    options.ceres->loss_function_scale =
+        ba_local_loss_scale;  // [AETHER] R1 sweep (was 1.0)
+    static const CeresBundleAdjustmentOptions::LossFunctionType kLossMap[3] = {
+        CeresBundleAdjustmentOptions::LossFunctionType::TRIVIAL,
+        CeresBundleAdjustmentOptions::LossFunctionType::SOFT_L1,
+        CeresBundleAdjustmentOptions::LossFunctionType::CAUCHY};
+    options.ceres->loss_function_type =
+        kLossMap[ba_local_loss_type % 3];  // default SOFT_L1
+    options.ceres->use_gpu = ba_use_gpu;
+    options.ceres->gpu_index = ba_gpu_index;
+  }
   return options;
 }
 
 BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
     const {
   BundleAdjustmentOptions options;
-  options.solver_options.function_tolerance = ba_global_function_tolerance;
-  options.solver_options.gradient_tolerance = 1.0;
-  options.solver_options.parameter_tolerance = 0.0;
-  options.solver_options.max_num_iterations = ba_global_max_num_iterations;
-  options.solver_options.max_linear_solver_iterations = 100;
-  options.solver_options.logging_type = ceres::LoggingType::SILENT;
-  if (VLOG_IS_ON(2)) {
-    options.solver_options.minimizer_progress_to_stdout = true;
-    options.solver_options.logging_type =
-        ceres::LoggingType::PER_MINIMIZER_ITERATION;
-  }
-  options.solver_options.num_threads = num_threads;
-#if CERES_VERSION_MAJOR < 2
-  options.solver_options.num_linear_solver_threads = num_threads;
-#endif  // CERES_VERSION_MAJOR
   options.print_summary = false;
   options.refine_focal_length = ba_refine_focal_length;
   options.refine_principal_point = ba_refine_principal_point;
   options.refine_extra_params = ba_refine_extra_params;
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
-  options.min_num_residuals_for_cpu_multi_threading =
-      ba_min_num_residuals_for_cpu_multi_threading;
-  options.loss_function_scale = ba_global_loss_scale;  // [AETHER] P4 sweep
-  static const BundleAdjustmentOptions::LossFunctionType kGLossMap[3] = {
-      BundleAdjustmentOptions::LossFunctionType::TRIVIAL,
-      BundleAdjustmentOptions::LossFunctionType::SOFT_L1,
-      BundleAdjustmentOptions::LossFunctionType::CAUCHY};
-  options.loss_function_type = kGLossMap[ba_global_loss_type % 3];  // default TRIVIAL
-  // [AETHER] iOS solver routing for CAUCHY-reweighted finalize. The indefinite/near-
-  // singular Schur complement only crashes Apple's Accelerate sparse Cholesky
-  // (SparseFactorizationFailed) -- NOT sparse Cholesky in general. bundle_adjustment.cc
-  // now forces EIGEN_SPARSE (Eigen SimplicialLDLT) for the CPU sparse path, which
-  // factorizes the indefinite system fine. So CAUCHY can use the FAST SPARSE_SCHUR after
-  // all (the earlier ITERATIVE forcing was a workaround for the wrong backend). Route:
-  //   <=200 frames    -> DENSE_SCHUR  (tiny, O(n^3) but fastest at small scale)
-  //   201..5000        -> SPARSE_SCHUR (EIGEN_SPARSE; full-capture finalize lands here)
-  //   >5000            -> ITERATIVE_SCHUR (CLUSTER_JACOBI; only enormous recons)
-  if (ba_global_loss_type % 3 == 2) {  // CAUCHY only
-    // [AETHER] 2026-06-25 FINAL: DENSE_SCHUR for the whole finalize (threshold 1000
-    // covers all real object-centric captures). Sweep proved DENSE beats SPARSE+EIGEN at
-    // every size on this build (50f 14.8 vs 16.9s, 200f 113 vs 146s, 396f 450 vs 538s &
-    // 2.91 vs 3.77GB): object-centric => the reduced camera matrix is DENSE (all cams see
-    // the object) => "sparse" Schur fills in => slow simplicial EIGEN_SPARSE + more RAM;
-    // dense Cholesky (fast BLAS, fixed O(n^2) storage) wins. DENSE is also the cleanest
-    // license (pure Eigen dense MPL2, no SimplicialCholesky) and doesn't touch the
-    // Accelerate sparse crash path. SPARSE+EIGEN kept only as a >1000-frame fallback.
-    options.max_num_images_direct_dense_cpu_solver = 1000;
-    options.max_num_images_direct_sparse_cpu_solver = 5000;
-    // [AETHER] dense/sparse-threshold sweep override (env) — force DENSE vs SPARSE at a
-    // given problem size to find the DENSE↔SPARSE+EIGEN crossover (BAL/Ceres: ~50-200).
-    if (const char* d = std::getenv("AETHER_DENSE_THRESH"))
-      options.max_num_images_direct_dense_cpu_solver = std::atoi(d);
-    if (const char* s = std::getenv("AETHER_SPARSE_THRESH"))
-      options.max_num_images_direct_sparse_cpu_solver = std::atoi(s);
+  if (options.ceres) {
+    options.ceres->solver_options.function_tolerance =
+        ba_global_function_tolerance;
+    options.ceres->solver_options.gradient_tolerance = 1.0;
+    options.ceres->solver_options.parameter_tolerance = 0.0;
+    options.ceres->solver_options.max_num_iterations =
+        ba_global_max_num_iterations;
+    options.ceres->solver_options.max_linear_solver_iterations = 100;
+    options.ceres->solver_options.logging_type = ceres::LoggingType::SILENT;
+    if (VLOG_IS_ON(2)) {
+      options.ceres->solver_options.minimizer_progress_to_stdout = true;
+      options.ceres->solver_options.logging_type =
+          ceres::LoggingType::PER_MINIMIZER_ITERATION;
+    }
+    options.ceres->solver_options.num_threads = num_threads;
+#if CERES_VERSION_MAJOR < 2
+    options.ceres->solver_options.num_linear_solver_threads = num_threads;
+#endif  // CERES_VERSION_MAJOR
+    options.ceres->min_num_residuals_for_cpu_multi_threading =
+        ba_min_num_residuals_for_cpu_multi_threading;
+    options.ceres->loss_function_scale = ba_global_loss_scale;  // [AETHER] P4 sweep
+    static const CeresBundleAdjustmentOptions::LossFunctionType kGLossMap[3] = {
+        CeresBundleAdjustmentOptions::LossFunctionType::TRIVIAL,
+        CeresBundleAdjustmentOptions::LossFunctionType::SOFT_L1,
+        CeresBundleAdjustmentOptions::LossFunctionType::CAUCHY};
+    options.ceres->loss_function_type =
+        kGLossMap[ba_global_loss_type % 3];  // default TRIVIAL
+    // [AETHER] iOS solver routing for CAUCHY-reweighted finalize. The indefinite/near-
+    // singular Schur complement only crashes Apple's Accelerate sparse Cholesky
+    // (SparseFactorizationFailed) -- NOT sparse Cholesky in general. bundle_adjustment_ceres.cc
+    // now forces EIGEN_SPARSE (Eigen SimplicialLDLT) for the CPU sparse path, which
+    // factorizes the indefinite system fine. So CAUCHY can use the FAST SPARSE_SCHUR after
+    // all (the earlier ITERATIVE forcing was a workaround for the wrong backend). Route:
+    //   <=200 frames    -> DENSE_SCHUR  (tiny, O(n^3) but fastest at small scale)
+    //   201..5000        -> SPARSE_SCHUR (EIGEN_SPARSE; full-capture finalize lands here)
+    //   >5000            -> ITERATIVE_SCHUR (CLUSTER_JACOBI; only enormous recons)
+    if (ba_global_loss_type % 3 == 2) {  // CAUCHY only
+      // [AETHER] 2026-06-25 FINAL: DENSE_SCHUR for the whole finalize (threshold 1000
+      // covers all real object-centric captures). Sweep proved DENSE beats SPARSE+EIGEN at
+      // every size on this build (50f 14.8 vs 16.9s, 200f 113 vs 146s, 396f 450 vs 538s &
+      // 2.91 vs 3.77GB): object-centric => the reduced camera matrix is DENSE (all cams see
+      // the object) => "sparse" Schur fills in => slow simplicial EIGEN_SPARSE + more RAM;
+      // dense Cholesky (fast BLAS, fixed O(n^2) storage) wins. DENSE is also the cleanest
+      // license (pure Eigen dense MPL2, no SimplicialCholesky) and doesn't touch the
+      // Accelerate sparse crash path. SPARSE+EIGEN kept only as a >1000-frame fallback.
+      options.ceres->max_num_images_direct_dense_cpu_solver = 1000;
+      options.ceres->max_num_images_direct_sparse_cpu_solver = 5000;
+      // [AETHER] dense/sparse-threshold sweep override (env) — force DENSE vs SPARSE at a
+      // given problem size to find the DENSE↔SPARSE+EIGEN crossover (BAL/Ceres: ~50-200).
+      if (const char* d = std::getenv("AETHER_DENSE_THRESH"))
+        options.ceres->max_num_images_direct_dense_cpu_solver = std::atoi(d);
+      if (const char* s = std::getenv("AETHER_SPARSE_THRESH"))
+        options.ceres->max_num_images_direct_sparse_cpu_solver = std::atoi(s);
+    }
+    options.ceres->use_gpu = ba_use_gpu;
+    options.ceres->gpu_index = ba_gpu_index;
   }
-  options.use_gpu = ba_use_gpu;
-  options.gpu_index = ba_gpu_index;
   return options;
 }
 
@@ -216,7 +279,7 @@ bool IncrementalPipelineOptions::Check() const {
   CHECK_OPTION_GT(ba_global_max_num_iterations, 0);
   CHECK_OPTION_GT(ba_local_max_refinements, 0);
   CHECK_OPTION_GE(ba_local_max_refinement_change, 0);
-  CHECK_OPTION_GT(ba_global_max_refinements, 0);
+  CHECK_OPTION_GE(ba_global_max_refinements, 0);
   CHECK_OPTION_GE(ba_global_max_refinement_change, 0);
   CHECK_OPTION_GE(snapshot_frames_freq, 0);
   CHECK_OPTION_GT(prior_position_loss_scale, 0.);
@@ -228,25 +291,59 @@ bool IncrementalPipelineOptions::Check() const {
 }
 
 IncrementalPipeline::IncrementalPipeline(
-    std::shared_ptr<const IncrementalPipelineOptions> options,
-    const std::string& image_path,
-    const std::string& database_path,
+    std::shared_ptr<IncrementalPipelineOptions> options,
+    std::shared_ptr<class Database> database,
     std::shared_ptr<class ReconstructionManager> reconstruction_manager)
-    : options_(std::move(options)),
-      image_path_(image_path),
-      database_path_(database_path),
-      reconstruction_manager_(std::move(reconstruction_manager)),
+    : options_(std::move(THROW_CHECK_NOTNULL(options))),
+      reconstruction_manager_(
+          THROW_CHECK_NOTNULL(std::move(reconstruction_manager))),
       total_run_timer_(std::make_shared<Timer>()) {
   THROW_CHECK(options_->Check());
-  RegisterCallback(INITIAL_IMAGE_PAIR_REG_CALLBACK);
-  RegisterCallback(NEXT_IMAGE_REG_CALLBACK);
-  RegisterCallback(LAST_IMAGE_REG_CALLBACK);
+  THROW_CHECK_NOTNULL(database);
+
+  LOG(INFO) << "Loading database";
+  Timer timer;
+  timer.Start();
+  database_cache_ = DatabaseCache::Create(
+      *database,
+      CreateDatabaseCacheOptions(*options_, *reconstruction_manager_));
+  timer.PrintMinutes();
+
+  CustomizeIncrementalPipelineOptions(*database_cache_, *options_);
+
+  RegisterCallbacks();
+}
+
+IncrementalPipeline::IncrementalPipeline(
+    std::shared_ptr<IncrementalPipelineOptions> options,
+    std::shared_ptr<class DatabaseCache> database_cache,
+    std::shared_ptr<class ReconstructionManager> reconstruction_manager)
+    : options_(std::move(THROW_CHECK_NOTNULL(options))),
+      reconstruction_manager_(
+          THROW_CHECK_NOTNULL(std::move(reconstruction_manager))),
+      total_run_timer_(std::make_shared<Timer>()) {
+  THROW_CHECK(options_->Check());
+  THROW_CHECK_NOTNULL(database_cache);
+
+  database_cache_ = DatabaseCache::CreateFromCache(
+      *database_cache,
+      CreateDatabaseCacheOptions(*options_, *reconstruction_manager_));
+
+  CustomizeIncrementalPipelineOptions(*database_cache_, *options_);
+
+  RegisterCallbacks();
 }
 
 void IncrementalPipeline::Run() {
   total_run_timer_->Start();
 
-  if (!LoadDatabase()) {
+  if (database_cache_->NumImages() == 0) {
+    LOG(WARNING) << "No images with matches";
+    return;
+  }
+
+  if (options_->use_prior_position && database_cache_->NumPosePriors() == 0) {
+    LOG(WARNING) << "No pose priors";
     return;
   }
 
@@ -261,13 +358,17 @@ void IncrementalPipeline::Run() {
 
   IncrementalMapper::Options mapper_options = options_->Mapper();
   IncrementalMapper mapper(database_cache_);
-  Reconstruct(mapper,
-              mapper_options,
-              /*continue_reconstruction=*/continue_reconstruction);
+  if (Reconstruct(mapper,
+                  mapper_options,
+                  /*continue_reconstruction=*/continue_reconstruction) ==
+      Status::STOP) {
+    total_run_timer_->PrintMinutes();
+    return;
+  }
 
   auto ShouldStop = [this, &mapper, &num_images]() {
     return mapper.NumTotalRegImages() == num_images || CheckIfStopped() ||
-           ReachedMaxRuntime();
+           CheckReachedMaxRuntime();
   };
 
   const size_t kNumInitRelaxations = 2;
@@ -279,7 +380,11 @@ void IncrementalPipeline::Run() {
     LOG(INFO) << "=> Relaxing the initialization constraints.";
     mapper_options.init_min_num_inliers /= 2;
     mapper.ResetInitializationStats();
-    Reconstruct(mapper, mapper_options, /*continue_reconstruction=*/false);
+    if (Reconstruct(mapper,
+                    mapper_options,
+                    /*continue_reconstruction=*/false) == Status::STOP) {
+      break;
+    }
 
     if (ShouldStop()) {
       break;
@@ -288,48 +393,14 @@ void IncrementalPipeline::Run() {
     LOG(INFO) << "=> Relaxing the initialization constraints.";
     mapper_options.init_min_tri_angle /= 2;
     mapper.ResetInitializationStats();
-    Reconstruct(mapper, mapper_options, /*continue_reconstruction=*/false);
-  }
-
-  total_run_timer_->PrintMinutes();
-}
-
-bool IncrementalPipeline::LoadDatabase() {
-  LOG(INFO) << "Loading database";
-
-  // Make sure images of the given reconstruction are also included when
-  // manually specifying images for the reconstruction procedure.
-  std::unordered_set<std::string> image_names = {options_->image_names.begin(),
-                                                 options_->image_names.end()};
-  if (reconstruction_manager_->Size() == 1 && !options_->image_names.empty()) {
-    const auto& reconstruction = reconstruction_manager_->Get(0);
-    for (const image_t image_id : reconstruction->RegImageIds()) {
-      const auto& image = reconstruction->Image(image_id);
-      image_names.insert(image.Name());
+    if (Reconstruct(mapper,
+                    mapper_options,
+                    /*continue_reconstruction=*/false) == Status::STOP) {
+      break;
     }
   }
 
-  Timer timer;
-  timer.Start();
-  database_cache_ = DatabaseCache::Create(
-      *Database::Open(database_path_),
-      /*min_num_matches=*/static_cast<size_t>(options_->min_num_matches),
-      /*ignore_watermarks=*/options_->ignore_watermarks,
-      /*image_names=*/image_names);
-  timer.PrintMinutes();
-
-  if (database_cache_->NumImages() == 0) {
-    LOG(WARNING) << "No images with matches found in the database";
-    return false;
-  }
-
-  // If prior positions are to be used and setup from the database, convert
-  // geographic coords. to cartesian ones
-  if (options_->use_prior_position) {
-    return database_cache_->SetupPosePriors();
-  }
-
-  return true;
+  total_run_timer_->PrintMinutes();
 }
 
 IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
@@ -380,6 +451,10 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
     }
   }
 
+  if (reconstruction.NumPoints3D() == 0) {
+    return Status::BAD_INITIAL_PAIR;
+  }
+
   LOG(INFO) << "Global bundle adjustment";
   mapper.AdjustGlobalBundle(mapper_options, options_->GlobalBundleAdjustment());
   reconstruction.Normalize();
@@ -401,7 +476,7 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
     for (const image_t image_id : {image_id1, image_id2}) {
       const Image& image = reconstruction.Image(image_id);
       for (const data_t& data_id : image.FramePtr()->ImageIds()) {
-        ExtractColors(image_path_, data_id.id, reconstruction);
+        ExtractColors(options_->image_path, data_id.id, reconstruction);
       }
     }
   }
@@ -427,6 +502,10 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     const IncrementalMapper::Options& mapper_options,
     const std::shared_ptr<Reconstruction>& reconstruction) {
   mapper.BeginReconstruction(reconstruction);
+
+  if (HasUnknownSensorFromRig(*reconstruction)) {
+    return Status::UNKNOWN_SENSOR_FROM_RIG;
+  }
 
   ////////////////////////////////////////////////////////////////////////////
   // Register initial pair
@@ -463,7 +542,7 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
   bool reg_next_success = true;
   bool prev_reg_next_success = true;
   do {
-    if (CheckIfStopped() || ReachedMaxRuntime()) {
+    if (CheckIfStopped() || CheckReachedMaxRuntime()) {
       break;
     }
 
@@ -509,11 +588,11 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
         } else {
           LOG(INFO) << "=> Could not register, trying another image.";
 
-          // If initial pair fails to continue for some time,
+          // If initial model fails to continue for some time,
           // abort and try different initial pair.
           const size_t kMinNumInitialRegTrials = 30;
           if (reg_trial >= kMinNumInitialRegTrials &&
-              reconstruction->NumRegFrames() <
+              reconstruction->NumRegImages() <
                   static_cast<size_t>(options_->min_model_size)) {
             break;
           }
@@ -547,7 +626,7 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
       if (options_->extract_colors) {
         for (const data_t& data_id : image.FramePtr()->ImageIds()) {
-          ExtractColors(image_path_, data_id.id, *reconstruction);
+          ExtractColors(options_->image_path, data_id.id, *reconstruction);
         }
       }
 
@@ -576,7 +655,7 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     }
   } while (reg_next_success || prev_reg_next_success);
 
-  if (CheckIfStopped() || ReachedMaxRuntime()) {
+  if (CheckIfStopped() || CheckReachedMaxRuntime()) {
     return Status::INTERRUPTED;
   }
 
@@ -591,21 +670,20 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
   return Status::SUCCESS;
 }
 
-void IncrementalPipeline::Reconstruct(
+IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
     IncrementalMapper& mapper,
     const IncrementalMapper::Options& mapper_options,
     bool continue_reconstruction) {
   for (int num_trials = 0; num_trials < options_->init_num_trials;
        ++num_trials) {
-    if (CheckIfStopped() || ReachedMaxRuntime()) {
-      break;
+    if (CheckIfStopped() || CheckReachedMaxRuntime()) {
+      return Status::STOP;
     }
-    size_t reconstruction_idx;
-    if (!continue_reconstruction || num_trials > 0) {
-      reconstruction_idx = reconstruction_manager_->Add();
-    } else {
-      reconstruction_idx = 0;
-    }
+
+    const size_t reconstruction_idx =
+        (!continue_reconstruction || num_trials > 0)
+            ? reconstruction_manager_->Add()
+            : 0;
     std::shared_ptr<Reconstruction> reconstruction =
         reconstruction_manager_->Get(reconstruction_idx);
 
@@ -618,17 +696,22 @@ void IncrementalPipeline::Reconstruct(
         mapper.EndReconstruction(/*discard=*/false);
         AlignReconstructionToOrigRigScales(database_cache_->Rigs(),
                                            reconstruction.get());
-        return;
+        return Status::STOP;
       }
 
-      case Status::NO_INITIAL_PAIR: {
-        LOG(INFO) << "Discarding reconstruction due to no initial pair";
+      case Status::UNKNOWN_SENSOR_FROM_RIG: {
+        LOG(ERROR)
+            << "Discarding reconstruction due to unknown sensor_from_rig "
+               "poses. Either explicitly define the poses by configuring the "
+               "rigs or first run reconstruction without configured rigs and "
+               "then derive the poses from the initial reconstruction for a "
+               "subsequent reconstruction with rig constraints. See "
+               "documentation for detailed instructions.";
         mapper.EndReconstruction(/*discard=*/true);
         reconstruction_manager_->Delete(reconstruction_idx);
-        // If no pair could be found, we can exit the trial loop, because
-        // the next trial will not find anything unless the initialization
-        // thresholds are relaxed.
-        return;
+        // If the reconstruction was discarded due to an unknown sensor from
+        // rig, we can stop the outer trial loop, because all trials will fail.
+        return Status::STOP;
       }
 
       case Status::BAD_INITIAL_PAIR: {
@@ -640,22 +723,29 @@ void IncrementalPipeline::Reconstruct(
         break;
       }
 
+      case Status::NO_INITIAL_PAIR: {
+        LOG(INFO) << "Discarding reconstruction due to no initial pair";
+        mapper.EndReconstruction(/*discard=*/true);
+        reconstruction_manager_->Delete(reconstruction_idx);
+        // If no pair could be found, we can exit the trial loop, because
+        // the next trials in this loop will not find anything unless the
+        // initialization thresholds are relaxed. However, by relaxing the
+        // constraints in the outer loop we can succeed.
+        return Status::CONTINUE;
+      }
+
       case Status::SUCCESS: {
         // Remember the total number of registered images before potentially
         // discarding it below due to small size, so we can exit out of the main
         // loop, if all images were registered.
+        const size_t num_reg_images = reconstruction->NumRegImages();
         const size_t total_num_reg_images = mapper.NumTotalRegImages();
 
-        // If the total number of images is small then do not enforce the
-        // minimum model size so that we can reconstruct small image
-        // collections. Always keep the first reconstruction, independent of
-        // size.
-        const size_t min_model_size = std::min<size_t>(
-            0.8 * database_cache_->NumImages(), options_->min_model_size);
+        // Always keep the first reconstruction, independent of size.
         if ((options_->multiple_models && reconstruction_manager_->Size() > 1 &&
-             reconstruction->NumRegFrames() < min_model_size) ||
-            reconstruction->NumRegFrames() == 0) {
-          LOG(INFO) << "Discarding reconstruction due to insufficient size";
+             num_reg_images < static_cast<size_t>(options_->min_model_size)) ||
+            num_reg_images == 0) {
+          LOG(WARNING) << "Discarding reconstruction due to insufficient size";
           mapper.EndReconstruction(/*discard=*/true);
           reconstruction_manager_->Delete(reconstruction_idx);
         } else {
@@ -668,13 +758,16 @@ void IncrementalPipeline::Reconstruct(
 
         Callback(LAST_IMAGE_REG_CALLBACK);
 
+        // Check if we should or can reconstruct another sub-model.
         if (!options_->multiple_models ||
             reconstruction_manager_->Size() >=
                 static_cast<size_t>(options_->max_num_models) ||
             total_num_reg_images >= database_cache_->NumImages() - 1) {
-          return;
+          return Status::STOP;
         }
 
+        // In case the reconstruction was successful and there are remaining
+        // images, we try to reconstruct another sub-model in the next trial.
         break;
       }
 
@@ -682,11 +775,14 @@ void IncrementalPipeline::Reconstruct(
         LOG(FATAL_THROW) << "Unknown reconstruction status.";
     }
   }
+
+  return Status::CONTINUE;
 }
 
 void IncrementalPipeline::TriangulateReconstruction(
     const std::shared_ptr<Reconstruction>& reconstruction) {
-  THROW_CHECK(LoadDatabase());
+  THROW_CHECK_GT(database_cache_->NumImages(), 0)
+      << "No images with matches found in the database";
   IncrementalMapper mapper(database_cache_);
   mapper.BeginReconstruction(reconstruction);
 
@@ -719,16 +815,18 @@ void IncrementalPipeline::TriangulateReconstruction(
   reconstruction->UpdatePoint3DErrors();
 
   LOG(INFO) << "Extracting colors";
-  reconstruction->ExtractColorsForAllImages(image_path_);
+  reconstruction->ExtractColorsForAllImages(options_->image_path);
 }
 
 void IncrementalPipeline::RefineReconstruction(
     const std::shared_ptr<Reconstruction>& reconstruction) {
-  // [AETHER] Exactly the in-pipeline finalize global BA (see line ~553 +
-  // IterativeGlobalRefinement free fn), run standalone on an existing recon for
-  // the async-finalize worker. No per-image triangulation loop — matches what
-  // the synchronous defer-finalize produces (reproj 1.1455 on the real-res db).
-  THROW_CHECK(LoadDatabase());
+  // [AETHER] Exactly the in-pipeline finalize global BA (see ReconstructSubModel
+  // finalize + IterativeGlobalRefinement free fn), run standalone on an existing
+  // recon for the async-finalize worker. No per-image triangulation loop — matches
+  // what the synchronous defer-finalize produces (reproj 1.1455 on the real-res db).
+  // 4.0.4: the database cache is already loaded by the ctor (no LoadDatabase()).
+  THROW_CHECK_GT(database_cache_->NumImages(), 0)
+      << "No images with matches found in the database";
   IncrementalMapper mapper(database_cache_);
   mapper.BeginReconstruction(reconstruction);
   mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
@@ -742,7 +840,13 @@ void IncrementalPipeline::RefineReconstruction(
   reconstruction->UpdatePoint3DErrors();
 }
 
-bool IncrementalPipeline::ReachedMaxRuntime() const {
+void IncrementalPipeline::RegisterCallbacks() {
+  RegisterCallback(INITIAL_IMAGE_PAIR_REG_CALLBACK);
+  RegisterCallback(NEXT_IMAGE_REG_CALLBACK);
+  RegisterCallback(LAST_IMAGE_REG_CALLBACK);
+}
+
+bool IncrementalPipeline::CheckReachedMaxRuntime() const {
   if (options_->max_runtime_seconds > 0 &&
       total_run_timer_->ElapsedSeconds() > options_->max_runtime_seconds) {
     LOG(INFO) << "Reached maximum runtime of " << options_->max_runtime_seconds

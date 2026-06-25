@@ -34,7 +34,9 @@
 
 #include <memory>
 
-// CHOLMOD (SuiteSparse, GPL) removed for iOS build — Eigen SimplicialLLT only.
+// [MIGRATION] CHOLMOD (SuiteSparse, GPL) removed for iOS/host build — Eigen
+// SimplicialLLT only (matches 3.14 vendored tree; cholmod.h is unavailable and
+// SuiteSparse is GPL/unshippable). Guarded behind COLMAP_CHOLMOD_ENABLED, undefined.
 #include <Eigen/SparseCholesky>
 
 namespace colmap {
@@ -96,8 +98,12 @@ std::shared_ptr<LeastAbsoluteDeviationLinearSolverImpl> CreateLinearSolver(
       break;
     case LeastAbsoluteDeviationSolver::Options::SolverType::
         SupernodalCholmodLLT:
-      // CHOLMOD removed for iOS — fall back to Eigen SimplicialLLT.
+#ifdef COLMAP_CHOLMOD_ENABLED
+      return std::make_shared<SupernodalCholmodLLTLinearSolver>();
+#else
+      // [MIGRATION] CHOLMOD removed for iOS/host — fall back to Eigen SimplicialLLT.
       return std::make_shared<SimplicialLLTLinearSolver>();
+#endif  // COLMAP_CHOLMOD_ENABLED
       break;
     default:
       throw std::runtime_error("Unknown linear solver type");
@@ -117,7 +123,7 @@ LeastAbsoluteDeviationSolver::LeastAbsoluteDeviationSolver(
   THROW_CHECK_GE(options_.absolute_tolerance, 0);
   THROW_CHECK_GE(options_.relative_tolerance, 0);
   if (A.rows() < A.cols()) {
-    throw std::runtime_error("Undertermined systems not supported.");
+    throw std::runtime_error("Underdetermined systems not supported.");
   }
 
   linear_solver_->Compute(A_);

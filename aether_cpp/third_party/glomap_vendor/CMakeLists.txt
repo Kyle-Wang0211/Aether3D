@@ -22,7 +22,11 @@ file(GLOB COLMAP_SRC
   ${COLMAP}/colmap/sensor/*.cc
   ${COLMAP}/colmap/scene/*.cc
   ${COLMAP}/colmap/estimators/*.cc
+  ${COLMAP}/colmap/estimators/solvers/*.cc   # [MIGRATION 4.0.4] NEW: minimal-solver impls
   ${COLMAP}/colmap/optim/*.cc)
+# [MIGRATION 4.0.4] upstream now ships *_test.cc + *_matchers files inline in these dirs
+# (gmock-dependent); the glob would compile them. Drop all test TUs (same as GLOMAP/POSELIB).
+list(FILTER COLMAP_SRC EXCLUDE REGEX "_test\\.cc$")
 # excludes (explicit paths). KEEP scene/database.cc + database_sqlite.cc (sqlite3 db-input path).
 set(COLMAP_EXCLUDE
   ${COLMAP}/colmap/sensor/bitmap.cc            # FreeImage IO
@@ -34,7 +38,14 @@ set(COLMAP_EXCLUDE
   ${COLMAP}/colmap/util/cuda.cc
   ${COLMAP}/colmap/util/cudacc.cc
   ${COLMAP}/colmap/util/gtest_main.cc          # test runner (needs gmock)
-  ${COLMAP}/colmap/util/testing.cc)            # test helpers
+  ${COLMAP}/colmap/util/testing.cc             # test helpers
+  # [MIGRATION 4.0.4] COLMAP 4.0 added a native global-SfM module in estimators/.
+  # rotation_averaging_impl.cc #includes <Eigen/CholmodSupport> (SuiteSparse/GPL, no
+  # cholmod.h here). It is reached ONLY by sfm/global_mapper.cc, which is NOT in our
+  # explicit sfm/ source list (we vendor incremental SfM only). colmap_bench uses the
+  # incremental pipeline, so this TU is dead for our build -> exclude (matches 3.14's
+  # CHOLMOD-stripped iOS vendoring).
+  ${COLMAP}/colmap/estimators/rotation_averaging_impl.cc)
 list(REMOVE_ITEM COLMAP_SRC ${COLMAP_EXCLUDE})
 # feature/types.cc: defines FeatureKeypoint (needed by scene/database); clean (no FreeImage)
 list(APPEND COLMAP_SRC ${COLMAP}/colmap/feature/types.cc)
@@ -93,6 +104,37 @@ target_compile_definitions(glomap_core PRIVATE
 
 target_compile_options(glomap_core PRIVATE -w)   # silence warnings during bring-up
 
+# [MIGRATION 4.0.4] colmap-only static lib for colmap_bench_exe. The 3.14->4.0.4
+# colmap migration is independent of glomap-src / poselib-src / the DSP-SIFT threaded
+# extractor, which are STILL 3.14-API (glomap-src uses CamFromWorld().rotation; the
+# extractor uses the 3.14 VLFeat covdet API, whereas 4.0.4 vendored a different VLFeat).
+# colmap_bench reads a prebuilt database and runs incremental SfM only — it links ZERO
+# glomap/VLFeat/extractor symbols. Building a colmap-only lib lets colmap_bench_exe link
+# clean on 4.0.4 without dragging in those un-migrated 3.14 TUs. glomap_core is left
+# intact for glomap_bench_exe (out of scope for this migration step).
+set(COLMAP_ONLY_SRC ${COLMAP_SRC})
+list(REMOVE_ITEM COLMAP_ONLY_SRC ${V}/bench/aether_threaded_extract.cc)
+# [MIGRATION 4.0.4] COLMAP 4.0 now calls PoseLib minimal solvers directly (via
+# estimators/solvers/poselib_utils.cc + the solver wrappers) -> colmap depends on
+# poselib::p3p / gp3p / p4pf / Camera. PoseLib is Eigen-only and compiles clean, so
+# bundle it into colmap_only too (it was already in glomap_core).
+add_library(colmap_only STATIC ${COLMAP_ONLY_SRC} ${POSELIB_SRC})
+target_include_directories(colmap_only PUBLIC
+  ${COLMAP} ${POSELIB} ${V}/stubs
+  ${GLOG}
+  ${CERES}/include ${CERESB}/include ${CERES}/config
+  ${EIGEN}
+  /opt/homebrew/include)
+target_compile_definitions(colmap_only PRIVATE
+  EIGEN_MPL2_ONLY
+  GLOG_USE_GLOG_EXPORT
+  GLOG_NO_ABBREVIATED_SEVERITIES
+  GLOG_VERSION_MAJOR=0
+  GLOG_VERSION_MINOR=7
+  GLOMAP_CUDA_DISABLED
+  VL_DISABLE_SSE2 VL_DISABLE_AVX)
+target_compile_options(colmap_only PRIVATE -w)
+
 # ---- benchmark executable (link test + standalone run) ----
 option(BUILD_BENCH "Build glomap_bench executable" ON)
 if(BUILD_BENCH)
@@ -136,7 +178,7 @@ if(BUILD_BENCH)
     GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7)
   target_compile_options(colmap_bench_exe PRIVATE -w)
   target_link_libraries(colmap_bench_exe PRIVATE
-    glomap_core
+    colmap_only                          # [MIGRATION 4.0.4] colmap-only (no glomap/VLFeat)
     /opt/homebrew/lib/libceres.dylib
     /opt/homebrew/lib/libglog.dylib
     "-lsqlite3"
