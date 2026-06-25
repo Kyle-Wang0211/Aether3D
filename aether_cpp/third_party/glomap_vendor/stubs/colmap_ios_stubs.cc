@@ -14,6 +14,8 @@
 
 #include "colmap/sensor/bitmap.h"
 #include "colmap/feature/index.h"
+#include "colmap/feature/aliked.h"        // [MIGRATION 4.0.4] ALIKED factory stubs
+#include "colmap/feature/onnx_matchers.h" // [MIGRATION 4.0.4] LightGlue factory stub
 
 #include <cstring>
 #include <memory>
@@ -189,5 +191,33 @@ std::unique_ptr<FeatureDescriptorIndex> FeatureDescriptorIndex::Create(
     FeatureDescriptorIndex::Type /*type*/, int /*num_threads*/) {
   return nullptr;
 }
+
+// [MIGRATION 4.0.4] COLMAP 4.0 added ALIKED (learned features) + LightGlue/ONNX
+// matching backends. Their impls (feature/aliked.cc, feature/onnx_matchers.cc)
+// pull libtorch + ONNX Runtime and are NOT built for our device subset. The
+// SIFT factory dispatchers (CreateSiftFeatureExtractor / CreateSiftFeatureMatcher
+// in extractor.cc / matcher.cc / sift.cc) reference these symbols at link time
+// for the non-SIFT branches, but our path is SIFT-only (FeatureExtractorType::SIFT
+// / FeatureMatcherType::SIFT_BRUTEFORCE), so these are never reached at runtime.
+// Stub them to satisfy the linker — same pattern as the faiss index stub above.
+std::unique_ptr<FeatureExtractor> CreateAlikedFeatureExtractor(
+    const FeatureExtractionOptions& /*options*/) {
+  return nullptr;
+}
+
+std::unique_ptr<FeatureMatcher> CreateAlikedFeatureMatcher(
+    const FeatureMatchingOptions& /*options*/) {
+  return nullptr;
+}
+
+std::unique_ptr<FeatureMatcher> CreateLightGlueONNXFeatureMatcher(
+    const FeatureMatchingOptions& /*options*/,
+    const LightGlueONNXMatchingOptions& /*lightglue_options*/) {
+  return nullptr;
+}
+
+bool AlikedExtractionOptions::Check() const { return true; }
+bool AlikedMatchingOptions::Check() const { return true; }
+bool LightGlueONNXMatchingOptions::Check() const { return true; }
 
 }  // namespace colmap

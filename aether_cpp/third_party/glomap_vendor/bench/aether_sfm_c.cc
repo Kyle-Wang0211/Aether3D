@@ -34,8 +34,6 @@
 #include "colmap/scene/reconstruction_manager.h"
 #include "colmap/scene/two_view_geometry.h"
 
-#include "glomap/controllers/track_retriangulation.h"
-
 #include <glog/logging.h>
 
 #include <atomic>
@@ -59,25 +57,11 @@ extern "C" int aether_sift_match(const uint8_t* desc1, int n1,
                                  const uint8_t* desc2, int n2, double max_ratio,
                                  int* out_num_matches);
 
-namespace glomap {
-// Linker-only stub. -force_load drags the whole libglomap_core.a into the
-// Runner binary, including global_mapper.cc.o which references
-// RetriangulateTracks (lives in track_retriangulation.cc, EXCLUDED from the
-// iOS subset because it needs the colmap incremental triangulator's GPU path).
-// The colmap *incremental* pipeline this wrapper drives never calls GLOMAP's
-// global mapper, so this is never invoked at runtime — it only satisfies the
-// linker. Same stub the validated glomap_bench.cc provides; defining it here
-// keeps the SfM wrapper self-sufficient when linked WITHOUT the bench TUs.
-bool RetriangulateTracks(const TriangulatorOptions&, const colmap::Database&,
-                         std::unordered_map<rig_t, Rig>&,
-                         std::unordered_map<camera_t, Camera>&,
-                         std::unordered_map<frame_t, Frame>&,
-                         std::unordered_map<image_t, Image>&,
-                         std::unordered_map<track_t, Track>&) {
-  LOG(WARNING) << "RetriangulateTracks stub called (should be skipped)";
-  return true;
-}
-}  // namespace glomap
+// [MIGRATION 4.0.4 / STEP 5] The glomap::RetriangulateTracks linker stub was
+// removed together with GLOMAP. It existed only to satisfy -force_load of
+// libglomap_core.a (global_mapper.cc.o referenced the symbol). With GLOMAP no
+// longer compiled into glomap_core there is no such reference, so the stub is
+// dead. The colmap incremental pipeline this wrapper drives never used it.
 
 namespace {
 
@@ -441,8 +425,14 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     for (int i = 0; i < n; ++i) {
       kps[i] = colmap::FeatureKeypoint(xy[2 * i], xy[2 * i + 1]);
     }
-    colmap::FeatureDescriptors descriptors(n, 128);
-    std::memcpy(descriptors.data(), desc.data(),
+    // [MIGRATION 4.0.4 / STEP 5] FeatureDescriptors is now a struct
+    // {FeatureExtractorType type; FeatureDescriptorsData data;}. The raw
+    // uint8 matrix is the `.data` member; tag the type so WriteDescriptors
+    // serializes it consistently with ReadDescriptors.
+    colmap::FeatureDescriptors descriptors;
+    descriptors.type = colmap::FeatureExtractorType::SIFT;
+    descriptors.data.resize(n, 128);
+    std::memcpy(descriptors.data.data(), desc.data(),
                 static_cast<size_t>(n) * 128);
     s->db->WriteKeypoints(image_id, kps);
     s->db->WriteDescriptors(image_id, descriptors);

@@ -35,11 +35,12 @@ int aether_dsp_sift_extract(const uint8_t* gray,
   try {
     if (gray == nullptr || width <= 0 || height <= 0 || out_cap <= 0) return 1;
 
-    colmap::Bitmap bitmap;
-    bitmap.Allocate(width, height, /*as_rgb=*/false);
-    FIBITMAP* fib = bitmap.Data();
-    if (fib == nullptr) return 2;
-    fib->data.assign(gray, gray + static_cast<size_t>(width) * height);
+    // [MIGRATION 4.0.4 / STEP 5] colmap::Bitmap dropped the FreeImage backing
+    // (Allocate / Data() / FIBITMAP). Construct a grayscale bitmap and fill its
+    // row-major buffer directly via RowMajorData().
+    colmap::Bitmap bitmap(width, height, /*as_rgb=*/false);
+    bitmap.RowMajorData().assign(gray,
+                                 gray + static_cast<size_t>(width) * height);
 
     colmap::FeatureExtractionOptions opts(colmap::FeatureExtractorType::SIFT);
     opts.sift = std::make_shared<colmap::SiftExtractionOptions>();
@@ -64,12 +65,12 @@ int aether_dsp_sift_extract(const uint8_t* gray,
         out_xy[2 * i + 1] = kps[i].y;
       }
     }
-    if (out_desc != nullptr && desc.cols() == 128) {
-      const int dn = static_cast<int>(desc.rows());
+    if (out_desc != nullptr && desc.data.cols() == 128) {
+      const int dn = static_cast<int>(desc.data.rows());
       const int m = n < dn ? n : dn;
       for (int i = 0; i < m; ++i) {
         for (int d = 0; d < 128; ++d) {
-          out_desc[i * 128 + d] = desc(i, d);
+          out_desc[i * 128 + d] = desc.data(i, d);
         }
       }
     }
@@ -96,11 +97,10 @@ int aether_dsp_sift_extract_threaded(const uint8_t* gray,
   try {
     if (gray == nullptr || width <= 0 || height <= 0 || out_cap <= 0) return 1;
 
-    colmap::Bitmap bitmap;
-    bitmap.Allocate(width, height, /*as_rgb=*/false);
-    FIBITMAP* fib = bitmap.Data();
-    if (fib == nullptr) return 2;
-    fib->data.assign(gray, gray + static_cast<size_t>(width) * height);
+    // [MIGRATION 4.0.4 / STEP 5] See above: 4.0.4 Bitmap has no FreeImage backing.
+    colmap::Bitmap bitmap(width, height, /*as_rgb=*/false);
+    bitmap.RowMajorData().assign(gray,
+                                 gray + static_cast<size_t>(width) * height);
 
     // Default-constructed options match aether_dsp_sift_extract's defaults
     // (first_octave/octave_resolution/peak/edge/dsp_num_scales=10/L1_ROOT).
@@ -124,12 +124,12 @@ int aether_dsp_sift_extract_threaded(const uint8_t* gray,
         out_xy[2 * i + 1] = kps[i].y;
       }
     }
-    if (out_desc != nullptr && desc.cols() == 128) {
-      const int dn = static_cast<int>(desc.rows());
+    if (out_desc != nullptr && desc.data.cols() == 128) {
+      const int dn = static_cast<int>(desc.data.rows());
       const int m = n < dn ? n : dn;
       for (int i = 0; i < m; ++i) {
         for (int d = 0; d < 128; ++d) {
-          out_desc[i * 128 + d] = desc(i, d);
+          out_desc[i * 128 + d] = desc.data(i, d);
         }
       }
     }
@@ -223,12 +223,22 @@ int aether_sift_match(const uint8_t* desc1,
   try {
     if (desc1 == nullptr || desc2 == nullptr || n1 <= 0 || n2 <= 0) return 1;
 
-    auto d1 = std::make_shared<colmap::FeatureDescriptors>(n1, 128);
-    std::memcpy(d1->data(), desc1, static_cast<size_t>(n1) * 128);
-    auto d2 = std::make_shared<colmap::FeatureDescriptors>(n2, 128);
-    std::memcpy(d2->data(), desc2, static_cast<size_t>(n2) * 128);
+    // [MIGRATION 4.0.4 / STEP 5] FeatureDescriptors is a struct now; the raw
+    // matrix is `.data` and the matcher checks `.type == SIFT` (sift.cc:102).
+    auto d1 = std::make_shared<colmap::FeatureDescriptors>();
+    d1->type = colmap::FeatureExtractorType::SIFT;
+    d1->data.resize(n1, 128);
+    std::memcpy(d1->data.data(), desc1, static_cast<size_t>(n1) * 128);
+    auto d2 = std::make_shared<colmap::FeatureDescriptors>();
+    d2->type = colmap::FeatureExtractorType::SIFT;
+    d2->data.resize(n2, 128);
+    std::memcpy(d2->data.data(), desc2, static_cast<size_t>(n2) * 128);
 
-    colmap::FeatureMatchingOptions opts(colmap::FeatureMatcherType::SIFT);
+    // [MIGRATION 4.0.4] FeatureMatcherType::SIFT was renamed to SIFT_BRUTEFORCE
+    // (CreateSiftFeatureMatcher dispatches on it; cpu_brute_force_matcher=true +
+    // use_gpu=false still selects the Eigen CPU brute-force path).
+    colmap::FeatureMatchingOptions opts(
+        colmap::FeatureMatcherType::SIFT_BRUTEFORCE);
     opts.sift = std::make_shared<colmap::SiftMatchingOptions>();
     opts.sift->max_ratio = max_ratio > 0 ? max_ratio : 0.7;
     opts.sift->cpu_brute_force_matcher = true;  // streaming: match-per-pair, no index

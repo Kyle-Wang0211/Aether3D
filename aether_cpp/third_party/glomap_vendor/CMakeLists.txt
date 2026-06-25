@@ -73,19 +73,19 @@ list(APPEND COLMAP_SRC ${V}/stubs/colmap_ios_stubs.cc)
 # otherwise the cloned keypoint/descriptor FP arithmetic diverges -> not bit-identical.
 list(APPEND COLMAP_SRC ${V}/bench/aether_threaded_extract.cc)
 
-# ---- glomap pipeline ----
-file(GLOB_RECURSE GLOMAP_SRC ${GLOMAP}/glomap/*.cc)
-# exclude: exe main, lib entry, CLI option_manager (boost::program_options), retriangulation (colmap incremental triangulator), tests
-list(FILTER GLOMAP_SRC EXCLUDE REGEX "(/exe/|_test\\.cc$|/glomap\\.cc$|option_manager\\.cc$|track_retriangulation\\.cc$)")
+# [MIGRATION 4.0.4 / STEP 5] GLOMAP DROPPED from glomap_core. Production iOS runs
+# colmap INCREMENTAL SfM only (see aether_sfm_c.cc); GLOMAP's global mapper is
+# dead weight on device (device-infeasible per e7ef7cf8) and is the only piece
+# still on the 3.14 API. glomap-src/ is left in the tree but no longer compiled.
 
 # ---- PoseLib (Eigen-only) ----
 file(GLOB_RECURSE POSELIB_SRC ${POSELIB}/PoseLib/*.cc ${POSELIB}/PoseLib/*.cpp)
 list(FILTER POSELIB_SRC EXCLUDE REGEX "_test")
 
-add_library(glomap_core STATIC ${COLMAP_SRC} ${GLOMAP_SRC} ${POSELIB_SRC})
+add_library(glomap_core STATIC ${COLMAP_SRC} ${POSELIB_SRC})
 
 target_include_directories(glomap_core PUBLIC
-  ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs
+  ${COLMAP} ${POSELIB} ${V}/stubs
   ${GLOG}                               # real glog (BSD-3), not miniglog
   ${CERES}/include ${CERESB}/include ${CERES}/config
   ${EIGEN}
@@ -139,19 +139,9 @@ target_compile_options(colmap_only PRIVATE -w)
 option(BUILD_BENCH "Build glomap_bench executable" ON)
 if(BUILD_BENCH)
   find_library(ACCELERATE_FW Accelerate)
-  add_executable(glomap_bench_exe bench/glomap_bench.cc bench/colmap_bench.cc
-    bench/dsp_sift_c.cc)  # aether_threaded_extract.cc is in glomap_core
-  target_include_directories(glomap_bench_exe PRIVATE ${V}/stubs)
-  target_compile_definitions(glomap_bench_exe PRIVATE
-    GLOMAP_BENCH_MAIN EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
-    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7)
-  target_compile_options(glomap_bench_exe PRIVATE -w)
-  target_link_libraries(glomap_bench_exe PRIVATE
-    glomap_core
-    /opt/homebrew/lib/libceres.dylib    # [AETHER] host ceres (was iOS ${CERESB} -> arch mismatch); glomap_bench_exe is HOST-only
-    /opt/homebrew/lib/libglog.dylib
-    "-lsqlite3"
-    ${ACCELERATE_FW})
+  # [MIGRATION 4.0.4 / STEP 5] glomap_bench_exe DROPPED: it is the only consumer of
+  # GLOMAP's GlobalMapper / colmap_converter symbols, which were removed from
+  # glomap_core when GLOMAP was dropped. Its bench/glomap_bench.cc is now dead.
 
   # desktop correctness gate for the threaded extractor (bit-identical check).
   # Extraction-only path: needs glog (host, brew 0.7.1 == iOS glog 0.7 ABI) but

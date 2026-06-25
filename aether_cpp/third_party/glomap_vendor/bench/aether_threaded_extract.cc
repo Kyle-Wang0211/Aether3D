@@ -29,13 +29,14 @@ namespace {
 
 // Verbatim from colmap/feature/sift.cc (anonymous namespace): VLFeat stores
 // descriptor bins in a different order than the UBC/SiftGPU convention.
-colmap::FeatureDescriptors TransformVLFeatToUBCFeatureDescriptors(
-    const colmap::FeatureDescriptors& vlfeat_descriptors) {
-  colmap::FeatureDescriptors ubc_descriptors(vlfeat_descriptors.rows(),
-                                             vlfeat_descriptors.cols());
+// [MIGRATION 4.0.4] operates on the raw matrix (FeatureDescriptorsData), which
+// is now the `.data` member of the FeatureDescriptors struct.
+colmap::FeatureDescriptorsData TransformVLFeatToUBCFeatureDescriptors(
+    const colmap::FeatureDescriptorsData& vlfeat_descriptors) {
+  colmap::FeatureDescriptorsData ubc_descriptors(vlfeat_descriptors.rows(),
+                                                 vlfeat_descriptors.cols());
   const std::array<int, 8> q{{0, 7, 6, 5, 4, 3, 2, 1}};
-  for (colmap::FeatureDescriptors::Index n = 0; n < vlfeat_descriptors.rows();
-       ++n) {
+  for (Eigen::Index n = 0; n < vlfeat_descriptors.rows(); ++n) {
     for (int i = 0; i < 4; ++i) {
       for (int j = 0; j < 4; ++j) {
         for (int k = 0; k < 8; ++k) {
@@ -70,7 +71,9 @@ bool ExtractCovariantSiftThreaded(const colmap::SiftExtractionOptions& sift_opts
   vl_covdet_set_edge_threshold(covdet.get(), sift_opts.edge_threshold);
 
   {
-    const std::vector<uint8_t> data_uint8 = bitmap.ConvertToRowMajorArray();
+    // [MIGRATION 4.0.4] ConvertToRowMajorArray() -> RowMajorData() (returns a
+    // const ref to the row-major buffer; same bytes, same downstream math).
+    const std::vector<uint8_t>& data_uint8 = bitmap.RowMajorData();
     std::vector<float> data_float(data_uint8.size());
     for (size_t i = 0; i < data_uint8.size(); ++i) {
       data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
@@ -189,7 +192,7 @@ bool ExtractCovariantSiftThreaded(const colmap::SiftExtractionOptions& sift_opts
 
   // ---- threaded: per-keypoint domain-size-pooling descriptor loop ----
   const size_t num_kp = keypoints->size();
-  descriptors->resize(num_kp, 128);
+  descriptors->data.resize(num_kp, 128);  // [MIGRATION 4.0.4] -> .data member
 
   // The master's Gaussian scale space is frozen after detect/affine/orient and
   // is read-only from here on; every worker borrows this single instance.
@@ -241,8 +244,10 @@ bool ExtractCovariantSiftThreaded(const colmap::SiftExtractionOptions& sift_opts
       dsp_num_scales = sift_opts.dsp_num_scales;
     }
 
-    colmap::FeatureDescriptorsFloat descriptor(1, 128);
-    colmap::FeatureDescriptorsFloat scaled_descriptors(dsp_num_scales, 128);
+    // [MIGRATION 4.0.4] FeatureDescriptorsFloat is now a struct; the raw float
+    // matrix type is FeatureDescriptorsFloatData (== 3.14's FeatureDescriptorsFloat).
+    colmap::FeatureDescriptorsFloatData descriptor(1, 128);
+    colmap::FeatureDescriptorsFloatData scaled_descriptors(dsp_num_scales, 128);
 
     for (size_t i = lo; i < hi; ++i) {
       for (int s = 0; s < dsp_num_scales; ++s) {
@@ -295,7 +300,8 @@ bool ExtractCovariantSiftThreaded(const colmap::SiftExtractionOptions& sift_opts
         colmap::L1RootNormalizeFeatureDescriptors(&descriptor);
       }
 
-      descriptors->row(i) = colmap::FeatureDescriptorsToUnsignedByte(descriptor);
+      descriptors->data.row(i) =
+          colmap::FeatureDescriptorsToUnsignedByte(descriptor);
     }
 
     vl_covdet_set_gss(wd, nullptr);  // detach shared gss before delete
@@ -321,7 +327,10 @@ bool ExtractCovariantSiftThreaded(const colmap::SiftExtractionOptions& sift_opts
     }
   }
 
-  *descriptors = TransformVLFeatToUBCFeatureDescriptors(*descriptors);
+  // [MIGRATION 4.0.4] transform the raw matrix in place + tag the type, exactly
+  // as colmap/feature/sift.cc (covariant extractor, lines 538-540) does.
+  descriptors->data = TransformVLFeatToUBCFeatureDescriptors(descriptors->data);
+  descriptors->type = colmap::FeatureExtractorType::SIFT;
   return true;
 }
 
