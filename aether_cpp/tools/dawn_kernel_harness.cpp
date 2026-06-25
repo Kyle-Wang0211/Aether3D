@@ -124,6 +124,24 @@ bool DawnKernelHarness::init() {
         // created. Apple Silicon supports up to 64; this 10 is well below
         // any modern GPU's max — verified by adapter introspection.
         required_limits.maxStorageBuffersPerShaderStage = 10;
+        // S1 GPU DSP-SIFT detect parity (sift_dog_extrema_test.wgsl): one
+        // octave's gss levels are bound as a single storage buffer. For the
+        // 4224x2376 octave 0 with 6 gss levels that is ~240 MB, above WebGPU's
+        // default maxStorageBufferBindingSize of 128 MB. The adapter reports
+        // support up to 4 GB (verified at runtime via the Dawn validation
+        // message); request 1 GB so the largest octave binding is valid. This
+        // limit is PERMISSIVE-only — it cannot change any existing kernel's
+        // output, it only allows larger single bindings (same additive pattern
+        // as the maxComputeInvocations / maxStorageBuffersPerShaderStage bumps
+        // above). Falls back loudly (device request fails) on an adapter that
+        // genuinely can't support it.
+        required_limits.maxStorageBufferBindingSize = 2048ull * 1024ull * 1024ull;
+        // maxBufferSize is a separate cap (default 256 MB). The first_octave=-1
+        // parity-baseline geometry upsamples to 8448x4752, so one octave's gss
+        // levels are ~963 MB; bump to 2 GB so the baseline path is also
+        // validateable. Production uses first_octave=0 (PLAN 06-25), well under
+        // even the default. Same permissive-only rationale as above.
+        required_limits.maxBufferSize = 2048ull * 1024ull * 1024ull;
         device_desc.requiredLimits = &required_limits;
 
         // Phase 6.3a Step 6: Brush rasterize_backwards.wgsl uses

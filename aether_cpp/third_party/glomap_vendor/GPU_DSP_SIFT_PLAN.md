@@ -136,3 +136,23 @@ sift_pyramid_dawn.{h,cc}`, `bench/extract_gpuparity.cc`, then the week-1 A/B.
 - **Gate 2 (S1 gss parity): host Dawn proven (aether_dawn_hello_compute PASS); full parity harness
   (`extract_gpuparity.cc` + `sift_gss_resample.wgsl`) still to build.** NOTE: shaders/Dawn are under
   `aether_cpp/` (not `glomap_vendor/`) — the paths above are aether_cpp-relative.
+
+## 2026-06-25 — S1 task A: fused DoG + 26-neighbour extremum TEST built + parity PASS
+- **`shaders/wgsl/sift_dog_extrema_test.wgsl`** (entry `detect`): fused DoG (css[lvl]=gss[lvl]−gss[lvl+1],
+  the VLFeat `_vl_dog_response` sign, fp32 in-register, no css materialized) + strict 26-neighbour scale-space
+  extremum test gated by `detect_thr = 0.8*peakThreshold` + atomic-append. Replicates VLFeat `covdet.c`
+  exactly: `_vl_dog_response` (1905), css geom `octaveLastSubdivision−=1` (1939) depth (2002),
+  `vl_find_local_extrema_3` (1057-1126: threshold gate non-strict `>=`/`<=`, 26 neighbours STRICT `>`/`<`,
+  interior bounds 1103-1105), threshold 0.8× (2013). Output interface (record layout, bindings, ~24k cap) in
+  `bench/gpu_extrema_iface.md` + the .wgsl header — for task B (S2 compaction/Newton).
+- **Parity: RECALL = PRECISION = 1.000000** on `sift_test.jpg` (4224×2376) vs VLFeat's OWN
+  `vl_find_local_extrema_3` on the byte-identical CPU css. fo0: 36779 candidates, 0 miss / 0 extra across
+  8 octaves. fo−1 baseline: 153551 candidates, 0/0 across 9 octaves. VLFeat default peak_threshold 0.01:
+  identical. **No fp32 divergence** because the kernel is fed VLFeat's exact gss bytes (isolates DETECT from
+  gss-build) and the subtract+compare are arithmetically exact — divergence (if any) lives in the separately
+  gated gss-build (max-rel ≤1e-3), not the detector. `bench/extract_gpuparity.cc --detect` mode + the
+  declared-extern `vl_find_local_extrema_3` (non-static, no public header).
+- Harness: `tools/dawn_kernel_harness.cpp` got `maxStorageBufferBindingSize`/`maxBufferSize` bumped to 2 GB
+  (one octave's 6 gss levels @4224×2376 = ~240 MB > default 128 MB binding; fo−1 octave −1 = ~963 MB >
+  256 MB default). Permissive-only (cannot change existing kernel output). Build: `bench/build_gpuparity.sh`
+  (reuses prebuilt host Dawn, no rebuild).
