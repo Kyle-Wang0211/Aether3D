@@ -177,8 +177,22 @@ BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
   //   201..5000        -> SPARSE_SCHUR (EIGEN_SPARSE; full-capture finalize lands here)
   //   >5000            -> ITERATIVE_SCHUR (CLUSTER_JACOBI; only enormous recons)
   if (ba_global_loss_type % 3 == 2) {  // CAUCHY only
-    options.max_num_images_direct_dense_cpu_solver = 200;
+    // [AETHER] 2026-06-25 FINAL: DENSE_SCHUR for the whole finalize (threshold 1000
+    // covers all real object-centric captures). Sweep proved DENSE beats SPARSE+EIGEN at
+    // every size on this build (50f 14.8 vs 16.9s, 200f 113 vs 146s, 396f 450 vs 538s &
+    // 2.91 vs 3.77GB): object-centric => the reduced camera matrix is DENSE (all cams see
+    // the object) => "sparse" Schur fills in => slow simplicial EIGEN_SPARSE + more RAM;
+    // dense Cholesky (fast BLAS, fixed O(n^2) storage) wins. DENSE is also the cleanest
+    // license (pure Eigen dense MPL2, no SimplicialCholesky) and doesn't touch the
+    // Accelerate sparse crash path. SPARSE+EIGEN kept only as a >1000-frame fallback.
+    options.max_num_images_direct_dense_cpu_solver = 1000;
     options.max_num_images_direct_sparse_cpu_solver = 5000;
+    // [AETHER] dense/sparse-threshold sweep override (env) — force DENSE vs SPARSE at a
+    // given problem size to find the DENSE↔SPARSE+EIGEN crossover (BAL/Ceres: ~50-200).
+    if (const char* d = std::getenv("AETHER_DENSE_THRESH"))
+      options.max_num_images_direct_dense_cpu_solver = std::atoi(d);
+    if (const char* s = std::getenv("AETHER_SPARSE_THRESH"))
+      options.max_num_images_direct_sparse_cpu_solver = std::atoi(s);
   }
   options.use_gpu = ba_use_gpu;
   options.gpu_index = ba_gpu_index;
