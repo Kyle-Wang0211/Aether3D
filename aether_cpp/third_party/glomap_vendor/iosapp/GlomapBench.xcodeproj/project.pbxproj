@@ -12,31 +12,23 @@
 		2E56F215DBBBEEF3611D12D9 /* colmap_bench.cc in Sources */ = {isa = PBXBuildFile; fileRef = 8353E0FF8157C2BD74FFEEE3 /* colmap_bench.cc */; };
 		306272283F96EFCFD2C849E7 /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = AA2732A0EA22100B90FBE550 /* AppDelegate.m */; };
 		5A3324EFA43C63B4027BB029 /* MatchKernel.metal in Sources */ = {isa = PBXBuildFile; fileRef = C2A4A62DC7DCA5FFB4CE104F /* MatchKernel.metal */; };
-		86FCE8CE51A586BE90BC6103 /* glomap_bench.cc in Sources */ = {isa = PBXBuildFile; fileRef = 37CA38A7C2FAF2781590AD3A /* glomap_bench.cc */; };
-		9926B378E5D061F82157B8D5 /* db50_2048_8192_nodesc.db in Resources */ = {isa = PBXBuildFile; fileRef = C77F1FFD5CA920B2938CC193 /* db50_2048_8192_nodesc.db */; };
 		A534723AC5F794DDAA6975D5 /* sift_test.jpg in Resources */ = {isa = PBXBuildFile; fileRef = CE76DB09055663BBA63DDC86 /* sift_test.jpg */; };
 		AB98BD86D2B1C6083BFBE1AF /* GpuMatch.m in Sources */ = {isa = PBXBuildFile; fileRef = A90586B7E58835B3DD668644 /* GpuMatch.m */; };
-		BA4FA220E10D70A7A614602C /* db50_4224_8192_nodesc.db in Resources */ = {isa = PBXBuildFile; fileRef = 9383676DC45D4E92DAC934C7 /* db50_4224_8192_nodesc.db */; };
-		C4D30A8EA9BE179B2CD7C448 /* db50_3200_8192_nodesc.db in Resources */ = {isa = PBXBuildFile; fileRef = 048E3FAF55C478FEBEC176A0 /* db50_3200_8192_nodesc.db */; };
 		DEA0347B8C8F7450C668D4DD /* sift_test2.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 860E41AC551F88CE73E6BD24 /* sift_test2.jpg */; };
 		EFC151142A2DE8E828DF121F /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 99998517FC07F35565D1E19A /* main.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		048E3FAF55C478FEBEC176A0 /* db50_3200_8192_nodesc.db */ = {isa = PBXFileReference; path = db50_3200_8192_nodesc.db; sourceTree = "<group>"; };
 		1878EAAB8133C84E0659C325 /* MatchKernelGEMM.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = MatchKernelGEMM.metal; sourceTree = "<group>"; };
-		37CA38A7C2FAF2781590AD3A /* glomap_bench.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = glomap_bench.cc; sourceTree = "<group>"; };
 		8353E0FF8157C2BD74FFEEE3 /* colmap_bench.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = colmap_bench.cc; sourceTree = "<group>"; };
 		8569CB3992EF15DE85828AA5 /* GlomapBench.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GlomapBench.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		860E41AC551F88CE73E6BD24 /* sift_test2.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = sift_test2.jpg; sourceTree = "<group>"; };
 		893F9594DDE6254369543DEC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		9383676DC45D4E92DAC934C7 /* db50_4224_8192_nodesc.db */ = {isa = PBXFileReference; path = db50_4224_8192_nodesc.db; sourceTree = "<group>"; };
 		99998517FC07F35565D1E19A /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
 		A90586B7E58835B3DD668644 /* GpuMatch.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GpuMatch.m; sourceTree = "<group>"; };
 		AA2732A0EA22100B90FBE550 /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
 		BB40198DEB15CBC65CE57AF8 /* GlomapBench.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GlomapBench.entitlements; sourceTree = "<group>"; };
 		C2A4A62DC7DCA5FFB4CE104F /* MatchKernel.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = MatchKernel.metal; sourceTree = "<group>"; };
-		C77F1FFD5CA920B2938CC193 /* db50_2048_8192_nodesc.db */ = {isa = PBXFileReference; path = db50_2048_8192_nodesc.db; sourceTree = "<group>"; };
 		CE76DB09055663BBA63DDC86 /* sift_test.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = sift_test.jpg; sourceTree = "<group>"; };
 		ED4CDB0EBFFF7EB300C96F45 /* dsp_sift_c.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = dsp_sift_c.cc; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -57,10 +49,9 @@
 			children = (
 				8353E0FF8157C2BD74FFEEE3 /* colmap_bench.cc */,
 				ED4CDB0EBFFF7EB300C96F45 /* dsp_sift_c.cc */,
-				37CA38A7C2FAF2781590AD3A /* glomap_bench.cc */,
 			);
 			name = bench;
-			path = ../../../../../aether_cpp/third_party/glomap_vendor/bench;
+			path = ../bench;
 			sourceTree = "<group>";
 		};
 		1CD49DAB95DE6B8700A1DE81 /* Products */ = {
@@ -74,9 +65,6 @@
 		6D139870DC0BAD5A4A308184 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				C77F1FFD5CA920B2938CC193 /* db50_2048_8192_nodesc.db */,
-				048E3FAF55C478FEBEC176A0 /* db50_3200_8192_nodesc.db */,
-				9383676DC45D4E92DAC934C7 /* db50_4224_8192_nodesc.db */,
 				CE76DB09055663BBA63DDC86 /* sift_test.jpg */,
 				860E41AC551F88CE73E6BD24 /* sift_test2.jpg */,
 			);
@@ -157,9 +145,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				9926B378E5D061F82157B8D5 /* db50_2048_8192_nodesc.db in Resources */,
-				C4D30A8EA9BE179B2CD7C448 /* db50_3200_8192_nodesc.db in Resources */,
-				BA4FA220E10D70A7A614602C /* db50_4224_8192_nodesc.db in Resources */,
 				A534723AC5F794DDAA6975D5 /* sift_test.jpg in Resources */,
 				DEA0347B8C8F7450C668D4DD /* sift_test2.jpg in Resources */,
 			);
@@ -178,7 +163,6 @@
 				14615E8815F416BC4A96D937 /* MatchKernelGEMM.metal in Sources */,
 				2E56F215DBBBEEF3611D12D9 /* colmap_bench.cc in Sources */,
 				04E5EF5A4927B049F64367D0 /* dsp_sift_c.cc in Sources */,
-				86FCE8CE51A586BE90BC6103 /* glomap_bench.cc in Sources */,
 				EFC151142A2DE8E828DF121F /* main.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -262,13 +246,13 @@
 				);
 				HEADER_SEARCH_PATHS = (
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/colmap-src",
-					/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/stubs,
+					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/stubs",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/glomap-src",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/poselib-src",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glog-install/include",
-					/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/include,
+					"/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/include",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/ceres-build-ios/include",
-					/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/config,
+					"/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/config",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/eigen-install/include/eigen3",
 					/opt/homebrew/include,
 				);
@@ -376,13 +360,13 @@
 				);
 				HEADER_SEARCH_PATHS = (
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/colmap-src",
-					/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/stubs,
+					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/stubs",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/glomap-src",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/poselib-src",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/glog-install/include",
-					/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/include,
+					"/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/include",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/ceres-build-ios/include",
-					/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/config,
+					"/Users/kaidongwang/Developer/aether_cpp/third_party/ceres/config",
 					"/Users/kaidongwang/Developer/aether_cpp/third_party/eigen-install/include/eigen3",
 					/opt/homebrew/include,
 				);

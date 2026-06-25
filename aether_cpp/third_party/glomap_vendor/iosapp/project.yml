@@ -9,7 +9,6 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-      - path: /Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/bench/glomap_bench.cc
       - path: /Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/bench/colmap_bench.cc
       - path: /Users/kaidongwang/Developer/aether_cpp/third_party/glomap_vendor/bench/dsp_sift_c.cc
       - path: Resources
