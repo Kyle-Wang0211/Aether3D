@@ -122,3 +122,17 @@ plain-upright-SIFT cannot be lifted for affine/DSP).
   kernel; NOT yet parity-validated — that is S1 week-1 work (gss max-rel ≤1e-3).
 Next: `sift_gss_resample.wgsl`, `sift_dog_extrema_test.wgsl`, `src/gpu/
 sift_pyramid_dawn.{h,cc}`, `bench/extract_gpuparity.cc`, then the week-1 A/B.
+
+## 2026-06-25 — week-1 gates run + extractor choice CONFIRMED (desktop A/B)
+- **Gate 1 (first_octave −1 vs 0): PASS.** bench50 50f@4224, COLMAP incremental, all DSP-SIFT opts equal:
+  fo−1 → 50/50, reproj 1.0076px; **fo0 → 50/50, reproj 1.0217px (+0.014, noise)**. octave −1 = 75% of gss
+  but ~1.6% of keypoints → **gss 642MB → 161MB (4×) confirmed.** **Adopt first_octave=0 as the port baseline.**
+- **Extractor choice re-litigated (no sunk cost) and CONFIRMED: stay DSP-SIFT, do this GPU port.** XFeat
+  desktop A/B (same fixture/mapper/BA, 3 matchers incl. its own LighterGlue): best XFeat = 1.086px vs
+  DSP-SIFT COLMAP+CAUCHY 0.8319px (+30%); all XFeat variants 1.09-1.53px, 50/50 registered, strong inliers
+  → fair failure on sub-pixel localization (structural: 8×8-cell/1-8-res heatmap). XFeat extract 25× faster
+  (0.2s) but fails the quality gate; and DSP-SIFT @fo0 161MB < XFeat sparse 318MB → XFeat loses memory too.
+  Full data: `pocketworld_research_benchmarks/experiments/frontend_extractor_ab_2026-06-25.md`.
+- **Gate 2 (S1 gss parity): host Dawn proven (aether_dawn_hello_compute PASS); full parity harness
+  (`extract_gpuparity.cc` + `sift_gss_resample.wgsl`) still to build.** NOTE: shaders/Dawn are under
+  `aether_cpp/` (not `glomap_vendor/`) — the paths above are aether_cpp-relative.
