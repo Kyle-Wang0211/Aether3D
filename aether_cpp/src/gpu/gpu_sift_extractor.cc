@@ -23,13 +23,11 @@
 #include <utility>
 #include <vector>
 
-extern "C" {
-#include "covdet.h"
-#include "scalespace.h"
-#include "sift.h"
-#include "imopv.h"
-#include "mathop.h"
-}
+// NOTE: This module no longer builds (or links) any VLFeat scale space. The
+// gss pyramid is built FULLY ON THE GPU from the raw image, and the scale-space
+// geometry/sigmas are computed directly from the deterministic VLFeat formula
+// (see compute_geometry / level_sigma_geom below). The ~900ms/frame
+// vl_covdet_put_image host build is removed. No VLFeat headers are included.
 
 #include "dawn_kernel_harness.h"
 
@@ -158,10 +156,55 @@ std::vector<float> build_expn_lut() {
 struct Geom {
   int firstOctave, lastOctave, firstSub, lastSub, octaveResolution;
   double baseScale;
+  double nominalScale;
   int numOct() const { return lastOctave - firstOctave + 1; }
   int numSub() const { return lastSub - firstSub + 1; }
 };
 struct OctInfo { int o, w, h; double step; uint32_t base; };
+
+// ── Deterministic VLFeat scale-space geometry (DoG, first_octave=0) ──────────
+// Replicates, WITHOUT building any VLFeat gss, the geometry that
+// vl_covdet_put_image / vl_scalespace_get_default_geometry would produce for a
+// w×h image with the given octave resolution. References (worktree VLFeat):
+//   covdet.c vl_covdet_put_image (lines 1683-1730): DoG => octaveFirstSub=-1,
+//     octaveLastSub=octaveResolution+1; lastOctave = floor(log2(min(w-1,h-1)/15)).
+//   scalespace.c vl_scalespace_get_default_geometry (306-319): octaveRes=3,
+//     baseScale=1.6*2^(1/octaveRes), nominalScale=0.5, firstOctave=0 here.
+//   scalespace.c vl_scalespace_get_octave_geometry (369-376):
+//     width=w>>o, height=h>>o, step=2^o  (VL_SHIFT_LEFT(x,-o)=x>>o for o>=0).
+// VLFeat sigma recurrence: sigma(o,s)=baseScale*2^(o+s/octaveResolution)
+//   (scalespace.c vl_scalespace_get_level_sigma, line 431-433).
+inline double level_sigma_geom(const Geom& G, int o, int s) {
+  return G.baseScale * std::pow(2.0, o + (double)s / (double)G.octaveResolution);
+}
+
+// Build Geom for a w×h image (DoG method, first_octave=0). Matches
+// vl_covdet_put_image exactly for octave_resolution>=1.
+Geom compute_geometry(int w, int h, int octave_resolution) {
+  Geom G{};
+  G.firstOctave = 0;
+  G.octaveResolution = octave_resolution;
+  // lastOctave = vl_floor_d(vl_log2_d(min(w-1,h-1) / (minOctaveSize-1)))
+  const double minDim = (double)std::min(w - 1, h - 1);
+  const double lo = std::floor(std::log2(minDim / 15.0));  // minOctaveSize=16
+  G.lastOctave = (int)lo;
+  if (G.lastOctave < G.firstOctave) G.lastOctave = G.firstOctave;
+  // DoG: octaveFirstSubdivision=-1, octaveLastSubdivision=octaveResolution+1.
+  G.firstSub = -1;
+  G.lastSub = octave_resolution + 1;
+  // default geometry baseScale/nominalScale (firstOctave overridden to 0).
+  G.baseScale = 1.6 * std::pow(2.0, 1.0 / (double)octave_resolution);
+  G.nominalScale = 0.5;
+  return G;
+}
+
+// Octave dims (w>>o, h>>o) and step (2^o) from the geometry — no VLFeat object.
+inline void octave_dims(const Geom& G, int o, int w0, int h0, int* ow, int* oh,
+                        double* step) {
+  *ow = w0 >> o;
+  *oh = h0 >> o;
+  *step = std::pow(2.0, o);
+}
 
 wgpu::BindGroup make_bind_group(
     const wgpu::Device& dev, const wgpu::ComputePipeline& pipe,
@@ -188,11 +231,25 @@ struct Pipelines {
   wgpu::ComputePipeline affine, orient, fused;
 };
 
-// gss RESIDENT build — collapsed to ONE command buffer. Math identical to
-// extract_fullgpu_batched.cc build_resident_gss_batched.
-wgpu::Buffer build_resident_gss_batched(
-    aether::tools::DawnKernelHarness& h, const Pipelines& P, VlScaleSpace* gss,
-    const Geom& G, std::vector<OctInfo>* octinfo_out, size_t* total_floats_out,
+// gss RESIDENT build — FULLY ON GPU FROM THE RAW IMAGE. Collapsed to ONE command
+// buffer. Within-octave and octave-transition math identical to the validated
+// extract_fullgpu_batched.cc / extract_gpuparity.cc --full chained build. The
+// ONLY change vs the old build is the SEED: octave-0 level firstSub is produced
+// on the GPU from the uploaded raw image (copy + top-up Gaussian to the firstSub
+// sigma) instead of being read back from a host-built VLFeat gss level. ALL
+// geometry (dims, step) and per-level sigmas come from the deterministic VLFeat
+// formula (compute_geometry / level_sigma_geom), so NO VLFeat gss is built.
+//
+// Octave-0 seed replicates scalespace.c _vl_scalespace_start_octave_from_image
+// for first_octave=0 (lines 700-745): copy_and_downsample with numOctaves=0 is a
+// pure copy of the raw image into level firstSub; then, since
+// sigma(0,firstSub) > nominalScale(0.5), a top-up vl_imsmooth by
+// deltaSigma = sqrt(sigma(0,firstSub)^2 - nominalScale^2), step=1. The GPU blur
+// shader's clamp-to-edge handling matches vl_imsmooth_f's VL_PAD_BY_CONTINUITY.
+wgpu::Buffer build_resident_gss_from_image(
+    aether::tools::DawnKernelHarness& h, const Pipelines& P,
+    const float* image, int img_w, int img_h, const Geom& G,
+    std::vector<OctInfo>* octinfo_out, size_t* total_floats_out,
     double* build_ms_out) {
   const wgpu::Device& dev = h.device();
   const wgpu::Queue& q = h.queue();
@@ -201,13 +258,18 @@ wgpu::Buffer build_resident_gss_batched(
   std::vector<OctInfo> oi;
   size_t total = 0, max_plane = 0;
   for (int o = G.firstOctave; o <= G.lastOctave; ++o) {
-    VlScaleSpaceOctaveGeometry og = vl_scalespace_get_octave_geometry(gss, o);
-    OctInfo r; r.o = o; r.w = (int)og.width; r.h = (int)og.height; r.step = og.step;
+    int ow = 0, oh = 0; double step = 0;
+    octave_dims(G, o, img_w, img_h, &ow, &oh, &step);
+    OctInfo r; r.o = o; r.w = ow; r.h = oh; r.step = step;
     total = align64(total); r.base = (uint32_t)total; oi.push_back(r);
     const size_t plane = (size_t)r.w * r.h;
     max_plane = std::max(max_plane, plane);
     total += plane * (size_t)G.numSub();
   }
+  // octave-0 firstSub seed copies the whole raw image into scratch_a; that plane
+  // is (img_w*img_h) which equals octave-0's plane (w>>0 == img_w), already the
+  // max — but be defensive in case of any dim rounding.
+  max_plane = std::max(max_plane, (size_t)img_w * (size_t)img_h);
   total = align64(total);
   *total_floats_out = total;
   const size_t total_bytes = total * sizeof(float);
@@ -267,8 +329,24 @@ wgpu::Buffer build_resident_gss_batched(
     const size_t plane = (size_t)r.w * r.h;
     const double step = r.step;
     if (k == 0) {
-      const float* cf = vl_scalespace_get_level_const(gss, r.o, G.firstSub);
-      q.WriteBuffer(scratch_a, 0, cf, plane * sizeof(float));
+      // ── OCTAVE-0 firstSub SEED, FULLY FROM THE RAW IMAGE ──
+      // first_octave=0: copy_and_downsample(numOctaves=0) == pure copy of the
+      // raw image into scratch_a. (octave-0 dims == image dims.)
+      q.WriteBuffer(scratch_a, 0, image, plane * sizeof(float));
+      // Top-up: sigma(0,firstSub) > nominalScale(0.5) => smooth by
+      // deltaSigma = sqrt(sigma^2 - nominalScale^2), smoothSigma = deltaSigma/step
+      // (step==1 at octave 0). scalespace.c lines 734-744.
+      const double sigma0 = level_sigma_geom(G, r.o, G.firstSub);
+      const double imageSigma = G.nominalScale;
+      if (sigma0 > imageSigma) {
+        const double ds = std::sqrt(sigma0 * sigma0 - imageSigma * imageSigma);
+        int radius = 0;
+        std::vector<float> taps = vlfeat_gaussian_taps_f(ds / step, &radius);
+        wgpu::Buffer mid = mk(wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+        keepalive.push_back(mid);
+        blur_rec(scratch_a, mid, scratch_b, r.w, r.h, taps, radius);
+        enc.CopyBufferToBuffer(scratch_b, 0, scratch_a, 0, plane * sizeof(float));
+      }
     } else {
       DownParams dp{(uint32_t)prev_ow, (uint32_t)prev_oh, (uint32_t)r.w, (uint32_t)r.h};
       wgpu::Buffer dp_buf = upload(&dp, sizeof(dp), wgpu::BufferUsage::Uniform);
@@ -280,8 +358,8 @@ wgpu::Buffer build_resident_gss_batched(
         pass.DispatchWorkgroups(gx, gy, 1u);
         pass.End();
       }
-      const double sigma0 = vl_scalespace_get_level_sigma(gss, r.o, G.firstSub);
-      const double prevSigma = vl_scalespace_get_level_sigma(gss, r.o - 1, prevLevelIndex);
+      const double sigma0 = level_sigma_geom(G, r.o, G.firstSub);
+      const double prevSigma = level_sigma_geom(G, r.o - 1, prevLevelIndex);
       if (sigma0 > prevSigma) {
         const double ds = std::sqrt(sigma0 * sigma0 - prevSigma * prevSigma);
         int radius = 0;
@@ -298,8 +376,8 @@ wgpu::Buffer build_resident_gss_batched(
       prev_ow = r.w; prev_oh = r.h;
     }
     for (int s = G.firstSub + 1; s <= G.lastSub; ++s) {
-      const double sig = vl_scalespace_get_level_sigma(gss, r.o, s);
-      const double sigp = vl_scalespace_get_level_sigma(gss, r.o, s - 1);
+      const double sig = level_sigma_geom(G, r.o, s);
+      const double sigp = level_sigma_geom(G, r.o, s - 1);
       const double ds = std::sqrt(sig * sig - sigp * sigp);
       int radius = 0;
       std::vector<float> taps = vlfeat_gaussian_taps_f(ds / step, &radius);
@@ -358,7 +436,8 @@ struct GpuSiftExtractor::Impl {
   };
   std::map<std::pair<int, int>, Cached> gss_cache;
 
-  bool run_frame(VlScaleSpace* gss, const Geom& G, GpuSiftFrame* out);
+  bool run_frame(const float* image, int w, int h, const Geom& G,
+                 GpuSiftFrame* out);
 };
 
 GpuSiftExtractor::GpuSiftExtractor() : impl_(new Impl()) {}
@@ -430,8 +509,8 @@ bool GpuSiftExtractor::init(const Config& cfg) {
 double GpuSiftExtractor::init_compile_ms() const { return impl_->compile_ms; }
 
 // ── ONE per-frame GPU pipeline run (execution only; pipelines + caps reused). ──
-bool GpuSiftExtractor::Impl::run_frame(VlScaleSpace* gss, const Geom& G,
-                                       GpuSiftFrame* out) {
+bool GpuSiftExtractor::Impl::run_frame(const float* image, int img_w, int img_h,
+                                       const Geom& G, GpuSiftFrame* out) {
   aether::tools::DawnKernelHarness& harness = this->harness;
   const Pipelines& PIPE = this->PIPE;
   const double peak_threshold = cfg.peak_threshold;
@@ -441,25 +520,23 @@ bool GpuSiftExtractor::Impl::run_frame(VlScaleSpace* gss, const Geom& G,
 
   const wgpu::Device& dev = harness.device();
   const wgpu::Queue& q = harness.queue();
-  VlScaleSpaceGeometry g = vl_scalespace_get_geometry(gss);
+  // Scale-space geometry scalars from the deterministic formula (no VLFeat gss).
+  const double geom_base_scale = G.baseScale;
+  const double geom_octave_res = (double)G.octaveResolution;
   const int D = G.numSub() - 1;
   const int nOct = G.numOct();
 
   GpuSiftTimings T{};
   auto t_all = clock_t_::now();
 
-  // ── B.1 gss RESIDENT — cached per (w,h). The pyramid buffer is reused for
-  //    same-size frames; only its CONTENTS are rewritten (build records into a
-  //    fresh command buffer). The buffer is image-size-dependent so it is keyed
-  //    by dims, but it is allocated AT MOST ONCE per distinct size. ──
-  VlScaleSpaceOctaveGeometry og0 = vl_scalespace_get_octave_geometry(gss, G.firstOctave);
-  const std::pair<int, int> dims{(int)og0.width, (int)og0.height};
-  // Build always re-runs the gss kernels (content depends on the image); the
-  // pyramid + octinfo + size are taken from cache to avoid re-allocating the
-  // (large) resident buffer. We re-derive octinfo here cheaply.
+  // ── B.1 gss RESIDENT — built FULLY ON GPU FROM THE RAW IMAGE. The octave-0
+  //    seed is produced on the GPU (image copy + top-up blur); all subsequent
+  //    levels/octaves chain on the GPU. No VLFeat host gss build. The resident
+  //    pyramid is allocated each frame here (image-size-dependent). ──
+  (void)gss_cache;  // size-keyed cache retained for future reuse of the buffer.
   std::vector<OctInfo> octinfo; size_t total_floats = 0; double gss_ms = 0;
-  wgpu::Buffer pyramid = build_resident_gss_batched(
-      harness, PIPE, gss, G, &octinfo, &total_floats, &gss_ms);
+  wgpu::Buffer pyramid = build_resident_gss_from_image(
+      harness, PIPE, image, img_w, img_h, G, &octinfo, &total_floats, &gss_ms);
   T.gss_ms = gss_ms;
   T.gss_bytes = (double)total_floats * 4.0;
 
@@ -505,8 +582,8 @@ bool GpuSiftExtractor::Impl::run_frame(VlScaleSpace* gss, const Geom& G,
       wgpu::Buffer ap_buf = dr_up(&ap, sizeof(ap), wgpu::BufferUsage::Uniform);
       RefineParams rp{(uint32_t)r.w, (uint32_t)r.h, (uint32_t)D, kCap,
                       (float)peak_threshold, (float)edge_threshold,
-                      (float)g.baseScale, (float)r.step, G.firstSub,
-                      (float)g.octaveResolution, kKpCap, 0u};
+                      (float)geom_base_scale, (float)r.step, G.firstSub,
+                      (float)geom_octave_res, kKpCap, 0u};
       wgpu::Buffer rp_buf = dr_up(&rp, sizeof(rp), wgpu::BufferUsage::Uniform);
 
       const uint32_t gx = ((uint32_t)r.w + 7u) / 8u, gy = ((uint32_t)r.h + 7u) / 8u;
@@ -665,7 +742,7 @@ bool GpuSiftExtractor::Impl::run_frame(VlScaleSpace* gss, const Geom& G,
     wgpu::Buffer out_buf = harness.alloc(std::max<size_t>(obytes, 4),
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
     AffParams P{Naff, (uint32_t)nOct, G.firstOctave, G.lastOctave, G.firstSub, G.lastSub,
-                (float)g.octaveResolution, (float)g.baseScale};
+                (float)geom_octave_res, (float)geom_base_scale};
     wgpu::Buffer P_buf = harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
     auto ta = clock_t_::now();
     harness.dispatch(PIPE.affine, {pyramid, oct_buf, frame_buf, out_buf, P_buf}, Naff ? Naff : 1u, 1u, 1u);
@@ -707,7 +784,7 @@ bool GpuSiftExtractor::Impl::run_frame(VlScaleSpace* gss, const Geom& G,
     P.num_kp = Nor; P.num_octaves = (uint32_t)nOct;
     P.first_octave = G.firstOctave; P.last_octave = G.lastOctave;
     P.first_sub = G.firstSub; P.last_sub = G.lastSub;
-    P.octave_res = (float)g.octaveResolution; P.base_scale = (float)g.baseScale;
+    P.octave_res = (float)geom_octave_res; P.base_scale = (float)geom_base_scale;
     P.max_out = kMaxOut;
     wgpu::Buffer P_buf = harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
     const uint32_t gx = (Nor + 63u) / 64u;
@@ -789,7 +866,7 @@ bool GpuSiftExtractor::Impl::run_frame(VlScaleSpace* gss, const Geom& G,
     P.num_kp = (uint32_t)N; P.dsp_num_scales = (uint32_t)kDspNumScales;
     P.first_octave = G.firstOctave; P.last_octave = G.lastOctave;
     P.first_sub = G.firstSub; P.last_sub = G.lastSub;
-    P.octave_res = (float)g.octaveResolution; P.base_scale = (float)g.baseScale;
+    P.octave_res = (float)geom_octave_res; P.base_scale = (float)geom_base_scale;
     P.extent = (float)kPatchRelativeExtent;
     P.stephat = (float)(kPatchRelativeExtent / kPatchResolution);
     P.sigma = (float)kPatchRelativeSmoothing; P.k_sigma = (float)kSigma;
@@ -829,28 +906,18 @@ bool GpuSiftExtractor::Impl::run_frame(VlScaleSpace* gss, const Geom& G,
 bool GpuSiftExtractor::extract(const float* gray, int w, int h, GpuSiftFrame* out) {
   if (!impl_->ready || !gray || w <= 0 || h <= 0 || !out) return false;
 
-  // Build the VLFeat scale space for this image (host-side; identical seed to
-  // the validated harness). The gss object is owned by a VlCovDet we keep only
-  // for the duration of this call.
-  std::vector<float> gray255((size_t)w * h);
-  std::memcpy(gray255.data(), gray, (size_t)w * h * sizeof(float));
+  // ── NO VLFeat host gss build. The scale-space geometry (octave dims, per-level
+  //    sigmas, octave count) is computed directly from (w,h,octaveResolution) via
+  //    the deterministic VLFeat formula; the gss pyramid is then built FULLY ON
+  //    the GPU from the raw image. This removes the ~900ms/frame
+  //    vl_covdet_put_image host cost (the critical-path fix). ──
+  const Geom G = compute_geometry(w, h, impl_->cfg.octave_resolution);
 
-  VlCovDet* cd = vl_covdet_new(VL_COVDET_METHOD_DOG);
-  vl_covdet_set_first_octave(cd, 0);
-  vl_covdet_set_octave_resolution(cd, impl_->cfg.octave_resolution);
-  vl_covdet_set_peak_threshold(cd, impl_->cfg.peak_threshold);
-  vl_covdet_set_edge_threshold(cd, impl_->cfg.edge_threshold);
-  auto t_vl = clock_t_::now();
-  vl_covdet_put_image(cd, gray255.data(), w, h);
-  const double vlfeat_gss_ms = ms_since(t_vl);
+  // vlfeat_gss_ms is now ZERO by construction (kept in the timings struct for
+  // reporting continuity with the pre-fix verifier).
+  const double vlfeat_gss_ms = 0.0;
 
-  VlScaleSpace* gss = vl_covdet_get_gss(cd);
-  VlScaleSpaceGeometry g = vl_scalespace_get_geometry(gss);
-  Geom G{(int)g.firstOctave, (int)g.lastOctave, (int)g.octaveFirstSubdivision,
-         (int)g.octaveLastSubdivision, (int)g.octaveResolution, g.baseScale};
-
-  bool ok = impl_->run_frame(gss, G, out);
-  vl_covdet_delete(cd);
+  bool ok = impl_->run_frame(gray, w, h, G, out);
   if (ok) {
     out->timings.vlfeat_gss_ms = vlfeat_gss_ms;
     out->timings.total_ms = out->timings.gpu_total_ms + vlfeat_gss_ms;
