@@ -97,6 +97,16 @@ set(AETHER_CORE_SOURCES
     src/pipeline/streaming_c_api.cpp
     src/thermal/thermal_predictor.cpp
     src/training/gaussian_training_engine.cpp
+    # GPU DSP-SIFT SfM streaming orchestrator (per-frame loop + bounded queue).
+    # Pure std::thread/std::mutex; depends on NO device archives (the SfM + GPU
+    # extractor are injected as std::function), so it builds on every platform
+    # and is testable host-side (tests/gpu/streaming_orchestrator_test.cpp).
+    src/gpu/streaming_orchestrator.cc
+    # Production glue: build the orchestrator stages from the real device ABIs
+    # (task A's aether_gpu_sift_* + the SfM C ABI). Compiles to empty-function
+    # factories unless AETHER_HAS_GPU_SIFT / AETHER_HAS_SFM are defined by the
+    # device build, so it is safe in the host-only aether3d_core library.
+    src/gpu/orchestrator_bindings.cc
 )
 
 # Phase 4 — Apple-only sources (CoreML / Metal / IOSurface). These are
@@ -735,6 +745,7 @@ if(AETHER_BUILD_MINIMAL_WHITEBOX_TESTS)
     aether_test(da3_depth_fuser_test tests/trainer/da3_depth_fuser_test.cpp)
     aether_test(noise_aware_trainer_test tests/trainer/noise_aware_trainer_test.cpp)
     aether_test(spatial_hash_table_test tests/tsdf/spatial_hash_table_test.cpp)
+    aether_test(streaming_orchestrator_test tests/gpu/streaming_orchestrator_test.cpp)
 endif()
 
 # ─── Phase 1: GLB normalizer atlas merger smoke (always available) ─────
