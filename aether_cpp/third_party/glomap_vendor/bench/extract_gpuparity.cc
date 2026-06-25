@@ -66,6 +66,28 @@ extern "C" {
 vl_size vl_find_local_extrema_3(vl_index** extrema, vl_size* bufferSize,
                                 float const* map, vl_size width, vl_size height,
                                 vl_size depth, double threshold);
+
+// vl_refine_local_extreum_3 + VlCovDetExtremum3 are likewise non-static in
+// covdet.c but NOT in covdet.h (covdet.c:1007-1017,1206). The --refine parity
+// mode (S2, this file) calls them to build VLFeat's EXACT reference
+// refined+gated keypoint list on the SAME css the GPU S2 kernel refines — so the
+// kernel's recall/precision/pos-err is measured against VLFeat's OWN refine
+// (the same function covdet.c:2019 uses), isolating the refine/gate kernel from
+// the gss-build error. Signature + struct copied verbatim from covdet.c.
+typedef struct _VlCovDetExtremum3 {
+  vl_index xi;
+  vl_index yi;
+  vl_index zi;
+  float x;
+  float y;
+  float z;
+  float peakScore;
+  float edgeScore;
+} VlCovDetExtremum3;
+
+vl_bool vl_refine_local_extreum_3(VlCovDetExtremum3* refined, float const* map,
+                                  vl_size width, vl_size height, vl_size depth,
+                                  vl_index x, vl_index y, vl_index z);
 }
 
 // ─── Dawn kernel harness (GPU under test) ───
@@ -924,6 +946,495 @@ int run_detect(const char* img_path, const char* dog_wgsl_path, int first_octave
   return pass ? 0 : 1;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// S2 task A --refine — GPU Newton refine + peak/edge gates parity vs VLFeat.
+//
+// Validates shaders/wgsl/sift_refine_gate.wgsl against VLFeat's OWN refine +
+// gate. Strategy (mirrors --detect: isolate the S2 kernel from gss-build error):
+//   1. Build the CPU reference gss via VLFeat (vl_covdet_put_image).
+//   2. Per octave: feed the GPU the VLFeat gss levels (EXACT bytes) + run S1
+//      sift_dog_extrema_test.wgsl `detect` to get the candidate set (the SAME
+//      input the production GPU pipeline would feed S2); then run
+//      sift_refine_gate.wgsl `refine` on those candidates -> GPU survivor kps.
+//   3. Per octave: build the CPU css EXACTLY as vl_covdet_detect, run the SAME
+//      vl_find_local_extrema_3 (0.8*peak) -> vl_refine_local_extreum_3 ->
+//      |peakScore|>peak && edgeScore<edge gates -> the CPU refined+gated kp list
+//      (PRE-suppression; the refine/gate kernel's true reference).
+//   4. Match GPU vs CPU keypoints by nearest IMAGE-FRAME position within the
+//      same octave (frame = (x*step+0.5, y*step+0.5), COLMAP sift.cc:422-423):
+//      recall, precision, median + max subpixel position error (px), gate-
+//      decision agreement, near-threshold/near-edge fp32 divergence count.
+//   5. ALSO report parity vs VLFeat's POST-suppression feature list
+//      (vl_covdet_get_features after a full vl_covdet_detect) so the
+//      nonExtremaSuppression=0.5 effect (covdet.c:2104, ON by default, NOT in
+//      the per-candidate kernel) is quantified, not hidden.
+// Gate targets (PLAN line 68): recall/precision >= 0.97, median pos-err <=0.05px.
+
+// One GPU survivor keypoint (mirrors WGSL Keypoint, std430, 48 bytes).
+struct GpuKp {
+  float x_local;
+  float y_local;
+  float z_local;
+  uint32_t octave;
+  float sigma;
+  float step;
+  float peak_score;
+  float edge_score;
+};
+
+// One reference keypoint in octave-local css coords + derived image-frame.
+struct RefKp {
+  int o;
+  double x_local, y_local, z_local;  // refined.x / .y / .z (css-local)
+  double fx, fy;                     // image frame (x*step+0.5, y*step+0.5)
+  double sigma;
+  double peak_score, edge_score;
+};
+
+// Run sift_refine_gate.wgsl `refine` on ONE octave's candidates. gss_levels =
+// flat level-major (D+1) gss levels (same buffer S1 detect consumed). cands =
+// the S1 GpuCandidate records for THIS octave. Returns the GPU survivor kps.
+std::vector<GpuKp> gpu_refine_octave(
+    aether::tools::DawnKernelHarness& h, const std::string& wgsl,
+    const std::vector<float>& gss_levels, int W, int H, int D,
+    const std::vector<uint32_t>& cand_records /*5 u32 per cand, packed*/,
+    uint32_t num_cands, double peak_thr, double edge_thr, double base_scale,
+    double step, int first_sub, double octave_res, uint32_t max_kp,
+    uint32_t* out_total_count) {
+#pragma pack(push, 4)
+  struct RefineParams {
+    uint32_t width;
+    uint32_t height;
+    uint32_t num_css;
+    uint32_t num_cands;
+    float peak_thr;
+    float edge_thr;
+    float base_scale;
+    float step;
+    int32_t first_sub;
+    float octave_res;
+    uint32_t max_kp;
+    uint32_t pad0;
+  };
+#pragma pack(pop)
+
+  auto pipeline = h.load_compute(wgsl, "refine");
+
+  const size_t gss_n = static_cast<size_t>(W) * H * (D + 1);
+  wgpu::Buffer gss_buf = h.upload(gss_levels.data(), gss_n * sizeof(float),
+                                  wgpu::BufferUsage::Storage);
+
+  // candidate buffer: num_cands records of 5 u32 each (CandidateExtremum).
+  wgpu::Buffer cand_buf =
+      h.upload(cand_records.data(), cand_records.size() * sizeof(uint32_t),
+               wgpu::BufferUsage::Storage);
+
+  uint32_t zero = 0u;
+  wgpu::Buffer count_buf = h.upload(
+      &zero, sizeof(uint32_t),
+      wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+
+  const size_t kp_bytes = static_cast<size_t>(max_kp) * sizeof(GpuKp);
+  wgpu::Buffer kp_buf = h.alloc(
+      kp_bytes, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+
+  RefineParams p{static_cast<uint32_t>(W),
+                 static_cast<uint32_t>(H),
+                 static_cast<uint32_t>(D),
+                 num_cands,
+                 static_cast<float>(peak_thr),
+                 static_cast<float>(edge_thr),
+                 static_cast<float>(base_scale),
+                 static_cast<float>(step),
+                 static_cast<int32_t>(first_sub),
+                 static_cast<float>(octave_res),
+                 max_kp,
+                 0u};
+  wgpu::Buffer params_buf = h.upload(&p, sizeof(p), wgpu::BufferUsage::Uniform);
+
+  // 1D dispatch over candidates; workgroup_size(64).
+  const uint32_t gx = (num_cands + 63u) / 64u;
+  // Binding order matches the WGSL: gss(0), cands(1), out_count(2), out_kp(3),
+  // P(4).
+  h.dispatch(pipeline, {gss_buf, cand_buf, count_buf, kp_buf, params_buf},
+             gx > 0 ? gx : 1u, 1u, 1u);
+
+  wgpu::Buffer cstage = h.alloc_staging_for_readback(sizeof(uint32_t));
+  h.copy_to_staging(count_buf, cstage, sizeof(uint32_t));
+  std::vector<uint8_t> cbytes = h.readback(cstage, sizeof(uint32_t));
+  uint32_t total = 0u;
+  std::memcpy(&total, cbytes.data(), sizeof(uint32_t));
+  if (out_total_count) *out_total_count = total;
+
+  const uint32_t kept = std::min(total, max_kp);
+  std::vector<GpuKp> kps;
+  if (kept > 0) {
+    const size_t kept_bytes = static_cast<size_t>(kept) * sizeof(GpuKp);
+    wgpu::Buffer kstage = h.alloc_staging_for_readback(kept_bytes);
+    h.copy_to_staging(kp_buf, kstage, kept_bytes);
+    std::vector<uint8_t> kbytes = h.readback(kstage, kept_bytes);
+    kps.resize(kept);
+    std::memcpy(kps.data(), kbytes.data(), kept_bytes);
+  }
+  return kps;
+}
+
+int run_refine(const char* img_path, const char* dog_wgsl_path,
+               const char* refine_wgsl_path, int first_octave,
+               double peak_threshold, double edge_threshold) {
+  // ── 1. Load image as grayscale fp32 ──
+  int iw = 0, ih = 0, ic = 0;
+  unsigned char* pixels = stbi_load(img_path, &iw, &ih, &ic, 1);
+  if (!pixels) {
+    std::fprintf(stderr, "FAIL: stbi_load(%s) failed: %s\n", img_path,
+                 stbi_failure_reason());
+    return 2;
+  }
+  std::printf("image: %s  %dx%d (orig %d ch) -> grayscale fp32\n", img_path, iw,
+              ih, ic);
+  std::vector<float> gray(static_cast<size_t>(iw) * static_cast<size_t>(ih));
+  for (size_t i = 0; i < gray.size(); ++i)
+    gray[i] = static_cast<float>(pixels[i]);
+  stbi_image_free(pixels);
+
+  // ── 2. CPU reference gss via VLFeat ──
+  VlCovDet* covdet = vl_covdet_new(VL_COVDET_METHOD_DOG);
+  if (!covdet) {
+    std::fprintf(stderr, "FAIL: vl_covdet_new returned null\n");
+    return 2;
+  }
+  vl_covdet_set_first_octave(covdet, first_octave);
+  vl_covdet_set_peak_threshold(covdet, peak_threshold);
+  vl_covdet_set_edge_threshold(covdet, edge_threshold);
+  vl_covdet_put_image(covdet, gray.data(), static_cast<vl_size>(iw),
+                      static_cast<vl_size>(ih));
+  VlScaleSpace* gss = vl_covdet_get_gss(covdet);
+  if (!gss) {
+    std::fprintf(stderr, "FAIL: vl_covdet_get_gss returned null\n");
+    vl_covdet_delete(covdet);
+    return 2;
+  }
+  VlScaleSpaceGeometry g = vl_scalespace_get_geometry(gss);
+
+  const int gssFirstSub = static_cast<int>(g.octaveFirstSubdivision);
+  const int gssLastSub = static_cast<int>(g.octaveLastSubdivision);
+  const int cssFirstSub = gssFirstSub;
+  const int cssLastSub = gssLastSub - 1;  // DoG
+  const int D = cssLastSub - cssFirstSub + 1;
+  const double detect_thr = 0.8 * peak_threshold;  // covdet.c:2013
+  const double octave_res = static_cast<double>(g.octaveResolution);
+  const double base_scale = g.baseScale;
+
+  std::printf(
+      "gss geometry: octaves [%ld..%ld] res=%lu gss-subdiv [%d..%d]  "
+      "css-subdiv [%d..%d] depth=%d baseScale=%.6f\n",
+      (long)g.firstOctave, (long)g.lastOctave, (unsigned long)g.octaveResolution,
+      gssFirstSub, gssLastSub, cssFirstSub, cssLastSub, D, base_scale);
+  std::printf(
+      "peak_threshold=%.8f detect_thr(0.8x)=%.8f edge_threshold=%.4f "
+      "first_octave=%d\n",
+      peak_threshold, detect_thr, edge_threshold, first_octave);
+
+  std::string dog_wgsl = read_file(dog_wgsl_path);
+  std::string refine_wgsl = read_file(refine_wgsl_path);
+  if (dog_wgsl.empty()) {
+    std::fprintf(stderr, "FAIL: could not read DoG WGSL at %s\n", dog_wgsl_path);
+    vl_covdet_delete(covdet);
+    return 2;
+  }
+  if (refine_wgsl.empty()) {
+    std::fprintf(stderr, "FAIL: could not read refine WGSL at %s\n",
+                 refine_wgsl_path);
+    vl_covdet_delete(covdet);
+    return 2;
+  }
+
+  aether::tools::DawnKernelHarness harness;
+  if (!harness.init()) {
+    std::fprintf(stderr, "FAIL: DawnKernelHarness.init() (no host Dawn?)\n");
+    vl_covdet_delete(covdet);
+    return 2;
+  }
+
+  const uint32_t kMaxCount = 200000u;   // over-detect cap (S1)
+  const uint32_t kMaxKp = 200000u;      // survivor cap (S2)
+
+  std::vector<GpuKp> gpu_kps;           // all GPU survivors over all octaves
+  std::vector<RefKp> cpu_kps;           // CPU pre-suppression refined+gated kps
+
+  // Per-octave/per-gate diagnostic counters.
+  size_t cpu_refine_fail = 0, cpu_peak_fail = 0, cpu_edge_fail = 0;
+
+  for (int o = static_cast<int>(g.firstOctave);
+       o <= static_cast<int>(g.lastOctave); ++o) {
+    VlScaleSpaceOctaveGeometry og = vl_scalespace_get_octave_geometry(gss, o);
+    const int W = static_cast<int>(og.width);
+    const int H = static_cast<int>(og.height);
+    const double step = og.step;
+    const size_t plane = static_cast<size_t>(W) * H;
+
+    // Flat gss-levels buffer (D+1 levels), level-major. Same as --detect.
+    const int nGssLevels = D + 1;
+    std::vector<float> gss_flat(plane * static_cast<size_t>(nGssLevels));
+    for (int lvl0 = 0; lvl0 < nGssLevels; ++lvl0) {
+      const int s = cssFirstSub + lvl0;
+      const float* lv = vl_scalespace_get_level_const(gss, o, s);
+      std::memcpy(gss_flat.data() + static_cast<size_t>(lvl0) * plane, lv,
+                  plane * sizeof(float));
+    }
+
+    // ── GPU S1 detect on this octave -> candidate set ──
+    uint32_t s1_total = 0u;
+    std::vector<float> oct_dog;
+    std::vector<Cand> oct_cands =
+        gpu_detect_octave(harness, dog_wgsl, gss_flat, W, H, D, o, detect_thr,
+                          kMaxCount, &oct_dog, &s1_total);
+
+    // Pack the GPU candidates back into the CandidateExtremum record layout
+    // (5 u32 per record: octave,level,x,y,dog_value) so S2 reads the SAME bytes
+    // S1 emitted. (We round-tripped through Cand for the --detect set logic;
+    // re-pack here. dog_value is reinterpreted from the float oct_dog.)
+    std::vector<uint32_t> cand_records;
+    cand_records.reserve(oct_cands.size() * 5);
+    for (size_t i = 0; i < oct_cands.size(); ++i) {
+      cand_records.push_back(static_cast<uint32_t>(oct_cands[i].o));
+      cand_records.push_back(static_cast<uint32_t>(oct_cands[i].z));
+      cand_records.push_back(static_cast<uint32_t>(oct_cands[i].x));
+      cand_records.push_back(static_cast<uint32_t>(oct_cands[i].y));
+      float dv = oct_dog[i];
+      uint32_t bits;
+      std::memcpy(&bits, &dv, sizeof(uint32_t));
+      cand_records.push_back(bits);
+    }
+
+    // ── GPU S2 refine on this octave's candidates ──
+    uint32_t s2_total = 0u;
+    std::vector<GpuKp> oct_kps = gpu_refine_octave(
+        harness, refine_wgsl, gss_flat, W, H, D, cand_records,
+        static_cast<uint32_t>(oct_cands.size()), peak_threshold, edge_threshold,
+        base_scale, step, cssFirstSub, octave_res, kMaxKp, &s2_total);
+    for (const auto& k : oct_kps) gpu_kps.push_back(k);
+
+    // ── CPU reference: css, find extrema, refine, gate (pre-suppression). ──
+    std::vector<float> css(plane * static_cast<size_t>(D));
+    for (int z = 0; z < D; ++z) {
+      const float* a = gss_flat.data() + static_cast<size_t>(z) * plane;
+      const float* b = gss_flat.data() + static_cast<size_t>(z + 1) * plane;
+      float* c = css.data() + static_cast<size_t>(z) * plane;
+      for (size_t k = 0; k < plane; ++k) c[k] = a[k] - b[k];
+    }
+    vl_index* extrema = nullptr;
+    vl_size bufSize = 0;
+    vl_size nEx = vl_find_local_extrema_3(
+        &extrema, &bufSize, css.data(), static_cast<vl_size>(W),
+        static_cast<vl_size>(H), static_cast<vl_size>(D), detect_thr);
+    size_t oct_cpu_kp = 0;
+    for (vl_size i = 0; i < nEx; ++i) {
+      VlCovDetExtremum3 refined;
+      vl_bool ok = vl_refine_local_extreum_3(
+          &refined, css.data(), static_cast<vl_size>(W),
+          static_cast<vl_size>(H), static_cast<vl_size>(D),
+          extrema[3 * i + 0], extrema[3 * i + 1], extrema[3 * i + 2]);
+      if (!ok) {
+        ++cpu_refine_fail;
+        continue;
+      }
+      const bool peak_ok =
+          std::fabs(static_cast<double>(refined.peakScore)) > peak_threshold;
+      const bool edge_ok =
+          static_cast<double>(refined.edgeScore) < edge_threshold;
+      if (!peak_ok) ++cpu_peak_fail;
+      if (!edge_ok) ++cpu_edge_fail;
+      if (!(peak_ok && edge_ok)) continue;
+
+      RefKp rk;
+      rk.o = o;
+      rk.x_local = refined.x;
+      rk.y_local = refined.y;
+      rk.z_local = refined.z;
+      rk.fx = refined.x * step + 0.5;
+      rk.fy = refined.y * step + 0.5;
+      rk.sigma = base_scale * std::pow(2.0, o + (refined.z + cssFirstSub) /
+                                                  octave_res);
+      rk.peak_score = refined.peakScore;
+      rk.edge_score = refined.edgeScore;
+      cpu_kps.push_back(rk);
+      ++oct_cpu_kp;
+    }
+    if (extrema) vl_free(extrema);
+
+    std::printf(
+        "  octave %d  %dx%d D=%d  S1cands=%u  GPUkp=%u(atomic=%u%s)  "
+        "CPUkp(pre-supp)=%zu\n",
+        o, W, H, D, static_cast<unsigned>(oct_cands.size()),
+        static_cast<unsigned>(oct_kps.size()), s2_total,
+        s2_total > kMaxKp ? " SATURATED" : "", oct_cpu_kp);
+  }
+
+  // ── 3. VLFeat POST-suppression reference: a full vl_covdet_detect. ──
+  // (Fresh covdet so put_image/detect run the production path incl.
+  // nonExtremaSuppression=0.5.) We compare frame-space positions only.
+  std::vector<RefKp> cpu_kps_post;
+  {
+    VlCovDet* cd2 = vl_covdet_new(VL_COVDET_METHOD_DOG);
+    vl_covdet_set_first_octave(cd2, first_octave);
+    vl_covdet_set_peak_threshold(cd2, peak_threshold);
+    vl_covdet_set_edge_threshold(cd2, edge_threshold);
+    vl_covdet_put_image(cd2, gray.data(), static_cast<vl_size>(iw),
+                        static_cast<vl_size>(ih));
+    vl_covdet_detect(cd2, /*max_num_features=*/1u << 30);
+    const int nf = static_cast<int>(vl_covdet_get_num_features(cd2));
+    VlCovDetFeature* feats = vl_covdet_get_features(cd2);
+    for (int i = 0; i < nf; ++i) {
+      RefKp rk;
+      rk.o = feats[i].o;
+      rk.x_local = 0;
+      rk.y_local = 0;
+      rk.z_local = feats[i].s;
+      rk.fx = feats[i].frame.x + 0.5;  // COLMAP sift.cc:422
+      rk.fy = feats[i].frame.y + 0.5;
+      rk.sigma = feats[i].frame.a11;
+      rk.peak_score = feats[i].peakScore;
+      rk.edge_score = feats[i].edgeScore;
+      cpu_kps_post.push_back(rk);
+    }
+    vl_covdet_delete(cd2);
+  }
+
+  // ── 4. Match GPU survivors vs a CPU reference set (frame-space, per octave).
+  // A GPU kp matches a CPU kp iff same octave AND image-frame distance <
+  // match_radius px. Greedy nearest match (each CPU kp matched once). Reports
+  // recall, precision, and the position-error distribution over matches.
+  struct MatchResult {
+    double recall, precision, median, mean, maxerr;
+  };
+  auto match_and_report = [&](const std::vector<RefKp>& ref,
+                              const char* label) -> MatchResult {
+    const double kMatchRadius = 1.0;  // px in image frame (generous; refine
+                                      // moves <1.5 voxel * step; near matches
+                                      // are sub-0.1px, see the err dist)
+    // Build per-octave CPU index lists.
+    std::map<int, std::vector<size_t>> ref_by_oct;
+    for (size_t i = 0; i < ref.size(); ++i)
+      ref_by_oct[ref[i].o].push_back(i);
+
+    std::vector<bool> ref_used(ref.size(), false);
+    std::vector<double> pos_errs;
+    pos_errs.reserve(gpu_kps.size());
+    size_t matched = 0;
+
+    for (const auto& gk : gpu_kps) {
+      const double gfx = static_cast<double>(gk.x_local) * gk.step + 0.5;
+      const double gfy = static_cast<double>(gk.y_local) * gk.step + 0.5;
+      auto it = ref_by_oct.find(static_cast<int>(gk.octave));
+      if (it == ref_by_oct.end()) continue;
+      double best_d2 = kMatchRadius * kMatchRadius;
+      long best_j = -1;
+      for (size_t j : it->second) {
+        if (ref_used[j]) continue;
+        const double dx = ref[j].fx - gfx;
+        const double dy = ref[j].fy - gfy;
+        const double d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+          best_d2 = d2;
+          best_j = static_cast<long>(j);
+        }
+      }
+      if (best_j >= 0) {
+        ref_used[static_cast<size_t>(best_j)] = true;
+        pos_errs.push_back(std::sqrt(best_d2));
+        ++matched;
+      }
+    }
+
+    const size_t gpu_n = gpu_kps.size();
+    const size_t ref_n = ref.size();
+    const double recall = ref_n ? static_cast<double>(matched) / ref_n : 1.0;
+    const double precision =
+        gpu_n ? static_cast<double>(matched) / gpu_n : 1.0;
+
+    double median = 0.0, maxerr = 0.0, mean = 0.0, p95 = 0.0, p99 = 0.0;
+    size_t over_05 = 0;  // matches with pos-err > 0.05px (the gate threshold)
+    if (!pos_errs.empty()) {
+      std::sort(pos_errs.begin(), pos_errs.end());
+      median = pos_errs[pos_errs.size() / 2];
+      maxerr = pos_errs.back();
+      p95 = pos_errs[static_cast<size_t>(0.95 * (pos_errs.size() - 1))];
+      p99 = pos_errs[static_cast<size_t>(0.99 * (pos_errs.size() - 1))];
+      for (double e : pos_errs) {
+        mean += e;
+        if (e > 0.05) ++over_05;
+      }
+      mean /= static_cast<double>(pos_errs.size());
+    }
+
+    std::printf(
+        "\n=== REFINE PARITY vs %s ===\n"
+        "GPU survivors     : %zu\n"
+        "CPU keypoints      : %zu\n"
+        "matched            : %zu\n"
+        "RECALL             : %.6f  (matched / CPU)\n"
+        "PRECISION          : %.6f  (matched / GPU)\n"
+        "pos-err px (frame) : median=%.6f mean=%.6f p95=%.6f p99=%.6f max=%.6f"
+        "  (N=%zu, >0.05px: %zu = %.4f%%)\n",
+        label, gpu_n, ref_n, matched, recall, precision, median, mean, p95, p99,
+        maxerr, pos_errs.size(), over_05,
+        pos_errs.empty() ? 0.0
+                         : 100.0 * static_cast<double>(over_05) /
+                               static_cast<double>(pos_errs.size()));
+    return MatchResult{recall, precision, median, mean, maxerr};
+  };
+
+  std::printf(
+      "\nCPU gate-decision tally (pre-suppression refine of the SAME GPU-fed "
+      "candidates): refine_fail=%zu peak_fail=%zu edge_fail=%zu\n",
+      cpu_refine_fail, cpu_peak_fail, cpu_edge_fail);
+
+  // Primary gate: vs the CPU pre-suppression refined+gated list (isolates the
+  // refine/gate kernel from nonExtremaSuppression).
+  auto pre = match_and_report(cpu_kps, "VLFeat refine+gate (pre-suppression)");
+  // Secondary: vs the production post-suppression feature list (quantifies the
+  // suppression gap the kernel does NOT yet apply).
+  auto post = match_and_report(
+      cpu_kps_post, "VLFeat full detect (POST nonExtremaSuppression=0.5)");
+
+  // ── 5. fp32-vs-VLFeat near-threshold / near-edge divergence quantification.
+  // For the GPU survivors, count how many sit within 5% of a gate boundary
+  // (|peak|~peak_thr or edge~edge_thr) — these are the fp32-fragile decisions.
+  size_t gpu_near_peak = 0, gpu_near_edge = 0;
+  for (const auto& gk : gpu_kps) {
+    if (std::fabs(static_cast<double>(gk.peak_score)) <= peak_threshold * 1.05)
+      ++gpu_near_peak;
+    if (static_cast<double>(gk.edge_score) >= edge_threshold * 0.95)
+      ++gpu_near_edge;
+  }
+  std::printf(
+      "\nGPU survivors near a gate boundary (fp32-fragile): "
+      "near-peak(|peak|<=1.05*thr)=%zu  near-edge(edge>=0.95*edge_thr)=%zu  "
+      "of %zu\n",
+      gpu_near_peak, gpu_near_edge, gpu_kps.size());
+
+  // Gate: PLAN line 68 — recall/precision >= 0.97, median pos-err <= 0.05px,
+  // measured vs the pre-suppression reference (the kernel's true target; the
+  // suppression is a separate deferred stage reported above).
+  const double kGate = 0.97;
+  const double kPosGate = 0.05;
+  const bool recall_ok = pre.recall >= kGate;
+  const bool prec_ok = pre.precision >= kGate;
+  const bool pos_ok = pre.median <= kPosGate;
+  const bool pass = recall_ok && prec_ok && pos_ok;
+  std::printf(
+      "\ngate: recall>=%.2f (%.6f %s) AND precision>=%.2f (%.6f %s) AND "
+      "median-pos-err<=%.2fpx (%.6f %s)  =>  %s\n",
+      kGate, pre.recall, recall_ok ? "ok" : "FAIL", kGate, pre.precision,
+      prec_ok ? "ok" : "FAIL", kPosGate, pre.median, pos_ok ? "ok" : "FAIL",
+      pass ? "PASS" : "FAIL");
+  (void)post;
+
+  vl_covdet_delete(covdet);
+  return pass ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -992,6 +1503,49 @@ int main(int argc, char** argv) {
       ++pos;
     }
     return run_detect(img, dog, first_octave, peak_threshold);
+  }
+
+  // --refine (S2 task A): GPU Newton refine + peak/edge gates parity vs VLFeat.
+  //   extract_gpuparity_exe --refine <image.jpg> [dog.wgsl] [refine.wgsl]
+  //                         [--first-octave N] [--peak-threshold T]
+  //                         [--edge-threshold E]
+  // Defaults: in-repo sift_test.jpg, sift_dog_extrema_test.wgsl (S1) +
+  //   sift_refine_gate.wgsl (S2), first_octave=0 (PLAN 06-25 baseline),
+  //   peak=0.02/3 (COLMAP sift.h:55), edge=10.0 (sift.h:58).
+  if (argc > 1 && std::string_view(argv[1]) == "--refine") {
+    const char* img =
+        "third_party/glomap_vendor/iosapp/Resources/sift_test.jpg";
+    const char* dog = "shaders/wgsl/sift_dog_extrema_test.wgsl";
+    const char* refine = "shaders/wgsl/sift_refine_gate.wgsl";
+    int first_octave = 0;
+    double peak_threshold = 0.02 / 3.0;
+    double edge_threshold = 10.0;
+    int pos = 0;  // 0=img, 1=dog, 2=refine
+    for (int i = 2; i < argc; ++i) {
+      std::string_view a(argv[i]);
+      if (a == "--first-octave" && i + 1 < argc) {
+        first_octave = std::atoi(argv[++i]);
+        continue;
+      }
+      if (a == "--peak-threshold" && i + 1 < argc) {
+        peak_threshold = std::atof(argv[++i]);
+        continue;
+      }
+      if (a == "--edge-threshold" && i + 1 < argc) {
+        edge_threshold = std::atof(argv[++i]);
+        continue;
+      }
+      if (a.size() >= 2 && a[0] == '-' && a[1] == '-') continue;  // unknown flag
+      if (pos == 0)
+        img = argv[i];
+      else if (pos == 1)
+        dog = argv[i];
+      else if (pos == 2)
+        refine = argv[i];
+      ++pos;
+    }
+    return run_refine(img, dog, refine, first_octave, peak_threshold,
+                      edge_threshold);
   }
 
   // CLI: extract_gpuparity_exe <image.jpg> <gss_blur.wgsl> [octave] [level_s]
