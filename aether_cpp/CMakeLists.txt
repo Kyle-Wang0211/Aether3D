@@ -404,6 +404,48 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
     aether_dawn_smoke_test(aether_dawn_splat_smoke_cross_validate
                             tools/aether_dawn_splat_smoke_cross_validate.cpp)
 
+    # ─── GPU DSP-SIFT S1 ②: gss GPU↔CPU parity harness ───
+    # Validates shaders/wgsl/sift_gss_blur.wgsl against VLFeat's CPU gss
+    # (vl_covdet → vl_scalespace) within the Stage-1 tolerance gate
+    # (max-rel ≤ 1e-3, RMS ≤ 2e-4). See glomap_vendor/GPU_DSP_SIFT_PLAN.md.
+    #
+    # Compiles ONLY the minimal VLFeat .c subset the gss needs (covdet +
+    # scalespace + imopv + mathop + generic + host + random) directly into
+    # the target, with VL_DISABLE_{SSE2,AVX,OPENMP} (the arm64 scalar path,
+    # matching VLFeat's own CMake on non-x86). This keeps the harness
+    # self-contained — it does NOT pull glomap_core/glog/ceres/sqlite, which
+    # the e2e benches (extract_selfcheck, colmap_bench) need but this unit
+    # does not. Links the kernel harness + Dawn like the splat smokes.
+    set(AETHER_VLFEAT_DIR
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glomap_vendor/colmap-src/thirdparty/VLFeat)
+    add_executable(extract_gpuparity_exe
+        third_party/glomap_vendor/bench/extract_gpuparity.cc
+        ${AETHER_VLFEAT_DIR}/covdet.c
+        ${AETHER_VLFEAT_DIR}/scalespace.c
+        ${AETHER_VLFEAT_DIR}/imopv.c
+        ${AETHER_VLFEAT_DIR}/mathop.c
+        ${AETHER_VLFEAT_DIR}/generic.c
+        ${AETHER_VLFEAT_DIR}/host.c
+        ${AETHER_VLFEAT_DIR}/random.c)
+    target_include_directories(extract_gpuparity_exe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${AETHER_VLFEAT_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+    target_compile_definitions(extract_gpuparity_exe PRIVATE
+        VL_DISABLE_SSE2 VL_DISABLE_AVX VL_DISABLE_OPENMP)
+    # -w: VLFeat .c is upstream code; do not inherit AETHER_STRICT options.
+    target_compile_options(extract_gpuparity_exe PRIVATE -w)
+    target_link_libraries(extract_gpuparity_exe PRIVATE
+        aether_dawn_kernel_harness dawn::webgpu_dawn)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set_target_properties(extract_gpuparity_exe PROPERTIES
+            MACOSX_BUNDLE TRUE
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER
+                "com.kyle.aether.extract_gpuparity_exe"
+            XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
+            XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "26AH7V448L")
+    endif()
+
     # ─── 6.2.G-K production-path smokes ───
     # These link against aether3d_core (production DawnGPUDevice path),
     # NOT the harness library. They migrate harness-validated kernels
