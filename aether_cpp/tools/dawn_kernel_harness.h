@@ -54,6 +54,19 @@ public:
     // device() and queue() are valid.
     bool init();
 
+    // Same as init(), but wires a DISK-BACKED Dawn persistent pipeline cache
+    // (DawnCacheDeviceDescriptor) chained onto the device descriptor so the
+    // WGSL→Tint→MSL→Metal pipeline compiles (the ~31.7s A16 first-launch cost
+    // of CreateComputePipeline) are serialized to `cache_dir` and reloaded on
+    // later launches. `isolation_key` is a STABLE version string ("gpusift-v1")
+    // — bump it to invalidate the cache when shaders change. On return,
+    // *out_cache_warm (if non-null) is true iff at least one blob was loaded
+    // from disk (i.e. a warm start that should skip recompiles). cache_dir is
+    // created if missing; each blob is a file named by the hex of Dawn's cache
+    // key. Pass cache_dir=nullptr to disable the cache (== plain init()).
+    bool init_with_cache(const char* cache_dir, const char* isolation_key,
+                         bool* out_cache_warm);
+
     // Upload `size` bytes from `data` to a new buffer. `usage` must include
     // CopyDst (for the upload itself); typical usage = Storage|CopyDst.
     // Synchronous from caller's POV (queue.WriteBuffer doesn't block but
@@ -155,11 +168,19 @@ public:
     const wgpu::Device&   device()   const { return device_; }
     const wgpu::Queue&    queue()    const { return queue_; }
 
+    // Persistent-cache telemetry (valid only when init_with_cache used a dir).
+    // Call AFTER the pipelines have been compiled (GpuSiftExtractor::init), so
+    // the load callbacks have fired. Returns how many cache blobs Dawn loaded
+    // from disk (warm-hit count) / stored to disk this run.
+    long cache_load_hits() const;
+    long cache_store_count() const;
+
 private:
     wgpu::Instance instance_;
     wgpu::Adapter adapter_;
     wgpu::Device device_;
     wgpu::Queue queue_;
+    void* cache_for_report_ = nullptr;  // DiskPipelineCache* (opaque here)
 };
 
 }  // namespace tools

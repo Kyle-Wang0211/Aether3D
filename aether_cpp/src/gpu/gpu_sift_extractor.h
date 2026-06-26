@@ -95,6 +95,13 @@ class GpuSiftExtractor {
     // Absolute path to the directory containing shaders/wgsl/*.wgsl (the
     // aether_cpp root). If empty, paths are resolved relative to CWD.
     const char* shader_root = nullptr;
+    // Optional disk-backed Dawn persistent pipeline cache. When non-null, the
+    // 11 WGSL→Tint→MSL→Metal pipeline compiles (the ~31.7s A16 first-launch
+    // cost) are serialized to this dir and reloaded on a later launch, so a
+    // warm start skips the recompile. cache_isolation_key is a stable version
+    // string ("gpusift-v1") — bump it to invalidate when shaders change.
+    const char* cache_dir = nullptr;
+    const char* cache_isolation_key = nullptr;
   };
 
   GpuSiftExtractor();
@@ -109,6 +116,12 @@ class GpuSiftExtractor {
   // One-time compile cost measured inside init() (Tint compile of all 11
   // pipelines). Valid after a successful init().
   double init_compile_ms() const;
+
+  // Persistent-cache telemetry (valid after init() when cache_dir was set).
+  // cache_load_hits() = #pipeline blobs Dawn loaded from disk this launch
+  // (>0 ⇒ warm start). cache_store_count() = #blobs written this launch.
+  long cache_load_hits() const;
+  long cache_store_count() const;
 
   // Per-frame extraction. REUSES the cached pipelines + buffers. `gray` is a
   // row-major float image (intensity 0..255), w*h elements. Returns false on

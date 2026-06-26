@@ -445,7 +445,16 @@ GpuSiftExtractor::~GpuSiftExtractor() = default;
 
 bool GpuSiftExtractor::init(const Config& cfg) {
   impl_->cfg = cfg;
-  if (!impl_->harness.init()) {
+  // Wire the disk-backed Dawn persistent pipeline cache when a cache_dir is
+  // configured (skips the ~31.7s A16 first-launch pipeline compiles on a warm
+  // start). Falls back to a plain init() (no cache) when cache_dir is null.
+  bool cache_warm = false;
+  bool ok = cfg.cache_dir
+                ? impl_->harness.init_with_cache(cfg.cache_dir,
+                                                 cfg.cache_isolation_key,
+                                                 &cache_warm)
+                : impl_->harness.init();
+  if (!ok) {
     std::fprintf(stderr, "GpuSiftExtractor::init: harness.init() failed\n");
     return false;
   }
@@ -507,6 +516,13 @@ bool GpuSiftExtractor::init(const Config& cfg) {
 }
 
 double GpuSiftExtractor::init_compile_ms() const { return impl_->compile_ms; }
+
+long GpuSiftExtractor::cache_load_hits() const {
+  return impl_->harness.cache_load_hits();
+}
+long GpuSiftExtractor::cache_store_count() const {
+  return impl_->harness.cache_store_count();
+}
 
 // ── ONE per-frame GPU pipeline run (execution only; pipelines + caps reused). ──
 bool GpuSiftExtractor::Impl::run_frame(const float* image, int img_w, int img_h,

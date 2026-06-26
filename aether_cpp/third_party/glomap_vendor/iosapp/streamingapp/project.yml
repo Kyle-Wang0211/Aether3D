@@ -1,0 +1,104 @@
+name: StreamingBench
+options:
+  bundleIdPrefix: com.kyle
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  StreamingBench:
+    type: application
+    platform: iOS
+    sources:
+      # App driver (console mirror + mem/thermal sampler + START button) +
+      # the streaming run entry (orchestrator wiring + per-frame telemetry).
+      - path: Sources
+      # ① GPU DSP-SIFT extractor + the Dawn kernel harness (NOW with the disk-
+      #   backed persistent pipeline cache — the 31.7s init fix).
+      - path: /tmp/aether-s1/aether_cpp/src/gpu/gpu_sift_extractor.cc
+      - path: /tmp/aether-s1/aether_cpp/tools/dawn_kernel_harness.cpp
+      # The streaming orchestrator (2-stage pipeline + bounded queue + drain).
+      - path: /tmp/aether-s1/aether_cpp/src/gpu/streaming_orchestrator.cc
+      # ②③ SfM C ABI (inject + pose-guided match-persist + COLMAP incremental
+      #   register/local-BA) + the CPU DSP-SIFT extractor & index-pair matcher.
+      #   These are NOT in libglomap_core.a (verified via nm) — compile here.
+      - path: /tmp/aether-s1/aether_cpp/third_party/glomap_vendor/bench/aether_sfm_c.cc
+      - path: /tmp/aether-s1/aether_cpp/third_party/glomap_vendor/bench/dsp_sift_c.cc
+      # Bundle shaders/wgsl/*.wgsl (folder ref) -> <bundle>/shaders/wgsl/*.wgsl.
+      - path: /tmp/aether-s1/aether_cpp/shaders
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 26AH7V448L
+        PRODUCT_BUNDLE_IDENTIFIER: com.kyle.StreamingBench
+        CODE_SIGN_STYLE: Automatic
+        # NOTE: the increased-memory-limit entitlement requires a provisioning
+        # profile that includes that capability; the team's wildcard profile does
+        # not, so we DON'T wire Sources/StreamingBench.entitlements here (it's
+        # kept for reference). The A16 jetsam (~3GB) applies regardless; we log
+        # rss_mb per frame to watch it. To enable: add the capability to the App
+        # ID in the Apple Developer portal, then re-add CODE_SIGN_ENTITLEMENTS.
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        # c++20: the orchestrator + GPU extractor use c++20 (the GlomapBench
+        # COLMAP link used c++17; COLMAP 4.0.4 compiles fine at c++20).
+        CLANG_CXX_LANGUAGE_STANDARD: "c++20"
+        CLANG_CXX_LIBRARY: "libc++"
+        ENABLE_BITCODE: NO
+        GCC_OPTIMIZATION_LEVEL: "2"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "EIGEN_MPL2_ONLY"
+          - "GLOG_USE_GLOG_EXPORT"
+          - "GLOG_NO_ABBREVIATED_SEVERITIES"
+          - "GLOG_VERSION_MAJOR=0"
+          - "GLOG_VERSION_MINOR=7"
+        HEADER_SEARCH_PATHS:
+          # aether_cpp public headers (aether_sfm_c.h, aether/gpu/*).
+          - "/tmp/aether-s1/aether_cpp/include"
+          # GPU extractor + Dawn harness headers.
+          - "/tmp/aether-s1/aether_cpp/src/gpu"
+          - "/tmp/aether-s1/aether_cpp/tools"
+          # Dawn (device build — proven by the gpusiftapp run on this device).
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/dawn/include"
+          - "/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/gen/include"
+          # COLMAP / glomap / poselib sources (header-only deps the lib was built from).
+          - "/tmp/aether-s1/aether_cpp/third_party/glomap_vendor/colmap-src"
+          - "/tmp/aether-s1/aether_cpp/third_party/glomap_vendor/stubs"
+          - "/tmp/aether-s1/aether_cpp/third_party/glomap_vendor/glomap-src"
+          - "/tmp/aether-s1/aether_cpp/third_party/glomap_vendor/poselib-src"
+          # ceres / glog / eigen iOS headers (worktree symlinks → Aether3D-cross tree).
+          - "/tmp/aether-s1/aether_cpp/third_party/glog-install/include"
+          - "/tmp/aether-s1/aether_cpp/third_party/ceres/include"
+          - "/tmp/aether-s1/aether_cpp/third_party/ceres-build-ios/include"
+          - "/tmp/aether-s1/aether_cpp/third_party/ceres/config"
+          - "/tmp/aether-s1/aether_cpp/third_party/eigen-install/include/eigen3"
+          # Boost headers (COLMAP's enum_utils.h needs boost/preprocessor.hpp).
+          # Header-only; same as the GlomapBench COLMAP-on-iOS link recipe.
+          - "/opt/homebrew/include"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          # COLMAP incremental SfM (rebuilt from THIS worktree → ABI matches the
+          # aether_sfm_c.cc / colmap-src compiled above).
+          - "/tmp/aether-s1/aether_cpp/third_party/glomap_vendor/build-ios/libglomap_core.a"
+          - "/tmp/aether-s1/aether_cpp/third_party/ceres-build-ios/lib/libceres.a"
+          - "/tmp/aether-s1/aether_cpp/third_party/glog-install/lib/libglog.a"
+          # Dawn → Metal (the same device archive the gpusiftapp run used).
+          - "/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/src/dawn/native/Debug-iphoneos/libwebgpu_dawn.a"
+          - "-lsqlite3"
+          - "-framework Accelerate"
+          - "-framework CoreFoundation"
+          - "-framework Foundation"
+          - "-framework ImageIO"
+          - "-framework CoreGraphics"
+          - "-framework IOSurface"
+          - "-framework QuartzCore"
+          - "-framework Metal"
+          - "-lobjc"
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: StreamingBench
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
