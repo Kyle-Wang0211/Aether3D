@@ -211,8 +211,9 @@ aether_sfm_result_t RunIncremental(
     auto manager = std::make_shared<colmap::ReconstructionManager>();
 
     const double t0 = NowMs();
-    colmap::IncrementalPipeline pipeline(pipeline_opts, image_path, db_path,
-                                         manager);
+    pipeline_opts->image_path = image_path;  // [4.0.4] image_path moved into options
+    colmap::IncrementalPipeline pipeline(
+        pipeline_opts, colmap::Database::Open(db_path), manager);
     pipeline.Run();
     const double solve_ms = NowMs() - t0;
 
@@ -245,8 +246,9 @@ void RefineGlobalBA(aether_sfm_session* s,
     // finalize quality (reproj 1.1455). TriangulateReconstruction reads
     // ba_global_* + Mapper() + Triangulation() from these options.
     auto manager = std::make_shared<colmap::ReconstructionManager>();
-    colmap::IncrementalPipeline pipeline(popts, s->image_path, s->db_path,
-                                         manager);
+    popts->image_path = s->image_path;  // [4.0.4] image_path moved into options
+    colmap::IncrementalPipeline pipeline(
+        popts, colmap::Database::Open(s->db_path), manager);
     pipeline.RefineReconstruction(refined);
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
@@ -570,14 +572,14 @@ aether_sfm_result_t aether_sfm_get_poses(aether_sfm_session_t* s,
       p.registered = image.HasPose() ? 1 : 0;
       if (image.HasPose()) {
         const colmap::Rigid3d c_from_w = image.CamFromWorld();
-        const Eigen::Quaterniond& q = c_from_w.rotation;
+        const Eigen::Quaterniond q = c_from_w.rotation();  // [4.0.4] member -> method
         p.qwxyz[0] = q.w();
         p.qwxyz[1] = q.x();
         p.qwxyz[2] = q.y();
         p.qwxyz[3] = q.z();
-        p.t[0] = c_from_w.translation.x();
-        p.t[1] = c_from_w.translation.y();
-        p.t[2] = c_from_w.translation.z();
+        p.t[0] = c_from_w.translation().x();  // [4.0.4] member -> method
+        p.t[1] = c_from_w.translation().y();
+        p.t[2] = c_from_w.translation().z();
       } else {
         p.qwxyz[0] = 1.0;
         p.qwxyz[1] = p.qwxyz[2] = p.qwxyz[3] = 0.0;
