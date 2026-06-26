@@ -60,3 +60,16 @@ aether_cpp/build-ios-sim/
 
 # Distribution artifacts (iOS xcframework, etc.) — regeneratable via scripts/build_ios_xcframework.sh
 dist/
+
+# large fixtures + run/build artifacts (do not commit)
+*.db
+*.db-shm
+*.db-wal
+run_*.txt
+run_*.err
+build*.log
+cmake_*.log
+photo_bundle_full414.json
+featcache/
+*.feat
+smoke.err
