@@ -127,12 +127,18 @@ static void StartMemSampler(void) {
            manifest.UTF8String);
     fflush(stdout);
 
-    // Config: full 414 frames, jitter pacing on, register every 25 frames,
+    // Config: full 414 frames, jitter pacing on, PER-FRAME interleaved register,
     // downsample 4K->~2112 long edge (production 4K->2K). max_frames=0 = all.
     // To smoke-test fast, change max_frames to e.g. 40 here.
     int max_frames = 0;        // 0 = all 414
     int jitter = 1;            // 2s ± variance + occasional drain pauses
-    int register_every_n = 25; // COLMAP incremental register cadence
+    // [gpu-sift-s1 FIX-2] Registration is PER FRAME. The interleaved
+    // add_and_register path registers every fed frame (the cloud grows per-frame).
+    // This value does NOT gate registration (see streaming_run.mm: it is consumed
+    // only as `global_ba_marker`, a cosmetic deferred-global-BA log cadence flag).
+    // Renamed to make clear it is NOT a register cadence.
+    int global_ba_log_marker_every = 25;  // cosmetic BA-log cadence ONLY (not register)
+    int register_every_n = global_ba_log_marker_every;
     int max_edge = 2112;       // 4224 -> 2112 (half; ~2K production downsample)
 
     g_peak_mb = 0.0;

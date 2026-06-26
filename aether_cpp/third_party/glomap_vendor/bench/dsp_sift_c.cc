@@ -298,15 +298,28 @@ int aether_sift_match_pairs(const uint8_t* desc1,
     d2->data.resize(n2, 128);
     std::memcpy(d2->data.data(), desc2, static_cast<size_t>(n2) * 128);
 
-    colmap::FeatureMatchingOptions opts(
-        colmap::FeatureMatcherType::SIFT_BRUTEFORCE);
-    opts.sift = std::make_shared<colmap::SiftMatchingOptions>();
-    opts.sift->max_ratio = max_ratio > 0 ? max_ratio : 0.7;
-    opts.sift->cpu_brute_force_matcher = true;
-    opts.use_gpu = false;
-
-    std::unique_ptr<colmap::FeatureMatcher> matcher =
-        colmap::CreateSiftFeatureMatcher(opts);
+    // [gpu-sift-s1 FIX-1] CACHED MATCHER REUSE. The streaming pose-guided driver
+    // (MatchAndPersistAgainstPrev) calls this once per candidate pair, K times per
+    // frame. Recreating colmap::CreateSiftFeatureMatcher on EVERY pair re-allocated
+    // the CPU brute-force matcher + its scratch buffers and emitted the repeated
+    // "Creating SIFT CPU feature matcher" log line. The matcher is STATELESS across
+    // Match() calls (it takes the two Images as arguments each call), so we build it
+    // ONCE per thread (keyed by max_ratio, which is constant for a run) and reuse it.
+    // This removes the per-pair allocation; match cost is now K * one Match() call.
+    static thread_local std::unique_ptr<colmap::FeatureMatcher> tls_matcher;
+    static thread_local double tls_max_ratio = -1.0;
+    const double mr = max_ratio > 0 ? max_ratio : 0.7;
+    if (!tls_matcher || tls_max_ratio != mr) {
+      colmap::FeatureMatchingOptions opts(
+          colmap::FeatureMatcherType::SIFT_BRUTEFORCE);
+      opts.sift = std::make_shared<colmap::SiftMatchingOptions>();
+      opts.sift->max_ratio = mr;
+      opts.sift->cpu_brute_force_matcher = true;
+      opts.use_gpu = false;
+      tls_matcher = colmap::CreateSiftFeatureMatcher(opts);
+      tls_max_ratio = mr;
+    }
+    colmap::FeatureMatcher* matcher = tls_matcher.get();
     if (!matcher) return 3;
 
     colmap::FeatureMatcher::Image img1;

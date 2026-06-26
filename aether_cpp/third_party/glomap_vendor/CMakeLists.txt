@@ -267,4 +267,29 @@ if(BUILD_BENCH)
     /opt/homebrew/lib/libglog.dylib
     "-lsqlite3"
     ${ACCELERATE_FW})
+
+  # [gpu-sift-s1] END-TO-END LIVE-MATCHING host verify. Unlike sfm_live_verify
+  # (which stages PRECOMPUTED matches+TVGs from a baked db), this extracts DSP-SIFT
+  # descriptors from the capture JPEGs and per frame runs the production sequence:
+  #   add_frame_with_features (LIVE pose-guided bounded match + persist) ->
+  #   set_image_pose_prior -> add_and_register_frame (per-frame pose-prior register).
+  # match_ms is therefore the REAL live match cost (the old harness never measured
+  # it). Proves O(K)-bounded matching (per-quartile match_ms means flat in N).
+  add_executable(sfm_e2e_live_verify_exe
+    bench/sfm_e2e_live_verify.cc
+    bench/aether_sfm_c.cc
+    bench/dsp_sift_c.cc)
+  target_include_directories(sfm_e2e_live_verify_exe PRIVATE
+    ${V}/stubs ${AT}/../include ${AT}/stb)
+  target_compile_definitions(sfm_e2e_live_verify_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED VL_DISABLE_SSE2 VL_DISABLE_AVX)
+  target_compile_options(sfm_e2e_live_verify_exe PRIVATE -w)
+  target_link_libraries(sfm_e2e_live_verify_exe PRIVATE
+    glomap_core
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
 endif()

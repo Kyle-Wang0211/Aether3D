@@ -430,13 +430,56 @@ bool PosePriorAllowsMatch(const FrameRecord& a, const FrameRecord& b,
 // brute-force matches + fewer RANSAC verifications). Returns the number of pairs
 // that produced a non-degenerate two-view geometry (>=1 means the frame is
 // connected into the graph).
+// [gpu-sift-s1 FIX-1] Camera center C = -R^T * t from the stored ARKit prior
+// (world->cam). Used to rank previous frames by physical camera proximity so the
+// bounded candidate set is pose-covisibility-driven, not a pure temporal window.
+static Eigen::Vector3d FrameCameraCenter(const FrameRecord& f) {
+  const Eigen::Matrix3d R = f.pose_q.normalized().toRotationMatrix();
+  return -(R.transpose() * f.pose_t);
+}
+
 int MatchAndPersistAgainstPrev(aether_sfm_session* s, const FrameRecord& cur,
                                bool pose_guided, double guided_max_angle_deg) {
   const int frame_id = cur.frame_id;
   const int k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 6;
-  const int start = (frame_id - k) > 0 ? (frame_id - k) : 0;
   const double max_ratio =
       s->options.match_max_ratio > 0 ? s->options.match_max_ratio : 0.7;
+
+  // [gpu-sift-s1 FIX-1] BOUNDED POSE-GUIDED CANDIDATE SELECTION (O(K), flat in N).
+  // Replace the pure temporal window (start=frame_id-k) with a pose-covisibility
+  // ranking: of ALL previous frames, keep only those within the 75° optical-axis
+  // cone (PosePriorAllowsMatch), rank them by camera-center distance
+  // ||C_cur-C_prev|| (nearest first), and cap at K. This recovers near-but-
+  // non-adjacent covisible frames (e.g. revisits) a strict temporal window misses,
+  // while the cap keeps per-frame match cost CONSTANT regardless of how large N
+  // grows. With no prior on the current frame we fall back to the temporal window.
+  std::vector<int> candidates;
+  if (pose_guided && cur.has_pose) {
+    const Eigen::Vector3d C_cur = FrameCameraCenter(cur);
+    std::vector<std::pair<double, int>> ranked;  // (dist, j)
+    ranked.reserve(frame_id);
+    for (int j = 0; j < frame_id; ++j) {
+      const FrameRecord& prev = s->frames[j];
+      if (!prev.has_pose) {
+        // No prior on prev: keep only as a near-temporal fallback candidate.
+        if (j >= frame_id - k) ranked.emplace_back(1e18 + (frame_id - j), j);
+        continue;
+      }
+      if (!PosePriorAllowsMatch(prev, cur, guided_max_angle_deg)) continue;
+      const double d = (C_cur - FrameCameraCenter(prev)).norm();
+      ranked.emplace_back(d, j);
+    }
+    std::sort(ranked.begin(), ranked.end());
+    const int cap_k = static_cast<int>(ranked.size()) < k
+                          ? static_cast<int>(ranked.size())
+                          : k;
+    candidates.reserve(cap_k);
+    for (int i = 0; i < cap_k; ++i) candidates.push_back(ranked[i].second);
+    std::sort(candidates.begin(), candidates.end());  // image_id order for persist
+  } else {
+    const int start = (frame_id - k) > 0 ? (frame_id - k) : 0;
+    for (int j = start; j < frame_id; ++j) candidates.push_back(j);
+  }
 
   // The shared camera (created on the first frame) is used for both views — a
   // single self-calibrated SIMPLE_PINHOLE group (see add_frame note). Reading it
@@ -459,9 +502,12 @@ int MatchAndPersistAgainstPrev(aether_sfm_session* s, const FrameRecord& cur,
 
   int n_verified = 0;
   std::vector<int> pair_buf;  // {i,j} flat
-  for (int j = start; j < frame_id; ++j) {
+  for (int j : candidates) {
     const FrameRecord& prev = s->frames[j];
-    if (pose_guided &&
+    // Cone check already applied during pose-guided selection; re-applied here only
+    // for the temporal-fallback path (where prev/cur may carry priors but selection
+    // didn't rank them). Cheap and keeps the GAP-3 guarantee on all paths.
+    if (pose_guided && cur.has_pose && prev.has_pose &&
         !PosePriorAllowsMatch(prev, cur, guided_max_angle_deg)) {
       continue;  // GAP-3: pose says these views can't overlap — skip
     }
