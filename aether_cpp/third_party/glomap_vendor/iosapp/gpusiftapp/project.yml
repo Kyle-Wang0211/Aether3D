@@ -1,0 +1,58 @@
+name: GpuSiftBench
+options:
+  bundleIdPrefix: com.kyle
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  GpuSiftBench:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # The production GPU DSP-SIFT extractor + the Dawn kernel harness, compiled
+      # directly into the app target (same pattern as dawnmatchapp/dawn_match_run.mm).
+      - path: /tmp/aether-s1/aether_cpp/src/gpu/gpu_sift_extractor.cc
+      - path: /tmp/aether-s1/aether_cpp/tools/dawn_kernel_harness.cpp
+      # Bundle the 4224x2376 test image.
+      - path: /tmp/aether-s1/aether_cpp/third_party/glomap_vendor/iosapp/Resources/sift_test.jpg
+        buildPhase: resources
+      # Bundle shaders/wgsl/*.wgsl as a folder reference -> available at
+      # <bundle>/shaders/wgsl/<name>.wgsl. AETHER_SHADER_ROOT == bundle resourcePath.
+      - path: /tmp/aether-s1/aether_cpp/shaders
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 26AH7V448L
+        PRODUCT_BUNDLE_IDENTIFIER: com.kyle.GpuSiftBench
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++20"
+        CLANG_CXX_LIBRARY: "libc++"
+        ENABLE_BITCODE: NO
+        GCC_OPTIMIZATION_LEVEL: "2"
+        HEADER_SEARCH_PATHS:
+          - "/tmp/aether-s1/aether_cpp/src/gpu"
+          - "/tmp/aether-s1/aether_cpp/tools"
+          - "/Users/kaidongwang/Developer/aether_cpp/third_party/dawn/include"
+          - "/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/gen/include"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/src/dawn/native/Debug-iphoneos/libwebgpu_dawn.a"
+          - "-framework CoreFoundation"
+          - "-framework Foundation"
+          - "-framework ImageIO"
+          - "-framework CoreGraphics"
+          - "-framework IOSurface"
+          - "-framework QuartzCore"
+          - "-framework Metal"
+          - "-lobjc"
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: GpuSiftBench
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true

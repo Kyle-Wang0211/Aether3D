@@ -142,6 +142,28 @@ bool DawnKernelHarness::init() {
         // validateable. Production uses first_octave=0 (PLAN 06-25), well under
         // even the default. Same permissive-only rationale as above.
         required_limits.maxBufferSize = 2048ull * 1024ull * 1024ull;
+        // iOS-Metal safety (GPU DSP-SIFT on-device): Apple A-series Metal caps
+        // maxBufferLength at ~half device RAM, so a 6 GB A16 reports a maximum
+        // BELOW the 2 GB request above and RequestDevice would FAIL. The
+        // production path is first_octave=0, whose largest single octave-0
+        // binding (4224x2376, 6 gss levels) is ~240 MB — comfortably under any
+        // A-series limit. Clamp the two buffer-size limits to what the adapter
+        // actually reports so the device request succeeds on-device while still
+        // exceeding the real 240 MB need. (Desktop adapters report >= 2 GB so
+        // this is a no-op there.)
+        {
+            wgpu::Limits adapter_limits{};
+            if (adapter_.GetLimits(&adapter_limits) == wgpu::Status::Success) {
+                if (adapter_limits.maxStorageBufferBindingSize <
+                    required_limits.maxStorageBufferBindingSize) {
+                    required_limits.maxStorageBufferBindingSize =
+                        adapter_limits.maxStorageBufferBindingSize;
+                }
+                if (adapter_limits.maxBufferSize < required_limits.maxBufferSize) {
+                    required_limits.maxBufferSize = adapter_limits.maxBufferSize;
+                }
+            }
+        }
         device_desc.requiredLimits = &required_limits;
 
         // Phase 6.3a Step 6: Brush rasterize_backwards.wgsl uses

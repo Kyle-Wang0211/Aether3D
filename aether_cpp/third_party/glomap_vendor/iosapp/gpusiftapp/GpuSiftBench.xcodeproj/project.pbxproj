@@ -1,0 +1,400 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		33001284AEE9929F97F07565 /* gpu_sift_run.mm in Sources */ = {isa = PBXBuildFile; fileRef = 74E1E7F048BF7BC2D3CB1D72 /* gpu_sift_run.mm */; };
+		3F2C2F6116C73805F1279E34 /* dawn_kernel_harness.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E082FF90F75D3CB7ABF968A8 /* dawn_kernel_harness.cpp */; };
+		3F77369D5D764C5B4C779BD0 /* gpu_sift_extractor.cc in Sources */ = {isa = PBXBuildFile; fileRef = ED53B8C2EC371EDE8EF7F1F1 /* gpu_sift_extractor.cc */; };
+		64DC81B6DEAA3571E444770C /* sift_test.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 906F9DD00B8A2E58C8B5759C /* sift_test.jpg */; };
+		772BCFD5708CE9018FE1DBED /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 1B5F601ED9EBF48A64F72A00 /* main.m */; };
+		ACBBF7B32727EDB712043DCE /* shaders in Resources */ = {isa = PBXBuildFile; fileRef = 2B3A40DC622AFE4063260FCB /* shaders */; };
+		CD356EC9E379C0CC96F00C6B /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 38CE6B9500267D3ED2DF49E1 /* AppDelegate.m */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1B5F601ED9EBF48A64F72A00 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		2B3A40DC622AFE4063260FCB /* shaders */ = {isa = PBXFileReference; lastKnownFileType = folder; name = shaders; path = ../../../../shaders; sourceTree = SOURCE_ROOT; };
+		38CE6B9500267D3ED2DF49E1 /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
+		43657FB42F49850622C7ADE3 /* GpuSiftBench.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = GpuSiftBench.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		74E1E7F048BF7BC2D3CB1D72 /* gpu_sift_run.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = gpu_sift_run.mm; sourceTree = "<group>"; };
+		906F9DD00B8A2E58C8B5759C /* sift_test.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = sift_test.jpg; sourceTree = "<group>"; };
+		D483DC01A9851C0919B9D812 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		E082FF90F75D3CB7ABF968A8 /* dawn_kernel_harness.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = dawn_kernel_harness.cpp; sourceTree = "<group>"; };
+		E642360DAE9BFA684F198B35 /* GpuSiftBench.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GpuSiftBench.entitlements; sourceTree = "<group>"; };
+		ED53B8C2EC371EDE8EF7F1F1 /* gpu_sift_extractor.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = gpu_sift_extractor.cc; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		007BEEDCFA9EDB9273C01624 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				906F9DD00B8A2E58C8B5759C /* sift_test.jpg */,
+			);
+			name = Resources;
+			path = ../Resources;
+			sourceTree = "<group>";
+		};
+		361641364B2B15A2F2E1BE43 = {
+			isa = PBXGroup;
+			children = (
+				2B3A40DC622AFE4063260FCB /* shaders */,
+				63BF5DCE3463F432647CD471 /* gpu */,
+				007BEEDCFA9EDB9273C01624 /* Resources */,
+				ACFB12C51CBDA6ADB30907C5 /* Sources */,
+				3C4E9255953D2D4E6272F5FA /* tools */,
+				9FFFA6C6ADFE2E5CA1654F98 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		3C4E9255953D2D4E6272F5FA /* tools */ = {
+			isa = PBXGroup;
+			children = (
+				E082FF90F75D3CB7ABF968A8 /* dawn_kernel_harness.cpp */,
+			);
+			name = tools;
+			path = ../../../../tools;
+			sourceTree = "<group>";
+		};
+		63BF5DCE3463F432647CD471 /* gpu */ = {
+			isa = PBXGroup;
+			children = (
+				ED53B8C2EC371EDE8EF7F1F1 /* gpu_sift_extractor.cc */,
+			);
+			name = gpu;
+			path = ../../../../src/gpu;
+			sourceTree = "<group>";
+		};
+		9FFFA6C6ADFE2E5CA1654F98 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				43657FB42F49850622C7ADE3 /* GpuSiftBench.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		ACFB12C51CBDA6ADB30907C5 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				38CE6B9500267D3ED2DF49E1 /* AppDelegate.m */,
+				74E1E7F048BF7BC2D3CB1D72 /* gpu_sift_run.mm */,
+				E642360DAE9BFA684F198B35 /* GpuSiftBench.entitlements */,
+				D483DC01A9851C0919B9D812 /* Info.plist */,
+				1B5F601ED9EBF48A64F72A00 /* main.m */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		BE38B9C9825A6E8EE5CF427B /* GpuSiftBench */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F36776E86153E5688BE0AB56 /* Build configuration list for PBXNativeTarget "GpuSiftBench" */;
+			buildPhases = (
+				2A41A1FC6D24E932A9C6596C /* Sources */,
+				724E9374E8915E0DD6E241EE /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = GpuSiftBench;
+			packageProductDependencies = (
+			);
+			productName = GpuSiftBench;
+			productReference = 43657FB42F49850622C7ADE3 /* GpuSiftBench.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		27FAB345114B300BCFE230F6 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					BE38B9C9825A6E8EE5CF427B = {
+						DevelopmentTeam = 26AH7V448L;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 0D0852A59CDA7220369BDF3A /* Build configuration list for PBXProject "GpuSiftBench" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 361641364B2B15A2F2E1BE43;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BE38B9C9825A6E8EE5CF427B /* GpuSiftBench */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		724E9374E8915E0DD6E241EE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ACBBF7B32727EDB712043DCE /* shaders in Resources */,
+				64DC81B6DEAA3571E444770C /* sift_test.jpg in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2A41A1FC6D24E932A9C6596C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CD356EC9E379C0CC96F00C6B /* AppDelegate.m in Sources */,
+				3F2C2F6116C73805F1279E34 /* dawn_kernel_harness.cpp in Sources */,
+				3F77369D5D764C5B4C779BD0 /* gpu_sift_extractor.cc in Sources */,
+				33001284AEE9929F97F07565 /* gpu_sift_run.mm in Sources */,
+				772BCFD5708CE9018FE1DBED /* main.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		529D4C61C54CD4C144361FDE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		DF59CDF4A7FDAC0C4648A1D0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 26AH7V448L;
+				ENABLE_BITCODE = NO;
+				GCC_OPTIMIZATION_LEVEL = 2;
+				HEADER_SEARCH_PATHS = (
+					"/tmp/aether-s1/aether_cpp/src/gpu",
+					"/tmp/aether-s1/aether_cpp/tools",
+					/Users/kaidongwang/Developer/aether_cpp/third_party/dawn/include,
+					"/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/gen/include",
+				);
+				INFOPLIST_FILE = Sources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/src/dawn/native/Debug-iphoneos/libwebgpu_dawn.a",
+					"-framework CoreFoundation",
+					"-framework Foundation",
+					"-framework ImageIO",
+					"-framework CoreGraphics",
+					"-framework IOSurface",
+					"-framework QuartzCore",
+					"-framework Metal",
+					"-lobjc",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kyle.GpuSiftBench;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		F9800832F07A3034ABF4561D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 26AH7V448L;
+				ENABLE_BITCODE = NO;
+				GCC_OPTIMIZATION_LEVEL = 2;
+				HEADER_SEARCH_PATHS = (
+					"/tmp/aether-s1/aether_cpp/src/gpu",
+					"/tmp/aether-s1/aether_cpp/tools",
+					/Users/kaidongwang/Developer/aether_cpp/third_party/dawn/include,
+					"/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/gen/include",
+				);
+				INFOPLIST_FILE = Sources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"/Users/kaidongwang/Developer/aether_cpp/build-ios-device-dawn/third_party/dawn/src/dawn/native/Debug-iphoneos/libwebgpu_dawn.a",
+					"-framework CoreFoundation",
+					"-framework Foundation",
+					"-framework ImageIO",
+					"-framework CoreGraphics",
+					"-framework IOSurface",
+					"-framework QuartzCore",
+					"-framework Metal",
+					"-lobjc",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.kyle.GpuSiftBench;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		FB284C5897A6DC380CF729AE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0D0852A59CDA7220369BDF3A /* Build configuration list for PBXProject "GpuSiftBench" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FB284C5897A6DC380CF729AE /* Debug */,
+				529D4C61C54CD4C144361FDE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F36776E86153E5688BE0AB56 /* Build configuration list for PBXNativeTarget "GpuSiftBench" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DF59CDF4A7FDAC0C4648A1D0 /* Debug */,
+				F9800832F07A3034ABF4561D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 27FAB345114B300BCFE230F6 /* Project object */;
+}
