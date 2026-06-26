@@ -15,8 +15,10 @@ targets:
       #   backed persistent pipeline cache — the 31.7s init fix).
       - path: /tmp/aether-s1/aether_cpp/src/gpu/gpu_sift_extractor.cc
       - path: /tmp/aether-s1/aether_cpp/tools/dawn_kernel_harness.cpp
-      # The streaming orchestrator (2-stage pipeline + bounded queue + drain).
-      - path: /tmp/aether-s1/aether_cpp/src/gpu/streaming_orchestrator.cc
+      # NOTE: the streaming_orchestrator (2-stage pipeline + bounded queue) is no
+      # longer wired — the harness now runs a SINGLE wall-clock interleaved
+      # per-frame loop (①extract ②match-persist ③live-pose-prior-register) +
+      # final-flush directly in streaming_run.mm. No queue, no two-phase.
       # ②③ SfM C ABI (inject + pose-guided match-persist + COLMAP incremental
       #   register/local-BA) + the CPU DSP-SIFT extractor & index-pair matcher.
       #   These are NOT in libglomap_core.a (verified via nm) — compile here.

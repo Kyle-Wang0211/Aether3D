@@ -1,67 +1,67 @@
-// streaming_run.mm — Step-2 FULL-PIPELINE streaming device harness (iOS / A16).
+// streaming_run.mm — Step-3 SINGLE WALL-CLOCK INTERLEAVED streaming harness
+// (iOS / A16). THE REALISTIC-UX ON-DEVICE TEST.
 //
-// THE REALISTIC-UX ON-DEVICE TEST. Replays N captured frames (+ their REAL
-// ARKit world poses) at a ~2s capture cadence and runs the full per-frame
-// ①②③ pipeline through the StreamingOrchestrator:
+// Replays N captured frames (+ their REAL ARKit world poses) in TEMPORAL
+// (capture-timestamp) order and runs ONE interleaved per-frame loop where the
+// sparse cloud grows DURING capture, frame by frame:
 //
-//   frame ─▶ orchestrator.submit_frame
-//              │  (bounded queue, drop-oldest, drain-after-stop)
-//              ▼
-//          ① GPU EXTRACT  (GpuSiftExtractor, Dawn→Tint→Metal, ~868ms warm A16)
-//              ▼
-//          ② POSE-GUIDED MATCH  (aether_sift_match_pairs + PosePriorAllowsMatch,
-//                                 ARKit-prior 75° optical-axis prune) vs prev k
-//              ▼  WriteMatches → EstimateTwoViewGeometry → WriteTwoViewGeometry
-//          ③ REGISTER + LOCAL-BA  (PER FRAME: aether_sfm_register_next_frame —
-//                                  PnP + TriangulateImage + local-window BA)
-//              ▼
-//          sparse point cloud GROWS EVERY FRAME  (out_total_points)
+//   per frame (temporal order):
+//     ① GPU EXTRACT            GpuSiftExtractor (Dawn→Tint→Metal)
+//     ② POSE-GUIDED MATCH      aether_sfm_add_frame_with_features — inject the GPU
+//                              keypoints+descriptors into the LIVE COLMAP db +
+//                              pose-guided match-persist (PosePriorAllowsMatch,
+//                              ARKit 75° optical-axis prune) against the prev k.
+//     ──  attach ARKit pose prior for this image (cam_from_world, COLMAP frame)
+//     ③ LIVE POSE-PRIOR REGISTER
+//                              aether_sfm_add_and_register_frame — adds the frame
+//                              to the LIVE, GROWING graph (periodic bounded
+//                              re-cache), registers it via RegisterNextImage and,
+//                              when plain PnP lacks visible 3D structure,
+//                              RegisterNextImageWithPosePrior (bypasses PnP using
+//                              the ARKit prior) + fixed-window local BA + deferred
+//                              triangulation. The sparse point cloud grows THIS
+//                              frame (out_stats.total_points).
 //
-// TWO PHASES, both with PER-FRAME cloud growth:
+//   after the capture loop:
+//     FINAL-FLUSH              aether_sfm_live_final_flush — one final recache over
+//                              ALL fed frames, drains the entire pending frontier
+//                              (no per-call cap), one global BA + filter. Coverage
+//                              -> ~100%.
 //
-//   PHASE A — live capture sim (①② per frame). Replays N frames at ~2s cadence
-//     through the orchestrator: REAL GPU extract + REAL pose-guided match-persist
-//     into the session db. Builds the correspondence graph AND the frame_id→
-//     image_id map. Per-frame telemetry: extract (overlapped), match_ms,
-//     queue_depth, dropped, thermal, rss, cache cold/warm, init_ms.
+// This REPLACES the prior two-phase design (phase-A live ①②, phase-B post-hoc
+// register loop) AND the older every-25 finalize cadence. There is now exactly
+// ONE per-frame wall-clock loop: extract+match+register are interleaved per
+// frame, the cloud grows per frame, and a single final-flush pass closes
+// coverage after the loop.
 //
-//   PHASE B — TRUE per-frame step-3 (aether_sfm_register_next_frame PER FRAME).
-//     After the drain, aether_sfm_begin_incremental() builds the frozen
-//     DatabaseCache + bootstraps the seed ONCE (the single O(N) graph load), then
-//     we loop register_next_frame(frame_id) over EVERY frame in capture order.
-//     Each call = RegisterNextImage → TriangulateImage → IterativeLocalRefinement
-//     (local-window CAUCHY BA; NO FindNextImages O(N) scan, NO in-loop global BA).
-//     The sparse cloud GROWS on essentially every registered frame; per-frame the
-//     log carries register_ms + new_points + total_cloud_points + reproj. The
-//     mapper/Reconstruction/DatabaseCache PERSIST on the session across calls.
-//
-// This mirrors the host-verified flow (sfm_stream_real_verify.cc): cloud grows
-// per-frame, reproj holds at ~0.868px vs batch 0.8504px, per-frame ~354ms median.
+// Host-verified equivalent flow: bench/sfm_live_verify.cc (full-414 temporal,
+// coverage 0.97 w/ final-flush, per-frame WALL median 32-60ms / p95 680-1047ms,
+// reproj 0.778 sub-pixel). This harness wires the SAME ABI calls on real GPU
+// features streamed through add_frame_with_features (production path), not the
+// bench's live_stage_db_image (host-only db-copy helper).
 //
 // ───────────────────────────────────────────────────────────────────────────
 // HONEST NOTE — what is REAL end-to-end:
 //   • ① GPU extract: REAL. The production GpuSiftExtractor runs on the iPhone GPU.
-//   • ② match: REAL. aether_sift_match_pairs (CPU brute force) emits index pairs;
-//     PosePriorAllowsMatch prunes by the REAL ARKit pose prior; matches +
-//     two-view geometry are PERSISTED into the COLMAP session db. This is the
-//     real correspondence graph the incremental mapper consumes.
-//   • ③ register + local-BA: REAL COLMAP IncrementalMapper, now driven PER FRAME
-//     via aether_sfm_register_next_frame (NOT the O(N) finalize-every-N). The
-//     live mapper + Reconstruction + DatabaseCache persist on the session, so
-//     each call is O(1) in N (PnP + this image's triangulation + fixed-window
-//     local BA). begin_incremental needs the full graph to seed, so PHASE B runs
-//     after PHASE A's drain — but every register_next_frame call still grows the
-//     cloud, which is exactly the capture-time UI signal we want to measure.
-//   • Pacing: a wall-clock realsim timer at ~2s (jitter mode adds variance +
-//     occasional pauses so the queue drains). The orchestrator's bounded queue /
-//     drop-oldest / drain-after-stop run exactly as in production.
+//   • ② match: REAL. add_frame_with_features injects the GPU feats (NO CPU
+//     re-extraction), matches against the prev k_neighbors with the ARKit pose
+//     prior pruning, persists matches + two-view geometry into the live db.
+//   • ③ register: REAL COLMAP IncrementalMapper driven LIVE per frame via
+//     add_and_register_frame (RegisterNextImage / RegisterNextImageWithPosePrior
+//     + bounded local BA + deferred triangulation + amortized periodic recache).
+//   • Pacing: a wall-clock realsim timer at ~2s (jitter optional). The loop is
+//     synchronous (no orchestrator queue): each frame's extract→match→register
+//     runs inline, so the per-frame line carries the TRUE interleaved wall cost.
+//     A frame whose compute exceeds the capture cadence is counted as "dropped"
+//     (real-time backpressure model) but still registered (we never silently
+//     skip a frame's geometry).
 //
-// Entry: streaming_run_all(shader_root, frames_dir, manifest_path, out, out_cap).
-// Logs per-frame telemetry + a SUMMARY via printf (mirrored to the on-screen
-// console + Documents/aether_console.log by the AppDelegate).
+// Entry: streaming_run_all(shader_root, frames_dir, manifest, max_frames, jitter,
+//        register_every_n, max_edge, clear_cache, out, out_cap).
+// Logs per-frame telemetry + a STREAM_SUMMARY via printf (mirrored to the on-
+// screen console + Documents/aether_console.log by the AppDelegate).
 
 #include "gpu_sift_extractor.h"
-#include "aether/gpu/streaming_orchestrator.h"
 #include "aether_sfm_c.h"
 
 #import <Foundation/Foundation.h>
@@ -70,23 +70,19 @@
 #include <os/log.h>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <string>
 #include <vector>
 
-// CPU matcher that EMITS index pairs (dsp_sift_c.cc, same archive set). Used by
-// the pose-guided match stage to build the correspondence graph.
-extern "C" int aether_sift_match_pairs(const uint8_t* desc1, int n1,
-                                       const uint8_t* desc2, int n2,
-                                       double max_ratio, int* out_pairs,
-                                       int out_cap_pairs, int* out_num_pairs);
+// READ-ONLY accessor (defined in aether_sfm_c.cc, not in the stable ABI header —
+// declared here exactly like aether_sfm_dump_reg_failures). Resolves frame_id ->
+// COLMAP image_id so we can attach the ARKit pose prior (keyed by image_id).
+extern "C" int aether_sfm_frame_image_id(aether_sfm_session_t* s, int frame_id);
 
 // phys_footprint (the iOS jetsam metric) — sampled per frame so we can watch
 // cumulative RSS as COLMAP + the growing cloud add onto Dawn's resident set.
@@ -119,8 +115,8 @@ struct ReplayFrame {
   int width = 0, height = 0;
   float fx = 0, fy = 0, cx = 0, cy = 0;
   bool has_pose = false;
-  double q_wxyz[4] = {1, 0, 0, 0};  // CamFromWorld rotation (world→cam)
-  double t[3] = {0, 0, 0};          // CamFromWorld translation
+  double q_wxyz[4] = {1, 0, 0, 0};  // CamFromWorld rotation (ARKit world→cam)
+  double t[3] = {0, 0, 0};          // CamFromWorld translation (ARKit frame)
 };
 
 // Decode a JPEG to row-major top-down uint8 grayscale (CGImage convention,
@@ -160,9 +156,10 @@ uint8_t* DecodeGray8(const std::string& path, int maxEdge, int* outW, int* outH)
 // Parse the harness manifest (a JSON array written by gen_streaming_manifest.py)
 // in timestamp order. Each element:
 //   {"file","timestamp","w","h","fx","fy","cx","cy","q":[qw,qx,qy,qz],"t":[..]}
-// q/t are CamFromWorld (world→cam) — already inverted from the bundle's
-// Camera-to-World cameraTransform by the generator (see that script). If "q"
-// is absent the frame has no pose (unguided matching).
+// q/t are ARKit-frame CamFromWorld (world→cam) — the generator inverted the
+// Camera-to-World cameraTransform but did NOT apply the COLMAP camera-axis flip.
+// We apply F=diag(1,-1,-1) here when building the COLMAP cam_from_world prior
+// (see ArkitToColmapCamFromWorld). If "q" is absent the frame has no pose.
 bool LoadManifest(const std::string& manifest_path, const std::string& frames_dir,
                   std::vector<ReplayFrame>* out) {
   NSString* mp = [NSString stringWithUTF8String:manifest_path.c_str()];
@@ -202,78 +199,69 @@ bool LoadManifest(const std::string& manifest_path, const std::string& frames_di
   return !out->empty();
 }
 
+// Convert an ARKit-frame CamFromWorld (quaternion wxyz + translation) into the
+// COLMAP-convention cam_from_world as a row-major [R|t] (12 doubles), applying
+// the camera-axis flip F=diag(1,-1,-1): ARKit camera looks down -Z (+X right,
+// +Y up); COLMAP looks down +Z (+X right, +Y down). The manifest's q/t are the
+// ARKit-frame CamFromWorld (R_wc^T and -R_wc^T*C), so the COLMAP cam_from_world
+// is R_colmap = F * R_manifest, t_colmap = F * t_manifest — identical to the
+// host-verify bench's conversion (sfm_live_verify.cc lines 199-225).
+void ArkitToColmapCamFromWorld(const double q_wxyz[4], const double t[3],
+                               double out_3x4[12]) {
+  // Quaternion (w,x,y,z) -> rotation matrix R_manifest.
+  const double w = q_wxyz[0], x = q_wxyz[1], y = q_wxyz[2], z = q_wxyz[3];
+  const double n = std::sqrt(w * w + x * x + y * y + z * z);
+  const double s = (n > 0) ? 1.0 / n : 1.0;
+  const double qw = w * s, qx = x * s, qy = y * s, qz = z * s;
+  double R[3][3];
+  R[0][0] = 1 - 2 * (qy * qy + qz * qz);
+  R[0][1] = 2 * (qx * qy - qz * qw);
+  R[0][2] = 2 * (qx * qz + qy * qw);
+  R[1][0] = 2 * (qx * qy + qz * qw);
+  R[1][1] = 1 - 2 * (qx * qx + qz * qz);
+  R[1][2] = 2 * (qy * qz - qx * qw);
+  R[2][0] = 2 * (qx * qz - qy * qw);
+  R[2][1] = 2 * (qy * qz + qx * qw);
+  R[2][2] = 1 - 2 * (qx * qx + qy * qy);
+  const double F[3] = {1.0, -1.0, -1.0};
+  for (int i = 0; i < 3; ++i) {
+    out_3x4[i * 4 + 0] = F[i] * R[i][0];
+    out_3x4[i * 4 + 1] = F[i] * R[i][1];
+    out_3x4[i * 4 + 2] = F[i] * R[i][2];
+    out_3x4[i * 4 + 3] = F[i] * t[i];
+  }
+}
+
 // Thermal-state name (NSProcessInfo): 0=nominal 1=fair 2=serious 3=critical.
 long ThermalState() {
   return (long)[[NSProcessInfo processInfo] thermalState];
 }
 
-}  // namespace
-
-// ── Streaming SfM ingest state shared with the AppDelegate-driven loop ──
-// Owns the COLMAP session; the orchestrator's IngestFn closes over it. PHASE A
-// (this struct's ingest) does ①② only: inject GPU features + pose-guided
-// match-persist, building the live correspondence graph in the session db AND
-// the frame_id→image_id mapping that PHASE B's per-frame register consumes.
-// PHASE B (in streaming_run_all, after drain) calls aether_sfm_begin_incremental
-// once then aether_sfm_register_next_frame PER FRAME — the TRUE per-frame step-3.
-struct StreamSfmState {
-  aether_sfm_session_t* session = nullptr;
-  std::atomic<uint64_t> ingested{0};
-  std::atomic<int> last_frame_id{-1};
-  // per-frame ② timing published for the PHASE-A telemetry line (guarded by mu)
-  std::mutex mu;
-  double match_ms = 0;
-};
-
-// PHASE A per-frame ingest: inject GPU features → pose-guided match-persist (②).
-// Records the frame_id (== add order) so PHASE B can register_next_frame(frame_id).
-// NO register/finalize here — step-3 is the per-frame register loop in PHASE B.
-static bool StreamIngest(StreamSfmState* st, const aether::gpu::CaptureFrame& f,
-                         const aether::gpu::FrameFeatures& feats,
-                         aether::gpu::CloudSnapshot* out) {
-  if (feats.count <= 0) return false;
-  // GPU stride-2 {x,y} → injection ABI's stride-4 {x,y,sigma,octave}.
-  std::vector<float> kp4((size_t)feats.count * 4, 0.f);
-  for (int i = 0; i < feats.count; ++i) {
-    kp4[i * 4 + 0] = feats.xy[2 * i];
-    kp4[i * 4 + 1] = feats.xy[2 * i + 1];
-  }
-  auto t_match = clk::now();
-  int frame_id = -1;
-  // ② inject + pose-guided match-persist (WriteMatches + TwoViewGeometry). The
-  // ARKit pose in `f` drives PosePriorAllowsMatch (75° optical-axis prune).
-  aether_sfm_result_t rc = aether_sfm_add_frame_with_features(
-      st->session, f.width, f.height, f.fx, f.fy, f.cx, f.cy, kp4.data(),
-      feats.desc.data(), (unsigned)feats.count,
-      f.has_pose ? f.pose_qwxyz : nullptr, f.has_pose ? f.pose_t : nullptr,
-      &frame_id);
-  double match_ms = ms_since(t_match);
-  if (rc != AETHER_SFM_OK) return false;
-
-  ++st->ingested;
-  st->last_frame_id = frame_id;
-  {
-    std::lock_guard<std::mutex> lk(st->mu);
-    st->match_ms = match_ms;
-  }
-  if (out) out->last_frame_index = f.frame_index;
-  return true;
+double Pctl(std::vector<double> v, double p) {
+  if (v.empty()) return 0.0;
+  std::sort(v.begin(), v.end());
+  size_t idx = (size_t)(v.size() * p);
+  if (idx >= v.size()) idx = v.size() - 1;
+  return v[idx];
 }
 
+}  // namespace
+
 // ════════════════════════════════════════════════════════════════════════════
-// streaming_run_all — the harness entry. Loads frames+poses, builds the
-// orchestrator with REAL GPU extract + REAL SfM ingest, replays at ~2s pacing
-// (jitter optional), logs per-frame telemetry + a SUMMARY.
+// streaming_run_all — the harness entry. Loads frames+poses (temporal order),
+// inits the GPU extractor + the LIVE COLMAP session, then runs the SINGLE
+// interleaved per-frame loop (extract → match → live pose-prior register), and a
+// FINAL-FLUSH pass after the loop. Logs per-frame telemetry + a STREAM_SUMMARY.
 //
-//   shader_root   : bundle resourcePath (holds shaders/wgsl/*.wgsl)
-//   frames_dir    : dir on device holding the JPEGs (Documents/frames)
-//   manifest_path : the harness manifest JSON (Documents/streaming_manifest.json)
-//   max_frames    : cap N for a smaller run (0 = all)
-//   jitter        : 0 = fixed 2s pacing; 1 = 2s ± variance + occasional pauses
-//   register_every_n : PHASE-B global-BA SPIKE cadence MARKER (frames). The
-//                      deferred design runs NO global BA on the per-frame loop;
-//                      this only flags the cadence frames distinctly in the log.
-//   max_edge      : downsample longest image edge (production downsamples 4K→2K)
+//   shader_root    : bundle resourcePath (holds shaders/wgsl/*.wgsl)
+//   frames_dir     : dir on device holding the JPEGs (Documents/frames)
+//   manifest_path  : the harness manifest JSON (Documents/streaming_manifest.json)
+//   max_frames     : cap N for a smaller run (0 = all)
+//   jitter         : 0 = fixed 2s pacing; 1 = 2s ± variance + occasional pauses
+//   register_every_n : global-BA SPIKE cadence MARKER only (the deferred design
+//                      runs NO in-loop global BA; recache/global-BA frames are
+//                      flagged distinctly in the log instead).
+//   max_edge       : downsample longest image edge (production downsamples 4K→2K)
 // ════════════════════════════════════════════════════════════════════════════
 extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir,
                                  const char* manifest_path, int max_frames,
@@ -283,8 +271,9 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
   char b[1024];
 
   snprintf(b, sizeof(b),
-           "STREAM_BEGIN shader_root=%s frames_dir=%s manifest=%s max_frames=%d "
-           "jitter=%d register_every_n=%d max_edge=%d thermal_before=%ld",
+           "STREAM_BEGIN [INTERLEAVED 1+2+3 per-frame + final-flush] "
+           "shader_root=%s frames_dir=%s manifest=%s max_frames=%d jitter=%d "
+           "register_every_n=%d max_edge=%d thermal_before=%ld",
            shader_root, frames_dir, manifest_path, max_frames, jitter,
            register_every_n, max_edge, ThermalState());
   logline(b);
@@ -301,34 +290,44 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
            frames.size());
   logline(b);
 
-  // ── ③ create the COLMAP streaming session (private temp db) ──
+  // ── create the LIVE COLMAP streaming session (private temp db) ──
   std::string docs =
       [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask,
                                            YES).firstObject UTF8String];
   std::string db_path = docs + "/stream_sfm.db";
   std::remove(db_path.c_str());
+  std::remove((db_path + "-shm").c_str());
+  std::remove((db_path + "-wal").c_str());
   aether_sfm_options_t opts;
   aether_sfm_options_default(&opts);
   opts.max_features = 8192;     // production GPU extractor cap
   opts.k_neighbors = 6;         // sequential match window
   opts.match_max_ratio = 0.7f;
 
-  StreamSfmState st;
-  if (aether_sfm_create(db_path.c_str(), &opts, &st.session) != AETHER_SFM_OK ||
-      !st.session) {
+  aether_sfm_session_t* session = nullptr;
+  if (aether_sfm_create(db_path.c_str(), &opts, &session) != AETHER_SFM_OK ||
+      !session) {
     logline("STREAM_FAIL aether_sfm_create");
     return 2;
   }
   logline("STREAM_SFM_SESSION_OK");
 
-  // ── ① init the GPU DSP-SIFT extractor ONCE (11 Tint→Metal pipeline compiles).
-  //    A disk-backed Dawn persistent pipeline cache (DawnCacheDeviceDescriptor)
-  //    serializes the compiled blobs so a WARM launch skips the recompile. On a
-  //    COLD launch (empty cache) this is the ~31.7s A16 cost — logged loudly so
-  //    the user doesn't think it hung. Run the app TWICE: run1 cold (writes
-  //    cache), run2 warm (init should drop). ──
+  // ── live-path params + ARKit pose-prior fallback ENABLED. recache_every=8,
+  //    bootstrap_k=6 (the host-verified live defaults); pose prior lets frames
+  //    whose 2D-3D visibility is too low for plain PnP register via the known
+  //    ARKit pose instead (RegisterNextImageWithPosePrior). ──
+  aether_sfm_set_live_params(session, /*recache_every=*/8, /*bootstrap_k=*/6,
+                             /*max_register_per_call=*/0 /*default 4*/);
+  aether_sfm_set_pose_prior_enabled(session, 1);
+  logline("STREAM_LIVE_PARAMS recache_every=8 bootstrap_k=6 pose_prior=ON "
+          "(RegisterNextImageWithPosePrior fallback)");
+
+  // ── ① init the GPU DSP-SIFT extractor ONCE (Tint→Metal pipeline compiles).
+  //    A disk-backed Dawn persistent pipeline cache serializes the compiled
+  //    blobs so a WARM launch skips the recompile. COLD launch (empty cache) is
+  //    the ~30s A16 cost — logged loudly. Run the app TWICE: run1 cold (writes
+  //    cache), run2 warm (init drops). ──
   std::string cache_dir = docs + "/dawn_pipeline_cache";
-  // count blobs already on disk BEFORE init → cold vs warm classification.
   int blobs_before = 0;
   {
     NSFileManager* fm = [NSFileManager defaultManager];
@@ -355,7 +354,7 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
   auto t_init = clk::now();
   if (!ex.init(cfg)) {
     logline("STREAM_FAIL GPU extractor init (Dawn/WGSL→Tint→Metal/buffer limits)");
-    aether_sfm_free(st.session);
+    aether_sfm_free(session);
     return 3;
   }
   double init_ms = ms_since(t_init);
@@ -368,72 +367,36 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
            blobs_before, cache_hits, cache_stores);
   logline(b);
 
-  // ── extract stage: REAL GPU extract on the orchestrator's GPU thread.
-  //    CaptureFrame.gray is uint8; the extractor wants float intensity. ──
-  aether::gpu::ExtractFn extract_fn =
-      [&ex](const aether::gpu::CaptureFrame& f,
-            aether::gpu::FrameFeatures* o) -> bool {
-    if (!f.gray || f.width <= 0 || f.height <= 0) return false;
-    const size_t n = (size_t)f.width * f.height;
-    std::vector<float> grayf(n);
-    for (size_t i = 0; i < n; ++i) grayf[i] = (float)f.gray[i];
-    aether::gpu::GpuSiftFrame frame;
-    if (!ex.extract(grayf.data(), f.width, f.height, &frame)) return false;
-    int nk = (int)frame.count;
-    o->count = nk;
-    o->xy.resize((size_t)nk * 2);
-    o->desc.resize((size_t)nk * 128);
-    // GpuSiftFrame layout: separate x[], y[], sigma[], octave[] + desc 128*count.
-    for (int i = 0; i < nk; ++i) {
-      o->xy[2 * i] = frame.x[i];
-      o->xy[2 * i + 1] = frame.y[i];
-    }
-    if (nk > 0) std::memcpy(o->desc.data(), frame.descriptors.data(),
-                            (size_t)nk * 128);
-    return nk > 0;
-  };
+  // ── per-run telemetry accumulators ──
+  std::vector<double> per_frame_total_ms;  // ext+match+register interleaved wall
+  std::vector<double> register_ms_samples; // O(local) register-only sub-term
+  double peak_rss = 0.0;
+  long thermal_max = ThermalState();
+  long thermal_log = ThermalState();
+  int over_2s = 0, dropped = 0;
+  int recache_count = 0;
+  double recache_ms_total = 0.0, recache_ms_max = 0.0;
+  int bootstrap_frame = -1;
+  int final_total_pts = 0;
+  double final_reproj = 0.0;
+  int registered_running = 0;
+  int prev_total = -1, grew_count = 0, growth_eligible = 0;
+  const int global_ba_marker = register_every_n > 0 ? register_every_n : 25;
 
-  // ── ingest stage: REAL pose-guided match (②) + periodic register (③). ──
-  aether::gpu::IngestFn ingest_fn =
-      [&st](const aether::gpu::CaptureFrame& f,
-            const aether::gpu::FrameFeatures& feats,
-            aether::gpu::CloudSnapshot* o) -> bool {
-    return StreamIngest(&st, f, feats, o);
-  };
+  logline("STREAM_LOOP_START single wall-clock interleaved per-frame "
+          "①extract ②match ③live-pose-prior-register; cloud grows per frame");
 
-  // ── per-frame telemetry, published by the cloud sink (runs on SfM thread) ──
-  struct Telemetry {
-    std::atomic<uint64_t> frames_done{0};
-    std::atomic<int> over_2s{0};
-    std::atomic<double> peak_rss{0};
-    std::atomic<long> thermal_max{0};
-    std::vector<double> per_frame_total_ms;  // for mean/p95 (guarded by mu)
-    std::mutex mu;
-  } tel;
-
-  aether::gpu::OrchestratorConfig ocfg;
-  ocfg.max_queue_depth = 12;
-  ocfg.drop_policy = aether::gpu::OrchestratorConfig::DropPolicy::kDropOldest;
-  ocfg.max_features = 8192;
-
-  aether::gpu::StreamingOrchestrator orch(extract_fn, ingest_fn,
-                                          /*sink=*/nullptr, ocfg);
-  orch.start();
-  logline("STREAM_ORCH_START extract∥ingest, queue=12 drop=oldest");
-
-  // ── replay loop: submit each frame at ~2s pacing; log per-frame telemetry.
-  //    We measure END-TO-END per-frame wall (submit → that frame's ingest done)
-  //    via the orchestrator stats deltas + the StreamSfmState timings. Because
-  //    the pipeline overlaps stages, we report the orchestrator's instantaneous
-  //    queue depth + the just-completed frame's extract/match/register split. ──
   srand(1789);
   auto t_run0 = clk::now();
-  long thermal_log = ThermalState();
-  uint64_t prev_ingested = 0;
-  uint64_t prev_extracted = 0;
 
+  // ════════════════════════════════════════════════════════════════════════
+  // THE SINGLE INTERLEAVED PER-FRAME LOOP. Each iteration runs ①②③ inline so
+  // the per-frame line carries the TRUE interleaved wall cost; the cloud grows
+  // this frame. NO orchestrator queue, NO two-phase, NO every-25 finalize.
+  // ════════════════════════════════════════════════════════════════════════
   for (size_t i = 0; i < frames.size(); ++i) {
     ReplayFrame& rf = frames[i];
+    auto t_frame = clk::now();
 
     // decode (downsample to max_edge; production downsamples 4K→2K)
     int w = 0, h = 0;
@@ -447,61 +410,107 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
     // scale intrinsics to the decoded resolution
     float sx = rf.width > 0 ? (float)w / rf.width : 1.f;
     float sy = rf.height > 0 ? (float)h / rf.height : 1.f;
+    float fx = rf.fx * sx, fy = rf.fy * sy, cx = rf.cx * sx, cy = rf.cy * sy;
 
-    aether::gpu::CaptureFrame cf;
-    cf.gray = gray;
-    cf.width = w;
-    cf.height = h;
-    cf.fx = rf.fx * sx;
-    cf.fy = rf.fy * sy;
-    cf.cx = rf.cx * sx;
-    cf.cy = rf.cy * sy;
-    cf.has_pose = rf.has_pose;
-    for (int k = 0; k < 4; ++k) cf.pose_qwxyz[k] = rf.q_wxyz[k];
-    for (int k = 0; k < 3; ++k) cf.pose_t[k] = rf.t[k];
-    cf.timestamp = rf.timestamp;
-    cf.frame_index = i;
-
-    auto t_frame = clk::now();
-    bool accepted = orch.submit_frame(cf);  // copies gray into the queue envelope
+    // ── ① GPU EXTRACT ──
+    auto t_ext = clk::now();
+    const size_t n = (size_t)w * h;
+    std::vector<float> grayf(n);
+    for (size_t k = 0; k < n; ++k) grayf[k] = (float)gray[k];
     free(gray);
-
-    // Pace BEFORE polling so the pipeline has the cadence window to work. The
-    // orchestrator overlaps extract(N+1) with ingest(N); at steady state the
-    // per-frame service ≈ max(extract,match) which should fit under ~2s with
-    // headroom — UNTIL a periodic register (③) or thermal throttle stretches it.
-    double pace_ms = 2000.0;
-    if (jitter) {
-      // 2s ± up to 600ms; every ~17th frame a 4s "hold still" pause → drain.
-      pace_ms = 2000.0 + ((rand() % 1200) - 600);
-      if ((i % 17) == 16) pace_ms += 4000.0;
+    aether::gpu::GpuSiftFrame gframe;
+    bool ext_ok = ex.extract(grayf.data(), w, h, &gframe);
+    double extract_ms = ms_since(t_ext);
+    if (!ext_ok || gframe.count == 0) {
+      snprintf(b, sizeof(b), "STREAM_FRAME f=%zu EXTRACT_FAIL extract_ms=%.0f",
+               i, extract_ms);
+      logline(b);
+      continue;
     }
-    // Busy-wait-free sleep in small slices so we can sample mem/thermal mid-pace.
-    double waited = 0;
-    while (waited < pace_ms) {
-      double slice = std::min(200.0, pace_ms - waited);
-      [NSThread sleepForTimeInterval:slice / 1000.0];
-      waited += slice;
-      double rss = FootprintMB();
-      if (rss > tel.peak_rss.load()) tel.peak_rss = rss;
-      long th = ThermalState();
-      if (th > tel.thermal_max.load()) tel.thermal_max = th;
+    int nk = (int)gframe.count;
+
+    // GpuSiftFrame layout (separate x[],y[],sigma[],octave[] + desc 128*count)
+    // → injection ABI's stride-4 {x,y,sigma,octave} + 128*count uint8 desc.
+    std::vector<float> kp4((size_t)nk * 4, 0.f);
+    for (int k = 0; k < nk; ++k) {
+      kp4[k * 4 + 0] = gframe.x[k];
+      kp4[k * 4 + 1] = gframe.y[k];
     }
 
-    // snapshot orchestrator stats AFTER the pacing window
-    aether::gpu::OrchestratorStats s = orch.stats();
-    double frame_wall_ms = ms_since(t_frame);
-
-    // pull the just-completed frame's ② match cost from StreamSfmState
-    double match_ms;
-    {
-      std::lock_guard<std::mutex> lk(st.mu);
-      match_ms = st.match_ms;
+    // ── ② POSE-GUIDED MATCH-PERSIST (inject GPU feats into the live db) ──
+    auto t_match = clk::now();
+    int frame_id = -1;
+    aether_sfm_result_t arc = aether_sfm_add_frame_with_features(
+        session, w, h, fx, fy, cx, cy, kp4.data(), gframe.descriptors.data(),
+        (unsigned)nk, rf.has_pose ? rf.q_wxyz : nullptr,
+        rf.has_pose ? rf.t : nullptr, &frame_id);
+    double match_ms = ms_since(t_match);
+    if (arc != AETHER_SFM_OK || frame_id < 0) {
+      snprintf(b, sizeof(b),
+               "STREAM_FRAME f=%zu ADD_FRAME_FAIL rc=%d (%s) extract_ms=%.0f "
+               "match_ms=%.0f kp=%d",
+               i, arc, aether_sfm_result_str(arc), extract_ms, match_ms, nk);
+      logline(b);
+      continue;
     }
+
+    // ── attach the ARKit pose prior (COLMAP cam_from_world) for THIS image so
+    //    the live register can fall back to RegisterNextImageWithPosePrior. ──
+    if (rf.has_pose) {
+      int image_id = aether_sfm_frame_image_id(session, frame_id);
+      if (image_id > 0) {
+        double cfw[12];
+        ArkitToColmapCamFromWorld(rf.q_wxyz, rf.t, cfw);
+        aether_sfm_set_image_pose_prior(session, image_id, cfw);
+      }
+    }
+
+    // ── ③ LIVE POSE-PRIOR REGISTER (cloud grows THIS frame) ──
+    aether_sfm_live_stats_t lst;
+    auto t_reg = clk::now();
+    aether_sfm_result_t rrc =
+        aether_sfm_add_and_register_frame(session, frame_id, &lst);
+    double register_ms = ms_since(t_reg);
+    if (rrc != AETHER_SFM_OK) {
+      snprintf(b, sizeof(b),
+               "STREAM_FRAME f=%zu REGISTER_FAIL rc=%d (%s) extract_ms=%.0f "
+               "match_ms=%.0f register_ms=%.0f",
+               i, rrc, aether_sfm_result_str(rrc), extract_ms, match_ms,
+               register_ms);
+      logline(b);
+      continue;
+    }
+
+    // bookkeeping
+    if (lst.did_bootstrap && bootstrap_frame < 0) bootstrap_frame = (int)i;
+    if (lst.did_recache && lst.recache_ms > 0) {
+      ++recache_count;
+      recache_ms_total += lst.recache_ms;
+      if (lst.recache_ms > recache_ms_max) recache_ms_max = lst.recache_ms;
+    }
+    registered_running = lst.total_registered;
+    final_total_pts = lst.total_points;
+    if (lst.reproj_px > 0) final_reproj = lst.reproj_px;
+
+    // cumulative cloud-growth stat (post-bootstrap)
+    if (bootstrap_frame >= 0) {
+      if (prev_total >= 0) {
+        ++growth_eligible;
+        if (lst.total_points > prev_total) ++grew_count;
+        register_ms_samples.push_back(register_ms);
+      }
+      prev_total = lst.total_points;
+    }
+
+    // total interleaved per-frame compute (what the device/UI actually pays)
+    double compute_ms = extract_ms + match_ms + register_ms;
+    per_frame_total_ms.push_back(compute_ms);
+
+    // mem/thermal sample
     double rss = FootprintMB();
-    if (rss > tel.peak_rss.load()) tel.peak_rss = rss;
+    if (rss > peak_rss) peak_rss = rss;
     long thermal = ThermalState();
-    if (thermal > tel.thermal_max.load()) tel.thermal_max = thermal;
+    if (thermal > thermal_max) thermal_max = thermal;
     if (thermal != thermal_log) {
       snprintf(b, sizeof(b), "STREAM_THERMAL_RAMP f=%zu state %ld→%ld at t=%.0fs",
                i, thermal_log, thermal, ms_since(t_run0) / 1000.0);
@@ -509,199 +518,130 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
       thermal_log = thermal;
     }
 
-    // PHASE A per-frame critical-path compute = ② match (① extract is overlapped
-    // on the GPU thread). Step-3 register is the PHASE-B per-frame loop below, so
-    // PHASE A's per-frame cost is just the match-persist service time.
-    double compute_ms = match_ms;
-    if (compute_ms > 2000.0) tel.over_2s++;
-    {
-      std::lock_guard<std::mutex> lk(tel.mu);
-      tel.per_frame_total_ms.push_back(compute_ms);
-    }
+    // real-time backpressure model: a synchronous loop has no queue, but a frame
+    // whose interleaved compute exceeds the capture cadence would have forced a
+    // drop in a live bounded-queue capture. Count it (geometry still registered).
+    double cadence_ms = 2000.0;
+    int queue_depth = 0;  // synchronous interleaved loop: no pending backlog
+    if (compute_ms > cadence_ms) { ++over_2s; ++dropped; }
+
+    // distinct flags for recache / global-BA-cadence / bootstrap frames
+    bool ba_marker = (global_ba_marker > 0) &&
+                     registered_running > 0 &&
+                     (registered_running % global_ba_marker) == 0;
+    char flags[160];
+    flags[0] = 0;
+    if (lst.did_bootstrap) strncat(flags, " *BOOTSTRAP_SEED", sizeof(flags) - 1);
+    if (lst.did_recache)
+      snprintf(flags + strlen(flags), sizeof(flags) - strlen(flags),
+               " *RECACHE(%.0fms,off-loop)", lst.recache_ms);
+    if (ba_marker)
+      strncat(flags, " *GLOBAL_BA_CADENCE(deferred,off-loop)",
+              sizeof(flags) - strlen(flags) - 1);
 
     snprintf(b, sizeof(b),
-             "STREAM_FRAME f=%zu accepted=%d ext_done=%llu match_ms=%.0f "
-             "compute_ms=%.0f qdepth=%zu peakq=%zu drop_old=%llu "
-             "ingested=%llu thermal=%ld rss_mb=%.0f t=%.0fs",
-             i, accepted ? 1 : 0, (unsigned long long)s.extracted, match_ms,
-             compute_ms, s.queue_depth, s.peak_queue_depth,
-             (unsigned long long)s.dropped_oldest,
-             (unsigned long long)s.ingested, thermal, rss,
-             ms_since(t_run0) / 1000.0);
+             "STREAM_FRAME f=%zu extract_ms=%.0f match_ms=%.0f register_ms=%.0f "
+             "total_ms=%.0f registered=%d new_points=%d total_cloud_points=%d "
+             "reproj=%.4f queue_depth=%d dropped=%d thermalState=%ld rss_mb=%.0f "
+             "kp=%d t=%.0fs%s",
+             i, extract_ms, match_ms, register_ms, compute_ms, lst.registered,
+             lst.new_points, lst.total_points, lst.reproj_px, queue_depth,
+             dropped, thermal, rss, nk, ms_since(t_run0) / 1000.0, flags);
     logline(b);
-    (void)prev_ingested; (void)prev_extracted; (void)frame_wall_ms;
-  }
 
-  // ── stop + DRAIN: process every accepted-but-pending frame before joining ──
-  logline("STREAM_STOP draining queue...");
-  orch.stop_capture();  // blocks until the backlog is fully consumed
-
-  aether::gpu::OrchestratorStats fs = orch.stats();
-
-  // ════════════════════════════════════════════════════════════════════════
-  // PHASE B — TRUE per-frame step-3: aether_sfm_begin_incremental once, then
-  // aether_sfm_register_next_frame PER FRAME. The sparse cloud grows every
-  // registered frame; we log register_ms + new_points + total_cloud_points +
-  // reproj per frame (the real capture-time UI signal). The live mapper +
-  // Reconstruction + DatabaseCache persist on the session across calls.
-  // ════════════════════════════════════════════════════════════════════════
-  int num_added = (int)st.ingested.load();
-  snprintf(b, sizeof(b),
-           "STREAM_BEGIN_INCREMENTAL building frozen DatabaseCache + seed over "
-           "%d injected frames (single O(N) graph load)...",
-           num_added);
-  logline(b);
-  auto t_seed = clk::now();
-  char seed_json[512] = {0};
-  aether_sfm_result_t brc =
-      aether_sfm_begin_incremental(st.session, seed_json, sizeof(seed_json));
-  double seed_ms = ms_since(t_seed);
-  snprintf(b, sizeof(b), "STREAM_SEED rc=%d (%s) seed_ms=%.0f json=%s", brc,
-           aether_sfm_result_str(brc), seed_ms, seed_json);
-  logline(b);
-
-  // Per-frame register loop. Streaming reality: a frame may not be registerable
-  // until its covisible neighbours are in — so we sweep capture order up to
-  // max_passes; each pass that registers >=1 new frame is progress. We log the
-  // per-frame step-3 split EVERY register call so the cloud-growth-per-frame is
-  // visible. A periodic global-BA SPIKE marker is flagged distinctly (the
-  // deferred design keeps global BA OFF this per-frame loop by construction; we
-  // only mark the cadence frames so the spike-free per-frame cost is legible).
-  int register_count = 0, grew_count = 0, growth_eligible = 0;
-  int last_total_pts = 0, prev_total = -1;
-  double last_reproj = 0.0;
-  std::vector<double> reg_ms_samples;
-  const int global_ba_every = register_every_n > 0 ? register_every_n : 25;
-  char json[512] = {0};
-
-  if (brc == AETHER_SFM_OK) {
-    std::vector<char> reg_done(num_added, 0);
-    const int max_passes = 4;
-    for (int pass = 0; pass < max_passes; ++pass) {
-      int registered_this_pass = 0;
-      for (int k = 0; k < num_added; ++k) {
-        if (reg_done[k]) continue;
-        double qwxyz[4] = {1, 0, 0, 0}, t3[3] = {0, 0, 0};
-        int reg = 0, newp = 0, total = 0;
-        double reproj = 0.0;
-        auto t_reg = clk::now();
-        aether_sfm_result_t rrc = aether_sfm_register_next_frame(
-            st.session, k, qwxyz, t3, &reg, &newp, &total, &reproj);
-        double reg_ms = ms_since(t_reg);
-        if (rrc != AETHER_SFM_OK) {
-          snprintf(b, sizeof(b), "STREAM_REG_FRAME f=%d rc=%d (%s) reg_ms=%.0f",
-                   k, rrc, aether_sfm_result_str(rrc), reg_ms);
-          logline(b);
-          continue;
-        }
-        if (reg) {
-          reg_done[k] = 1;
-          ++registered_this_pass;
-          ++register_count;
-          last_total_pts = total;
-          last_reproj = reproj;
-          if (prev_total >= 0) {
-            reg_ms_samples.push_back(reg_ms);
-            ++growth_eligible;
-            if (total > prev_total) ++grew_count;
-          }
-          prev_total = total;
-          // Periodic global-BA SPIKE cadence marker (deferred design: NO global
-          // BA actually runs here — register_next_frame is local-window only —
-          // we flag the cadence frame distinctly so the user can see it stays
-          // off the per-frame critical path).
-          bool ba_spike = (global_ba_every > 0) &&
-                          (register_count % global_ba_every) == 0;
-          double rss = FootprintMB();
-          if (rss > tel.peak_rss.load()) tel.peak_rss = rss;
-          long th = ThermalState();
-          if (th > tel.thermal_max.load()) tel.thermal_max = th;
-          snprintf(b, sizeof(b),
-                   "STREAM_REG_FRAME f=%d pass=%d registered=1 register_ms=%.0f "
-                   "new_points=%d total_cloud_points=%d reproj_px=%.4f%s "
-                   "thermal=%ld rss_mb=%.0f t=%.0fs",
-                   k, pass, reg_ms, newp, total, reproj,
-                   ba_spike ? " *GLOBAL_BA_CADENCE(deferred,off-loop)" : "", th,
-                   rss, ms_since(t_run0) / 1000.0);
-          logline(b);
-        }
-      }
-      snprintf(b, sizeof(b),
-               "STREAM_REG_PASS pass=%d registered_this_pass=%d "
-               "total_registered=%d",
-               pass, registered_this_pass, register_count);
-      logline(b);
-      if (registered_this_pass == 0) break;
+    // ── pace to ~2s capture cadence (replays the real capture rate). The work
+    //    already consumed compute_ms; only sleep the remainder. ──
+    double pace_ms = 2000.0;
+    if (jitter) {
+      pace_ms = 2000.0 + ((rand() % 1200) - 600);
+      if ((i % 17) == 16) pace_ms += 4000.0;  // occasional "hold still" pause
+    }
+    double remain = pace_ms - compute_ms;
+    while (remain > 0) {
+      double slice = std::min(200.0, remain);
+      [NSThread sleepForTimeInterval:slice / 1000.0];
+      remain -= slice;
+      double r2 = FootprintMB();
+      if (r2 > peak_rss) peak_rss = r2;
+      long th = ThermalState();
+      if (th > thermal_max) thermal_max = th;
     }
   }
 
-  // authoritative final cloud/pose readback from the live incremental model
+  // ════════════════════════════════════════════════════════════════════════
+  // FINAL-FLUSH — one pass after the capture loop. Recache over ALL fed frames,
+  // drain the entire pending frontier (no per-call cap), one global BA + filter.
+  // Coverage -> ~100%. Explicitly OFF the per-frame critical path.
+  // ════════════════════════════════════════════════════════════════════════
+  logline("STREAM_FINAL_FLUSH_BEGIN draining pending frontier + global BA "
+          "(off the per-frame path)...");
+  aether_sfm_live_stats_t flush_st;
+  auto t_flush = clk::now();
+  aether_sfm_result_t frc = aether_sfm_live_final_flush(session, &flush_st);
+  double flush_ms = ms_since(t_flush);
+  if (frc == AETHER_SFM_OK) {
+    snprintf(b, sizeof(b),
+             "STREAM_FINAL_FLUSH rc=%d registered_this_call=%d new_points=%d "
+             "total_registered=%d total_cloud_points=%d reproj=%.4f "
+             "flush_wall_ms=%.0f (recache_ms=%.0f) *FINAL_FLUSH",
+             frc, flush_st.registered, flush_st.new_points,
+             flush_st.total_registered, flush_st.total_points,
+             flush_st.reproj_px, flush_ms, flush_st.recache_ms);
+    logline(b);
+    if (flush_st.total_points > 0) final_total_pts = flush_st.total_points;
+    if (flush_st.reproj_px > 0) final_reproj = flush_st.reproj_px;
+    if (flush_st.total_registered > 0) registered_running = flush_st.total_registered;
+  } else {
+    snprintf(b, sizeof(b), "STREAM_FINAL_FLUSH rc=%d (%s) — flush failed", frc,
+             aether_sfm_result_str(frc));
+    logline(b);
+  }
+
+  // ── authoritative final readback from the live incremental model ──
   int final_pts = 0;
-  aether_sfm_get_points(st.session, nullptr, &final_pts);
+  aether_sfm_get_points(session, nullptr, &final_pts);
   int pose_total = 0;
-  aether_sfm_get_poses(st.session, nullptr, 0, &pose_total);
+  aether_sfm_get_poses(session, nullptr, 0, &pose_total);
   std::vector<aether_sfm_pose_t> poses(pose_total > 0 ? pose_total : 1);
   int pc = 0;
-  aether_sfm_get_poses(st.session, poses.data(), pose_total, &pc);
+  aether_sfm_get_poses(session, poses.data(), pose_total, &pc);
   int final_reg = 0;
   for (int i = 0; i < pc; ++i) final_reg += poses[i].registered ? 1 : 0;
 
-  // ── PHASE-A ② match stats + PHASE-B step-3 register stats ──
-  double mean_ms = 0, p95_ms = 0;
-  {
-    std::lock_guard<std::mutex> lk(tel.mu);
-    if (!tel.per_frame_total_ms.empty()) {
-      std::vector<double> v = tel.per_frame_total_ms;
-      double sum = 0;
-      for (double x : v) sum += x;
-      mean_ms = sum / v.size();
-      std::sort(v.begin(), v.end());
-      p95_ms = v[(size_t)(v.size() * 0.95)];
-    }
-  }
-  double reg_median_ms = 0, reg_p95_ms = 0;
-  if (!reg_ms_samples.empty()) {
-    std::vector<double> v = reg_ms_samples;
-    std::sort(v.begin(), v.end());
-    reg_median_ms = v[v.size() / 2];
-    reg_p95_ms = v[std::min(v.size() - 1, (size_t)(v.size() * 0.95))];
-  }
+  // ── per-frame stats ──
+  double total_p50 = Pctl(per_frame_total_ms, 0.50);
+  double total_p95 = Pctl(per_frame_total_ms, 0.95);
+  double reg_p50 = Pctl(register_ms_samples, 0.50);
+  double reg_p95 = Pctl(register_ms_samples, 0.95);
   double growth_ratio =
       growth_eligible > 0 ? (double)grew_count / growth_eligible : 0.0;
-  snprintf(b, sizeof(b),
-           "STREAM_PERFRAME_REGISTER_DONE registered=%d cloud_pts=%d "
-           "final_reproj_px=%.4f reg_median_ms=%.0f reg_p95_ms=%.0f "
-           "cloud_grew_frac=%.2f (%d/%d) seed_ms=%.0f",
-           register_count, last_total_pts, last_reproj, reg_median_ms,
-           reg_p95_ms, growth_ratio, grew_count, growth_eligible, seed_ms);
-  logline(b);
-  std::snprintf(json, sizeof(json), "{\"reproj_px\":%.4f}", last_reproj);
-  aether_sfm_result_t frc = brc;
+  double coverage = !frames.empty() ? (double)final_reg / frames.size() : 0.0;
+  double recache_ms_avg =
+      recache_count > 0 ? recache_ms_total / recache_count : 0.0;
 
   snprintf(b, sizeof(b),
-           "STREAM_SUMMARY frames=%zu submitted=%llu enqueued=%llu "
-           "extracted=%llu ingested=%llu dropped_oldest=%llu queue_highwater=%zu "
+           "STREAM_SUMMARY mode=INTERLEAVED_1+2+3_perframe+final_flush "
+           "frames=%zu coverage=%.4f (%d/%zu) "
+           "perframe_total_p50_ms=%.0f perframe_total_p95_ms=%.0f over_2s=%d "
+           "dropped=%d register_p50_ms=%.0f register_p95_ms=%.0f "
+           "cloud_grew_frac=%.2f bootstrap_frame=%d "
+           "recache_count=%d recache_ms_avg=%.0f recache_ms_max=%.0f "
            "init_ms=%.0f cache=%s cache_load_hits=%ld cache_stores=%ld "
-           "match_mean_ms=%.0f match_p95_ms=%.0f over_2000ms=%d "
-           "seed_ms=%.0f perframe_registered=%d perframe_reg_median_ms=%.0f "
-           "perframe_reg_p95_ms=%.0f cloud_grew_frac=%.2f "
-           "final_registered=%d final_cloud_pts=%d final_reproj_px=%.4f "
-           "thermal_max=%ld peak_rss_mb=%.0f",
-           frames.size(), (unsigned long long)fs.submitted,
-           (unsigned long long)fs.enqueued, (unsigned long long)fs.extracted,
-           (unsigned long long)fs.ingested,
-           (unsigned long long)fs.dropped_oldest, fs.peak_queue_depth, init_ms,
-           cache_state, cache_hits, cache_stores, mean_ms, p95_ms,
-           tel.over_2s.load(), seed_ms, register_count, reg_median_ms,
-           reg_p95_ms, growth_ratio, final_reg, final_pts, last_reproj,
-           tel.thermal_max.load(), tel.peak_rss.load());
+           "thermal_ramp=%ld→%ld peak_rss_mb=%.0f "
+           "final_cloud_pts=%d final_reproj_px=%.4f flush_wall_ms=%.0f",
+           frames.size(), coverage, final_reg, frames.size(), total_p50,
+           total_p95, over_2s, dropped, reg_p50, reg_p95, growth_ratio,
+           bootstrap_frame, recache_count, recache_ms_avg, recache_ms_max,
+           init_ms, cache_state, cache_hits, cache_stores, ThermalState(),
+           thermal_max, peak_rss, final_pts, final_reproj, flush_ms);
   logline(b);
   if (out && out_cap > 0) {
     strncpy(out, b, out_cap - 1);
     out[out_cap - 1] = 0;
   }
+  (void)registered_running;
 
-  aether_sfm_free(st.session);
+  aether_sfm_free(session);
   logline("STREAM_DONE (log saved to Documents/aether_console.log)");
   return frc == AETHER_SFM_OK ? 0 : 4;
 }

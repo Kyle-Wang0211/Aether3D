@@ -1295,6 +1295,20 @@ int aether_sfm_num_prior_registered(aether_sfm_session_t* s) {
   return s ? s->live_prior_reg_count : 0;
 }
 
+// READ-ONLY accessor (NOT part of the stable ABI header — declared extern in the
+// device harness, mirroring aether_sfm_dump_reg_failures). Resolves the COLMAP
+// image_id assigned to a frame_id returned from add_frame_with_features, so the
+// production caller can attach the ARKit pose prior (keyed by image_id) without
+// assuming image_id == frame_id+1. Returns 0 on any error / unknown frame_id.
+int aether_sfm_frame_image_id(aether_sfm_session_t* s, int frame_id) {
+  if (!s) return 0;
+  if (frame_id >= 0 && frame_id < static_cast<int>(s->frames.size()))
+    return static_cast<int>(s->frames[frame_id].image_id);
+  auto it = s->live_frame_to_image.find(frame_id);
+  if (it != s->live_frame_to_image.end()) return static_cast<int>(it->second);
+  return 0;
+}
+
 // Stage one source-db image (with its keypoints + the matches/TVGs connecting it
 // to already-staged images) into the live session db, preserving image_id. This
 // is the host-verify feed: it makes the real414 graph arrive one frame at a time

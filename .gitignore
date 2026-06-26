@@ -16,6 +16,13 @@ build/
 *.pcm
 *.swiftmodule
 aether3d.db
+# host-verify SfM test databases (>100MB COLMAP graphs; regenerable from captures)
+real414_v313_nodesc.db
+real414_v313_nodesc.db-shm
+real414_v313_nodesc.db-wal
+sub140.db
+*.db-shm
+*.db-wal
 artifacts/
 Aether3DApp.xcodeproj/
 .deps/

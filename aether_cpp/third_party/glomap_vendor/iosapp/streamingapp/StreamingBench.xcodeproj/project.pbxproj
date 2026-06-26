@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		05C8C3C4632338562D861FA2 /* streaming_orchestrator.cc in Sources */ = {isa = PBXBuildFile; fileRef = C98AFE510D9E858C04EE638D /* streaming_orchestrator.cc */; };
 		133D57D800A16E30C41B25F9 /* streaming_run.mm in Sources */ = {isa = PBXBuildFile; fileRef = 8D9D52412FD376B8E26563EB /* streaming_run.mm */; };
 		48441784B567791EC575C795 /* gpu_sift_extractor.cc in Sources */ = {isa = PBXBuildFile; fileRef = A603E892B111637EE7054CC7 /* gpu_sift_extractor.cc */; };
 		4CFFB21EDF0119852D35BC71 /* dsp_sift_c.cc in Sources */ = {isa = PBXBuildFile; fileRef = 195D3F10E8EC217F37C9F9F9 /* dsp_sift_c.cc */; };
@@ -30,7 +29,6 @@
 		9ED72D8F44F7B7912E2154A1 /* StreamingBench.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = StreamingBench.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A603E892B111637EE7054CC7 /* gpu_sift_extractor.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = gpu_sift_extractor.cc; sourceTree = "<group>"; };
 		B03339C438E9E13A4BE12303 /* shaders */ = {isa = PBXFileReference; lastKnownFileType = folder; name = shaders; path = ../../../../shaders; sourceTree = SOURCE_ROOT; };
-		C98AFE510D9E858C04EE638D /* streaming_orchestrator.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = streaming_orchestrator.cc; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -77,7 +75,6 @@
 			isa = PBXGroup;
 			children = (
 				A603E892B111637EE7054CC7 /* gpu_sift_extractor.cc */,
-				C98AFE510D9E858C04EE638D /* streaming_orchestrator.cc */,
 			);
 			name = gpu;
 			path = ../../../../src/gpu;
@@ -172,7 +169,6 @@
 				4CFFB21EDF0119852D35BC71 /* dsp_sift_c.cc in Sources */,
 				48441784B567791EC575C795 /* gpu_sift_extractor.cc in Sources */,
 				C9CF9C273968E2F22301829C /* main.m in Sources */,
-				05C8C3C4632338562D861FA2 /* streaming_orchestrator.cc in Sources */,
 				133D57D800A16E30C41B25F9 /* streaming_run.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
