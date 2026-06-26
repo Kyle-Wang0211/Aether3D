@@ -112,6 +112,31 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
   return Unsupported(out_json, out_cap);
 }
 
+aether_sfm_result_t aether_sfm_attach_db_frames(aether_sfm_session_t* s,
+                                                int* out_num_frames) {
+  (void)s;
+  if (out_num_frames) *out_num_frames = 0;
+  return AETHER_SFM_ERR_UNSUPPORTED;
+}
+
+aether_sfm_result_t aether_sfm_begin_incremental(aether_sfm_session_t* s,
+                                                 char* out_json, int out_cap) {
+  (void)s;
+  return Unsupported(out_json, out_cap);
+}
+
+aether_sfm_result_t aether_sfm_register_next_frame(
+    aether_sfm_session_t* s, int frame_id, double out_pose_qwxyz[4],
+    double out_pose_t[3], int* out_registered, int* out_new_points,
+    int* out_total_points, double* out_reproj) {
+  (void)s; (void)frame_id; (void)out_pose_qwxyz; (void)out_pose_t;
+  if (out_registered) *out_registered = 0;
+  if (out_new_points) *out_new_points = 0;
+  if (out_total_points) *out_total_points = 0;
+  if (out_reproj) *out_reproj = 0.0;
+  return AETHER_SFM_ERR_UNSUPPORTED;
+}
+
 int aether_sfm_finalize_status(aether_sfm_session_t* s) {
   (void)s;
   return AETHER_SFM_FINALIZE_ERROR;

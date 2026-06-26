@@ -24,6 +24,10 @@
 #include "aether_sfm_c.h"
 
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/sfm/incremental_mapper.h"
+#include "colmap/sfm/incremental_triangulator.h"
+#include "colmap/scene/database_cache.h"
+#include "colmap/estimators/bundle_adjustment.h"
 #include "colmap/estimators/two_view_geometry.h"
 #include "colmap/feature/types.h"
 #include "colmap/feature/utils.h"
@@ -121,6 +125,19 @@ struct aether_sfm_session {
   std::thread refine_thread;
   std::atomic<int> finalize_status{0};  // aether_sfm_finalize_status_t
   double refine_ms = 0.0;               // worker global-BA wall time
+
+  // ── per-frame incremental register state (aether_sfm_begin_incremental /
+  //    aether_sfm_register_next_frame). The DatabaseCache MUST outlive the
+  //    mapper (mapper borrows std::shared_ptr<const DatabaseCache>); the live
+  //    Reconstruction IS the UI cloud (also pointed-to by s->recon). All persist
+  //    across register_next_frame calls — do NOT recreate per frame.
+  std::shared_ptr<colmap::DatabaseCache> database_cache;
+  std::unique_ptr<colmap::IncrementalMapper> mapper;
+  std::shared_ptr<colmap::Reconstruction> live_recon;
+  bool incremental_seeded = false;
+  // The option-builders the per-frame path reproduces (same validated 0.84-reproj
+  // BA config the pipeline injects: CAUCHY local, lnum=10 window, liter15).
+  std::shared_ptr<colmap::IncrementalPipelineOptions> inc_opts;
 };
 
 namespace {
@@ -150,6 +167,31 @@ std::shared_ptr<const colmap::Reconstruction> PickBestAndReport(
                   best_track);
   }
   return best;
+}
+
+// Build the AETHER ship-config IncrementalPipelineOptions (the validated
+// CAUCHY-local/global + DENSE_SCHUR-routing + deferred-global-BA config). Shared
+// by RunIncremental (batch finalize) and the per-frame register path so both run
+// the SAME BA option-builders (LocalBundleAdjustment()/GlobalBundleAdjustment()/
+// Mapper()/Triangulation()) — the per-frame path must NOT hand-roll
+// BundleAdjustmentOptions or it loses the 0.84-reproj config.
+std::shared_ptr<colmap::IncrementalPipelineOptions> MakeShipOptions(
+    const std::string& image_path, bool local_only) {
+  auto o = std::make_shared<colmap::IncrementalPipelineOptions>();
+  o->min_num_matches = 15;
+  if (image_path.empty()) o->extract_colors = false;
+  o->defer_global_ba = true;  // per-frame path NEVER triggers in-loop global BA
+  if (local_only) o->skip_finalize_global_ba = true;
+  o->ba_local_max_num_iterations = 15;
+  o->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+  o->ba_local_loss_type = 2;   // CAUCHY
+  o->ba_local_loss_scale = 1.0;
+  o->ba_global_loss_type = 2;  // CAUCHY (-> DENSE_SCHUR via override)
+  o->ba_global_loss_scale = 1.0;
+  o->ba_global_function_tolerance = 1e-6;
+  o->mapper.ba_local_num_images = 10;
+  o->image_path = image_path;
+  return o;
 }
 
 // Run the validated IncrementalPipeline over (db_path, image_path) into a fresh
@@ -703,6 +745,230 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
   }
 }
 
+// ─── bench-only: attach an existing db's frozen correspondence graph ─
+// Open an existing COLMAP db that already has images+keypoints+matches+TVGs and
+// populate s->frames (frame_id -> image_id) in image-rowid (capture) order so the
+// per-frame register path can stream over that REAL graph without re-injecting
+// descriptors. Only image_id is needed by register_next_frame; descriptors/xy are
+// not read on the register path (the frozen DatabaseCache owns the geometry).
+aether_sfm_result_t aether_sfm_attach_db_frames(aether_sfm_session_t* s,
+                                                int* out_num_frames) {
+  if (out_num_frames) *out_num_frames = 0;
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  try {
+    // (Re)open the db at db_path as the session db; this is a caller-owned file.
+    if (s->db) s->db->Close();
+    s->db = colmap::Database::Open(s->db_path);
+    if (!s->db) return AETHER_SFM_ERR_DB;
+    s->owns_db_file = false;  // attached an existing, caller-owned db
+
+    std::vector<colmap::Image> images = s->db->ReadAllImages();
+    // ReadAllImages returns rowid (capture) order. Map each to a frame slot.
+    s->frames.clear();
+    s->frames.reserve(images.size());
+    for (const colmap::Image& img : images) {
+      FrameRecord rec;
+      rec.frame_id = static_cast<int>(s->frames.size());
+      rec.image_id = img.ImageId();
+      // n_keypoints/descriptors/xy left empty: the register path does not touch
+      // them (geometry comes from the frozen DatabaseCache built in begin).
+      s->frames.push_back(std::move(rec));
+    }
+    if (out_num_frames) *out_num_frames = static_cast<int>(s->frames.size());
+    return AETHER_SFM_OK;
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_DB;
+  }
+}
+
+// ─── per-frame incremental register (true step-3 streaming) ─────────
+// Build the live IncrementalMapper from the db accumulated so far and run the
+// bootstrap seed. Mirrors IncrementalPipeline::InitializeReconstruction over the
+// frozen correspondence graph (DatabaseCache::Create reads all matches/TVGs that
+// add_frame_with_features persisted). Transitions ACCUMULATING -> SEEDED.
+aether_sfm_result_t aether_sfm_begin_incremental(aether_sfm_session_t* s,
+                                                 char* out_json, int out_cap) {
+  if (!s || !s->db) return AETHER_SFM_ERR_INVALID_ARG;
+  if (s->incremental_seeded) return AETHER_SFM_OK;  // idempotent
+  try {
+    const double t0 = NowMs();
+    // Flush sqlite writes so DatabaseCache::Create sees every frame/match.
+    s->db->Close();
+    auto db = colmap::Database::Open(s->db_path);
+
+    s->inc_opts = MakeShipOptions(s->image_path, /*local_only=*/false);
+
+    // Build the (frozen) correspondence-graph cache ONCE. This is the single
+    // O(N) graph load; subsequent register_next_frame calls are O(1) in N.
+    colmap::DatabaseCache::Options cache_opts;
+    cache_opts.min_num_matches =
+        static_cast<size_t>(s->inc_opts->min_num_matches);
+    cache_opts.ignore_watermarks = s->inc_opts->ignore_watermarks;
+    cache_opts.load_all_images = s->inc_opts->load_all_images;
+    s->database_cache = colmap::DatabaseCache::Create(*db, cache_opts);
+    db->Close();
+    // Reopen the streaming handle so getters/finalize still work afterwards.
+    s->db = colmap::Database::Open(s->db_path);
+
+    if (s->database_cache->NumImages() < 2) {
+      if (out_json && out_cap > 0)
+        std::snprintf(out_json, out_cap,
+                      "{\"error\":\"need >=2 images in graph, have %zu\"}",
+                      s->database_cache->NumImages());
+      return AETHER_SFM_ERR_NO_INITIAL_PAIR;
+    }
+
+    s->live_recon = std::make_shared<colmap::Reconstruction>();
+    s->mapper =
+        std::make_unique<colmap::IncrementalMapper>(s->database_cache);
+    s->mapper->BeginReconstruction(s->live_recon);
+
+    const colmap::IncrementalMapper::Options mapper_opts =
+        s->inc_opts->Mapper();
+
+    // Bootstrap = InitializeReconstruction (incremental_pipeline.cc:406): find a
+    // seed pair, register it, triangulate both, one global BA, normalize, filter.
+    colmap::image_t id1 = 0, id2 = 0;
+    colmap::Rigid3d cam2_from_cam1;
+    if (!s->mapper->FindInitialImagePair(mapper_opts, id1, id2,
+                                         cam2_from_cam1)) {
+      if (out_json && out_cap > 0)
+        std::snprintf(out_json, out_cap,
+                      "{\"error\":\"no good initial image pair\"}");
+      return AETHER_SFM_ERR_NO_INITIAL_PAIR;
+    }
+    s->mapper->RegisterInitialImagePair(mapper_opts, id1, id2, cam2_from_cam1);
+
+    colmap::IncrementalTriangulator::Options tri_opts =
+        s->inc_opts->Triangulation();
+    tri_opts.min_angle = mapper_opts.init_min_tri_angle;
+    for (const colmap::image_t image_id : {id1, id2}) {
+      const colmap::Image& image = s->live_recon->Image(image_id);
+      for (const colmap::data_t& data_id : image.FramePtr()->ImageIds()) {
+        s->mapper->TriangulateImage(tri_opts, data_id.id);
+      }
+    }
+    if (s->live_recon->NumPoints3D() == 0) {
+      if (out_json && out_cap > 0)
+        std::snprintf(out_json, out_cap,
+                      "{\"error\":\"seed triangulation produced 0 points\"}");
+      return AETHER_SFM_ERR_NO_INITIAL_PAIR;
+    }
+    s->mapper->AdjustGlobalBundle(mapper_opts,
+                                  s->inc_opts->GlobalBundleAdjustment());
+    s->live_recon->Normalize();
+    s->mapper->FilterPoints(mapper_opts);
+    s->mapper->FilterFrames(mapper_opts);
+    if (s->live_recon->NumRegFrames() == 0 ||
+        s->live_recon->NumPoints3D() == 0) {
+      if (out_json && out_cap > 0)
+        std::snprintf(out_json, out_cap,
+                      "{\"error\":\"seed failed after BA/filter\"}");
+      return AETHER_SFM_ERR_NO_INITIAL_PAIR;
+    }
+
+    s->incremental_seeded = true;
+    {
+      std::lock_guard<std::mutex> lk(s->recon_mutex);
+      s->recon = s->live_recon;  // getters read the live model
+    }
+    const double seed_ms = NowMs() - t0;
+    if (out_json && out_cap > 0) {
+      std::snprintf(
+          out_json, out_cap,
+          "{\"seed_ms\":%.1f,\"seed_img1\":%d,\"seed_img2\":%d,"
+          "\"reg_frames\":%zu,\"points3d\":%zu,\"reproj_px\":%.4f}",
+          seed_ms, static_cast<int>(id1), static_cast<int>(id2),
+          s->live_recon->NumRegFrames(), s->live_recon->NumPoints3D(),
+          s->live_recon->ComputeMeanReprojectionError());
+    }
+    return AETHER_SFM_OK;
+  } catch (const std::exception& e) {
+    if (out_json && out_cap > 0)
+      std::snprintf(out_json, out_cap, "{\"error\":\"%s\"}", e.what());
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
+aether_sfm_result_t aether_sfm_register_next_frame(
+    aether_sfm_session_t* s, int frame_id, double out_pose_qwxyz[4],
+    double out_pose_t[3], int* out_registered, int* out_new_points,
+    int* out_total_points, double* out_reproj) {
+  if (out_registered) *out_registered = 0;
+  if (out_new_points) *out_new_points = 0;
+  if (!s || !s->mapper || !s->incremental_seeded) {
+    return AETHER_SFM_ERR_NOT_REGISTERED;  // begin_incremental not run / failed
+  }
+  if (frame_id < 0 || frame_id >= static_cast<int>(s->frames.size())) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+  try {
+    const colmap::image_t image_id = s->frames[frame_id].image_id;
+    if (!s->live_recon->ExistsImage(image_id)) {
+      // Frame not in the frozen graph (added after begin_incremental).
+      return AETHER_SFM_ERR_INVALID_ARG;
+    }
+    // Already registered (e.g. it was a seed image): report its current state.
+    const bool already = s->live_recon->Image(image_id).HasPose();
+    const int before_pts = static_cast<int>(s->live_recon->NumPoints3D());
+
+    const colmap::IncrementalMapper::Options mapper_opts =
+        s->inc_opts->Mapper();
+
+    bool reg_ok = already;
+    if (!already) {
+      // Per-frame body (incremental_pipeline.cc:583-617), one frame:
+      //   RegisterNextImage -> TriangulateImage(frame's images)
+      //   -> IterativeLocalRefinement (local window; NO global BA, NO
+      //      FindNextImages O(N) scan — we know the frame_id directly).
+      reg_ok = s->mapper->RegisterNextImage(mapper_opts, image_id);
+    }
+
+    if (reg_ok) {
+      const colmap::Image& image = s->live_recon->Image(image_id);
+      for (const colmap::data_t& data_id : image.FramePtr()->ImageIds()) {
+        s->mapper->TriangulateImage(s->inc_opts->Triangulation(), data_id.id);
+      }
+      if (!already) {
+        s->mapper->IterativeLocalRefinement(
+            s->inc_opts->ba_local_max_refinements,
+            s->inc_opts->ba_local_max_refinement_change, mapper_opts,
+            s->inc_opts->LocalBundleAdjustment(), s->inc_opts->Triangulation(),
+            image_id);
+      }
+    }
+
+    const int after_pts = static_cast<int>(s->live_recon->NumPoints3D());
+    if (out_registered) *out_registered = reg_ok ? 1 : 0;
+    if (out_new_points) *out_new_points = after_pts - before_pts;
+    if (out_total_points) *out_total_points = after_pts;
+
+    if (reg_ok && (out_pose_qwxyz || out_pose_t)) {
+      const colmap::Rigid3d c_from_w =
+          s->live_recon->Image(image_id).CamFromWorld();
+      const Eigen::Quaterniond q = c_from_w.rotation();
+      if (out_pose_qwxyz) {
+        out_pose_qwxyz[0] = q.w();
+        out_pose_qwxyz[1] = q.x();
+        out_pose_qwxyz[2] = q.y();
+        out_pose_qwxyz[3] = q.z();
+      }
+      if (out_pose_t) {
+        out_pose_t[0] = c_from_w.translation().x();
+        out_pose_t[1] = c_from_w.translation().y();
+        out_pose_t[2] = c_from_w.translation().z();
+      }
+    }
+    if (out_reproj) {
+      s->live_recon->UpdatePoint3DErrors();
+      *out_reproj = s->live_recon->ComputeMeanReprojectionError();
+    }
+    return AETHER_SFM_OK;  // not-registered (reg_ok==0) is a normal outcome
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
 // Two-phase async finalize. Phase 1 (synchronous, this call): incremental
 // register + local BA only -> LOCAL reconstruction is live in *recon the instant
 // this returns OK (status = LOCAL_READY), so the UI can show the model now.
@@ -837,6 +1103,16 @@ void aether_sfm_free(aether_sfm_session_t* s) {
   if (!s) return;
   // The async-finalize worker captures `s`; it MUST finish before we delete.
   if (s->refine_thread.joinable()) s->refine_thread.join();
+  // Tear down the live incremental mapper before its borrowed DatabaseCache /
+  // live Reconstruction drop. EndReconstruction(discard=false) finalizes the
+  // registration stats; order matters (mapper borrows database_cache).
+  if (s->mapper) {
+    try {
+      s->mapper->EndReconstruction(/*discard=*/false);
+    } catch (...) {
+    }
+    s->mapper.reset();
+  }
   if (s->db) {
     try {
       s->db->Close();

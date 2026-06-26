@@ -197,4 +197,50 @@ if(BUILD_BENCH)
     /opt/homebrew/lib/libglog.dylib
     "-lsqlite3"
     ${ACCELERATE_FW})
+
+  # [gpu-sift-s1] HOST verification of the TRUE per-frame incremental register
+  # ABI (aether_sfm_begin_incremental + aether_sfm_register_next_frame). Drives
+  # the IncrementalMapper directly, one frame per call, over a real capture
+  # sequence; gates the per-frame cloud growth + cost + reproj against the batch
+  # finalize baseline on the SAME injected db.
+  add_executable(sfm_stream_verify_exe
+    bench/sfm_stream_verify.cc
+    bench/aether_sfm_c.cc
+    bench/dsp_sift_c.cc)
+  target_include_directories(sfm_stream_verify_exe PRIVATE
+    ${V}/stubs ${AT}/../include)
+  target_compile_definitions(sfm_stream_verify_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED VL_DISABLE_SSE2 VL_DISABLE_AVX)
+  target_compile_options(sfm_stream_verify_exe PRIVATE -w)
+  target_link_libraries(sfm_stream_verify_exe PRIVATE
+    glomap_core
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
+
+  # [gpu-sift-s1] HOST verification of the per-frame register ABI over a REAL
+  # production correspondence graph (the real414 research db: real keypoints +
+  # real matches + real two-view geometries, descriptors stripped). Attaches the
+  # frozen graph (aether_sfm_attach_db_frames) and streams register_next_frame —
+  # no descriptor re-injection. The faithful streaming proof on real capture data.
+  add_executable(sfm_stream_real_verify_exe
+    bench/sfm_stream_real_verify.cc
+    bench/aether_sfm_c.cc
+    bench/dsp_sift_c.cc)
+  target_include_directories(sfm_stream_real_verify_exe PRIVATE
+    ${V}/stubs ${AT}/../include)
+  target_compile_definitions(sfm_stream_real_verify_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED VL_DISABLE_SSE2 VL_DISABLE_AVX)
+  target_compile_options(sfm_stream_real_verify_exe PRIVATE -w)
+  target_link_libraries(sfm_stream_real_verify_exe PRIVATE
+    glomap_core
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
 endif()

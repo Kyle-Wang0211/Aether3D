@@ -123,6 +123,65 @@ aether_sfm_result_t aether_sfm_add_frame_with_features(
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s,
                                         char* out_json, int out_cap);
 
+// ─── per-frame incremental register (true step-3 streaming) ─────────
+// Drives colmap::IncrementalMapper DIRECTLY, one frame at a time, instead of
+// running the whole IncrementalPipeline at finalize. Two entry points + a live
+// IncrementalMapper/Reconstruction/DatabaseCache held on the session:
+//
+//   begin_incremental : build the DatabaseCache from the frames accumulated so
+//                       far (add_frame_with_features), BeginReconstruction, run
+//                       the bootstrap seed (FindInitialImagePair ->
+//                       RegisterInitialImagePair -> TriangulateImage(x2) ->
+//                       AdjustGlobalBundle -> Normalize -> FilterPoints/Frames).
+//                       Call ONCE after the frames+matches are in the db. The
+//                       correspondence graph is FROZEN at this point (COLMAP
+//                       4.0.4 cannot extend a live cache), so frames added AFTER
+//                       this call are not registerable — add all frames first,
+//                       then begin, then stream register over the frozen graph.
+//                       Returns AETHER_SFM_ERR_NO_INITIAL_PAIR if no seed yet.
+//
+//   register_next_frame : register ONE already-added frame (by the frame_id
+//                       returned from add_frame_with_features) into the live
+//                       model: RegisterNextImage -> TriangulateImage ->
+//                       IterativeLocalRefinement (local window BA only; global
+//                       BA is DEFERRED to finalize, never on this path). Out-
+//                       params expose the just-registered pose + incremental
+//                       point stats so the capture UI can render immediately.
+//                       out_registered=0 (with AETHER_SFM_OK) means the frame is
+//                       not yet registerable (too few 2D-3D inliers) — a normal
+//                       streaming outcome, keep going.
+//
+// Cost: register_next_frame is O(1) in N (PnP + this image's triangulation +
+// fixed-window local BA). The single O(N) graph load is in begin_incremental;
+// the single O(N) global solve stays in finalize.
+aether_sfm_result_t aether_sfm_begin_incremental(aether_sfm_session_t* s,
+                                                 char* out_json, int out_cap);
+
+aether_sfm_result_t aether_sfm_register_next_frame(
+    aether_sfm_session_t* s,
+    int frame_id,               // index from add_frame_with_features
+    double out_pose_qwxyz[4],   // CamFromWorld rotation (w,x,y,z); may be NULL
+    double out_pose_t[3],       // CamFromWorld translation; may be NULL
+    int* out_registered,        // 1 if this frame got a pose this call, else 0
+    int* out_new_points,        // points3D created this call (delta)
+    int* out_total_points,      // total points3D in the live model now
+    double* out_reproj);        // current mean reproj over the live model
+
+// ─── bench-only: attach an EXISTING db's frozen correspondence graph ─
+// HOST-VERIFY helper (NOT a production capture entry point). Opens an existing
+// COLMAP database that ALREADY carries a complete correspondence graph (images +
+// keypoints + matches + two_view_geometries — e.g. the real414 research db whose
+// stored descriptors were stripped but whose matches/TVGs are intact) as the
+// session's db, and populates the session's frame_id -> image_id mapping in image
+// order so begin_incremental + register_next_frame can stream over that REAL,
+// production-grade graph WITHOUT re-injecting descriptors. The frame order is the
+// db's image rowid order (capture order, as written by the research extractor).
+// out_num_frames returns how many frames were attached. The session does NOT own
+// the db file (does not delete it on free). Pure-batch finalize on the same
+// session still works (it reopens db_path).
+aether_sfm_result_t aether_sfm_attach_db_frames(aether_sfm_session_t* s,
+                                                int* out_num_frames);
+
 // ─── async finalize (off-the-critical-path global BA) ───────────────
 // Progress flag for aether_sfm_finalize_async (poll via aether_sfm_finalize_status).
 typedef enum aether_sfm_finalize_status {
