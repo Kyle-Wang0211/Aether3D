@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/tmp/aether-s1/aether_cpp/third_party/glomap_vendor/build-host/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

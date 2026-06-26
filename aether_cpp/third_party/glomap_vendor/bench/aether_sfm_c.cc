@@ -138,6 +138,55 @@ struct aether_sfm_session {
   // The option-builders the per-frame path reproduces (same validated 0.84-reproj
   // BA config the pipeline injects: CAUCHY local, lnum=10 window, liter15).
   std::shared_ptr<colmap::IncrementalPipelineOptions> inc_opts;
+
+  // ── TRUE LIVE-INTERLEAVED state (aether_sfm_add_and_register_frame). Unlike
+  //    the begin/freeze path above, the live graph GROWS during capture: each
+  //    add_and_register_frame appends the new frame's image NAME to live_fed_names
+  //    and, every live_recache_every frames, rebuilds the DatabaseCache RESTRICTED
+  //    to live_fed_names (DatabaseCache::Options::image_names) so the cache/graph
+  //    cost scales with the FED SUBSET, not the full db. The live Reconstruction is
+  //    continued across rebuilds (Reconstruction::Load is additive + preserves
+  //    registered poses/points; EndReconstruction(discard=false)->TearDown keeps
+  //    the registered model). live_recon doubles as s->recon (UI cloud). The
+  //    register step itself is O(local) and never re-Finalizes the whole graph.
+  bool live_mode = false;                 // add_and_register_frame path active
+  int live_recache_every = 8;             // rebuild cache every N fed frames
+  int live_bootstrap_k = 6;               // accumulate K frames before seeding
+  int live_max_register_per_call = 4;     // cap registrations/call (bounds cost)
+  bool live_seeded = false;
+  int live_fed_count = 0;                 // frames fed so far (temporal)
+  int live_since_recache = 0;             // frames fed since last cache rebuild
+  std::unordered_set<std::string> live_fed_names;  // staged image names (subset)
+  std::unordered_map<int, colmap::image_t> live_frame_to_image;  // feed idx->image
+  std::shared_ptr<colmap::Database> live_src_db;  // bench: the real graph (RO)
+  // Fed-but-not-yet-registered images. After each re-cache we sweep these (in a
+  // bounded retry loop) because a newly-registered/triangulated frame gives its
+  // covisible neighbours the 2D-3D correspondences they previously lacked — the
+  // standard incremental-SfM frontier. Bounded: only the current fed subset.
+  std::unordered_set<colmap::image_t> live_pending;
+
+  // ── AETHER DIAGNOSTIC: per-image LAST RegisterNextImage failure reason +
+  //    the raw gate counts at that last attempt. Updated every time
+  //    LiveRegisterImage tries (and fails) to register an image; cleared when
+  //    the image finally registers. After the feed, the entries that remain are
+  //    the frames that NEVER registered, keyed by their final failure reason.
+  struct LiveRegFailInfo {
+    int reason = 6;        // see AetherLastRegFailReason() codes
+    int num_visible = -1;  // NumVisiblePoints3D at last attempt
+    int num_corrs = -1;    // tri_points2D count at last attempt
+    int min_inliers = -1;  // abs_pose_min_num_inliers threshold
+    int attempts = 0;      // how many times RegisterNextImage was tried
+  };
+  std::unordered_map<colmap::image_t, LiveRegFailInfo> live_reg_fail;
+
+  // ── AETHER POSE-PRIOR PATH (aether_sfm_set_image_pose_prior). When enabled,
+  //    LiveRegisterImage first tries the normal PnP RegisterNextImage; if that
+  //    fails AND a known ARKit cam_from_world prior exists for this image, it
+  //    registers via the prior (RegisterNextImageWithPosePrior), bypassing the
+  //    2D-3D resection that the diagnostic showed kills ~94% of live frames.
+  bool live_use_pose_prior = false;
+  std::unordered_map<colmap::image_t, colmap::Rigid3d> live_pose_prior;  // cam_from_world
+  int live_prior_reg_count = 0;  // how many frames registered VIA the prior path
 };
 
 namespace {
@@ -422,6 +471,150 @@ int MatchAndPersistAgainstPrev(aether_sfm_session* s, const FrameRecord& cur,
     }
   }
   return n_verified;
+}
+
+// ── LIVE re-cache: rebuild the DatabaseCache restricted to the frames fed so
+//    far (live_fed_names) and (re)attach a fresh IncrementalMapper that CONTINUES
+//    the existing live Reconstruction. This is the bounded live-mutation step:
+//    the cache/graph is rebuilt over the FED SUBSET only (not the whole db), and
+//    the registered poses + 3D points survive because Reconstruction::Load is
+//    additive and EndReconstruction(discard=false) keeps the registered model.
+//    Returns false on hard failure. seed_if_unseeded: when the live model has no
+//    registered frames yet, run the bootstrap seed inside this rebuild.
+bool LiveRebuildCacheAndMapper(aether_sfm_session* s, double* out_recache_ms) {
+  const double t0 = NowMs();
+
+  // Flush sqlite writes so the cache sees every staged frame/match.
+  if (s->db) s->db->Close();
+  auto db = colmap::Database::Open(s->db_path);
+
+  if (!s->inc_opts) s->inc_opts = MakeShipOptions(s->image_path, false);
+
+  colmap::DatabaseCache::Options cache_opts;
+  cache_opts.min_num_matches = static_cast<size_t>(s->inc_opts->min_num_matches);
+  cache_opts.ignore_watermarks = s->inc_opts->ignore_watermarks;
+  cache_opts.load_all_images = s->inc_opts->load_all_images;
+  // RESTRICT the cache to the temporally-fed subset — this is what keeps the
+  // rebuild O(fed-subset) instead of O(full-db). Empty => whole db (not used
+  // on the live path).
+  cache_opts.image_names = s->live_fed_names;
+
+  auto new_cache = colmap::DatabaseCache::Create(*db, cache_opts);
+  db->Close();
+  s->db = colmap::Database::Open(s->db_path);  // reopen streaming handle
+
+  if (new_cache->NumImages() < 2) {
+    if (out_recache_ms) *out_recache_ms = NowMs() - t0;
+    return false;  // not enough connected frames yet (keep accumulating)
+  }
+
+  // Tear down the prior mapper FIRST (it borrows the old cache + recon). With
+  // discard=false, TearDown keeps registered frames + 3D points on live_recon.
+  if (s->mapper) {
+    try {
+      s->mapper->EndReconstruction(/*discard=*/false);
+    } catch (...) {
+    }
+    s->mapper.reset();
+  }
+  if (!s->live_recon) s->live_recon = std::make_shared<colmap::Reconstruction>();
+
+  s->database_cache = new_cache;
+  s->mapper = std::make_unique<colmap::IncrementalMapper>(s->database_cache);
+  // BeginReconstruction re-Loads the new cache into the SAME live_recon
+  // (additive: new images merged, existing poses/points preserved) and rebuilds
+  // the ObservationManager snapshot over the now-larger graph.
+  s->mapper->BeginReconstruction(s->live_recon);
+
+  if (out_recache_ms) *out_recache_ms = NowMs() - t0;
+  return true;
+}
+
+// LIVE bootstrap: with the just-built mapper/cache, run the seed (same body as
+// begin_incremental's seed) into the live_recon. Returns true on success.
+bool LiveBootstrapSeed(aether_sfm_session* s) {
+  const colmap::IncrementalMapper::Options mapper_opts = s->inc_opts->Mapper();
+  colmap::image_t id1 = 0, id2 = 0;
+  colmap::Rigid3d cam2_from_cam1;
+  if (!s->mapper->FindInitialImagePair(mapper_opts, id1, id2, cam2_from_cam1)) {
+    return false;
+  }
+  s->mapper->RegisterInitialImagePair(mapper_opts, id1, id2, cam2_from_cam1);
+  colmap::IncrementalTriangulator::Options tri_opts = s->inc_opts->Triangulation();
+  tri_opts.min_angle = mapper_opts.init_min_tri_angle;
+  for (const colmap::image_t image_id : {id1, id2}) {
+    const colmap::Image& image = s->live_recon->Image(image_id);
+    for (const colmap::data_t& data_id : image.FramePtr()->ImageIds()) {
+      s->mapper->TriangulateImage(tri_opts, data_id.id);
+    }
+  }
+  if (s->live_recon->NumPoints3D() == 0) return false;
+  s->mapper->AdjustGlobalBundle(mapper_opts,
+                                s->inc_opts->GlobalBundleAdjustment());
+  s->live_recon->Normalize();
+  s->mapper->FilterPoints(mapper_opts);
+  s->mapper->FilterFrames(mapper_opts);
+  return s->live_recon->NumRegFrames() > 0 && s->live_recon->NumPoints3D() > 0;
+}
+
+// LIVE register: register one already-cached image into the live model
+// (RegisterNextImage -> TriangulateImage -> IterativeLocalRefinement). O(local).
+// Returns true if newly registered (or already registered).
+bool LiveRegisterImage(aether_sfm_session* s, colmap::image_t image_id,
+                       int* out_new_points) {
+  const int before_pts = static_cast<int>(s->live_recon->NumPoints3D());
+  const colmap::IncrementalMapper::Options mapper_opts = s->inc_opts->Mapper();
+  const bool already = s->live_recon->ExistsImage(image_id) &&
+                       s->live_recon->Image(image_id).HasPose();
+  bool reg_ok = already;
+  bool reg_via_prior = false;
+  if (!already && s->live_recon->ExistsImage(image_id)) {
+    reg_ok = s->mapper->RegisterNextImage(mapper_opts, image_id);
+    // AETHER POSE-PRIOR FALLBACK: if normal PnP resection failed but we hold a
+    // known ARKit cam_from_world for this image, register via the prior. This
+    // bypasses the 2D-3D visibility gate (reason 1/2) that the diagnostic showed
+    // blocks ~94% of live frames — exactly the class a pose prior removes.
+    if (!reg_ok && s->live_use_pose_prior) {
+      auto pit = s->live_pose_prior.find(image_id);
+      if (pit != s->live_pose_prior.end()) {
+        reg_ok = s->mapper->RegisterNextImageWithPosePrior(
+            mapper_opts, image_id, pit->second, /*max_reproj_error_px=*/12.0);
+        if (reg_ok) {
+          reg_via_prior = true;
+          ++s->live_prior_reg_count;
+        }
+      }
+    }
+    // AETHER DIAGNOSTIC: record WHY this attempt failed (or clear on success).
+    if (!reg_ok) {
+      auto& info = s->live_reg_fail[image_id];
+      info.reason = colmap::AetherLastRegFailReason();
+      info.num_visible = colmap::AetherLastNumVisiblePoints3D();
+      info.num_corrs = colmap::AetherLastNum2D3DCorrs();
+      info.min_inliers = colmap::AetherLastMinInliers();
+      ++info.attempts;
+    } else {
+      s->live_reg_fail.erase(image_id);
+    }
+  }
+  (void)reg_via_prior;
+  if (reg_ok) {
+    const colmap::Image& image = s->live_recon->Image(image_id);
+    for (const colmap::data_t& data_id : image.FramePtr()->ImageIds()) {
+      s->mapper->TriangulateImage(s->inc_opts->Triangulation(), data_id.id);
+    }
+    if (!already) {
+      s->mapper->IterativeLocalRefinement(
+          s->inc_opts->ba_local_max_refinements,
+          s->inc_opts->ba_local_max_refinement_change, mapper_opts,
+          s->inc_opts->LocalBundleAdjustment(), s->inc_opts->Triangulation(),
+          image_id);
+    }
+  }
+  if (out_new_points) {
+    *out_new_points = static_cast<int>(s->live_recon->NumPoints3D()) - before_pts;
+  }
+  return reg_ok;
 }
 
 }  // namespace
@@ -969,6 +1162,259 @@ aether_sfm_result_t aether_sfm_register_next_frame(
   }
 }
 
+// ─── TRUE LIVE-INTERLEAVED add+register ─────────────────────────────
+aether_sfm_result_t aether_sfm_set_live_params(aether_sfm_session_t* s,
+                                               int recache_every,
+                                               int bootstrap_k,
+                                               int max_register_per_call) {
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  if (recache_every > 0) s->live_recache_every = recache_every;
+  if (bootstrap_k >= 2) s->live_bootstrap_k = bootstrap_k;
+  if (max_register_per_call > 0)
+    s->live_max_register_per_call = max_register_per_call;
+  return AETHER_SFM_OK;
+}
+
+aether_sfm_result_t aether_sfm_set_pose_prior_enabled(aether_sfm_session_t* s,
+                                                      int enable) {
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  s->live_use_pose_prior = (enable != 0);
+  return AETHER_SFM_OK;
+}
+
+aether_sfm_result_t aether_sfm_set_image_pose_prior(
+    aether_sfm_session_t* s, int image_id, const double* cam_from_world_3x4) {
+  if (!s || !cam_from_world_3x4 || image_id <= 0)
+    return AETHER_SFM_ERR_INVALID_ARG;
+  const double* m = cam_from_world_3x4;
+  Eigen::Matrix3d R;
+  R << m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10];
+  const Eigen::Vector3d t(m[3], m[7], m[11]);
+  const colmap::Rigid3d cam_from_world(Eigen::Quaterniond(R).normalized(), t);
+  s->live_pose_prior[static_cast<colmap::image_t>(image_id)] = cam_from_world;
+  return AETHER_SFM_OK;
+}
+
+int aether_sfm_num_prior_registered(aether_sfm_session_t* s) {
+  return s ? s->live_prior_reg_count : 0;
+}
+
+// Stage one source-db image (with its keypoints + the matches/TVGs connecting it
+// to already-staged images) into the live session db, preserving image_id. This
+// is the host-verify feed: it makes the real414 graph arrive one frame at a time
+// in TEMPORAL order so the live cloud genuinely grows per frame.
+aether_sfm_result_t aether_sfm_live_stage_db_image(aether_sfm_session_t* s,
+                                                   const char* src_db_path,
+                                                   int src_image_id,
+                                                   int* out_frame_id) {
+  if (!s || !s->db || !src_db_path) return AETHER_SFM_ERR_INVALID_ARG;
+  try {
+    // Open the source graph once and cache it on the session.
+    if (!s->live_src_db) {
+      s->live_src_db = colmap::Database::Open(src_db_path);
+      if (!s->live_src_db) return AETHER_SFM_ERR_DB;
+      // Copy rigs + cameras up-front (small, shared by all images).
+      for (const colmap::Rig& rig : s->live_src_db->ReadAllRigs()) {
+        if (!s->db->ExistsRig(rig.RigId())) s->db->WriteRig(rig, /*use=*/true);
+      }
+      for (const colmap::Camera& cam : s->live_src_db->ReadAllCameras()) {
+        if (!s->db->ExistsCamera(cam.camera_id))
+          s->db->WriteCamera(cam, /*use=*/true);
+      }
+    }
+    const colmap::image_t image_id =
+        static_cast<colmap::image_t>(src_image_id);
+    // The feed index for this staged frame is the number staged so far; record
+    // the feed_idx -> image_id map so add_and_register_frame can resolve it.
+    const int feed_idx = static_cast<int>(s->live_frame_to_image.size());
+    if (s->db->ExistsImage(image_id)) {
+      // already staged (idempotent) — keep the existing mapping.
+      if (out_frame_id) *out_frame_id = feed_idx;
+      return AETHER_SFM_OK;
+    }
+    // Frame (4.0.4 rigs/frames): copy the owning frame if present + not yet here.
+    colmap::Image img = s->live_src_db->ReadImage(image_id);
+    if (img.HasFrameId() && !s->db->ExistsFrame(img.FrameId())) {
+      colmap::Frame fr = s->live_src_db->ReadFrame(img.FrameId());
+      s->db->WriteFrame(fr, /*use_frame_id=*/true);
+    }
+    s->db->WriteImage(img, /*use_image_id=*/true);
+    s->db->WriteKeypoints(image_id, s->live_src_db->ReadKeypoints(image_id));
+
+    // Copy matches + TVGs linking this image to ALREADY-staged images (temporal:
+    // only earlier-fed frames exist yet, exactly the streaming reality).
+    for (const auto& [fed_idx, prev_image_id] : s->live_frame_to_image) {
+      if (!s->live_src_db->ExistsMatches(prev_image_id, image_id) &&
+          !s->live_src_db->ExistsMatches(image_id, prev_image_id)) {
+        continue;
+      }
+      colmap::FeatureMatches m =
+          s->live_src_db->ReadMatches(prev_image_id, image_id);
+      if (!m.empty()) s->db->WriteMatches(prev_image_id, image_id, m);
+      if (s->live_src_db->ExistsTwoViewGeometry(prev_image_id, image_id)) {
+        colmap::TwoViewGeometry tvg =
+            s->live_src_db->ReadTwoViewGeometry(prev_image_id, image_id);
+        s->db->WriteTwoViewGeometry(prev_image_id, image_id, tvg);
+      }
+    }
+    // Record the feed_idx -> image_id map now that the frame is staged.
+    s->live_frame_to_image[feed_idx] = image_id;
+    if (out_frame_id) *out_frame_id = feed_idx;
+    return AETHER_SFM_OK;
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_DB;
+  }
+}
+
+aether_sfm_result_t aether_sfm_add_and_register_frame(
+    aether_sfm_session_t* s, int frame_id,
+    aether_sfm_live_stats_t* out_stats) {
+  if (out_stats) std::memset(out_stats, 0, sizeof(*out_stats));
+  if (!s || !s->db) return AETHER_SFM_ERR_INVALID_ARG;
+  try {
+    s->live_mode = true;
+    // Resolve the image_id for this feed index. Production: add_frame_with_features
+    // already wrote it and recorded s->frames[frame_id].image_id. Bench: the
+    // staging helper wrote it preserving image_id (frame_to_image filled below).
+    colmap::image_t image_id = 0;
+    if (frame_id >= 0 && frame_id < static_cast<int>(s->frames.size())) {
+      image_id = s->frames[frame_id].image_id;
+    }
+    auto it = s->live_frame_to_image.find(frame_id);
+    if (it != s->live_frame_to_image.end()) image_id = it->second;
+    if (image_id == 0) return AETHER_SFM_ERR_INVALID_ARG;
+
+    // Record this frame's name into the fed-subset filter so the next re-cache
+    // includes it. The graph GROWS by exactly this image each call.
+    const std::string name = s->db->ReadImage(image_id).Name();
+    s->live_fed_names.insert(name);
+    s->live_frame_to_image[frame_id] = image_id;
+    ++s->live_fed_count;
+    ++s->live_since_recache;
+
+    double recache_ms = 0.0;
+    int did_recache = 0, did_bootstrap = 0;
+
+    if (!s->live_seeded) {
+      // BOOTSTRAP phase: accumulate live_bootstrap_k frames, then build the cache
+      // over them and seed. Until seeded, the cloud is empty (no registered model
+      // yet) — this is the live bootstrap, not a pre-built full graph.
+      if (s->live_fed_count >= s->live_bootstrap_k) {
+        if (LiveRebuildCacheAndMapper(s, &recache_ms)) {
+          did_recache = 1;
+          s->live_since_recache = 0;
+          if (LiveBootstrapSeed(s)) {
+            s->live_seeded = true;
+            did_bootstrap = 1;
+            {
+              std::lock_guard<std::mutex> lk(s->recon_mutex);
+              s->recon = s->live_recon;  // getters read the live cloud
+            }
+            // All fed images become the pending frontier except the ones the seed
+            // just registered; the next add_and_register sweep will register the
+            // ones now connected to the seed.
+            for (const auto& [fidx, iid] : s->live_frame_to_image) {
+              if (!(s->live_recon->ExistsImage(iid) &&
+                    s->live_recon->Image(iid).HasPose())) {
+                s->live_pending.insert(iid);
+              }
+            }
+          }
+        }
+      }
+      // Not seeded yet (or seed not ready): report accumulation state.
+      if (out_stats) {
+        out_stats->registered = 0;
+        out_stats->new_points =
+            s->live_recon ? static_cast<int>(s->live_recon->NumPoints3D()) : 0;
+        out_stats->total_points = out_stats->new_points;
+        out_stats->total_registered =
+            s->live_recon ? static_cast<int>(s->live_recon->NumRegFrames()) : 0;
+        out_stats->reproj_px =
+            (s->live_recon && s->live_recon->NumPoints3D() > 0)
+                ? s->live_recon->ComputeMeanReprojectionError()
+                : 0.0;
+        out_stats->recache_ms = recache_ms;
+        out_stats->did_recache = did_recache;
+        out_stats->did_bootstrap = did_bootstrap;
+      }
+      return AETHER_SFM_OK;
+    }
+
+    // STEADY-STATE: the just-fed frame joins the pending frontier. We re-cache
+    // when due (periodic) OR when the current frame isn't in the (stale) cache,
+    // so its correspondences become visible; then we sweep the pending frontier.
+    s->live_pending.insert(image_id);
+
+    // Re-cache PERIODICALLY only (every live_recache_every frames). The current
+    // frame need NOT be in the cache this instant — it waits in the pending
+    // frontier for the next periodic rebuild. This bounds the re-cache CADENCE so
+    // the per-frame register cost stays flat (no force-rebuild every frame). The
+    // cloud therefore grows in bursts every live_recache_every frames (the genuine
+    // semi-live behavior the workaround provides), not strictly 1-per-frame.
+    const bool recache_due = s->live_since_recache >= s->live_recache_every;
+    if (recache_due) {
+      if (LiveRebuildCacheAndMapper(s, &recache_ms)) {
+        did_recache = 1;
+        s->live_since_recache = 0;
+      }
+    }
+
+    int new_points = 0;
+    int registered_this_call = 0;
+    bool current_reg = false;
+    const double tr0 = NowMs();
+    // BOUNDED retry sweep over the pending frontier. Registering one frame +
+    // triangulating it gives covisible neighbours new 2D-3D correspondences, so
+    // newly-registerable frames cascade — but we CAP the cascade at
+    // live_max_register_per_call so the per-frame cost stays O(local*cap), NOT
+    // O(pending). The remaining pending frames register on subsequent calls,
+    // spreading the burst and keeping the cloud growing steadily. Each registered
+    // frame's local BA is O(local); the cap bounds how many run per call.
+    if (s->mapper && s->live_recon) {
+      bool progress = true;
+      while (progress && registered_this_call < s->live_max_register_per_call) {
+        progress = false;
+        std::vector<colmap::image_t> to_try(s->live_pending.begin(),
+                                            s->live_pending.end());
+        for (const colmap::image_t cand : to_try) {
+          if (registered_this_call >= s->live_max_register_per_call) break;
+          if (!s->live_recon->ExistsImage(cand)) continue;  // not in cache yet
+          int np = 0;
+          if (LiveRegisterImage(s, cand, &np)) {
+            s->live_pending.erase(cand);
+            new_points += np;
+            ++registered_this_call;
+            progress = true;
+            if (cand == image_id) current_reg = true;
+          }
+        }
+      }
+    }
+    const double register_ms = NowMs() - tr0;
+
+    if (out_stats) {
+      // "registered" = the cloud grew live this call (current frame got a pose,
+      // OR a pending frame finally registered now that its neighbours are in).
+      out_stats->registered = (current_reg || new_points > 0) ? 1 : 0;
+      out_stats->new_points = new_points;
+      out_stats->total_points =
+          static_cast<int>(s->live_recon->NumPoints3D());
+      out_stats->total_registered =
+          static_cast<int>(s->live_recon->NumRegFrames());
+      s->live_recon->UpdatePoint3DErrors();
+      out_stats->reproj_px = s->live_recon->ComputeMeanReprojectionError();
+      out_stats->register_ms = register_ms;
+      out_stats->recache_ms = recache_ms;
+      out_stats->did_recache = did_recache;
+      out_stats->did_bootstrap = did_bootstrap;
+    }
+    return AETHER_SFM_OK;
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
 // Two-phase async finalize. Phase 1 (synchronous, this call): incremental
 // register + local BA only -> LOCAL reconstruction is live in *recon the instant
 // this returns OK (status = LOCAL_READY), so the UI can show the model now.
@@ -1099,6 +1545,49 @@ void aether_sfm_points_free(aether_sfm_point_t* points) {
   std::free(points);
 }
 
+// ── AETHER DIAGNOSTIC: dump the per-image final RegisterNextImage failure-reason
+//    distribution for every FED frame that never registered, plus the raw gate
+//    counts (visible 3D pts / 2D-3D corrs vs the min-inlier threshold). Writes a
+//    line-per-failing-frame CSV to out_buf:
+//      feed_image_id,reason,num_visible,num_corrs,min_inliers,attempts
+//    reason codes: 0=success 1=too few VISIBLE 3D pts 2=too few 2D-3D corrs
+//                  3=PnP failed 4=too few inliers 5=refine failed
+//                  6=other/early 7=never attempted (never in cache during a sweep)
+// Returns the number of failing (unregistered fed) frames.
+int aether_sfm_dump_reg_failures(aether_sfm_session_t* s, char* out_buf,
+                                 int out_cap) {
+  if (!s || !s->live_recon) return 0;
+  int n_fail = 0;
+  int off = 0;
+  auto emit = [&](colmap::image_t iid, int reason, int nv, int nc, int mi,
+                  int att) {
+    if (out_buf && off < out_cap - 1) {
+      int w = std::snprintf(out_buf + off, out_cap - off,
+                            "%d,%d,%d,%d,%d,%d\n", static_cast<int>(iid), reason,
+                            nv, nc, mi, att);
+      if (w > 0) off += w;
+    }
+    ++n_fail;
+  };
+  // Every fed frame that does NOT have a pose in the live model is a failure.
+  for (const auto& [feed_idx, iid] : s->live_frame_to_image) {
+    (void)feed_idx;
+    const bool registered = s->live_recon->ExistsImage(iid) &&
+                            s->live_recon->Image(iid).HasPose();
+    if (registered) continue;
+    auto it = s->live_reg_fail.find(iid);
+    if (it != s->live_reg_fail.end()) {
+      emit(iid, it->second.reason, it->second.num_visible, it->second.num_corrs,
+           it->second.min_inliers, it->second.attempts);
+    } else {
+      // Fed but RegisterNextImage was never even called on it (it never entered
+      // the cache-resident pending set during a sweep). reason 7.
+      emit(iid, 7, -1, -1, -1, 0);
+    }
+  }
+  return n_fail;
+}
+
 void aether_sfm_free(aether_sfm_session_t* s) {
   if (!s) return;
   // The async-finalize worker captures `s`; it MUST finish before we delete.
@@ -1112,6 +1601,12 @@ void aether_sfm_free(aether_sfm_session_t* s) {
     } catch (...) {
     }
     s->mapper.reset();
+  }
+  if (s->live_src_db) {
+    try {
+      s->live_src_db->Close();
+    } catch (...) {
+    }
   }
   if (s->db) {
     try {

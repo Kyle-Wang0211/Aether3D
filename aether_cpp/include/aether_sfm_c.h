@@ -167,6 +167,109 @@ aether_sfm_result_t aether_sfm_register_next_frame(
     int* out_total_points,      // total points3D in the live model now
     double* out_reproj);        // current mean reproj over the live model
 
+// ─── TRUE LIVE-INTERLEAVED incremental register (sparse cloud grows DURING
+//     capture) ──────────────────────────────────────────────────────────
+// The frozen-graph model above (begin_incremental + register_next_frame) requires
+// ALL frames to be in the db BEFORE begin_incremental, because COLMAP 4.0.4's
+// CorrespondenceGraph::Finalize() is one-shot and irreversible (it destroys the
+// mutable per-image `corrs` and the query path FindCorrespondences THROW_CHECKs
+// finalized_). So that path is a POST-capture replay over a fully-captured graph.
+//
+// This live path is genuinely interleaved: it adds a frame's correspondences to a
+// LIVE, growing session and registers it immediately, with the cloud growing
+// frame-by-frame DURING capture. Because stock COLMAP cannot extend a finalized
+// cache in place, the live-mutation mechanism is a PERIODIC BOUNDED RE-CACHE
+// (the recommended workaround): the new frame's image+keypoints+matches+TVGs are
+// streamed into the db every call; every `recache_every` frames (default 8) the
+// session rebuilds a fresh DatabaseCache + IncrementalMapper and CONTINUES the
+// SAME live Reconstruction (Reconstruction::Load is additive + preserves the
+// already-registered poses/3D points, EndReconstruction(discard=false) keeps the
+// registered model via TearDown). Between re-caches, newly-cached frames register
+// against the existing model via RegisterNextImage + TriangulateImage + local BA.
+//
+// COST (honest): the per-frame REGISTER step is O(local) (PnP + this image's
+// triangulation + fixed-window local BA) and does NOT grow with N. The re-cache
+// rebuild is O(current graph) and lands once per `recache_every` frames; on device
+// it runs on a background thread off the per-frame critical path. The two out-
+// params out_recache_ms / out_register_ms separate the two so the caller can see
+// the register cost stays flat while the (amortized) re-cache spike is reported.
+//
+// Bootstrap is handled live: the first `bootstrap_k` frames are accumulated, then
+// the seed runs (FindInitialImagePair -> RegisterInitialImagePair ->
+// TriangulateImage x2 -> AdjustGlobalBundle -> Normalize -> Filter); subsequent
+// frames register incrementally. out_registered=0 with AETHER_SFM_OK = not yet
+// registerable (normal streaming outcome — keep feeding frames).
+//
+// This REPLACES the begin/freeze model for the live path; the old path is kept for
+// comparison/baseline. Configure recache_every / bootstrap_k via the options-less
+// defaults (8 / 6) or aether_sfm_set_live_params.
+typedef struct aether_sfm_live_stats {
+  int registered;       // 1 if THIS frame got a pose this call, else 0
+  int new_points;       // points3D created this call (delta)
+  int total_points;     // total points3D in the live model now
+  int total_registered; // running count of registered frames
+  double reproj_px;     // current mean reproj over the live model
+  double register_ms;   // O(local) per-frame register wall time (flat in N)
+  double recache_ms;    // re-cache rebuild wall time this call (0 if no rebuild)
+  int did_recache;      // 1 if a graph re-cache happened this call
+  int did_bootstrap;    // 1 if the bootstrap seed fired this call
+} aether_sfm_live_stats_t;
+
+// Tune the live path. recache_every>0 = rebuild the cache every N frames;
+// bootstrap_k>=2 = accumulate this many frames before seeding. Call before the
+// first aether_sfm_add_and_register_frame (later calls are honored at the next
+// boundary). Defaults: recache_every=8, bootstrap_k=6.
+// max_register_per_call>0 caps how many frames register per add_and_register call
+// (bounds the cascade cost; the rest drain on later calls). Pass 0 to leave the
+// default (4).
+aether_sfm_result_t aether_sfm_set_live_params(aether_sfm_session_t* s,
+                                               int recache_every,
+                                               int bootstrap_k,
+                                               int max_register_per_call);
+
+// AETHER POSE-PRIOR PATH. Enable a known per-frame ARKit world pose so that
+// frames whose 2D-3D visibility is too low for plain PnP register via the known
+// pose instead. `enable` toggles the prior fallback in LiveRegisterImage.
+aether_sfm_result_t aether_sfm_set_pose_prior_enabled(aether_sfm_session_t* s,
+                                                      int enable);
+
+// Attach an ARKit pose prior for one db image. `cam_from_world` is the 3x4
+// COLMAP-convention camera-from-world pose as a row-major [R|t] (12 doubles:
+// r00 r01 r02 tx r10 r11 r12 ty r20 r21 r22 tz). The caller is responsible for
+// converting the ARKit world-from-camera transform into COLMAP cam_from_world
+// (rotation transpose + camera-axis flip). Stored on the session and consumed by
+// LiveRegisterImage's prior fallback only when the prior path is enabled.
+aether_sfm_result_t aether_sfm_set_image_pose_prior(aether_sfm_session_t* s,
+                                                    int image_id,
+                                                    const double* cam_from_world_3x4);
+
+// Read back how many frames registered VIA the pose-prior fallback (diagnostic).
+int aether_sfm_num_prior_registered(aether_sfm_session_t* s);
+
+// TRUE live-interleaved add+register. `frame_id` is the caller's monotonically-
+// increasing capture index (also the order in which frames must be fed). The
+// session must already carry this frame's image+correspondences in the db — in
+// production via a prior aether_sfm_add_frame_with_features(frame_id...) on the
+// SAME session; in the host-verify bench via aether_sfm_live_stage_db_image which
+// stages one real-graph image into the live db in temporal order. Adds the frame
+// to the live graph (periodic bounded re-cache) and registers it immediately.
+aether_sfm_result_t aether_sfm_add_and_register_frame(
+    aether_sfm_session_t* s,
+    int frame_id,
+    aether_sfm_live_stats_t* out_stats);   // may be NULL
+
+// HOST-VERIFY helper: stage ONE image (by the live-feed index `feed_index` into a
+// caller-supplied temporal image_id ordering) FROM an already-open source db that
+// carries the full graph, INTO the live session's db, copying its keypoints +
+// the matches/TVGs that connect it to previously-staged images. This is how the
+// bench feeds the real414 graph in TEMPORAL order one frame at a time so the live
+// cloud genuinely grows per frame (not a pre-built full graph). Production does
+// NOT use this — it streams real features via add_frame_with_features.
+aether_sfm_result_t aether_sfm_live_stage_db_image(aether_sfm_session_t* s,
+                                                   const char* src_db_path,
+                                                   int src_image_id,
+                                                   int* out_frame_id);
+
 // ─── bench-only: attach an EXISTING db's frozen correspondence graph ─
 // HOST-VERIFY helper (NOT a production capture entry point). Opens an existing
 // COLMAP database that ALREADY carries a complete correspondence graph (images +

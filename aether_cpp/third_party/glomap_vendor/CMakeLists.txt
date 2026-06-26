@@ -243,4 +243,28 @@ if(BUILD_BENCH)
     /opt/homebrew/lib/libglog.dylib
     "-lsqlite3"
     ${ACCELERATE_FW})
+
+  # [gpu-sift-s1] HOST verification of the TRUE LIVE-INTERLEAVED add+register ABI
+  # (aether_sfm_add_and_register_frame). Feeds the real414 graph ONE frame at a
+  # time in TEMPORAL (photo_bundle.json timestamp) order into a LIVE, growing
+  # session — the sparse cloud grows DURING the feed via periodic bounded re-cache
+  # (NO pre-built full graph). Gates live mutation + per-frame growth + O(local)
+  # register cost + coverage against the KNOWN batch baseline 0.8504.
+  add_executable(sfm_live_verify_exe
+    bench/sfm_live_verify.cc
+    bench/aether_sfm_c.cc
+    bench/dsp_sift_c.cc)
+  target_include_directories(sfm_live_verify_exe PRIVATE
+    ${V}/stubs ${AT}/../include)
+  target_compile_definitions(sfm_live_verify_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED VL_DISABLE_SSE2 VL_DISABLE_AVX)
+  target_compile_options(sfm_live_verify_exe PRIVATE -w)
+  target_link_libraries(sfm_live_verify_exe PRIVATE
+    glomap_core
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
 endif()

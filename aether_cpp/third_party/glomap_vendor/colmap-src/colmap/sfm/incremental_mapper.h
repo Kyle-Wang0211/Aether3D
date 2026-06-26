@@ -59,6 +59,15 @@ namespace colmap {
 //  }
 //  mapper.EndReconstruction(false);
 //
+// ── AETHER DIAGNOSTIC INSTRUMENTATION (temporary) ───────────────────────────
+// Why did the most recent RegisterNextImage return false?
+//   0=success 1=too few VISIBLE 3D pts 2=too few 2D-3D corrs 3=PnP failed
+//   4=too few inliers 5=refine failed 6=other/early.
+int AetherLastRegFailReason();
+int AetherLastNumVisiblePoints3D();
+int AetherLastNum2D3DCorrs();
+int AetherLastMinInliers();
+
 class IncrementalMapper {
  public:
   // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
@@ -214,6 +223,22 @@ class IncrementalMapper {
   // Attempt to register image to the existing model. This requires that
   // a previous call to `RegisterInitialImagePair` was successful.
   bool RegisterNextImage(const Options& options, image_t image_id);
+
+  // AETHER: register an image using a KNOWN external (ARKit) pose prior, fully
+  // bypassing the EstimateAbsolutePose P3P/RANSAC 2D-3D resection that fails for
+  // ~94% of live frames (reason 1: too few VISIBLE 3D points). The frame's
+  // cam_from_world is set directly from the prior, the frame is marked
+  // registered, and any existing 3D points that correspond to this image's 2D
+  // features (via the correspondence graph) and reproject under the prior within
+  // `max_reproj_error_px` are linked as observations. Returns true if the frame
+  // was registered (which it always can be, since the pose is given), regardless
+  // of how many points it currently observes — subsequent TriangulateImage then
+  // triangulates new structure against neighbours. This is the pose-prior
+  // register path COLMAP 4.0.4 does NOT ship.
+  bool RegisterNextImageWithPosePrior(const Options& options,
+                                      image_t image_id,
+                                      const Rigid3d& cam_from_world,
+                                      double max_reproj_error_px = 12.0);
 
   // Attempts to register image using structure-less resectioning as proposed in
   // "Structure from Motion Using Structure-less Resection" by Zheng and Wu.

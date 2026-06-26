@@ -37,8 +37,33 @@
 #include "colmap/sfm/incremental_mapper_impl.h"
 
 #include <array>
+#include <limits>
+#include <optional>
+#include <unordered_set>
 
 namespace colmap {
+
+// ── AETHER DIAGNOSTIC INSTRUMENTATION (temporary) ───────────────────────────
+// Records WHY the most recent RegisterNextImage call returned false. Read by the
+// live-verify bench after each failed registration to build the failure-reason
+// distribution. Thread-local so concurrent registrations don't clobber it.
+//   0 = success (returned true)
+//   1 = too few VISIBLE 3D points       (NumVisiblePoints3D < min_inliers)
+//   2 = too few 2D-3D correspondences   (tri_points2D < min_inliers, PnP can't run)
+//   3 = absolute-pose / PnP estimation failed
+//   4 = too few inliers after pose estimation
+//   5 = pose refinement failed
+//   6 = other (generalized-frame path / early return)
+// Also captures the two raw counts at the gate for "do failing frames simply lack
+// visible 3D points" analysis.
+thread_local int g_aether_last_reg_fail_reason = 0;
+thread_local int g_aether_last_num_visible_pts3d = -1;
+thread_local int g_aether_last_num_2d3d_corrs = -1;
+thread_local int g_aether_last_min_inliers = -1;
+int AetherLastRegFailReason() { return g_aether_last_reg_fail_reason; }
+int AetherLastNumVisiblePoints3D() { return g_aether_last_num_visible_pts3d; }
+int AetherLastNum2D3DCorrs() { return g_aether_last_num_2d3d_corrs; }
+int AetherLastMinInliers() { return g_aether_last_min_inliers; }
 
 bool IncrementalMapper::Options::Check() const {
   CHECK_OPTION_GT(init_min_num_inliers, 0);
@@ -191,6 +216,12 @@ bool IncrementalMapper::RegisterNextImage(const Options& options,
   THROW_CHECK_GT(reconstruction_->NumRegFrames(), 0);
   THROW_CHECK(options.Check());
 
+  // AETHER: reset diagnostic state for this registration attempt.
+  g_aether_last_reg_fail_reason = 6;  // default = other/early until a gate sets it
+  g_aether_last_num_visible_pts3d = -1;
+  g_aether_last_num_2d3d_corrs = -1;
+  g_aether_last_min_inliers = -1;
+
   Image& image = reconstruction_->Image(image_id);
   Camera& camera = *image.CameraPtr();
 
@@ -227,8 +258,12 @@ bool IncrementalMapper::RegisterNextImage(const Options& options,
   reg_stats_.num_reg_trials[image_id] += 1;
 
   // Check if enough 2D-3D correspondences.
+  g_aether_last_min_inliers = options.abs_pose_min_num_inliers;
+  g_aether_last_num_visible_pts3d =
+      static_cast<int>(obs_manager_->NumVisiblePoints3D(image_id));
   if (obs_manager_->NumVisiblePoints3D(image_id) <
       static_cast<size_t>(options.abs_pose_min_num_inliers)) {
+    g_aether_last_reg_fail_reason = 1;  // too few VISIBLE 3D points
     VLOG(2) << "Image observes insufficient number of points for registration ("
             << obs_manager_->NumVisiblePoints3D(image_id) << " < "
             << options.abs_pose_min_num_inliers << ")";
@@ -292,8 +327,10 @@ bool IncrementalMapper::RegisterNextImage(const Options& options,
   // The size of `next_image.num_tri_obs` and `tri_corrs_point2D_idxs.size()`
   // can only differ, when there are images with bogus camera parameters, and
   // hence we skip some of the 2D-3D correspondences.
+  g_aether_last_num_2d3d_corrs = static_cast<int>(tri_points2D.size());
   if (tri_points2D.size() <
       static_cast<size_t>(options.abs_pose_min_num_inliers)) {
+    g_aether_last_reg_fail_reason = 2;  // too few 2D-3D corrs for PnP
     VLOG(2) << "Insufficient number of 2D-3D correspondences for registration ("
             << tri_points2D.size() << " < " << options.abs_pose_min_num_inliers
             << ")";
@@ -383,11 +420,13 @@ bool IncrementalMapper::RegisterNextImage(const Options& options,
                             &camera,
                             &num_inliers,
                             &inlier_mask)) {
+    g_aether_last_reg_fail_reason = 3;  // PnP / absolute-pose estimation failed
     VLOG(2) << "Absolute pose estimation failed";
     return false;
   }
 
   if (num_inliers < static_cast<size_t>(options.abs_pose_min_num_inliers)) {
+    g_aether_last_reg_fail_reason = 4;  // too few inliers after pose estimation
     VLOG(2) << "Absolute pose estimation failed due to insufficient inliers ("
             << num_inliers << " < " << options.abs_pose_min_num_inliers << ")";
     return false;
@@ -403,9 +442,12 @@ bool IncrementalMapper::RegisterNextImage(const Options& options,
                           tri_points3D,
                           &cam_from_world,
                           &camera)) {
+    g_aether_last_reg_fail_reason = 5;  // pose refinement failed
     VLOG(2) << "Absolute pose refinement failed";
     return false;
   }
+
+  g_aether_last_reg_fail_reason = 0;  // AETHER: reached success path
 
   //////////////////////////////////////////////////////////////////////////////
   // Continue tracks
@@ -431,6 +473,84 @@ bool IncrementalMapper::RegisterNextImage(const Options& options,
     }
   }
 
+  return true;
+}
+
+// AETHER: pose-prior register path. Sets cam_from_world from a KNOWN external
+// (ARKit) pose, marks the frame registered (no PnP/RANSAC, so it CANNOT be
+// blocked by the "too few visible 3D points" gate that kills ~94% of live
+// frames), then links any existing 3D points whose graph correspondences
+// reproject under the prior within max_reproj_error_px. Trivial frames only
+// (single-sensor); generalized rigs fall back to the caller.
+bool IncrementalMapper::RegisterNextImageWithPosePrior(
+    const Options& options,
+    const image_t image_id,
+    const Rigid3d& cam_from_world,
+    const double max_reproj_error_px) {
+  THROW_CHECK_NOTNULL(reconstruction_);
+  THROW_CHECK_NOTNULL(obs_manager_);
+
+  Image& image = reconstruction_->Image(image_id);
+  if (image.HasPose()) return true;  // already registered
+
+  // Only trivial (single-image) frames here; rigs go through the normal path.
+  if (image.FramePtr()->RigPtr()->NumSensors() > 1) {
+    g_aether_last_reg_fail_reason = 6;
+    return false;
+  }
+
+  reg_stats_.num_reg_trials[image_id] += 1;
+
+  // 1) Set the pose DIRECTLY from the ARKit prior and register the frame. From
+  //    here HasPose() is true, so this frame becomes a registered neighbour that
+  //    later frames can triangulate against — breaking the bootstrap chain.
+  image.FramePtr()->SetCamFromWorld(image.CameraId(), cam_from_world);
+  obs_manager_->RegisterFrame(image.FrameId());
+  RegisterFrameEvent(image.FrameId());
+
+  // 2) Link existing 3D points: for each 2D feature, walk the correspondence
+  //    graph; if a correspondent in a posed image already owns a 3D point, test
+  //    whether that point reprojects near this 2D feature under the prior pose.
+  //    If so, add the observation (generous threshold — the prior has drift).
+  const Camera& camera = *image.CameraPtr();
+  const std::shared_ptr<const CorrespondenceGraph> correspondence_graph =
+      database_cache_->CorrespondenceGraph();
+  std::unordered_set<point3D_t> linked;
+  int num_linked = 0;
+  for (point2D_t point2D_idx = 0; point2D_idx < image.NumPoints2D();
+       ++point2D_idx) {
+    Point2D& point2D = image.Point2D(point2D_idx);
+    if (point2D.HasPoint3D()) continue;
+    const auto corr_range =
+        correspondence_graph->FindCorrespondences(image_id, point2D_idx);
+    for (const auto* corr = corr_range.beg; corr < corr_range.end; ++corr) {
+      const Image& corr_image = reconstruction_->Image(corr->image_id);
+      if (!corr_image.HasPose()) continue;
+      const Point2D& corr_point2D = corr_image.Point2D(corr->point2D_idx);
+      if (!corr_point2D.HasPoint3D()) continue;
+      const point3D_t point3D_id = corr_point2D.point3D_id;
+      if (linked.count(point3D_id) > 0) continue;
+      const Point3D& point3D = reconstruction_->Point3D(point3D_id);
+      // Reproject the 3D point under the PRIOR pose and gate by pixel error.
+      const Eigen::Vector3d point_in_cam = cam_from_world * point3D.xyz;
+      if (point_in_cam.z() <= std::numeric_limits<double>::epsilon()) continue;
+      const std::optional<Eigen::Vector2d> proj =
+          camera.ImgFromCam(point_in_cam);
+      if (!proj) continue;
+      const double err = (*proj - point2D.xy).norm();
+      if (err > max_reproj_error_px) continue;
+      // Link this existing 3D point to the new image's 2D feature.
+      const TrackElement track_el(image_id, point2D_idx);
+      obs_manager_->AddObservation(point3D_id, track_el);
+      triangulator_->AddModifiedPoint3D(point3D_id);
+      linked.insert(point3D_id);
+      ++num_linked;
+      break;  // one 3D point per 2D feature
+    }
+  }
+
+  g_aether_last_reg_fail_reason = 0;
+  g_aether_last_num_2d3d_corrs = num_linked;
   return true;
 }
 

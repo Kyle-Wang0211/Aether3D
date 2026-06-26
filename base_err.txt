@@ -1,0 +1,5 @@
+bundle: 414 frames (temporal order)
+db: 414 images
+pose priors converted: 414 (use_prior=0)
+temporal ids resolved: 414
+streaming TEMPORAL subsequence [0,70) = 70 frames
