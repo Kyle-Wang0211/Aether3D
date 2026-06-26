@@ -187,6 +187,14 @@ struct aether_sfm_session {
   bool live_use_pose_prior = false;
   std::unordered_map<colmap::image_t, colmap::Rigid3d> live_pose_prior;  // cam_from_world
   int live_prior_reg_count = 0;  // how many frames registered VIA the prior path
+
+  // ── AETHER COVERAGE PROBE: BA cap. When set (env AETHER_LIVE_BACAP=1), skip
+  //    the per-frame IterativeLocalRefinement (local BA) — the term that drove
+  //    the prior p95 ~3065ms. This is a COVERAGE-ONLY probe: registration +
+  //    triangulation still run (so the prior path still has 3D structure to link
+  //    against), but the expensive local-window BA is disabled so a full-414 feed
+  //    completes fast. reproj/cost bounding is a SEPARATE known task.
+  bool live_cap_ba = false;     // skip IterativeLocalRefinement (local BA)
 };
 
 namespace {
@@ -603,7 +611,12 @@ bool LiveRegisterImage(aether_sfm_session* s, colmap::image_t image_id,
     for (const colmap::data_t& data_id : image.FramePtr()->ImageIds()) {
       s->mapper->TriangulateImage(s->inc_opts->Triangulation(), data_id.id);
     }
-    if (!already) {
+    // AETHER COVERAGE PROBE: cap the per-frame local BA (the p95 ~3065ms term).
+    // Coverage only depends on RegisterNextImage[WithPosePrior] succeeding +
+    // triangulation building cloud the prior path can link against; the local
+    // bundle adjustment refines but does not change WHICH frames register, so we
+    // skip it under AETHER_LIVE_BACAP to let a full-414 feed complete fast.
+    if (!already && !s->live_cap_ba) {
       s->mapper->IterativeLocalRefinement(
           s->inc_opts->ba_local_max_refinements,
           s->inc_opts->ba_local_max_refinement_change, mapper_opts,
@@ -1172,6 +1185,13 @@ aether_sfm_result_t aether_sfm_set_live_params(aether_sfm_session_t* s,
   if (bootstrap_k >= 2) s->live_bootstrap_k = bootstrap_k;
   if (max_register_per_call > 0)
     s->live_max_register_per_call = max_register_per_call;
+  // AETHER COVERAGE PROBE: env knob to cap the per-frame local BA. Env-gated so
+  // it stays out of the stable ABI (this is a diagnostic-only path).
+  if (const char* e = std::getenv("AETHER_LIVE_BACAP")) {
+    s->live_cap_ba = (e[0] != '0');
+    std::fprintf(stderr, "[aether] AETHER_LIVE_BACAP=%s -> live_cap_ba=%d\n", e,
+                 s->live_cap_ba ? 1 : 0);
+  }
   return AETHER_SFM_OK;
 }
 
