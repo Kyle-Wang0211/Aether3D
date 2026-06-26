@@ -173,4 +173,28 @@ if(BUILD_BENCH)
     /opt/homebrew/lib/libglog.dylib
     "-lsqlite3"
     ${ACCELERATE_FW})
+
+  # [gpu-sift-s1] HOST verification harness for the GPU-feature injection +
+  # match-persist path (GAP 1+2+3). Links glomap_core (has VLFeat extractor +
+  # CPU matcher + incremental SfM) + the two streaming-ABI TUs + the driver.
+  # Drives aether_sfm_create -> aether_sfm_add_frame_with_features (injection)
+  # -> aether_sfm_finalize (incremental mapper) over real DSP-SIFT features read
+  # from a prebuilt bench db, proving streamed frames REGISTER.
+  add_executable(sfm_inject_verify_exe
+    bench/sfm_inject_verify.cc
+    bench/aether_sfm_c.cc
+    bench/dsp_sift_c.cc)
+  target_include_directories(sfm_inject_verify_exe PRIVATE
+    ${V}/stubs ${AT}/../include)         # aether_sfm_c.h lives in aether_cpp/include
+  target_compile_definitions(sfm_inject_verify_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED VL_DISABLE_SSE2 VL_DISABLE_AVX)
+  target_compile_options(sfm_inject_verify_exe PRIVATE -w)
+  target_link_libraries(sfm_inject_verify_exe PRIVATE
+    glomap_core                          # VLFeat + matcher + incremental SfM
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
 endif()

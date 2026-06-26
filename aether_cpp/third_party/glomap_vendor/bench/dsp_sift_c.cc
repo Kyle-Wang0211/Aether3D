@@ -264,4 +264,73 @@ int aether_sift_match(const uint8_t* desc1,
   }
 }
 
+// Same brute-force match as aether_sift_match, but EMITS the index pairs so the
+// caller can persist correspondences (Database::WriteMatches). out_pairs is a
+// caller-allocated int buffer of capacity (out_cap_pairs*2); on success it is
+// filled with interleaved {i_in_image1, j_in_image2} pairs and *out_num_pairs is
+// the number of pairs written (<= out_cap_pairs). The indices are 0-based into
+// image1's / image2's keypoint arrays (i.e. point2D_idx). Returns 0 on success.
+//
+// This is the GAP-2 fix: the colmap brute-force matcher already produces a
+// FeatureMatches vector of {point2D_idx1, point2D_idx2}; the old count-only
+// entry discarded it. WriteMatches + EstimateTwoViewGeometry -> WriteTwoViewGeometry
+// (done in aether_sfm_c.cc) need exactly these index pairs to let the incremental
+// mapper build its correspondence graph and register the streamed frames.
+int aether_sift_match_pairs(const uint8_t* desc1,
+                            int n1,
+                            const uint8_t* desc2,
+                            int n2,
+                            double max_ratio,
+                            int* out_pairs,
+                            int out_cap_pairs,
+                            int* out_num_pairs) {
+  if (out_num_pairs) *out_num_pairs = 0;
+  try {
+    if (desc1 == nullptr || desc2 == nullptr || n1 <= 0 || n2 <= 0) return 1;
+    if (out_pairs == nullptr || out_cap_pairs <= 0) return 1;
+
+    auto d1 = std::make_shared<colmap::FeatureDescriptors>();
+    d1->type = colmap::FeatureExtractorType::SIFT;
+    d1->data.resize(n1, 128);
+    std::memcpy(d1->data.data(), desc1, static_cast<size_t>(n1) * 128);
+    auto d2 = std::make_shared<colmap::FeatureDescriptors>();
+    d2->type = colmap::FeatureExtractorType::SIFT;
+    d2->data.resize(n2, 128);
+    std::memcpy(d2->data.data(), desc2, static_cast<size_t>(n2) * 128);
+
+    colmap::FeatureMatchingOptions opts(
+        colmap::FeatureMatcherType::SIFT_BRUTEFORCE);
+    opts.sift = std::make_shared<colmap::SiftMatchingOptions>();
+    opts.sift->max_ratio = max_ratio > 0 ? max_ratio : 0.7;
+    opts.sift->cpu_brute_force_matcher = true;
+    opts.use_gpu = false;
+
+    std::unique_ptr<colmap::FeatureMatcher> matcher =
+        colmap::CreateSiftFeatureMatcher(opts);
+    if (!matcher) return 3;
+
+    colmap::FeatureMatcher::Image img1;
+    img1.image_id = 1;
+    img1.descriptors = d1;
+    colmap::FeatureMatcher::Image img2;
+    img2.image_id = 2;
+    img2.descriptors = d2;
+
+    colmap::FeatureMatches matches;
+    matcher->Match(img1, img2, &matches);
+
+    int written = 0;
+    for (const auto& m : matches) {
+      if (written >= out_cap_pairs) break;
+      out_pairs[2 * written] = static_cast<int>(m.point2D_idx1);
+      out_pairs[2 * written + 1] = static_cast<int>(m.point2D_idx2);
+      ++written;
+    }
+    if (out_num_pairs) *out_num_pairs = written;
+    return 0;
+  } catch (...) {
+    return 2;
+  }
+}
+
 }  // extern "C"

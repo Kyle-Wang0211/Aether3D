@@ -154,14 +154,39 @@ IngestFn make_sfm_ingest_fn(const char* db_path, int max_features,
 
     return [session](const CaptureFrame& f, const FrameFeatures& feats,
                      CloudSnapshot* out) -> bool {
-        (void)feats;  // aether_sfm_add_frame re-extracts internally in v1; when
-                      // the SfM ABI grows a "add pre-extracted features" entry
-                      // this passes feats.xy/desc straight through (no re-extract).
         int frame_id = -1;
-        const aether_sfm_result_t rc = aether_sfm_add_frame(
-            session.get(), f.gray, f.width, f.height, f.fx, f.fy, f.cx, f.cy,
-            f.has_pose ? f.pose_qwxyz : nullptr,
-            f.has_pose ? f.pose_t : nullptr, &frame_id);
+        aether_sfm_result_t rc;
+        // GAP-1: when the extract stage already produced features (the GPU /
+        // CPU ExtractFn ran upstream), INJECT them — no redundant re-extraction
+        // inside the SfM ABI. The orchestrator's FrameFeatures.xy is stride-2
+        // {x,y}; the injection ABI takes the GPU-native stride-4
+        // {x,y,sigma,octave}, so re-expand here (sigma/octave are unused by the
+        // SfM geometry and left 0). Falls back to the self-extracting
+        // aether_sfm_add_frame only when no features were handed in (e.g. the
+        // extract stage was skipped on a build without the extractor).
+        if (feats.count > 0 &&
+            feats.xy.size() >= static_cast<std::size_t>(feats.count) * 2 &&
+            feats.desc.size() >= static_cast<std::size_t>(feats.count) * 128) {
+            std::vector<float> kp4(static_cast<std::size_t>(feats.count) * 4, 0.f);
+            for (int i = 0; i < feats.count; ++i) {
+                kp4[i * 4 + 0] = feats.xy[2 * i];
+                kp4[i * 4 + 1] = feats.xy[2 * i + 1];
+                // kp4[i*4+2] sigma, kp4[i*4+3] octave: unused by SfM geometry.
+            }
+            rc = aether_sfm_add_frame_with_features(
+                session.get(), f.width, f.height, f.fx, f.fy, f.cx, f.cy,
+                kp4.data(), feats.desc.data(),
+                static_cast<unsigned int>(feats.count),
+                f.has_pose ? f.pose_qwxyz : nullptr,
+                f.has_pose ? f.pose_t : nullptr, &frame_id);
+        } else if (f.gray && f.width > 0 && f.height > 0) {
+            rc = aether_sfm_add_frame(
+                session.get(), f.gray, f.width, f.height, f.fx, f.fy, f.cx,
+                f.cy, f.has_pose ? f.pose_qwxyz : nullptr,
+                f.has_pose ? f.pose_t : nullptr, &frame_id);
+        } else {
+            return false;  // no features and no image to extract from
+        }
         if (rc != AETHER_SFM_OK) return false;
 
         // Per-frame LOCAL solve so the cloud GROWS during capture. finalize()

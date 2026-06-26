@@ -92,6 +92,31 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                          const double pose_t[3],      // may be NULL
                                          int* out_frame_id);
 
+// Add one frame from ALREADY-EXTRACTED features (the GPU DSP-SIFT extractor's
+// output) — NO internal re-extraction. This is the streaming feature-injection
+// entry the orchestrator's IngestFn calls with the GPU `feats` it already
+// computed (see aether_gpu_sift_extract):
+//   - keypoints_stride4: count * {x, y, sigma, octave} floats (GPU native layout;
+//     only x,y are used by the SfM geometry).
+//   - descriptors:       count * 128 uint8 RootSIFT.
+//   - width/height/fx/fy/cx/cy: shared-camera intrinsics (created lazily on the
+//     first frame, self-calibrated by BA from the ARKit prior).
+//   - pose_qwxyz/pose_t (may be NULL): ARKit world->cam pose prior used for
+//     pose-guided match pruning (cheaper matching; never invents pairs).
+// Internally: WriteKeypoints/WriteDescriptors for this image, then matches +
+// persists (WriteMatches + geometric verification -> WriteTwoViewGeometry)
+// against the previous k_neighbors frames so the incremental mapper can register
+// it. Returns the assigned frame index in *out_frame_id.
+aether_sfm_result_t aether_sfm_add_frame_with_features(
+    aether_sfm_session_t* s, int width, int height, float fx, float fy,
+    float cx, float cy,
+    const float* keypoints_stride4,   // count * {x,y,sigma,octave}
+    const uint8_t* descriptors,       // count * 128 RootSIFT
+    unsigned int count,
+    const double pose_qwxyz[4],       // may be NULL
+    const double pose_t[3],           // may be NULL
+    int* out_frame_id);
+
 // Run colmap::IncrementalPipeline over the accumulated db (native incremental
 // triangulation + re-triangulation + local/global BA). out_json (optional)
 // gets {solve_ms,n_registered,n_points3d,reproj_px}.

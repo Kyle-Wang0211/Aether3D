@@ -24,7 +24,9 @@
 #include "aether_sfm_c.h"
 
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/estimators/two_view_geometry.h"
 #include "colmap/feature/types.h"
+#include "colmap/feature/utils.h"
 #include "colmap/geometry/rigid3.h"
 #include "colmap/scene/camera.h"
 #include "colmap/scene/database.h"
@@ -36,8 +38,10 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -56,6 +60,13 @@ extern "C" int aether_dsp_sift_extract(const uint8_t* gray, int width,
 extern "C" int aether_sift_match(const uint8_t* desc1, int n1,
                                  const uint8_t* desc2, int n2, double max_ratio,
                                  int* out_num_matches);
+// GAP-2: brute-force match that EMITS the {i,j} index pairs (0-based into each
+// image's keypoints) so we can persist correspondences. out_pairs holds
+// out_cap_pairs*2 ints; *out_num_pairs = #pairs written. Returns 0 on success.
+extern "C" int aether_sift_match_pairs(const uint8_t* desc1, int n1,
+                                       const uint8_t* desc2, int n2,
+                                       double max_ratio, int* out_pairs,
+                                       int out_cap_pairs, int* out_num_pairs);
 
 // [MIGRATION 4.0.4 / STEP 5] The glomap::RetriangulateTracks linker stub was
 // removed together with GLOMAP. It existed only to satisfy -force_load of
@@ -78,6 +89,10 @@ struct FrameRecord {
   colmap::image_t image_id = 0;
   int n_keypoints = 0;
   std::vector<uint8_t> descriptors;  // 128 * n_keypoints, RootSIFT
+  std::vector<float> xy;             // 2 * n_keypoints, image pixel coords
+  bool has_pose = false;             // ARKit world->cam pose prior available
+  Eigen::Quaterniond pose_q{1, 0, 0, 0};  // world->cam rotation (qw,qx,qy,qz)
+  Eigen::Vector3d pose_t{0, 0, 0};         // world->cam translation
 };
 
 }  // namespace
@@ -211,8 +226,11 @@ aether_sfm_result_t RunIncremental(
     auto manager = std::make_shared<colmap::ReconstructionManager>();
 
     const double t0 = NowMs();
-    colmap::IncrementalPipeline pipeline(pipeline_opts, image_path, db_path,
-                                         manager);
+    // [MIGRATION 4.0.4] image_path moved into options; the pipeline ctor takes a
+    // Database shared_ptr (not a db_path string). Mirrors colmap_bench.cc.
+    pipeline_opts->image_path = image_path;
+    colmap::IncrementalPipeline pipeline(
+        pipeline_opts, colmap::Database::Open(db_path), manager);
     pipeline.Run();
     const double solve_ms = NowMs() - t0;
 
@@ -245,8 +263,10 @@ void RefineGlobalBA(aether_sfm_session* s,
     // finalize quality (reproj 1.1455). TriangulateReconstruction reads
     // ba_global_* + Mapper() + Triangulation() from these options.
     auto manager = std::make_shared<colmap::ReconstructionManager>();
-    colmap::IncrementalPipeline pipeline(popts, s->image_path, s->db_path,
-                                         manager);
+    // [MIGRATION 4.0.4] image_path in options; ctor takes a Database shared_ptr.
+    popts->image_path = s->image_path;
+    colmap::IncrementalPipeline pipeline(
+        popts, colmap::Database::Open(s->db_path), manager);
     pipeline.RefineReconstruction(refined);
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
@@ -257,6 +277,109 @@ void RefineGlobalBA(aether_sfm_session* s,
   } catch (...) {
     s->finalize_status.store(3);  // AETHER_SFM_FINALIZE_ERROR
   }
+}
+
+// Whether two frames carrying ARKit world->cam pose priors are within
+// `max_angle_deg` viewing-direction angle of each other. Used as the GAP-3
+// pose-prior guard: skip matching frame pairs whose cameras look in wildly
+// different directions (they cannot share enough surface for a useful epipolar
+// geometry), which prunes the O(k) candidate matches per frame to the ones the
+// pose says can actually overlap. Conservative: if either pose is missing we
+// return true (fall back to unguided matching — never drop a real pair).
+bool PosePriorAllowsMatch(const FrameRecord& a, const FrameRecord& b,
+                          double max_angle_deg) {
+  if (!a.has_pose || !b.has_pose) return true;  // unguided fallback
+  // world->cam rotation R maps world points into the camera frame. The camera's
+  // optical axis in WORLD coords is R^T * (0,0,1) = third ROW of R^T = third
+  // COLUMN of R... i.e. R.transpose().col(2). Compare the two world-space axes.
+  const Eigen::Matrix3d Ra = a.pose_q.normalized().toRotationMatrix();
+  const Eigen::Matrix3d Rb = b.pose_q.normalized().toRotationMatrix();
+  const Eigen::Vector3d za = Ra.transpose().col(2);  // cam a optical axis (world)
+  const Eigen::Vector3d zb = Rb.transpose().col(2);  // cam b optical axis (world)
+  const double cos_ang = za.normalized().dot(zb.normalized());
+  const double ang_deg =
+      std::acos(std::max(-1.0, std::min(1.0, cos_ang))) * 180.0 / M_PI;
+  return ang_deg <= max_angle_deg;
+}
+
+// GAP-2 + GAP-3 core: match `cur` against each of the previous k frames, persist
+// the resulting index-pair correspondences (Database::WriteMatches) and the
+// geometrically-verified inlier set (EstimateTwoViewGeometry ->
+// WriteTwoViewGeometry) so the incremental mapper's correspondence graph
+// (database_cache reads ReadTwoViewGeometries) can register the streamed frame.
+// `pose_guided` (GAP-3): when both frames carry an ARKit pose prior, skip pairs
+// whose optical axes diverge by more than guided_max_angle_deg (cheaper: fewer
+// brute-force matches + fewer RANSAC verifications). Returns the number of pairs
+// that produced a non-degenerate two-view geometry (>=1 means the frame is
+// connected into the graph).
+int MatchAndPersistAgainstPrev(aether_sfm_session* s, const FrameRecord& cur,
+                               bool pose_guided, double guided_max_angle_deg) {
+  const int frame_id = cur.frame_id;
+  const int k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 6;
+  const int start = (frame_id - k) > 0 ? (frame_id - k) : 0;
+  const double max_ratio =
+      s->options.match_max_ratio > 0 ? s->options.match_max_ratio : 0.7;
+
+  // The shared camera (created on the first frame) is used for both views — a
+  // single self-calibrated SIMPLE_PINHOLE group (see add_frame note). Reading it
+  // once avoids a per-pair db round-trip.
+  colmap::Camera camera = s->db->ReadCamera(s->camera_id);
+
+  // Reusable keypoint->points conversion for the current frame.
+  auto kps_to_points = [](const std::vector<float>& xy,
+                          int n) -> std::vector<Eigen::Vector2d> {
+    std::vector<Eigen::Vector2d> pts(n);
+    for (int i = 0; i < n; ++i) {
+      pts[i] = Eigen::Vector2d(xy[2 * i], xy[2 * i + 1]);
+    }
+    return pts;
+  };
+  const std::vector<Eigen::Vector2d> points_cur =
+      kps_to_points(cur.xy, cur.n_keypoints);
+
+  colmap::TwoViewGeometryOptions tvg_opts;  // colmap defaults (min 15 inliers)
+
+  int n_verified = 0;
+  std::vector<int> pair_buf;  // {i,j} flat
+  for (int j = start; j < frame_id; ++j) {
+    const FrameRecord& prev = s->frames[j];
+    if (pose_guided &&
+        !PosePriorAllowsMatch(prev, cur, guided_max_angle_deg)) {
+      continue;  // GAP-3: pose says these views can't overlap — skip
+    }
+
+    // GAP-2: get the actual index pairs (not just a count).
+    const int cap_pairs = std::min(prev.n_keypoints, cur.n_keypoints);
+    pair_buf.assign(static_cast<size_t>(cap_pairs) * 2, 0);
+    int n_pairs = 0;
+    const int mrc = aether_sift_match_pairs(
+        prev.descriptors.data(), prev.n_keypoints, cur.descriptors.data(),
+        cur.n_keypoints, max_ratio, pair_buf.data(), cap_pairs, &n_pairs);
+    if (mrc != 0 || n_pairs <= 0) continue;
+
+    colmap::FeatureMatches matches(n_pairs);
+    for (int m = 0; m < n_pairs; ++m) {
+      matches[m] = colmap::FeatureMatch(
+          static_cast<colmap::point2D_t>(pair_buf[2 * m]),       // idx in prev
+          static_cast<colmap::point2D_t>(pair_buf[2 * m + 1]));  // idx in cur
+    }
+    // Persist the raw matches (image_id order: prev=image1, cur=image2).
+    s->db->WriteMatches(prev.image_id, cur.image_id, matches);
+
+    // Geometric verification -> inlier two-view geometry (mirrors COLMAP's own
+    // feature_matching_utils flow: keypoints -> points -> EstimateTwoViewGeometry).
+    const std::vector<Eigen::Vector2d> points_prev =
+        kps_to_points(prev.xy, prev.n_keypoints);
+    colmap::TwoViewGeometry tvg = colmap::EstimateTwoViewGeometry(
+        camera, points_prev, camera, points_cur, matches, tvg_opts);
+    s->db->WriteTwoViewGeometry(prev.image_id, cur.image_id, tvg);
+    if (tvg.config != colmap::TwoViewGeometry::UNDEFINED &&
+        tvg.config != colmap::TwoViewGeometry::DEGENERATE &&
+        !tvg.inlier_matches.empty()) {
+      ++n_verified;
+    }
+  }
+  return n_verified;
 }
 
 }  // namespace
@@ -378,8 +501,6 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
   if (!s || !s->db || !gray || width <= 0 || height <= 0) {
     return AETHER_SFM_ERR_INVALID_ARG;
   }
-  (void)pose_qwxyz;  // pose prior is stored by the caller / used post-solve;
-  (void)pose_t;      // COLMAP estimates CamFromWorld itself in this v1.
   try {
     const int max_features =
         s->options.max_features > 0 ? s->options.max_features : 2048;
@@ -442,33 +563,115 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     rec.image_id = image_id;
     rec.n_keypoints = n;
     rec.descriptors.assign(desc.begin(), desc.begin() + (size_t)n * 128);
-
-    // 4) Match against the previous k_neighbors frames (CPU brute-force; the
-    //    Metal GpuMatch path is wired platform-side via use_gpu_match — NOTE:
-    //    this v1 only records the match COUNT via aether_sift_match. The full
-    //    correspondence list + WriteTwoViewGeometry needs the matcher to return
-    //    the index pairs (currently aether_sift_match returns count only). See
-    //    the dsp_sift_c.cc matcher: extending it to emit the FeatureMatches
-    //    array is the next step to make incremental mapping consume this db.
-    const int k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 6;
-    const int start = (frame_id - k) > 0 ? (frame_id - k) : 0;
-    for (int j = start; j < frame_id; ++j) {
-      const FrameRecord& prev = s->frames[j];
-      int num_matches = 0;
-      aether_sift_match(prev.descriptors.data(), prev.n_keypoints,
-                        rec.descriptors.data(), rec.n_keypoints,
-                        s->options.match_max_ratio > 0
-                            ? s->options.match_max_ratio
-                            : 0.7,
-                        &num_matches);
-      // NOTE: WriteMatches/WriteTwoViewGeometry require the actual index pairs.
-      // Pending the matcher returning them, we cannot persist correspondences
-      // here. This is the single remaining gap to make finalize() register the
-      // accumulated frames. Tracked in next_steps.
-      (void)num_matches;
+    rec.xy.assign(xy.begin(), xy.begin() + (size_t)n * 2);
+    if (pose_qwxyz && pose_t) {
+      rec.has_pose = true;
+      rec.pose_q = Eigen::Quaterniond(pose_qwxyz[0], pose_qwxyz[1],
+                                      pose_qwxyz[2], pose_qwxyz[3]);
+      rec.pose_t = Eigen::Vector3d(pose_t[0], pose_t[1], pose_t[2]);
     }
 
+    // 4) GAP-2 + GAP-3: match against the previous k_neighbors frames, persist
+    //    the index-pair correspondences (WriteMatches) AND the geometrically
+    //    verified inlier two-view geometry (WriteTwoViewGeometry) so the
+    //    incremental mapper's correspondence graph can register this frame.
+    //    Pose-guided pruning (GAP-3) activates only when this frame and the
+    //    candidate both carry an ARKit pose prior; it only PRUNES pairs whose
+    //    optical axes diverge too far, and never invents pairs.
     s->frames.push_back(std::move(rec));
+    MatchAndPersistAgainstPrev(s, s->frames.back(),
+                               /*pose_guided=*/true,
+                               /*guided_max_angle_deg=*/75.0);
+    if (out_frame_id) *out_frame_id = frame_id;
+    return AETHER_SFM_OK;
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
+// GAP-1: inject ALREADY-EXTRACTED features (from the GPU DSP-SIFT extractor)
+// instead of re-running the CPU extractor. `keypoints_stride4` is the GPU
+// extractor's native layout: count * {x, y, sigma, octave} floats (we use x,y;
+// sigma/octave are kept by the descriptor and not needed by the SfM geometry).
+// `descriptors` is count*128 uint8 RootSIFT. fx/fy/cx/cy + width/height supply
+// the shared-camera intrinsics (created lazily on the first frame, identical to
+// add_frame). `pose_qwxyz`/`pose_t` (may be NULL) carry the ARKit world->cam
+// prior used for GAP-3 pose-guided match pruning. Writes
+// WriteKeypoints/WriteDescriptors for the frame, then matches+persists against
+// the previous k frames exactly like add_frame — but with ZERO redundant
+// extraction (the orchestrator already paid for it on the GPU).
+aether_sfm_result_t aether_sfm_add_frame_with_features(
+    aether_sfm_session_t* s, int width, int height, float fx, float fy,
+    float cx, float cy, const float* keypoints_stride4,
+    const uint8_t* descriptors, unsigned int count,
+    const double pose_qwxyz[4], const double pose_t[3], int* out_frame_id) {
+  if (!s || !s->db || width <= 0 || height <= 0) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+  if (!keypoints_stride4 || !descriptors || count == 0) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+  try {
+    int n = static_cast<int>(count);
+    const int cap =
+        s->options.max_features > 0 ? s->options.max_features : 8192;
+    if (n > cap) n = cap;  // clamp to the configured feature budget
+
+    // 1) Shared self-calibrated SIMPLE_PINHOLE camera (created once). Identical
+    //    to add_frame: BA refines the ARKit focal from the prior.
+    if (s->camera_id == 0) {
+      colmap::Camera camera = colmap::Camera::CreateFromModelId(
+          colmap::kInvalidCameraId, colmap::SimplePinholeCameraModel::model_id,
+          /*focal_length=*/0.5 * (fx + fy), width, height);
+      camera.SetPrincipalPointX(cx);
+      camera.SetPrincipalPointY(cy);
+      s->camera_id = s->db->WriteCamera(camera);
+    }
+
+    // 2) Write image + keypoints + descriptors (GAP-1: injected, not extracted).
+    const int frame_id = static_cast<int>(s->frames.size());
+    colmap::Image image;
+    char name[64];
+    std::snprintf(name, sizeof(name), "frame_%06d.jpg", frame_id);
+    image.SetName(name);
+    image.SetCameraId(s->camera_id);
+    const colmap::image_t image_id = s->db->WriteImage(image);
+
+    colmap::FeatureKeypoints kps(n);
+    std::vector<float> xy(static_cast<size_t>(n) * 2);
+    for (int i = 0; i < n; ++i) {
+      const float x = keypoints_stride4[i * 4 + 0];
+      const float y = keypoints_stride4[i * 4 + 1];
+      kps[i] = colmap::FeatureKeypoint(x, y);  // x,y only (geometry needs xy)
+      xy[2 * i] = x;
+      xy[2 * i + 1] = y;
+    }
+    colmap::FeatureDescriptors desc;
+    desc.type = colmap::FeatureExtractorType::SIFT;
+    desc.data.resize(n, 128);
+    std::memcpy(desc.data.data(), descriptors,
+                static_cast<size_t>(n) * 128);
+    s->db->WriteKeypoints(image_id, kps);
+    s->db->WriteDescriptors(image_id, desc);
+
+    FrameRecord rec;
+    rec.frame_id = frame_id;
+    rec.image_id = image_id;
+    rec.n_keypoints = n;
+    rec.descriptors.assign(descriptors, descriptors + (size_t)n * 128);
+    rec.xy = std::move(xy);
+    if (pose_qwxyz && pose_t) {
+      rec.has_pose = true;
+      rec.pose_q = Eigen::Quaterniond(pose_qwxyz[0], pose_qwxyz[1],
+                                      pose_qwxyz[2], pose_qwxyz[3]);
+      rec.pose_t = Eigen::Vector3d(pose_t[0], pose_t[1], pose_t[2]);
+    }
+
+    // 3) GAP-2 + GAP-3 match-persist (same path as add_frame).
+    s->frames.push_back(std::move(rec));
+    MatchAndPersistAgainstPrev(s, s->frames.back(),
+                               /*pose_guided=*/true,
+                               /*guided_max_angle_deg=*/75.0);
     if (out_frame_id) *out_frame_id = frame_id;
     return AETHER_SFM_OK;
   } catch (const std::exception&) {
@@ -570,14 +773,17 @@ aether_sfm_result_t aether_sfm_get_poses(aether_sfm_session_t* s,
       p.registered = image.HasPose() ? 1 : 0;
       if (image.HasPose()) {
         const colmap::Rigid3d c_from_w = image.CamFromWorld();
-        const Eigen::Quaterniond& q = c_from_w.rotation;
+        // [MIGRATION 4.0.4] Rigid3d::rotation/translation are METHODS now
+        // (Eigen::Map accessors over params[qx,qy,qz,qw,tx,ty,tz]), not the
+        // 3.x public members. Call them.
+        const Eigen::Quaterniond q = c_from_w.rotation();
         p.qwxyz[0] = q.w();
         p.qwxyz[1] = q.x();
         p.qwxyz[2] = q.y();
         p.qwxyz[3] = q.z();
-        p.t[0] = c_from_w.translation.x();
-        p.t[1] = c_from_w.translation.y();
-        p.t[2] = c_from_w.translation.z();
+        p.t[0] = c_from_w.translation().x();
+        p.t[1] = c_from_w.translation().y();
+        p.t[2] = c_from_w.translation().z();
       } else {
         p.qwxyz[0] = 1.0;
         p.qwxyz[1] = p.qwxyz[2] = p.qwxyz[3] = 0.0;

@@ -88,6 +88,18 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
   return AETHER_SFM_ERR_UNSUPPORTED;
 }
 
+aether_sfm_result_t aether_sfm_add_frame_with_features(
+    aether_sfm_session_t* s, int width, int height, float fx, float fy,
+    float cx, float cy, const float* keypoints_stride4,
+    const uint8_t* descriptors, unsigned int count,
+    const double pose_qwxyz[4], const double pose_t[3], int* out_frame_id) {
+  (void)s; (void)width; (void)height; (void)fx; (void)fy; (void)cx; (void)cy;
+  (void)keypoints_stride4; (void)descriptors; (void)count; (void)pose_qwxyz;
+  (void)pose_t;
+  if (out_frame_id) *out_frame_id = -1;
+  return AETHER_SFM_ERR_UNSUPPORTED;
+}
+
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   (void)s;
