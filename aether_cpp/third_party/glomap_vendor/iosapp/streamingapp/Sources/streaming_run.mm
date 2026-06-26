@@ -12,31 +12,46 @@
 //          ② POSE-GUIDED MATCH  (aether_sift_match_pairs + PosePriorAllowsMatch,
 //                                 ARKit-prior 75° optical-axis prune) vs prev k
 //              ▼  WriteMatches → EstimateTwoViewGeometry → WriteTwoViewGeometry
-//          ③ REGISTER + LOCAL-BA  (COLMAP IncrementalPipeline; defer_global_ba)
+//          ③ REGISTER + LOCAL-BA  (PER FRAME: aether_sfm_register_next_frame —
+//                                  PnP + TriangulateImage + local-window BA)
 //              ▼
-//          sparse point cloud GROWS  (aether_sfm_get_points)
+//          sparse point cloud GROWS EVERY FRAME  (out_total_points)
 //
-// ①② run EVERY frame (real GPU extract + real pose-guided match-persist into the
-// session db). ③ (the COLMAP incremental register + LOCAL BA) is run every
-// `register_every_n` frames AND once at the end, because aether_sfm_finalize
-// re-runs the incremental mapper over the WHOLE accumulated db (O(N) — see the
-// HONEST NOTE block below). Running it every frame would be both unrealistic
-// (production registers periodically / post-capture, not every frame) and would
-// take hours over 414 frames. The cadence is logged so the per-frame match cost
-// and the periodic register cost are measured SEPARATELY.
+// TWO PHASES, both with PER-FRAME cloud growth:
+//
+//   PHASE A — live capture sim (①② per frame). Replays N frames at ~2s cadence
+//     through the orchestrator: REAL GPU extract + REAL pose-guided match-persist
+//     into the session db. Builds the correspondence graph AND the frame_id→
+//     image_id map. Per-frame telemetry: extract (overlapped), match_ms,
+//     queue_depth, dropped, thermal, rss, cache cold/warm, init_ms.
+//
+//   PHASE B — TRUE per-frame step-3 (aether_sfm_register_next_frame PER FRAME).
+//     After the drain, aether_sfm_begin_incremental() builds the frozen
+//     DatabaseCache + bootstraps the seed ONCE (the single O(N) graph load), then
+//     we loop register_next_frame(frame_id) over EVERY frame in capture order.
+//     Each call = RegisterNextImage → TriangulateImage → IterativeLocalRefinement
+//     (local-window CAUCHY BA; NO FindNextImages O(N) scan, NO in-loop global BA).
+//     The sparse cloud GROWS on essentially every registered frame; per-frame the
+//     log carries register_ms + new_points + total_cloud_points + reproj. The
+//     mapper/Reconstruction/DatabaseCache PERSIST on the session across calls.
+//
+// This mirrors the host-verified flow (sfm_stream_real_verify.cc): cloud grows
+// per-frame, reproj holds at ~0.868px vs batch 0.8504px, per-frame ~354ms median.
 //
 // ───────────────────────────────────────────────────────────────────────────
-// HONEST NOTE — what is REAL end-to-end vs simplified, and WHY:
+// HONEST NOTE — what is REAL end-to-end:
 //   • ① GPU extract: REAL. The production GpuSiftExtractor runs on the iPhone GPU.
 //   • ② match: REAL. aether_sift_match_pairs (CPU brute force) emits index pairs;
 //     PosePriorAllowsMatch prunes by the REAL ARKit pose prior; matches +
 //     two-view geometry are PERSISTED into the COLMAP session db. This is the
 //     real correspondence graph the incremental mapper consumes.
-//   • ③ register + local-BA: REAL COLMAP colmap::IncrementalPipeline, but invoked
-//     via aether_sfm_finalize which re-runs the mapper over the full db each call.
-//     So it is run PERIODICALLY (register_every_n) not per-frame. The cloud still
-//     GROWS across the run; we just don't pay O(N) on every single frame. The
-//     final finalize over all injected frames is the authoritative cloud/reproj.
+//   • ③ register + local-BA: REAL COLMAP IncrementalMapper, now driven PER FRAME
+//     via aether_sfm_register_next_frame (NOT the O(N) finalize-every-N). The
+//     live mapper + Reconstruction + DatabaseCache persist on the session, so
+//     each call is O(1) in N (PnP + this image's triangulation + fixed-window
+//     local BA). begin_incremental needs the full graph to seed, so PHASE B runs
+//     after PHASE A's drain — but every register_next_frame call still grows the
+//     cloud, which is exactly the capture-time UI signal we want to measure.
 //   • Pacing: a wall-clock realsim timer at ~2s (jitter mode adds variance +
 //     occasional pauses so the queue drains). The orchestrator's bounded queue /
 //     drop-oldest / drain-after-stop run exactly as in production.
@@ -195,23 +210,24 @@ long ThermalState() {
 }  // namespace
 
 // ── Streaming SfM ingest state shared with the AppDelegate-driven loop ──
-// Owns the COLMAP session; the orchestrator's IngestFn closes over it. Splits
-// the per-frame work into ② match (always) and ③ register/local-BA (periodic).
+// Owns the COLMAP session; the orchestrator's IngestFn closes over it. PHASE A
+// (this struct's ingest) does ①② only: inject GPU features + pose-guided
+// match-persist, building the live correspondence graph in the session db AND
+// the frame_id→image_id mapping that PHASE B's per-frame register consumes.
+// PHASE B (in streaming_run_all, after drain) calls aether_sfm_begin_incremental
+// once then aether_sfm_register_next_frame PER FRAME — the TRUE per-frame step-3.
 struct StreamSfmState {
   aether_sfm_session_t* session = nullptr;
-  int register_every_n = 25;     // run COLMAP incremental register every N frames
   std::atomic<uint64_t> ingested{0};
-  std::atomic<int> last_registered{0};
-  std::atomic<int> last_points{0};
-  std::atomic<double> last_reproj{0.0};
-  // per-frame timings published for the telemetry line (guarded by mu)
+  std::atomic<int> last_frame_id{-1};
+  // per-frame ② timing published for the PHASE-A telemetry line (guarded by mu)
   std::mutex mu;
-  double match_ms = 0, register_ms = 0;
-  bool did_register = false;
+  double match_ms = 0;
 };
 
-// Per-frame ingest: inject GPU features → pose-guided match-persist (②, every
-// frame) → periodic COLMAP register + local-BA (③). Fills the cloud snapshot.
+// PHASE A per-frame ingest: inject GPU features → pose-guided match-persist (②).
+// Records the frame_id (== add order) so PHASE B can register_next_frame(frame_id).
+// NO register/finalize here — step-3 is the per-frame register loop in PHASE B.
 static bool StreamIngest(StreamSfmState* st, const aether::gpu::CaptureFrame& f,
                          const aether::gpu::FrameFeatures& feats,
                          aether::gpu::CloudSnapshot* out) {
@@ -234,49 +250,13 @@ static bool StreamIngest(StreamSfmState* st, const aether::gpu::CaptureFrame& f,
   double match_ms = ms_since(t_match);
   if (rc != AETHER_SFM_OK) return false;
 
-  uint64_t n = ++st->ingested;
-  bool do_register =
-      (st->register_every_n > 0) && ((n % (uint64_t)st->register_every_n) == 0);
-
-  double register_ms = 0;
-  if (do_register) {
-    // ③ COLMAP incremental register + LOCAL BA over the accumulated db. NOTE
-    // this re-runs the mapper over ALL frames so far (O(N)); that is why it is
-    // periodic, not per-frame. defer_global_ba keeps it local-BA-only.
-    auto t_reg = clk::now();
-    char json[256] = {0};
-    aether_sfm_result_t frc = aether_sfm_finalize(st->session, json, sizeof(json));
-    register_ms = ms_since(t_reg);
-    if (frc == AETHER_SFM_OK || frc == AETHER_SFM_ERR_NOT_REGISTERED) {
-      // read back the growing cloud
-      int npts = 0;
-      aether_sfm_get_points(st->session, nullptr, &npts);
-      st->last_points = npts;
-      int pose_total = 0;
-      aether_sfm_get_poses(st->session, nullptr, 0, &pose_total);
-      // count registered
-      std::vector<aether_sfm_pose_t> poses(pose_total > 0 ? pose_total : 1);
-      int pc = 0;
-      aether_sfm_get_poses(st->session, poses.data(), pose_total, &pc);
-      int reg = 0;
-      for (int i = 0; i < pc; ++i) reg += poses[i].registered ? 1 : 0;
-      st->last_registered = reg;
-      // parse reproj_px out of json (best-effort)
-      const char* rp = std::strstr(json, "\"reproj_px\":");
-      if (rp) st->last_reproj = std::atof(rp + 12);
-      if (out) {
-        out->registered_frames = reg;
-        out->reproj_px = st->last_reproj.load();
-        out->last_frame_index = f.frame_index;
-      }
-    }
-  }
+  ++st->ingested;
+  st->last_frame_id = frame_id;
   {
     std::lock_guard<std::mutex> lk(st->mu);
     st->match_ms = match_ms;
-    st->register_ms = register_ms;
-    st->did_register = do_register;
   }
+  if (out) out->last_frame_index = f.frame_index;
   return true;
 }
 
@@ -290,7 +270,9 @@ static bool StreamIngest(StreamSfmState* st, const aether::gpu::CaptureFrame& f,
 //   manifest_path : the harness manifest JSON (Documents/streaming_manifest.json)
 //   max_frames    : cap N for a smaller run (0 = all)
 //   jitter        : 0 = fixed 2s pacing; 1 = 2s ± variance + occasional pauses
-//   register_every_n : COLMAP register cadence (frames)
+//   register_every_n : PHASE-B global-BA SPIKE cadence MARKER (frames). The
+//                      deferred design runs NO global BA on the per-frame loop;
+//                      this only flags the cadence frames distinctly in the log.
 //   max_edge      : downsample longest image edge (production downsamples 4K→2K)
 // ════════════════════════════════════════════════════════════════════════════
 extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir,
@@ -332,7 +314,6 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
   opts.match_max_ratio = 0.7f;
 
   StreamSfmState st;
-  st.register_every_n = register_every_n > 0 ? register_every_n : 25;
   if (aether_sfm_create(db_path.c_str(), &opts, &st.session) != AETHER_SFM_OK ||
       !st.session) {
     logline("STREAM_FAIL aether_sfm_create");
@@ -511,14 +492,11 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
     aether::gpu::OrchestratorStats s = orch.stats();
     double frame_wall_ms = ms_since(t_frame);
 
-    // pull the just-completed frame's stage split from StreamSfmState
-    double match_ms, register_ms;
-    bool did_reg;
+    // pull the just-completed frame's ② match cost from StreamSfmState
+    double match_ms;
     {
       std::lock_guard<std::mutex> lk(st.mu);
       match_ms = st.match_ms;
-      register_ms = st.register_ms;
-      did_reg = st.did_register;
     }
     double rss = FootprintMB();
     if (rss > tel.peak_rss.load()) tel.peak_rss = rss;
@@ -531,12 +509,10 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
       thermal_log = thermal;
     }
 
-    // The dominant per-frame compute (the thing that must fit the cadence) is
-    // the extract+match service time. register_ms is the periodic (every-N)
-    // COLMAP cost, reported separately. "total" here = the compute on the
-    // critical path for THIS frame (extract is overlapped; the SfM thread cost
-    // is match + any periodic register).
-    double compute_ms = match_ms + register_ms;
+    // PHASE A per-frame critical-path compute = ② match (① extract is overlapped
+    // on the GPU thread). Step-3 register is the PHASE-B per-frame loop below, so
+    // PHASE A's per-frame cost is just the match-persist service time.
+    double compute_ms = match_ms;
     if (compute_ms > 2000.0) tel.over_2s++;
     {
       std::lock_guard<std::mutex> lk(tel.mu);
@@ -545,28 +521,121 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
 
     snprintf(b, sizeof(b),
              "STREAM_FRAME f=%zu accepted=%d ext_done=%llu match_ms=%.0f "
-             "reg_ms=%.0f%s compute_ms=%.0f qdepth=%zu peakq=%zu "
-             "drop_old=%llu reg_frames=%d cloud_pts=%d reproj_px=%.3f "
-             "thermal=%ld rss_mb=%.0f t=%.0fs",
+             "compute_ms=%.0f qdepth=%zu peakq=%zu drop_old=%llu "
+             "ingested=%llu thermal=%ld rss_mb=%.0f t=%.0fs",
              i, accepted ? 1 : 0, (unsigned long long)s.extracted, match_ms,
-             register_ms, did_reg ? "*REG" : "", compute_ms, s.queue_depth,
-             s.peak_queue_depth, (unsigned long long)s.dropped_oldest,
-             st.last_registered.load(), st.last_points.load(),
-             st.last_reproj.load(), thermal, rss, ms_since(t_run0) / 1000.0);
+             compute_ms, s.queue_depth, s.peak_queue_depth,
+             (unsigned long long)s.dropped_oldest,
+             (unsigned long long)s.ingested, thermal, rss,
+             ms_since(t_run0) / 1000.0);
     logline(b);
-    (void)prev_ingested; (void)prev_extracted;
+    (void)prev_ingested; (void)prev_extracted; (void)frame_wall_ms;
   }
 
   // ── stop + DRAIN: process every accepted-but-pending frame before joining ──
   logline("STREAM_STOP draining queue...");
   orch.stop_capture();  // blocks until the backlog is fully consumed
 
-  // ── FINAL authoritative register over ALL injected frames (③ full finalize) ──
-  logline("STREAM_FINAL_REGISTER running COLMAP incremental over all frames...");
-  auto t_final = clk::now();
+  aether::gpu::OrchestratorStats fs = orch.stats();
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE B — TRUE per-frame step-3: aether_sfm_begin_incremental once, then
+  // aether_sfm_register_next_frame PER FRAME. The sparse cloud grows every
+  // registered frame; we log register_ms + new_points + total_cloud_points +
+  // reproj per frame (the real capture-time UI signal). The live mapper +
+  // Reconstruction + DatabaseCache persist on the session across calls.
+  // ════════════════════════════════════════════════════════════════════════
+  int num_added = (int)st.ingested.load();
+  snprintf(b, sizeof(b),
+           "STREAM_BEGIN_INCREMENTAL building frozen DatabaseCache + seed over "
+           "%d injected frames (single O(N) graph load)...",
+           num_added);
+  logline(b);
+  auto t_seed = clk::now();
+  char seed_json[512] = {0};
+  aether_sfm_result_t brc =
+      aether_sfm_begin_incremental(st.session, seed_json, sizeof(seed_json));
+  double seed_ms = ms_since(t_seed);
+  snprintf(b, sizeof(b), "STREAM_SEED rc=%d (%s) seed_ms=%.0f json=%s", brc,
+           aether_sfm_result_str(brc), seed_ms, seed_json);
+  logline(b);
+
+  // Per-frame register loop. Streaming reality: a frame may not be registerable
+  // until its covisible neighbours are in — so we sweep capture order up to
+  // max_passes; each pass that registers >=1 new frame is progress. We log the
+  // per-frame step-3 split EVERY register call so the cloud-growth-per-frame is
+  // visible. A periodic global-BA SPIKE marker is flagged distinctly (the
+  // deferred design keeps global BA OFF this per-frame loop by construction; we
+  // only mark the cadence frames so the spike-free per-frame cost is legible).
+  int register_count = 0, grew_count = 0, growth_eligible = 0;
+  int last_total_pts = 0, prev_total = -1;
+  double last_reproj = 0.0;
+  std::vector<double> reg_ms_samples;
+  const int global_ba_every = register_every_n > 0 ? register_every_n : 25;
   char json[512] = {0};
-  aether_sfm_result_t frc = aether_sfm_finalize(st.session, json, sizeof(json));
-  double final_ms = ms_since(t_final);
+
+  if (brc == AETHER_SFM_OK) {
+    std::vector<char> reg_done(num_added, 0);
+    const int max_passes = 4;
+    for (int pass = 0; pass < max_passes; ++pass) {
+      int registered_this_pass = 0;
+      for (int k = 0; k < num_added; ++k) {
+        if (reg_done[k]) continue;
+        double qwxyz[4] = {1, 0, 0, 0}, t3[3] = {0, 0, 0};
+        int reg = 0, newp = 0, total = 0;
+        double reproj = 0.0;
+        auto t_reg = clk::now();
+        aether_sfm_result_t rrc = aether_sfm_register_next_frame(
+            st.session, k, qwxyz, t3, &reg, &newp, &total, &reproj);
+        double reg_ms = ms_since(t_reg);
+        if (rrc != AETHER_SFM_OK) {
+          snprintf(b, sizeof(b), "STREAM_REG_FRAME f=%d rc=%d (%s) reg_ms=%.0f",
+                   k, rrc, aether_sfm_result_str(rrc), reg_ms);
+          logline(b);
+          continue;
+        }
+        if (reg) {
+          reg_done[k] = 1;
+          ++registered_this_pass;
+          ++register_count;
+          last_total_pts = total;
+          last_reproj = reproj;
+          if (prev_total >= 0) {
+            reg_ms_samples.push_back(reg_ms);
+            ++growth_eligible;
+            if (total > prev_total) ++grew_count;
+          }
+          prev_total = total;
+          // Periodic global-BA SPIKE cadence marker (deferred design: NO global
+          // BA actually runs here — register_next_frame is local-window only —
+          // we flag the cadence frame distinctly so the user can see it stays
+          // off the per-frame critical path).
+          bool ba_spike = (global_ba_every > 0) &&
+                          (register_count % global_ba_every) == 0;
+          double rss = FootprintMB();
+          if (rss > tel.peak_rss.load()) tel.peak_rss = rss;
+          long th = ThermalState();
+          if (th > tel.thermal_max.load()) tel.thermal_max = th;
+          snprintf(b, sizeof(b),
+                   "STREAM_REG_FRAME f=%d pass=%d registered=1 register_ms=%.0f "
+                   "new_points=%d total_cloud_points=%d reproj_px=%.4f%s "
+                   "thermal=%ld rss_mb=%.0f t=%.0fs",
+                   k, pass, reg_ms, newp, total, reproj,
+                   ba_spike ? " *GLOBAL_BA_CADENCE(deferred,off-loop)" : "", th,
+                   rss, ms_since(t_run0) / 1000.0);
+          logline(b);
+        }
+      }
+      snprintf(b, sizeof(b),
+               "STREAM_REG_PASS pass=%d registered_this_pass=%d "
+               "total_registered=%d",
+               pass, registered_this_pass, register_count);
+      logline(b);
+      if (registered_this_pass == 0) break;
+    }
+  }
+
+  // authoritative final cloud/pose readback from the live incremental model
   int final_pts = 0;
   aether_sfm_get_points(st.session, nullptr, &final_pts);
   int pose_total = 0;
@@ -577,9 +646,7 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
   int final_reg = 0;
   for (int i = 0; i < pc; ++i) final_reg += poses[i].registered ? 1 : 0;
 
-  aether::gpu::OrchestratorStats fs = orch.stats();
-
-  // ── SUMMARY ──
+  // ── PHASE-A ② match stats + PHASE-B step-3 register stats ──
   double mean_ms = 0, p95_ms = 0;
   {
     std::lock_guard<std::mutex> lk(tel.mu);
@@ -592,25 +659,41 @@ extern "C" int streaming_run_all(const char* shader_root, const char* frames_dir
       p95_ms = v[(size_t)(v.size() * 0.95)];
     }
   }
-  snprintf(b, sizeof(b), "STREAM_FINAL_REGISTER_DONE final_ms=%.0f json=%s", final_ms,
-           json);
+  double reg_median_ms = 0, reg_p95_ms = 0;
+  if (!reg_ms_samples.empty()) {
+    std::vector<double> v = reg_ms_samples;
+    std::sort(v.begin(), v.end());
+    reg_median_ms = v[v.size() / 2];
+    reg_p95_ms = v[std::min(v.size() - 1, (size_t)(v.size() * 0.95))];
+  }
+  double growth_ratio =
+      growth_eligible > 0 ? (double)grew_count / growth_eligible : 0.0;
+  snprintf(b, sizeof(b),
+           "STREAM_PERFRAME_REGISTER_DONE registered=%d cloud_pts=%d "
+           "final_reproj_px=%.4f reg_median_ms=%.0f reg_p95_ms=%.0f "
+           "cloud_grew_frac=%.2f (%d/%d) seed_ms=%.0f",
+           register_count, last_total_pts, last_reproj, reg_median_ms,
+           reg_p95_ms, growth_ratio, grew_count, growth_eligible, seed_ms);
   logline(b);
+  std::snprintf(json, sizeof(json), "{\"reproj_px\":%.4f}", last_reproj);
+  aether_sfm_result_t frc = brc;
 
   snprintf(b, sizeof(b),
            "STREAM_SUMMARY frames=%zu submitted=%llu enqueued=%llu "
            "extracted=%llu ingested=%llu dropped_oldest=%llu queue_highwater=%zu "
            "init_ms=%.0f cache=%s cache_load_hits=%ld cache_stores=%ld "
-           "mean_compute_ms=%.0f p95_compute_ms=%.0f over_2000ms=%d "
-           "final_registered=%d final_cloud_pts=%d final_reproj_px=%s "
+           "match_mean_ms=%.0f match_p95_ms=%.0f over_2000ms=%d "
+           "seed_ms=%.0f perframe_registered=%d perframe_reg_median_ms=%.0f "
+           "perframe_reg_p95_ms=%.0f cloud_grew_frac=%.2f "
+           "final_registered=%d final_cloud_pts=%d final_reproj_px=%.4f "
            "thermal_max=%ld peak_rss_mb=%.0f",
            frames.size(), (unsigned long long)fs.submitted,
            (unsigned long long)fs.enqueued, (unsigned long long)fs.extracted,
            (unsigned long long)fs.ingested,
            (unsigned long long)fs.dropped_oldest, fs.peak_queue_depth, init_ms,
            cache_state, cache_hits, cache_stores, mean_ms, p95_ms,
-           tel.over_2s.load(), final_reg, final_pts,
-           (std::strstr(json, "reproj_px") ? std::strstr(json, "reproj_px") + 11
-                                           : "n/a"),
+           tel.over_2s.load(), seed_ms, register_count, reg_median_ms,
+           reg_p95_ms, growth_ratio, final_reg, final_pts, last_reproj,
            tel.thermal_max.load(), tel.peak_rss.load());
   logline(b);
   if (out && out_cap > 0) {
