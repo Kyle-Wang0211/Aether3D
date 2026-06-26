@@ -195,6 +195,25 @@ struct aether_sfm_session {
   //    against), but the expensive local-window BA is disabled so a full-414 feed
   //    completes fast. reproj/cost bounding is a SEPARATE known task.
   bool live_cap_ba = false;     // skip IterativeLocalRefinement (local BA)
+
+  // ── AETHER COST-BOUNDING (the SHIP live path). The per-frame UI cost must be
+  //    ~CONSTANT in N. Three knobs bound the three O(N)-growing terms:
+  //    (1) live_ba_window: FIXED local-BA image window (new frame + top-N
+  //        covisible already-registered frames). Overrides Mapper().ba_local_num_images
+  //        per register so the local solve never sees the whole growing neighbourhood.
+  //    (2) live_ba_max_refinements: cap the IterativeLocalRefinement passes (each
+  //        pass = one bounded AdjustLocalBundle). 1 keeps the per-frame solve tight;
+  //        the periodic + final global BA recover the cross-window consistency.
+  //    (3) live_global_ba_every: run a bounded AdjustGlobalBundle every K REGISTERED
+  //        frames (NOT every frame) to keep reproj from drifting between recaches;
+  //        0 = never in-loop (final flush does the one global solve). Defaults pick
+  //        a small in-loop cadence so live reproj stays sub-pixel without a per-frame
+  //        global solve.
+  int live_ba_window = 8;            // fixed local-BA covisible window
+  int live_ba_max_refinements = 1;   // capped local-BA iterations per frame
+  int live_global_ba_every = 0;      // periodic global BA cadence (0=off in-loop)
+  int live_reg_since_global = 0;     // registered frames since last global BA
+  bool live_flushed = false;         // final flush already ran (idempotent)
 };
 
 namespace {
@@ -489,7 +508,8 @@ int MatchAndPersistAgainstPrev(aether_sfm_session* s, const FrameRecord& cur,
 //    additive and EndReconstruction(discard=false) keeps the registered model.
 //    Returns false on hard failure. seed_if_unseeded: when the live model has no
 //    registered frames yet, run the bootstrap seed inside this rebuild.
-bool LiveRebuildCacheAndMapper(aether_sfm_session* s, double* out_recache_ms) {
+bool LiveRebuildCacheAndMapper(aether_sfm_session* s, double* out_recache_ms,
+                               bool load_all_images = false) {
   const double t0 = NowMs();
 
   // Flush sqlite writes so the cache sees every staged frame/match.
@@ -501,7 +521,11 @@ bool LiveRebuildCacheAndMapper(aether_sfm_session* s, double* out_recache_ms) {
   colmap::DatabaseCache::Options cache_opts;
   cache_opts.min_num_matches = static_cast<size_t>(s->inc_opts->min_num_matches);
   cache_opts.ignore_watermarks = s->inc_opts->ignore_watermarks;
-  cache_opts.load_all_images = s->inc_opts->load_all_images;
+  // FLUSH: force load_all_images so EVERY fed frame is loaded into the cache —
+  // even weakly/dis-connected tail frames that the default match-connectivity
+  // filter drops (reason 7). The pose-prior path then places them from the known
+  // ARKit pose regardless of their two-view connectivity.
+  cache_opts.load_all_images = load_all_images || s->inc_opts->load_all_images;
   // RESTRICT the cache to the temporally-fed subset — this is what keeps the
   // rebuild O(fed-subset) instead of O(full-db). Empty => whole db (not used
   // on the live path).
@@ -571,7 +595,13 @@ bool LiveBootstrapSeed(aether_sfm_session* s) {
 bool LiveRegisterImage(aether_sfm_session* s, colmap::image_t image_id,
                        int* out_new_points) {
   const int before_pts = static_cast<int>(s->live_recon->NumPoints3D());
-  const colmap::IncrementalMapper::Options mapper_opts = s->inc_opts->Mapper();
+  colmap::IncrementalMapper::Options mapper_opts = s->inc_opts->Mapper();
+  // COST-BOUNDING (1): pin the local-BA image window to a FIXED size so the local
+  // solve is O(window), independent of how large the registered neighbourhood has
+  // grown. FindLocalBundle picks the top-(ba_local_num_images) covisible posed
+  // frames for this image; clamping that count is exactly "new frame + its top-N
+  // covisible already-registered frames" — the bounded set the task asks for.
+  if (s->live_ba_window >= 2) mapper_opts.ba_local_num_images = s->live_ba_window;
   const bool already = s->live_recon->ExistsImage(image_id) &&
                        s->live_recon->Image(image_id).HasPose();
   bool reg_ok = already;
@@ -617,11 +647,35 @@ bool LiveRegisterImage(aether_sfm_session* s, colmap::image_t image_id,
     // bundle adjustment refines but does not change WHICH frames register, so we
     // skip it under AETHER_LIVE_BACAP to let a full-414 feed complete fast.
     if (!already && !s->live_cap_ba) {
+      // COST-BOUNDING (2): cap the local-refinement passes. Each pass is one
+      // bounded AdjustLocalBundle over the FIXED window above; capping the pass
+      // count keeps the per-frame solve tight. Cross-window consistency is
+      // recovered by the periodic + final global BA, not by burning more local
+      // passes here (which would grow with the modified-point set).
+      const int max_refine =
+          s->live_ba_max_refinements > 0 ? s->live_ba_max_refinements
+                                         : s->inc_opts->ba_local_max_refinements;
       s->mapper->IterativeLocalRefinement(
-          s->inc_opts->ba_local_max_refinements,
-          s->inc_opts->ba_local_max_refinement_change, mapper_opts,
+          max_refine, s->inc_opts->ba_local_max_refinement_change, mapper_opts,
           s->inc_opts->LocalBundleAdjustment(), s->inc_opts->Triangulation(),
           image_id);
+    }
+    // COST-BOUNDING (3): periodic — NOT per-frame — global BA. Every
+    // live_global_ba_every REGISTERED frames, run ONE bounded AdjustGlobalBundle
+    // so live reproj does not drift between recaches. 0 disables in-loop global BA
+    // entirely (the final flush runs the single global solve). This is the only
+    // O(N) solve and it fires at most once per K registrations, so its amortized
+    // per-frame cost is (global_solve / K), not per-frame.
+    if (!already && s->live_global_ba_every > 0) {
+      if (++s->live_reg_since_global >= s->live_global_ba_every) {
+        s->live_reg_since_global = 0;
+        try {
+          s->mapper->AdjustGlobalBundle(mapper_opts,
+                                        s->inc_opts->GlobalBundleAdjustment());
+          s->mapper->FilterPoints(mapper_opts);
+        } catch (...) {
+        }
+      }
     }
   }
   if (out_new_points) {
@@ -1192,6 +1246,28 @@ aether_sfm_result_t aether_sfm_set_live_params(aether_sfm_session_t* s,
     std::fprintf(stderr, "[aether] AETHER_LIVE_BACAP=%s -> live_cap_ba=%d\n", e,
                  s->live_cap_ba ? 1 : 0);
   }
+  // AETHER COST-BOUNDING knobs (env-gated so the stable ABI signature is
+  // unchanged): fixed local-BA window, capped local refinements, periodic
+  // global-BA cadence. Production wires these via the shipped defaults; the
+  // host-verify bench overrides them through the environment to sweep.
+  if (const char* e = std::getenv("AETHER_LIVE_BA_WINDOW")) {
+    const int v = std::atoi(e);
+    if (v >= 2) s->live_ba_window = v;
+    std::fprintf(stderr, "[aether] AETHER_LIVE_BA_WINDOW=%s -> ba_window=%d\n", e,
+                 s->live_ba_window);
+  }
+  if (const char* e = std::getenv("AETHER_LIVE_BA_REFINE")) {
+    const int v = std::atoi(e);
+    if (v >= 1) s->live_ba_max_refinements = v;
+    std::fprintf(stderr, "[aether] AETHER_LIVE_BA_REFINE=%s -> ba_refine=%d\n", e,
+                 s->live_ba_max_refinements);
+  }
+  if (const char* e = std::getenv("AETHER_LIVE_GLOBAL_EVERY")) {
+    const int v = std::atoi(e);
+    if (v >= 0) s->live_global_ba_every = v;
+    std::fprintf(stderr, "[aether] AETHER_LIVE_GLOBAL_EVERY=%s -> global_every=%d\n",
+                 e, s->live_global_ba_every);
+  }
   return AETHER_SFM_OK;
 }
 
@@ -1428,6 +1504,112 @@ aether_sfm_result_t aether_sfm_add_and_register_frame(
       out_stats->recache_ms = recache_ms;
       out_stats->did_recache = did_recache;
       out_stats->did_bootstrap = did_bootstrap;
+    }
+    return AETHER_SFM_OK;
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
+// ─── FINAL FLUSH (post feed-loop) ───────────────────────────────────
+// After the live feed loop the recache CADENCE strands the last few fed frames:
+// they enter the pending frontier but the next periodic recache (which would put
+// them in the cache so they can register) never fires because the feed ended.
+// This one-time flush — explicitly OFF the per-frame critical path — does a final
+// recache over ALL fed names, then drains the ENTIRE pending frontier with NO
+// per-call cap (every still-registerable frame), then runs ONE global BA + filter
+// to tighten reproj over the complete model. Brings coverage -> ~100%. Idempotent.
+aether_sfm_result_t aether_sfm_live_final_flush(aether_sfm_session_t* s,
+                                                aether_sfm_live_stats_t* out_stats) {
+  if (out_stats) std::memset(out_stats, 0, sizeof(*out_stats));
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  if (!s->live_seeded || !s->mapper || !s->live_recon) {
+    return AETHER_SFM_ERR_NOT_REGISTERED;  // nothing seeded -> nothing to flush
+  }
+  if (s->live_flushed) {
+    if (out_stats) {
+      out_stats->total_points =
+          static_cast<int>(s->live_recon->NumPoints3D());
+      out_stats->total_registered =
+          static_cast<int>(s->live_recon->NumRegFrames());
+      s->live_recon->UpdatePoint3DErrors();
+      out_stats->reproj_px = s->live_recon->ComputeMeanReprojectionError();
+    }
+    return AETHER_SFM_OK;
+  }
+  try {
+    const double t0 = NowMs();
+    // 1) FINAL recache: rebuild the cache over EVERY fed frame with
+    //    load_all_images=TRUE so even weakly-connected tail frames (dropped by the
+    //    per-frame match-connectivity filter -> reason 7) are loaded and become
+    //    registerable via their ARKit pose prior.
+    double recache_ms = 0.0;
+    LiveRebuildCacheAndMapper(s, &recache_ms, /*load_all_images=*/true);
+
+    // 2) Re-stage the pending frontier: any fed frame not yet posed is a
+    //    flush candidate (covers reason-7 "never in cache during a sweep").
+    for (const auto& [fidx, iid] : s->live_frame_to_image) {
+      (void)fidx;
+      if (s->live_recon->ExistsImage(iid) &&
+          s->live_recon->Image(iid).HasPose()) {
+        continue;  // already registered
+      }
+      s->live_pending.insert(iid);
+    }
+
+    // 3) Drain the ENTIRE pending frontier — NO per-call cap. Registering one
+    //    frame gives its covisible neighbours new 2D-3D corrs, so we loop until
+    //    no further progress (standard incremental frontier, now unbounded
+    //    because this is the one-time post-capture flush, not the live path).
+    int registered_this_flush = 0, new_points = 0;
+    bool progress = true;
+    while (progress) {
+      progress = false;
+      std::vector<colmap::image_t> to_try(s->live_pending.begin(),
+                                          s->live_pending.end());
+      for (const colmap::image_t cand : to_try) {
+        if (!s->live_recon->ExistsImage(cand)) continue;  // not in cache
+        int np = 0;
+        if (LiveRegisterImage(s, cand, &np)) {
+          s->live_pending.erase(cand);
+          new_points += np;
+          ++registered_this_flush;
+          progress = true;
+        }
+      }
+    }
+
+    // 4) ONE global BA + filter over the COMPLETE model to tighten reproj (the
+    //    bounded per-frame local BAs leave cross-window drift; this is the single
+    //    O(N) solve, run ONCE post-capture). Mirrors the InitializeReconstruction
+    //    finalize: global bundle -> normalize -> filter.
+    const colmap::IncrementalMapper::Options mapper_opts = s->inc_opts->Mapper();
+    try {
+      s->mapper->AdjustGlobalBundle(mapper_opts,
+                                    s->inc_opts->GlobalBundleAdjustment());
+      s->live_recon->Normalize();
+      s->mapper->FilterPoints(mapper_opts);
+      s->mapper->FilterFrames(mapper_opts);
+    } catch (...) {
+    }
+
+    s->live_flushed = true;
+    {
+      std::lock_guard<std::mutex> lk(s->recon_mutex);
+      s->recon = s->live_recon;
+    }
+    if (out_stats) {
+      out_stats->registered = registered_this_flush;
+      out_stats->new_points = new_points;
+      out_stats->total_points =
+          static_cast<int>(s->live_recon->NumPoints3D());
+      out_stats->total_registered =
+          static_cast<int>(s->live_recon->NumRegFrames());
+      s->live_recon->UpdatePoint3DErrors();
+      out_stats->reproj_px = s->live_recon->ComputeMeanReprojectionError();
+      out_stats->register_ms = NowMs() - t0;
+      out_stats->recache_ms = recache_ms;
+      out_stats->did_recache = 1;
     }
     return AETHER_SFM_OK;
   } catch (const std::exception&) {

@@ -258,6 +258,17 @@ aether_sfm_result_t aether_sfm_add_and_register_frame(
     int frame_id,
     aether_sfm_live_stats_t* out_stats);   // may be NULL
 
+// FINAL FLUSH — call ONCE after the live feed loop ends. Explicitly OFF the
+// per-frame critical path. The periodic recache cadence strands the last few fed
+// frames (they sit in the pending frontier but no further recache fires to put
+// them in the cache). This flush does a final recache over ALL fed frames, drains
+// the ENTIRE pending frontier with no per-call cap, then runs one global BA +
+// filter to tighten reproj over the complete model. Brings coverage -> ~100%.
+// Idempotent (a second call is a cheap no-op that just refreshes out_stats).
+aether_sfm_result_t aether_sfm_live_final_flush(
+    aether_sfm_session_t* s,
+    aether_sfm_live_stats_t* out_stats);   // may be NULL
+
 // HOST-VERIFY helper: stage ONE image (by the live-feed index `feed_index` into a
 // caller-supplied temporal image_id ordering) FROM an already-open source db that
 // carries the full graph, INTO the live session's db, copying its keypoints +

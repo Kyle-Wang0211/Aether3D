@@ -349,6 +349,35 @@ int main(int argc, char** argv) {
     }
   }
 
+  // ─── FINAL FLUSH (post feed-loop, OFF the per-frame path) ───────────
+  // The recache cadence strands the last few fed frames; this one-time flush
+  // recaches over ALL fed frames, drains the entire pending frontier, and runs
+  // one global BA + filter -> coverage ~100%. Its wall time is reported SEPARATELY
+  // (it is NOT a per-frame cost), and it is NOT counted in the per-frame stats.
+  aether_sfm_live_stats_t flush_st;
+  const double flush_t0 = NowMs();
+  const aether_sfm_result_t frc = aether_sfm_live_final_flush(s, &flush_st);
+  const double flush_ms = NowMs() - flush_t0;
+  int flush_registered = 0;
+  double flush_reproj = 0.0;
+  if (frc == AETHER_SFM_OK) {
+    flush_registered = flush_st.registered;
+    flush_reproj = flush_st.reproj_px;
+    std::fprintf(stdout,
+                 "FINAL_FLUSH rc=%d registered=%d new_points=%d total_reg=%d "
+                 "total_pts=%d reproj=%.4f wall_ms=%.1f (recache_ms=%.1f)\n",
+                 frc, flush_st.registered, flush_st.new_points,
+                 flush_st.total_registered, flush_st.total_points,
+                 flush_st.reproj_px, flush_ms, flush_st.recache_ms);
+    if (flush_reproj > 0) {
+      last_reproj = flush_reproj;  // post-flush reproj is the delivered model
+      if (flush_reproj > max_reproj) max_reproj = flush_reproj;
+    }
+  } else {
+    std::fprintf(stdout, "FINAL_FLUSH rc=%d (%s) — flush failed\n", frc,
+                 aether_sfm_result_str(frc));
+  }
+
   // Final coverage from the live model.
   int total_pts = 0;
   aether_sfm_get_points(s, nullptr, &total_pts);
@@ -472,6 +501,26 @@ int main(int argc, char** argv) {
     first_third /= third;
     last_third /= third;
   }
+  // PER-QUARTILE MEANS (in FEED order, not sorted) to prove cost is bounded/flat
+  // in N: if the per-frame WALL trends UP with cloud size the later quartiles grow;
+  // a flat profile means the cost is ~constant regardless of N. Reported for both
+  // the full WALL (recache-inclusive) and the register-only sub-term.
+  double q_wall[4] = {0, 0, 0, 0};
+  double q_reg[4] = {0, 0, 0, 0};
+  if (wall_after_seed.size() >= 4) {
+    const size_t n = wall_after_seed.size();
+    for (int q = 0; q < 4; ++q) {
+      const size_t a = (n * q) / 4, b = (n * (q + 1)) / 4;
+      double sw = 0, sr = 0;
+      for (size_t i = a; i < b; ++i) {
+        sw += wall_after_seed[i];
+        if (i < register_ms.size()) sr += register_ms[i];
+      }
+      const size_t cnt = (b > a) ? (b - a) : 1;
+      q_wall[q] = sw / cnt;
+      q_reg[q] = sr / cnt;
+    }
+  }
   double reg_med = 0;
   if (!register_ms.empty()) {
     std::vector<double> rs = register_ms;
@@ -528,6 +577,17 @@ int main(int argc, char** argv) {
                "first3rd %.2fms last3rd %.2fms; register-only median %.2fms)\n",
                cost_bounded ? 1 : 0, med_ms, p95_ms, first_third, last_third,
                reg_med);
+  std::fprintf(stdout,
+               "QUARTILE_MEANS_WALL_ms q1=%.1f q2=%.1f q3=%.1f q4=%.1f "
+               "(flat => cost bounded in N)\n",
+               q_wall[0], q_wall[1], q_wall[2], q_wall[3]);
+  std::fprintf(stdout,
+               "QUARTILE_MEANS_REGISTER_ms q1=%.1f q2=%.1f q3=%.1f q4=%.1f\n",
+               q_reg[0], q_reg[1], q_reg[2], q_reg[3]);
+  std::fprintf(stdout,
+               "FINAL_FLUSH_SUMMARY flush_registered=%d flush_reproj=%.4f "
+               "flush_wall_ms=%.1f\n",
+               flush_registered, flush_reproj, flush_ms);
   std::fprintf(stdout, "VERIFY coverage_frac=%.4f (%d/%d temporal)\n",
                coverage_frac, final_registered, N);
   std::fprintf(stdout, "PRIOR use_prior=%d registered_via_prior=%d\n", use_prior,
