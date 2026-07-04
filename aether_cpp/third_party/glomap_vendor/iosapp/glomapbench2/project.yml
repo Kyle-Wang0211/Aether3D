@@ -14,7 +14,11 @@ targets:
     settings:
       base:
         DEVELOPMENT_TEAM: 26AH7V448L
-        # [ENTITLEMENT FIX] Reuse the MAIN app's bundle id com.kyle.PocketWorld — its
+        # [SEPARATE APPS 2026-07-04] bench must NOT wear the main app's bundle id
+        # (it replaced the real PocketWorld app on device while UI work was ongoing).
+        # Own id + Increased Memory Limit entitlement via automatic signing
+        # (-allowProvisioningUpdates can manage this capability). Historical note: we
+        # previously reused com.kyle.PocketWorld because its App ID already had
         # App ID (26AH7V448L.com.kyle.PocketWorld) already has the Increased Memory
         # Limit capability enabled in the portal, so automatic signing yields a
         # profile that embeds com.apple.developer.kernel.increased-memory-limit
@@ -22,10 +26,11 @@ targets:
         # capability (portal edit needs the Apple Dev account); reusing PocketWorld's
         # is the local, no-portal path. NOTE: installing this over the device
         # temporarily replaces the PocketWorld main app (test-only, reversible).
-        PRODUCT_BUNDLE_IDENTIFIER: com.kyle.PocketWorld
-        # entitlements FILE was never wired to the target before, so the entitlement
-        # was never signed in regardless — wire it now.
-        CODE_SIGN_ENTITLEMENTS: Sources/GlomapBench2.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.kyle.GlomapBench2
+        # NO increased-memory-limit entitlement here: CLI signing has no portal
+        # account to add the capability to the GlomapBench2 App ID. Default cap
+        # (~3GB) is plenty for the subset bench (858MB peak); full-scene 3G+
+        # device benches need the capability added once via Xcode GUI signing.
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
         IPHONEOS_DEPLOYMENT_TARGET: "16.0"
@@ -78,4 +83,4 @@ targets:
         # duet/dasd match it string-level; the old lowercase form is a
         # suspected silent-drop cause (forums 807370/801126).
         BGTaskSchedulerPermittedIdentifiers:
-          - com.kyle.PocketWorld.recon
+          - com.kyle.GlomapBench2.recon

@@ -1,8 +1,13 @@
 #include "glomap/estimators/relpose_estimation.h"
 
+#include <atomic>
+
 #include <colmap/util/threading.h>
 
 #include <PoseLib/robust.h>
+
+// [AETHER PROGRESS] staged progress hooks (impl: controllers/aether_progress.cc)
+extern "C" void aether_progress_items(int stage, long done, long total);
 
 namespace glomap {
 
@@ -24,6 +29,9 @@ void EstimateRelativePoses(ViewGraph& view_graph,
   colmap::ThreadPool thread_pool(colmap::ThreadPool::kMaxNumThreads);
 
   LOG(INFO) << "Estimating relative pose for " << num_image_pairs << " pairs";
+  // [AETHER PROGRESS] per-pair completion counter (stage 1)
+  static std::atomic<int64_t> aether_pairs_done;
+  aether_pairs_done.store(0);
   for (int64_t chunk_id = 0; chunk_id < kNumChunks; chunk_id++) {
     std::cout << "\r Estimating relative pose: " << chunk_id * kNumChunks << "%"
               << std::flush;
@@ -33,6 +41,12 @@ void EstimateRelativePoses(ViewGraph& view_graph,
 
     for (int64_t pair_idx = start; pair_idx < end; pair_idx++) {
       thread_pool.AddTask([&, pair_idx]() {
+        struct AetherTick {  // count the pair on EVERY task exit path
+          ~AetherTick() {
+            aether_progress_items(1, ++aether_pairs_done, total);
+          }
+          int64_t total;
+        } aether_tick{num_image_pairs};
         // Define as thread-local to reuse memory allocation in different tasks.
         thread_local std::vector<Eigen::Vector2d> points2D_1;
         thread_local std::vector<Eigen::Vector2d> points2D_2;

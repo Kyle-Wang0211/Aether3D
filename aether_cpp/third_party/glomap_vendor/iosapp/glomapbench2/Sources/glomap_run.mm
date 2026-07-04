@@ -134,8 +134,12 @@ extern "C" int glomap_run_all(char* out, int out_cap) {
       if (rss > p) p = rss;
       peak.store(p);
       if (++tick % 50 == 0) {  // ~every 5s
-        char b[128]; snprintf(b, sizeof(b),
-            "GLOMAP_RSS now=%.0fMB peak=%.0fMB thermal=%d", rss, p, read_thermal());
+        extern int aether_progress_permille(void);
+        extern int aether_progress_stage_get(void);
+        char b[160]; snprintf(b, sizeof(b),
+            "GLOMAP_RSS now=%.0fMB peak=%.0fMB thermal=%d prog=%d stage=%d",
+            rss, p, read_thermal(),
+            aether_progress_permille(), aether_progress_stage_get());
         logline(b);
       }
       [NSThread sleepForTimeInterval:0.1];

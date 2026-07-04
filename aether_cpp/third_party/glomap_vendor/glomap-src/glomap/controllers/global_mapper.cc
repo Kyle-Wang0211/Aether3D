@@ -13,6 +13,9 @@
 #include <colmap/util/file.h>
 #include <colmap/util/timer.h>
 
+// [AETHER PROGRESS] staged progress hooks (impl: controllers/aether_progress.cc)
+extern "C" void aether_progress_stage(int stage);
+
 namespace glomap {
 
 // TODO: Rig normalizaiton has not be done
@@ -52,6 +55,7 @@ bool GlobalMapper::Solve(const colmap::Database& database,
   // 2. Run relative pose estimation
   //   TODO: Use generalized relative pose estimation for rigs.
   if (!options_.skip_relative_pose_estimation) {
+    aether_progress_stage(1);  // [AETHER PROGRESS] relpose
     std::cout << "-------------------------------------" << std::endl;
     std::cout << "Running relative pose estimation ..." << std::endl;
     std::cout << "-------------------------------------" << std::endl;
@@ -81,6 +85,7 @@ bool GlobalMapper::Solve(const colmap::Database& database,
 
   // 3. Run rotation averaging for three times
   if (!options_.skip_rotation_averaging) {
+    aether_progress_stage(2);  // [AETHER PROGRESS] rotation averaging
     std::cout << "-------------------------------------" << std::endl;
     std::cout << "Running rotation averaging ..." << std::endl;
     std::cout << "-------------------------------------" << std::endl;
@@ -118,6 +123,7 @@ bool GlobalMapper::Solve(const colmap::Database& database,
 
   // 4. Track establishment and selection
   if (!options_.skip_track_establishment) {
+    aether_progress_stage(3);  // [AETHER PROGRESS] track establishment
     colmap::Timer run_timer;
     run_timer.Start();
 
@@ -153,6 +159,7 @@ bool GlobalMapper::Solve(const colmap::Database& database,
 
   // 5. Global positioning
   if (!options_.skip_global_positioning) {
+    aether_progress_stage(4);  // [AETHER PROGRESS] global positioning
     std::cout << "-------------------------------------" << std::endl;
     std::cout << "Running global positioning ..." << std::endl;
     std::cout << "-------------------------------------" << std::endl;
@@ -205,6 +212,7 @@ bool GlobalMapper::Solve(const colmap::Database& database,
 
   // 6. Bundle adjustment
   if (!options_.skip_bundle_adjustment) {
+    aether_progress_stage(5);  // [AETHER PROGRESS] internal BA
     std::cout << "-------------------------------------" << std::endl;
     std::cout << "Running bundle adjustment ..." << std::endl;
     std::cout << "-------------------------------------" << std::endl;
@@ -294,6 +302,7 @@ bool GlobalMapper::Solve(const colmap::Database& database,
 
   // 7. Retriangulation
   if (!options_.skip_retriangulation) {
+    aether_progress_stage(6);  // [AETHER PROGRESS] retriangulation
     std::cout << "-------------------------------------" << std::endl;
     std::cout << "Running retriangulation ..." << std::endl;
     std::cout << "-------------------------------------" << std::endl;

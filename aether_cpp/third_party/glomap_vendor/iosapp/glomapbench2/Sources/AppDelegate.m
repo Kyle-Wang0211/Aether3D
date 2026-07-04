@@ -7,6 +7,12 @@
 #endif
 
 extern int glomap_run_all(char* out, int out_cap);
+// [AETHER PROGRESS] real staged pipeline progress (glomap-src aether_progress.cc)
+extern int aether_progress_permille(void);
+extern int aether_progress_stage_get(void);
+static NSString* const kStageNames[10] = {
+  @"准备中", @"估计相对位姿", @"全局旋转平均", @"建立特征轨迹", @"全局定位",
+  @"光束法平差",   @"重三角化",     @"精修优化",     @"导出结果", @"完成"};
 
 // ── [AETHER HYBRID MODE] foreground full-speed + background continued run ──
 // iOS suspends (and, as measured on run4: cpu_resource-KILLS, "90s CPU over
@@ -22,10 +28,10 @@ extern int glomap_run_all(char* out, int out_cap);
 //      real background speed factor, whatever the user does with the phone.
 
 // [UMBRELLA v3] identifier MUST be prefixed with the exact bundle id
-// (com.kyle.PocketWorld — case-sensitive string match on the duet/dasd side;
+// (com.kyle.GlomapBench2 — case-sensitive string match on the duet/dasd side;
 // the old all-lowercase "com.kyle.pocketworld.recon" is a suspected silent-drop
 // cause). Keep in sync with BGTaskSchedulerPermittedIdentifiers in project.yml.
-static NSString* const kBGTaskID = @"com.kyle.PocketWorld.recon";
+static NSString* const kBGTaskID = @"com.kyle.GlomapBench2.recon";
 static volatile int gBenchDone = 0;
 static volatile int gHandlerFired = 0;
 // [UMBRELLA v4] set on foreground return: the current grant is recycled
@@ -175,15 +181,17 @@ static void aether_lifecycle_log(const char* tag) {
           aether_lifecycle_log("BGTASK_HANDLER_FIRED(umbrella)");
           __block volatile int expired = 0;
           NSProgress* prog = nil;
+          BGContinuedProcessingTask* cpTask = nil;
           if ([task isKindOfClass:BGContinuedProcessingTask.class]) {
-            prog = ((BGContinuedProcessingTask*)task).progress;
-            // [v4.1] MEASURED: grant expired 74s after the old 100-unit ticker
-            // pinned at its 92% cap (bg throttling stretched the run past the
-            // ticker's 9-min horizon) — a stalled progress bar IS the expire
-            // trigger. Fine-grained creep: 1000 units, +1/4s, cap 95% → no
-            // stall before ~63min, far beyond any bench run.
+            cpTask = (BGContinuedProcessingTask*)task;
+            prog = cpTask.progress;
+            // [v5 REAL PROGRESS] weighted staged pipeline progress from
+            // aether_progress.cc (monotone by construction). v4.1's blind
+            // ticker is gone; the system's stall-expiry is avoided because
+            // real stages always advance (indeterminate stages creep
+            // asymptotically inside their segment on the C side).
             prog.totalUnitCount = 1000;
-            prog.completedUnitCount = 10;
+            prog.completedUnitCount = MAX(1, aether_progress_permille());
           }
           task.expirationHandler = ^{
             aether_lifecycle_log([[NSString stringWithFormat:
@@ -191,12 +199,31 @@ static void aether_lifecycle_log(const char* tag) {
                                      UTF8String]);
             expired = 1;
           };
-          int ticks = 0;
+          // [v5.2 TEXT≡RING] subtitle carries the LIVE percent and is re-sent
+          // whenever the whole percent or the stage changes (≥8s apart) — the
+          // ring (NSProgress) and the text stay in lockstep, and a stage
+          // switch the system coalesced away gets re-sent on the next tick.
+          int lastStage = -1;
+          long long lastPct = -1;
+          double lastTextT = 0;
           while (!gBenchDone && !expired && !gCloseUmbrella) {
             [NSThread sleepForTimeInterval:2.0];
-            ticks++;
-            if (prog && ticks % 2 == 0 && prog.completedUnitCount < 950)
-              prog.completedUnitCount += 1;  // 4s cadence, cap 95%
+            if (prog) {
+              long long p = aether_progress_permille();
+              if (p > prog.completedUnitCount && p <= 992)
+                prog.completedUnitCount = p;
+              int st = aether_progress_stage_get();
+              long long pct = prog.completedUnitCount / 10;
+              double nowt = [NSDate date].timeIntervalSince1970;
+              if (st >= 0 && st <= 9 &&
+                  (st != lastStage ||
+                   (pct != lastPct && nowt - lastTextT >= 8.0))) {
+                lastStage = st; lastPct = pct; lastTextT = nowt;
+                [cpTask updateTitle:@"PocketWorld 重建"
+                           subtitle:[NSString stringWithFormat:@"%@ · %lld%%",
+                                        kStageNames[st], pct]];
+              }
+            }
           }
           if (prog && gBenchDone) prog.completedUnitCount = 1000;
           aether_lifecycle_log(gBenchDone   ? "BGTASK_CLOSED(bench_done)"
@@ -208,9 +235,12 @@ static void aether_lifecycle_log(const char* tag) {
           // tap submits a fresh request while the bench is still running.
           gCloseUmbrella = 0;
           gHandlerFired = 0;
-          // fg_recycle is a clean handoff, not a failure — only a true
-          // expiration reports NO (that's what paints "任务失败" in the UI).
-          [task setTaskCompletedWithSuccess:(expired ? NO : YES)];
+          // ALWAYS report success: a reclaimed grant is NOT a failed job (the
+          // work resumes on the next foreground visit), and success:NO pins a
+          // "任务失败" tombstone card the app cannot dismiss (system-owned
+          // ended Live Activity, no public API). Ground truth (EXPIRED vs
+          // bench_done vs fg_recycle) lives in hybrid.log.
+          [task setTaskCompletedWithSuccess:YES];
         }];
     aether_lifecycle_log(reg ? "BGTASK_REGISTERED" : "BGTASK_REGISTER_FAILED");
     if (reg) {

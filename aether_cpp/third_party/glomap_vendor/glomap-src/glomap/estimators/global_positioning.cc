@@ -6,6 +6,19 @@
 #include <colmap/util/cuda.h>
 #include <colmap/util/misc.h>
 
+// [AETHER PROGRESS] staged progress hooks (impl: controllers/aether_progress.cc)
+extern "C" void aether_progress_items(int stage, long done, long total);
+namespace {
+struct AetherProgressIterCB : public ceres::IterationCallback {
+  int stage; int max_iter;
+  AetherProgressIterCB(int s, int m) : stage(s), max_iter(m) {}
+  ceres::CallbackReturnType operator()(const ceres::IterationSummary& is) override {
+    aether_progress_items(stage, is.iteration + 1, max_iter);
+    return ceres::SOLVER_CONTINUE;
+  }
+};
+}  // namespace
+
 namespace glomap {
 namespace {
 
@@ -80,7 +93,10 @@ bool GlobalPositioner::Solve(const ViewGraph& view_graph,
 
   ceres::Solver::Summary summary;
   options_.solver_options.minimizer_progress_to_stdout = VLOG_IS_ON(2);
+  AetherProgressIterCB aether_cb(4, options_.solver_options.max_num_iterations);
+  options_.solver_options.callbacks.push_back(&aether_cb);
   ceres::Solve(options_.solver_options, problem_.get(), &summary);
+  options_.solver_options.callbacks.pop_back();
 
   if (VLOG_IS_ON(2)) {
     LOG(INFO) << summary.FullReport();

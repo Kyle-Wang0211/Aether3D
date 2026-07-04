@@ -51,6 +51,12 @@ static double NowMs() {
 #include <mach/mach.h>
 // [AETHER OPT-CUT2] phase-tagged RSS: attribute the process peak to a pipeline
 // phase (sampler gives the max but not WHERE). phys_footprint, macOS + iOS.
+// [AETHER PROGRESS] staged progress hooks (impl: glomap-src/controllers/aether_progress.cc)
+extern "C" void aether_progress_stage(int stage);
+extern "C" void aether_progress_items(int stage, long done, long total);
+extern "C" int aether_progress_permille(void);
+extern "C" int aether_progress_stage_get(void);
+
 static void aether_phase_rss(const char* tag) {
   task_vm_info_data_t info;
   mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
@@ -58,7 +64,8 @@ static void aether_phase_rss(const char* tag) {
   if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) ==
       KERN_SUCCESS)
     mb = info.phys_footprint / (1024.0 * 1024.0);
-  fprintf(stderr, "[AETHER RSS] %s = %.0fMB\n", tag, mb);
+  fprintf(stderr, "[AETHER RSS] %s = %.0fMB prog=%d stage=%d\n", tag, mb,
+          aether_progress_permille(), aether_progress_stage_get());
   fflush(stderr);
 }
 
@@ -341,6 +348,7 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
     const char* ba_status = "no";
     try {
       if (recon->NumRegFrames() == 0) throw std::runtime_error("no reg frames");
+      aether_progress_stage(7);  // [AETHER PROGRESS] extra CAUCHY BA
       const double t_ba0 = NowMs();
       // Avoid degeneracies (same as controller).
       colmap::ObservationManager(*recon).FilterObservationsWithNegativeDepth();
@@ -386,6 +394,17 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
         ba_config.AddImage(image_id);
       // Fix the gauge with two cameras (controller default).
       ba_config.FixGauge(colmap::BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
+      // [AETHER PROGRESS] iteration-level progress for the extra BA (stage 7)
+      struct AetherExtraBACB : public ceres::IterationCallback {
+        int max_iter;
+        explicit AetherExtraBACB(int m) : max_iter(m) {}
+        ceres::CallbackReturnType operator()(
+            const ceres::IterationSummary& is) override {
+          aether_progress_items(7, is.iteration + 1, max_iter);
+          return ceres::SOLVER_CONTINUE;
+        }
+      } aether_extra_cb(ba_options.ceres->solver_options.max_num_iterations);
+      ba_options.ceres->solver_options.callbacks.push_back(&aether_extra_cb);
       std::unique_ptr<colmap::BundleAdjuster> bundle_adjuster =
           colmap::CreateDefaultBundleAdjuster(ba_options, ba_config, *recon);
       bundle_adjuster->Solve();
@@ -399,6 +418,7 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
     }
 
     // write the FINAL (post-BA) colmap model via colmap's native writer -> out_dir/0.
+    aether_progress_stage(8);  // [AETHER PROGRESS] write
     const char* wrote = "no";
     try {
       std::string m0 = std::string(out_dir) + "/0";
@@ -406,6 +426,7 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
       recon->Write(m0);
       wrote = "yes";
     } catch (const std::exception&) { wrote = "throw"; }
+    aether_progress_stage(9);  // [AETHER PROGRESS] done
 
     std::snprintf(out_json, out_cap,
                   "{\"solve_ms\":%.1f,\"ba_ms\":%.1f,\"n_registered\":%zu,"
