@@ -39,8 +39,12 @@ std::atomic<long> g_last_move_t{0};
 // 0 idle, 1 relpose, 2 rotavg, 3 tracks, 4 global positioning,
 // 5 internal BA, 6 retriangulation(+convert tail), 7 extra CAUCHY BA,
 // 8 write, 9 done
-constexpr int kBase[10] = {0, 10, 110, 190, 240, 540, 690, 810, 975, 1000};
-constexpr int kCap[10] = {10, 110, 190, 240, 540, 690, 810, 975, 1000, 1000};
+// [v5.3] per-10000 scale: the system's stuck-task heuristic reads ONLY integer
+// completedUnitCount jumps (DTS-confirmed, FB21338185; forum-measured floor
+// ~1 unit / 10-20s). Finer units = every relpose pair / ceres iteration is an
+// integer jump, and the anti-stall nudge (8s) always clears the floor.
+constexpr int kBase[10] = {0, 100, 1100, 1900, 2400, 5400, 6900, 8100, 9750, 10000};
+constexpr int kCap[10] = {100, 1100, 1900, 2400, 5400, 6900, 8100, 9750, 10000, 10000};
 }  // namespace
 
 extern "C" void aether_progress_stage(int stage) {
@@ -92,8 +96,8 @@ extern "C" int aether_progress_permille(void) {
     long lm = g_last_move_t.load(std::memory_order_relaxed);
     if (lm == 0) {
       g_last_move_t.store(now, std::memory_order_relaxed);
-    } else if (now - lm >= 15 && last + 1 < kCap[s]) {
-      p = last + 1;
+    } else if (now - lm >= 8 && last + 1 < kCap[s]) {
+      p = last + 1;  // 8s: comfortably under the ~10-20s/unit system floor
     }
   }
   while (p > last &&

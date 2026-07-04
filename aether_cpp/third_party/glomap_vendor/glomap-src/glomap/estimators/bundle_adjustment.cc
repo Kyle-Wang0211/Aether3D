@@ -151,6 +151,18 @@ bool BundleAdjuster::Solve(std::unordered_map<rig_t, Rig>& rigs,
     if (std::getenv("AETHER_INT_SC")) {
       options_.solver_options.use_explicit_schur_complement = true;
     }
+    // [SPSE VERDICT 2026-07-05: REJECTED, see global_positioning.cc]
+    // [AETHER SPSE spike 2026-07-04] see global_positioning.cc — same knob,
+    // internal-BA ITERATIVE path. NOTE post-verdict context: the SV
+    // "basin" story above is superseded — SV 0.060-0.063 was re-anchored as
+    // the run-noise band (stats + NN 0.00012 + user blind test); the gate now
+    // uses the band ceiling, not 3% off one lucky draw.
+    if (const char* e = std::getenv("AETHER_SPSE")) {
+      options_.solver_options.preconditioner_type =
+          ceres::SCHUR_POWER_SERIES_EXPANSION;
+      if (e[0] == '2')
+        options_.solver_options.use_spse_initialization = true;
+    }
   }
 
   options_.solver_options.minimizer_progress_to_stdout = VLOG_IS_ON(2);

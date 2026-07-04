@@ -353,6 +353,18 @@ struct hash<std::pair<uint32_t, uint32_t>> {
   }
 };
 
+// Hash function specialization for uint64_t pairs, e.g., point3D_t.
+// [AETHER] cherry-picked from upstream colmap PR #4354
+// (merge commit 56b9dfa679835712d07643cea87cbce675f0db33).
+template <>
+struct hash<std::pair<uint64_t, uint64_t>> {
+  std::size_t operator()(const std::pair<uint64_t, uint64_t>& p) const {
+    const std::size_t h1 = std::hash<uint64_t>{}(p.first);
+    const std::size_t h2 = std::hash<uint64_t>{}(p.second);
+    return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+  }
+};
+
 template <>
 struct hash<colmap::sensor_t> {
   std::size_t operator()(const colmap::sensor_t& s) const noexcept {

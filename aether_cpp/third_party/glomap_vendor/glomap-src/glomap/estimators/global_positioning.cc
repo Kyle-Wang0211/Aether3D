@@ -582,6 +582,21 @@ void GlobalPositioner::ParameterizeVariables(
       // SPARSE+EIGEN — its problem is smaller/sparser and fit at 3.07GB for COLMAP.)
       options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
       options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+      // [SPSE VERDICT 2026-07-05: REJECTED — 3.2x SLOWER (82min vs 25min
+      // clean-host dense-414) + ARKit-position gate fail. Single-core
+      // pathology confirmed in clean conditions; PoBA paper numbers do not
+      // transfer to this problem structure. Debug opt-in only.]
+      // [AETHER SPSE spike 2026-07-04] Schur power-series-expansion
+      // preconditioner (Ceres 2.2, PoBA lineage): attacks CG iteration count
+      // on the ITERATIVE path — orthogonal to the rejected explicit-SC axis
+      // (no materialized factorization). Same objective, same convergence
+      // criteria. AETHER_SPSE=1 → preconditioner; =2 → + SPSE initialization.
+      if (const char* e = std::getenv("AETHER_SPSE")) {
+        options_.solver_options.preconditioner_type =
+            ceres::SCHUR_POWER_SERIES_EXPANSION;
+        if (e[0] == '2')
+          options_.solver_options.use_spse_initialization = true;
+      }
     }
   } else {
     options_.solver_options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;

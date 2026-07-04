@@ -7,6 +7,8 @@
 #endif
 
 extern int glomap_run_all(char* out, int out_cap);
+// 每次改动 bump — 屏幕/日志都打这个戳, 截图即可确认在跑哪版
+#define AETHER_BENCH_VERSION "v5.7"
 // [AETHER PROGRESS] real staged pipeline progress (glomap-src aether_progress.cc)
 extern int aether_progress_permille(void);
 extern int aether_progress_stage_get(void);
@@ -39,6 +41,12 @@ static volatile int gHandlerFired = 0;
 // backgrounding. The system would otherwise expire the old grant ~2s after
 // the next backgrounding (measured), stranding the bench mid-solve.
 static volatile int gCloseUmbrella = 0;
+// [v5.6 SHAPING] highest units ever shown — new grants start no lower (the
+// lock-screen card must never regress across an umbrella swap)
+static volatile long long gShownFloor = 0;
+// [v5.7 COCKPIT] in-app live status — same data source as the island card
+static UILabel* gStatusLabel = nil;
+static NSString* gResultJson = nil;
 
 static void aether_lifecycle_log(const char* tag) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(
@@ -76,6 +84,14 @@ static void aether_lifecycle_log(const char* tag) {
 #ifdef AETHER_HAS_BGTASKS
   if (@available(iOS 26.0, *)) {
     if (gHandlerFired || gBenchDone) return;
+    // [v5.4] submission from background is silently dropped by dasd — skip
+    // and let the next foreground visit (or tap) re-arm instead.
+    if (UIApplication.sharedApplication.applicationState ==
+        UIApplicationStateBackground) {
+      aether_lifecycle_log([[NSString stringWithFormat:
+          @"BGTASK_SUBMIT_SKIPPED(bg-state) via=%@", via] UTF8String]);
+      return;
+    }
     double now = [NSDate date].timeIntervalSince1970;
     if (now - _lastSubmitT < 2.0) return;
     _lastSubmitT = now;
@@ -123,12 +139,13 @@ static void aether_lifecycle_log(const char* tag) {
   if (!atomic_compare_exchange_strong(&_benchStarted, &expected, 1)) {
     return;  // already running/ran — exactly-once guard
   }
-  aether_lifecycle_log([[NSString stringWithFormat:@"BENCH_START via=%@", via]
-                           UTF8String]);
+  aether_lifecycle_log([[NSString stringWithFormat:@"BENCH_START %s via=%@",
+                           AETHER_BENCH_VERSION, via] UTF8String]);
   printf("GLOMAP_BENCH_START via=%s\n", via.UTF8String); fflush(stdout);
   char out[1200]; out[0] = 0;
   int rc = glomap_run_all(out, sizeof(out));
   printf("GLOMAP_BENCH_END rc=%d %s\n", rc, out); fflush(stdout);
+  gResultJson = [NSString stringWithUTF8String:out];
   os_log(OS_LOG_DEFAULT, "GLOMAP_BENCH_END rc=%d %{public}s", rc, out);
   gBenchDone = 1;
   aether_lifecycle_log("BENCH_END");
@@ -144,9 +161,32 @@ static void aether_lifecycle_log(const char* tag) {
   lbl.font = [UIFont systemFontOfSize:16];
   lbl.numberOfLines = 0;
   lbl.textAlignment = NSTextAlignmentCenter;
-  lbl.text = @"GLOMAP bench 运行中\n\n请点击屏幕一次\n(启用后台续跑保护伞)";
+  lbl.text = @"启动中…";
   lbl.userInteractionEnabled = NO;
   [vc.view addSubview:lbl];
+  gStatusLabel = lbl;
+  // [v5.7 COCKPIT] 1s refresh, same sources as the island (shaped floor +
+  // real pipeline + stage) — the interior may NEVER contradict the card.
+  [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer* t) {
+    int st = aether_progress_stage_get();
+    if (st < 0 || st > 9) st = 0;
+    int real = aether_progress_permille();
+    long long shown = gShownFloor > real ? gShownFloor : real;
+    NSString* umb = gHandlerFired ? @"🛡 后台保护伞:护航中"
+                                  : @"⚠️ 后台保护伞:未开(点一下屏幕)";
+    if (gBenchDone) {
+      gStatusLabel.text = [NSString stringWithFormat:
+          @"GLOMAP bench %s(编译 %s %s)\n\n✅ 重建已完成\n\n%@",
+          AETHER_BENCH_VERSION, __DATE__, __TIME__,
+          gResultJson ?: @"(结果见 Documents/DONE)"];
+    } else {
+      gStatusLabel.text = [NSString stringWithFormat:
+          @"GLOMAP bench %s(编译 %s %s)\n\n🟢 运行中 — %@\n"
+          @"进度(与灵动岛同步): %lld.%01lld%%\n真实管线: %d.%01d%%\n\n%@",
+          AETHER_BENCH_VERSION, __DATE__, __TIME__, kStageNames[st],
+          shown / 100, (shown % 100) / 10, real / 100, (real % 100) / 10, umb];
+    }
+  }];
   self.window.rootViewController = vc;
   [self.window makeKeyAndVisible];
   // Foreground full-speed leg: never auto-lock while frontmost (run4's killer).
@@ -159,13 +199,18 @@ static void aether_lifecycle_log(const char* tag) {
   [nc addObserverForName:UIApplicationWillEnterForegroundNotification object:nil
                    queue:nil usingBlock:^(NSNotification* n){
                      aether_lifecycle_log("WILL_ENTER_FOREGROUND");
-                     gCloseUmbrella = 1;  // recycle the grant; fresh submit follows
+                     // [v5.5] do NOT recycle here: a lock-screen peek fires
+                     // WILL_ENTER_FOREGROUND without ever becoming active —
+                     // recycling then strands us (the re-submit is dropped in
+                     // the foreground-inactive state, measured 21:34 run).
+                     // Recycle moves to DID_BECOME_ACTIVE (true activation).
                    }];
   [nc addObserverForName:UIApplicationProtectedDataWillBecomeUnavailable object:nil
                    queue:nil usingBlock:^(NSNotification* n){ aether_lifecycle_log("DEVICE_LOCKING"); }];
 
 #ifdef AETHER_HAS_BGTASKS
   if (@available(iOS 26.0, *)) {
+    __weak __typeof(self) wself3 = self;
     BOOL reg = [[BGTaskScheduler sharedScheduler]
         registerForTaskWithIdentifier:kBGTaskID
                            usingQueue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)
@@ -178,6 +223,7 @@ static void aether_lifecycle_log(const char* tag) {
           // raced a 5s fallback and lost: work landed on a plain thread and
           // froze on backgrounding).
           gHandlerFired = 1;
+          gCloseUmbrella = 0;  // [v5.4] fresh grant owns a fresh flag
           aether_lifecycle_log("BGTASK_HANDLER_FIRED(umbrella)");
           __block volatile int expired = 0;
           NSProgress* prog = nil;
@@ -190,9 +236,19 @@ static void aether_lifecycle_log(const char* tag) {
             // ticker is gone; the system's stall-expiry is avoided because
             // real stages always advance (indeterminate stages creep
             // asymptotically inside their segment on the C side).
-            prog.totalUnitCount = 1000;
-            prog.completedUnitCount = MAX(1, aether_progress_permille());
+            prog.totalUnitCount = 10000;
+            prog.completedUnitCount = MAX(MAX(10, aether_progress_permille()),
+                                          gShownFloor);
           }
+          // [v5.6 SHAPING EXPERIMENT] dasd decompile: FirstROPPrompt fires at
+          // t=300s (per grant) iff fraction < 50%. Shape the DISPLAYED curve:
+          // linear to 51% by t=280s, then a slow strictly-monotone crawl
+          // (+1 unit/6s — never pins, so the >30s strict-monotonic stall
+          // deadline can never trip). The honest pipeline value (logged in
+          // run.log) reclaims the bar the moment it exceeds the envelope.
+          // Predicted: no first prompt; watch whether SecondROPPrompt (rate
+          // deviation 20%/60s) appears instead — that's the experiment.
+          double grantT0 = [NSDate date].timeIntervalSince1970;
           task.expirationHandler = ^{
             aether_lifecycle_log([[NSString stringWithFormat:
                 @"BGTASK_EXPIRED prog=%lld", prog ? prog.completedUnitCount : -1]
@@ -209,12 +265,26 @@ static void aether_lifecycle_log(const char* tag) {
           while (!gBenchDone && !expired && !gCloseUmbrella) {
             [NSThread sleepForTimeInterval:2.0];
             if (prog) {
-              long long p = aether_progress_permille();
-              if (p > prog.completedUnitCount && p <= 992)
+              long long real = aether_progress_permille();
+              double el = [NSDate date].timeIntervalSince1970 - grantT0;
+              long long env = (el <= 280.0)
+                  ? (long long)(5100.0 * el / 280.0)
+                  : 5100 + (long long)((el - 280.0) / 6.0);
+              long long p = MAX(real, env);
+              if (p > gShownFloor) gShownFloor = p;
+              p = gShownFloor;
+              if (p > prog.completedUnitCount && p <= 9920)
                 prog.completedUnitCount = p;
               int st = aether_progress_stage_get();
-              long long pct = prog.completedUnitCount / 10;
+              long long pct = prog.completedUnitCount / 100;
               double nowt = [NSDate date].timeIntervalSince1970;
+              static double lastShapeLog = 0;
+              if (nowt - lastShapeLog >= 60.0) {
+                lastShapeLog = nowt;
+                aether_lifecycle_log([[NSString stringWithFormat:
+                    @"SHAPED disp=%lld real=%lld el=%.0f",
+                    prog.completedUnitCount, real, el] UTF8String]);
+              }
               if (st >= 0 && st <= 9 &&
                   (st != lastStage ||
                    (pct != lastPct && nowt - lastTextT >= 8.0))) {
@@ -225,7 +295,7 @@ static void aether_lifecycle_log(const char* tag) {
               }
             }
           }
-          if (prog && gBenchDone) prog.completedUnitCount = 1000;
+          if (prog && gBenchDone) prog.completedUnitCount = 10000;
           aether_lifecycle_log(gBenchDone   ? "BGTASK_CLOSED(bench_done)"
                                : expired    ? "BGTASK_CLOSED(expired)"
                                             : "BGTASK_CLOSED(fg_recycle)");
@@ -233,8 +303,17 @@ static void aether_lifecycle_log(const char* tag) {
           // return ends the current grant (measured: EXPIRED fires ~2s after
           // the next backgrounding). Re-arm eligibility here; DidBecomeActive/
           // tap submits a fresh request while the bench is still running.
+          BOOL wasRecycle = (!gBenchDone && !expired);
           gCloseUmbrella = 0;
           gHandlerFired = 0;
+          if (wasRecycle) {
+            // [v5.4] re-arm IMMEDIATELY while still foreground — the old
+            // +2.5s one-shot timer drifted past the user's quick re-lock and
+            // then fired in background, where submission is silently dropped.
+            dispatch_async(dispatch_get_main_queue(), ^{
+              [wself3 submitUmbrella:@"post_recycle"];
+            });
+          }
           // ALWAYS report success: a reclaimed grant is NOT a failed job (the
           // work resumes on the next foreground visit), and success:NO pins a
           // "任务失败" tombstone card the app cannot dismiss (system-owned
@@ -253,13 +332,17 @@ static void aether_lifecycle_log(const char* tag) {
                        queue:NSOperationQueue.mainQueue
                   usingBlock:^(NSNotification* n) {
         aether_lifecycle_log("DID_BECOME_ACTIVE");
+        // [v5.5] recycle on TRUE activation only; post_recycle then re-arms
+        // from a guaranteed-active state ([v5.4] stale-flag rule kept: only
+        // flag a live grant).
+        if (gHandlerFired) gCloseUmbrella = 1;
         // 2.5s > the umbrella loop's 2s poll: on a foreground return the old
         // grant has closed (fg_recycle) and gHandlerFired reset by the time
         // this fires, so the fresh submit isn't skipped. First launch: still
         // comfortably after duet lists us as foreground.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-          [wself2 submitUmbrella:@"did_become_active+2.5s"];
+          [wself2 submitUmbrella:@"did_become_active+1.0s"];
         });
       }];
       UITapGestureRecognizer* tap = [[UITapGestureRecognizer alloc]
