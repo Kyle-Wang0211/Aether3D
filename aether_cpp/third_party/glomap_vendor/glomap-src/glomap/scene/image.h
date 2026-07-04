@@ -53,7 +53,7 @@ struct Image {
 };
 
 Eigen::Vector3d Image::Center() const {
-  return CamFromWorld().rotation.inverse() * -CamFromWorld().translation;
+  return CamFromWorld().rotation().inverse() * -CamFromWorld().translation();
 }
 
 // Concrete implementation of the methods
@@ -90,7 +90,7 @@ Eigen::Matrix3d Image::GetRAlign() const {
     } else {
       return frame_ptr->RigPtr()
                  ->SensorFromRig(sensor_t(SensorType::CAMERA, camera_id))
-                 .rotation.toRotationMatrix() *
+                 .rotation().toRotationMatrix() *
              frame_ptr->gravity_info.GetRAlign();
     }
   } else {

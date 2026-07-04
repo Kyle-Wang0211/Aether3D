@@ -67,8 +67,8 @@ bool ConvertRotationsFromImageToRig(
 
       // Set the rotation from the camera to the world
       cam_from_ref_cam_rotations[image.camera_id].push_back(
-          cam_from_worlds.at(image_id).rotation *
-          cam_from_worlds.at(ref_img_id).rotation.inverse());
+          cam_from_worlds.at(image_id).rotation() *
+          cam_from_worlds.at(ref_img_id).rotation().inverse());
     }
   }
 
@@ -102,15 +102,15 @@ bool ConvertRotationsFromImageToRig(
 
       if (image_id == frame_to_ref_image_id[frame_id]) {
         rig_from_world_rotations.push_back(
-            cam_from_worlds.at(image_id).rotation);
+            cam_from_worlds.at(image_id).rotation());
       } else {
         auto cam_from_rig_opt =
             rigs[camera_id_to_rig_id[image.camera_id]].MaybeSensorFromRig(
                 sensor_t(SensorType::CAMERA, image.camera_id));
         if (!cam_from_rig_opt.has_value()) continue;
         rig_from_world_rotations.push_back(
-            cam_from_rig_opt.value().rotation.inverse() *
-            cam_from_worlds.at(image_id).rotation);
+            cam_from_rig_opt.value().rotation().inverse() *
+            cam_from_worlds.at(image_id).rotation());
       }
 
       const std::vector<double> rotation_weights(

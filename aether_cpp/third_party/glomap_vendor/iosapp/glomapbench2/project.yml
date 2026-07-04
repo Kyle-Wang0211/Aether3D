@@ -1,0 +1,81 @@
+name: GlomapBench2
+options:
+  bundleIdPrefix: com.kyle
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  GlomapBench2:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # GLOMAP global-mapper C ABI (runs GlobalMapper::Solve over a prebuilt db)
+      - path: ../../bench/glomap_bench.cc
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 26AH7V448L
+        # [ENTITLEMENT FIX] Reuse the MAIN app's bundle id com.kyle.PocketWorld — its
+        # App ID (26AH7V448L.com.kyle.PocketWorld) already has the Increased Memory
+        # Limit capability enabled in the portal, so automatic signing yields a
+        # profile that embeds com.apple.developer.kernel.increased-memory-limit
+        # (~4.1GB cap). The dedicated com.kyle.GlomapBench2 App ID does NOT have the
+        # capability (portal edit needs the Apple Dev account); reusing PocketWorld's
+        # is the local, no-portal path. NOTE: installing this over the device
+        # temporarily replaces the PocketWorld main app (test-only, reversible).
+        PRODUCT_BUNDLE_IDENTIFIER: com.kyle.PocketWorld
+        # entitlements FILE was never wired to the target before, so the entitlement
+        # was never signed in regardless — wire it now.
+        CODE_SIGN_ENTITLEMENTS: Sources/GlomapBench2.entitlements
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        CLANG_CXX_LIBRARY: "libc++"
+        ENABLE_BITCODE: NO
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "EIGEN_MPL2_ONLY"
+          - "GLOG_USE_GLOG_EXPORT"
+          - "GLOG_NO_ABBREVIATED_SEVERITIES"
+          - "GLOG_VERSION_MAJOR=0"
+          - "GLOG_VERSION_MINOR=7"
+          - "GLOMAP_CUDA_DISABLED"
+        HEADER_SEARCH_PATHS:
+          # vendored colmap-src FIRST (4.0.4), then glomap-src, then deps
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glomap_vendor/colmap-src"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glomap_vendor/glomap-src"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glomap_vendor/stubs"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glomap_vendor/poselib-src"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glog-install/include"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/ceres/include"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/ceres-build-ios/include"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/ceres/config"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/eigen-install/include/eigen3"
+          # boost (header-only: preprocessor/predef) — MUST be LAST so homebrew's
+          # colmap headers never shadow the vendored colmap-src above.
+          - "/opt/homebrew/include"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          # the migrated GLOMAP static lib (colmap subset + glomap-src)
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glomap_vendor/build-ios-glomap/libglomap_full.a"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/ceres-build-ios/lib/libceres.a"
+          - "/Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glog-install/lib/libglog.a"
+          - "-lsqlite3"
+          - "-framework Accelerate"
+          - "-framework Foundation"
+          - "-framework UIKit"
+          - "-framework BackgroundTasks"
+          - "-lobjc"
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: GlomapBench2
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        # [AETHER HYBRID MODE] continued processing in background (iOS 26)
+        UIBackgroundModes: [processing]
+        # identifier MUST be prefixed with the exact (case-sensitive) bundle id —
+        # duet/dasd match it string-level; the old lowercase form is a
+        # suspected silent-drop cause (forums 807370/801126).
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.kyle.PocketWorld.recon

@@ -124,13 +124,13 @@ void RotationEstimator::InitializeFromMaximumSpanningTree(
         colmap::ImagePairToPairId(curr, parents[curr]));
     if (image_pair.image_id1 == curr) {
       // 1_R_w = 2_R_1^T * 2_R_w
-      cam_from_worlds[curr].rotation =
+      cam_from_worlds[curr].rotation() =
           (Inverse(image_pair.cam2_from_cam1) * cam_from_worlds[parents[curr]])
-              .rotation;
+              .rotation();
     } else {
       // 2_R_w = 2_R_1 * 1_R_w
-      cam_from_worlds[curr].rotation =
-          (image_pair.cam2_from_cam1 * cam_from_worlds[parents[curr]]).rotation;
+      cam_from_worlds[curr].rotation() =
+          (image_pair.cam2_from_cam1 * cam_from_worlds[parents[curr]]).rotation();
     }
   }
 
@@ -177,7 +177,7 @@ void RotationEstimator::SetupLinearSystem(
 
     auto cam_from_rig = rigs[rig_id].MaybeSensorFromRig(sensor_id);
     if (!cam_from_rig.has_value() ||
-        cam_from_rig.value().translation.hasNaN()) {
+        cam_from_rig.value().translation().hasNaN()) {
       if (camera_id_to_idx_.find(camera_id) == camera_id_to_idx_.end()) {
         camera_id_to_idx_[camera_id] = -1;
         if (cam_from_rig.has_value()) {
@@ -207,7 +207,7 @@ void RotationEstimator::SetupLinearSystem(
     if (options_.use_gravity && frame.gravity_info.has_gravity) {
       rotation_estimated_[num_dof] =
           RotUpToAngle(frame.gravity_info.GetRAlign().transpose() *
-                       frame.RigFromWorld().rotation.toRotationMatrix());
+                       frame.RigFromWorld().rotation().toRotationMatrix());
       num_dof++;
 
       if (fixed_camera_id_ == -1) {
@@ -304,8 +304,8 @@ void RotationEstimator::SetupLinearSystem(
     }
 
     rel_temp_info_[pair_id].R_rel =
-        (cam2_from_rig2.rotation.inverse() *
-         image_pair.cam2_from_cam1.rotation * cam1_from_rig1.rotation)
+        (cam2_from_rig2.rotation().inverse() *
+         image_pair.cam2_from_cam1.rotation() * cam1_from_rig1.rotation())
             .toRotationMatrix();
 
     // Align the relative rotation to the gravity
@@ -806,9 +806,9 @@ void RotationEstimator::ConvertResults(
         continue;  // Skip cameras that are not estimated
       }
       Rigid3d cam_from_rig;
-      cam_from_rig.rotation = AngleAxisToRotation(
+      cam_from_rig.rotation() = AngleAxisToRotation(
           rotation_estimated_.segment(camera_id_to_idx_[sensor_id.id], 3));
-      cam_from_rig.translation.setConstant(
+      cam_from_rig.translation().setConstant(
           std::numeric_limits<double>::quiet_NaN());  // No translation yet
       rig.SetSensorFromRig(sensor_id, cam_from_rig);
     }

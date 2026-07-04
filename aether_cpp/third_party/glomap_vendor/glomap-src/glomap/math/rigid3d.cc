@@ -5,16 +5,16 @@
 namespace glomap {
 
 double CalcAngle(const Rigid3d& pose1, const Rigid3d& pose2) {
-  return pose1.rotation.angularDistance(pose2.rotation) * 180 / EIGEN_PI;
+  return pose1.rotation().angularDistance(pose2.rotation()) * 180 / EIGEN_PI;
 }
 
 double CalcTrans(const Rigid3d& pose1, const Rigid3d& pose2) {
-  return (Inverse(pose1).translation - Inverse(pose2).translation).norm();
+  return (Inverse(pose1).translation() - Inverse(pose2).translation()).norm();
 }
 
 double CalcTransAngle(const Rigid3d& pose1, const Rigid3d& pose2) {
-  double cos_r = (pose1.translation).dot(pose2.translation) /
-                 (pose1.translation.norm() * pose2.translation.norm());
+  double cos_r = (pose1.translation()).dot(pose2.translation()) /
+                 (pose1.translation().norm() * pose2.translation().norm());
   cos_r = std::min(std::max(cos_r, -1.), 1.);
   return std::acos(cos_r) * 180 / EIGEN_PI;
 }
@@ -31,7 +31,7 @@ double DegToRad(double degree) { return degree * EIGEN_PI / 180; }
 double RadToDeg(double radian) { return radian * 180 / EIGEN_PI; }
 
 Eigen::Vector3d Rigid3dToAngleAxis(const Rigid3d& pose) {
-  Eigen::AngleAxis<double> aa(pose.rotation);
+  Eigen::AngleAxis<double> aa(pose.rotation());
   Eigen::Vector3d aa_vec = aa.angle() * aa.axis();
   return aa_vec;
 }
@@ -63,7 +63,7 @@ Eigen::Matrix3d AngleAxisToRotation(const Eigen::Vector3d& aa_vec) {
 }
 
 Eigen::Vector3d CenterFromPose(const Rigid3d& pose) {
-  return pose.rotation.inverse() * -pose.translation;
+  return pose.rotation().inverse() * -pose.translation();
 }
 
 }  // namespace glomap

@@ -3,7 +3,7 @@
 #include "glomap/estimators/cost_function.h"
 #include "glomap/math/gravity.h"
 
-#include <colmap/estimators/manifold.h>
+#include <colmap/estimators/cost_functions/manifold.h>
 
 namespace glomap {
 void GravityRefiner::RefineGravity(const ViewGraph& view_graph,
@@ -82,14 +82,14 @@ void GravityRefiner::RefineGravity(const ViewGraph& view_graph,
         gravities.emplace_back(
             (colmap::Inverse(view_graph.image_pairs.at(pair_id).cam2_from_cam1 *
                              cam1_from_rig1)
-                 .rotation.toRotationMatrix() *
+                 .rotation().toRotationMatrix() *
              images[image_id2].GetRAlign())
                 .col(1));
       } else if (images.at(image_id2).frame_id == frame_id) {
         gravities.emplace_back(
             ((colmap::Inverse(cam2_from_rig2) *
               view_graph.image_pairs.at(pair_id).cam2_from_cam1)
-                 .rotation.toRotationMatrix() *
+                 .rotation().toRotationMatrix() *
              images[image_id1].GetRAlign())
                 .col(1));
       }
@@ -104,7 +104,8 @@ void GravityRefiner::RefineGravity(const ViewGraph& view_graph,
 
     // Then, run refinment
     gravity = AverageGravity(gravities);
-    colmap::SetSphereManifold<3>(&problem, gravity.data());
+    colmap::SetManifold(
+        &problem, gravity.data(), colmap::CreateSphereManifold<3>());
     ceres::Solver::Summary summary_solver;
     ceres::Solve(options_.solver_options, &problem, &summary_solver);
 
@@ -150,7 +151,7 @@ void GravityRefiner::IdentifyErrorProneGravity(
       // Calculate the gravity aligned relative rotation
       const Eigen::Matrix3d R_rel =
           image2.GetRAlign().transpose() *
-          image_pair.cam2_from_cam1.rotation.toRotationMatrix() *
+          image_pair.cam2_from_cam1.rotation().toRotationMatrix() *
           image1.GetRAlign();
       // Convert it to the closest upright rotation
       const Eigen::Matrix3d R_rel_up = AngleToRotUp(RotUpToAngle(R_rel));

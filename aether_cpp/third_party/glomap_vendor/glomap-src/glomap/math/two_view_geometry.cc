@@ -8,13 +8,13 @@ bool CheckCheirality(const Rigid3d& pose,
                      double min_depth,
                      double max_depth) {
   // This code assumes that x1 and x2 are unit vectors
-  const Eigen::Vector3d Rx1 = pose.rotation * x1;
+  const Eigen::Vector3d Rx1 = pose.rotation() * x1;
 
   // [1 a; a 1] * [lambda1; lambda2] = [b1; b2]
   // [lambda1; lambda2] = [1 s-a; -a 1] * [b1; b2] / (1 - a*a)
   const double a = -Rx1.dot(x2);
-  const double b1 = -Rx1.dot(pose.translation);
-  const double b2 = x2.dot(pose.translation);
+  const double b1 = -Rx1.dot(pose.translation());
+  const double b2 = x2.dot(pose.translation());
 
   // Note that we drop the factor 1.0/(1-a*a) since it is always positive.
   const double lambda1 = b1 - a * b2;
@@ -39,9 +39,9 @@ double GetOrientationSignum(const Eigen::Matrix3d& F,
 }
 
 void EssentialFromMotion(const Rigid3d& pose, Eigen::Matrix3d* E) {
-  *E << 0.0, -pose.translation(2), pose.translation(1), pose.translation(2),
-      0.0, -pose.translation(0), -pose.translation(1), pose.translation(0), 0.0;
-  *E = (*E) * pose.rotation.toRotationMatrix();
+  *E << 0.0, -pose.translation()(2), pose.translation()(1), pose.translation()(2),
+      0.0, -pose.translation()(0), -pose.translation()(1), pose.translation()(0), 0.0;
+  *E = (*E) * pose.rotation().toRotationMatrix();
 }
 
 // Get the essential matrix from relative pose

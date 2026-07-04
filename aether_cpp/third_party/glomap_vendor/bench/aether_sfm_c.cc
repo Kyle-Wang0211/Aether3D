@@ -53,6 +53,18 @@ extern "C" int aether_dsp_sift_extract(const uint8_t* gray, int width,
                                        int height, int max_features,
                                        float* out_xy, uint8_t* out_desc,
                                        int out_cap, int* out_count);
+// GPU DSP-SIFT extractor (dsp_sift_gpu_c.cc). Same xy/128-d/UBC/RootSIFT
+// contract; falls back to the CPU _threaded path in-ABI on any GPU failure
+// (init / capacity / NaN), so the caller is unaware. num_threads is ignored.
+//
+// WEAK symbol: targets that don't link the Dawn-backed dsp_sift_gpu_c.cc (e.g.
+// CPU-only host benches) still link aether_sfm_c.cc — the weak ref resolves to
+// nullptr there, and the use_gpu_extract path guards on it (falls back to CPU).
+// Production iOS/Android links dsp_sift_gpu_c.cc so the symbol is real.
+extern "C" __attribute__((weak)) int aether_dsp_sift_extract_gpu(
+    const uint8_t* gray, int width, int height, int max_features,
+    int num_threads, float* out_xy, uint8_t* out_desc, int out_cap,
+    int* out_count);
 extern "C" int aether_sift_match(const uint8_t* desc1, int n1,
                                  const uint8_t* desc2, int n2, double max_ratio,
                                  int* out_num_matches);
@@ -273,6 +285,7 @@ void aether_sfm_options_default(aether_sfm_options_t* out) {
   out->match_max_ratio = 0.7f;
   out->use_gpu_match = 0;  // CPU brute-force by default; iOS shim can flip to 1
   out->k_neighbors = 6;
+  out->use_gpu_extract = 0;  // CPU DSP-SIFT by default; iOS shim flips to 1
 }
 
 const char* aether_sfm_result_str(aether_sfm_result_t code) {
@@ -386,13 +399,22 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     const int max_features =
         s->options.max_features > 0 ? s->options.max_features : 2048;
 
-    // 1) DSP-SIFT extraction (validated unmodified colmap covariant SIFT).
+    // 1) DSP-SIFT extraction. use_gpu_extract routes to the GPU DSP-SIFT
+    //    (Dawn/WGSL, f16 on A16) which is output-equivalent (xy/128-d/UBC/
+    //    RootSIFT) and falls back to the CPU _threaded path IN-ABI on any GPU
+    //    failure — so this call site is unaware which path ran. Default = CPU.
     std::vector<float> xy(static_cast<size_t>(max_features) * 2);
     std::vector<uint8_t> desc(static_cast<size_t>(max_features) * 128);
     int n = 0;
-    const int erc = aether_dsp_sift_extract(gray, width, height, max_features,
-                                            xy.data(), desc.data(), max_features,
-                                            &n);
+    const bool gpu_avail =
+        s->options.use_gpu_extract && (aether_dsp_sift_extract_gpu != nullptr);
+    const int erc =
+        gpu_avail
+            ? aether_dsp_sift_extract_gpu(gray, width, height, max_features,
+                                          /*num_threads=*/0, xy.data(),
+                                          desc.data(), max_features, &n)
+            : aether_dsp_sift_extract(gray, width, height, max_features,
+                                      xy.data(), desc.data(), max_features, &n);
     if (erc != 0 || n <= 0) return AETHER_SFM_ERR_EXTRACT;
 
     // 2) Single shared camera (SIMPLE_PINHOLE: f, cx, cy), self-calibrated by

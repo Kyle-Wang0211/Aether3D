@@ -71,7 +71,7 @@ colmap::Sim3d NormalizeReconstruction(
     for (auto& [sensor_id, sensor_from_rig_opt] : rig.NonRefSensors()) {
       if (sensor_from_rig_opt.has_value()) {
         Rigid3d sensor_from_rig = sensor_from_rig_opt.value();
-        sensor_from_rig.translation *= scale;
+        sensor_from_rig.translation() *= scale;
         rig.SetSensorFromRig(sensor_id, sensor_from_rig);
       }
     }

@@ -146,7 +146,7 @@ void GlobalPositioner::InitializeRandomPositions(
   if (!options_.generate_random_positions || !options_.optimize_positions) {
     for (auto& [frame_id, frame] : frames) {
       if (constrained_positions.find(frame_id) != constrained_positions.end())
-        frame.RigFromWorld().translation = CenterFromPose(frame.RigFromWorld());
+        frame.RigFromWorld().translation() = CenterFromPose(frame.RigFromWorld());
     }
     return;
   }
@@ -155,10 +155,10 @@ void GlobalPositioner::InitializeRandomPositions(
   for (auto& [frame_id, frame] : frames) {
     // Only set the cameras to be random if they are needed to be optimized
     if (constrained_positions.find(frame_id) != constrained_positions.end())
-      frame.RigFromWorld().translation =
+      frame.RigFromWorld().translation() =
           100.0 * RandVector3d(random_generator_, -1, 1);
     else
-      frame.RigFromWorld().translation = CenterFromPose(frame.RigFromWorld());
+      frame.RigFromWorld().translation() = CenterFromPose(frame.RigFromWorld());
   }
 
   VLOG(2) << "Constrained positions: " << constrained_positions.size();
@@ -190,15 +190,15 @@ void GlobalPositioner::AddCameraToCameraConstraints(
     double& scale = scales_.emplace_back(1);
 
     const Eigen::Vector3d translation =
-        -(images[image_id2].CamFromWorld().rotation.inverse() *
-          image_pair.cam2_from_cam1.translation);
+        -(images[image_id2].CamFromWorld().rotation().inverse() *
+          image_pair.cam2_from_cam1.translation());
     ceres::CostFunction* cost_function =
         BATAPairwiseDirectionError::Create(translation);
     problem_->AddResidualBlock(
         cost_function,
         loss_function_.get(),
-        images[image_id1].frame_ptr->RigFromWorld().translation.data(),
-        images[image_id2].frame_ptr->RigFromWorld().translation.data(),
+        images[image_id1].frame_ptr->RigFromWorld().translation().data(),
+        images[image_id2].frame_ptr->RigFromWorld().translation().data(),
         &scale);
 
     problem_->SetParameterLowerBound(&scale, 0, 1e-5);
@@ -292,14 +292,14 @@ void GlobalPositioner::AddTrackToProblem(
     }
 
     const Eigen::Vector3d translation =
-        image.CamFromWorld().rotation.inverse() *
+        image.CamFromWorld().rotation().inverse() *
         image.features_undist[observation.second];
 
     double& scale = scales_.emplace_back(1);
 
     if (!options_.generate_scales && tracks[track_id].is_initialized) {
       const Eigen::Vector3d trans_calc =
-          tracks[track_id].xyz - image.CamFromWorld().translation;
+          tracks[track_id].xyz - image.CamFromWorld().translation();
       scale = std::max(1e-5,
                        translation.dot(trans_calc) / trans_calc.squaredNorm());
     }
@@ -323,7 +323,7 @@ void GlobalPositioner::AddTrackToProblem(
       problem_->AddResidualBlock(
           cost_function,
           loss_function,
-          image.frame_ptr->RigFromWorld().translation.data(),
+          image.frame_ptr->RigFromWorld().translation().data(),
           tracks[track_id].xyz.data(),
           &scale);
       // If the image is part of a camera rig, use the RigBATA error
@@ -333,13 +333,13 @@ void GlobalPositioner::AddTrackToProblem(
       Rigid3d& cam_from_rig = rigs.at(rig_id).SensorFromRig(
           sensor_t(SensorType::CAMERA, image.camera_id));
 
-      Eigen::Vector3d cam_from_rig_translation = cam_from_rig.translation;
+      Eigen::Vector3d cam_from_rig_translation = cam_from_rig.translation();
 
       if (!cam_from_rig_translation.hasNaN()) {
         const Eigen::Vector3d translation_rig =
-            // image.cam_from_world.rotation.inverse() *
-            // cam_from_rig.translation;
-            image.CamFromWorld().rotation.inverse() * cam_from_rig_translation;
+            // image.cam_from_world.rotation().inverse() *
+            // cam_from_rig.translation();
+            image.CamFromWorld().rotation().inverse() * cam_from_rig_translation;
 
         ceres::CostFunction* cost_function =
             RigBATAPairwiseDirectionError::Create(translation, translation_rig);
@@ -347,7 +347,7 @@ void GlobalPositioner::AddTrackToProblem(
         problem_->AddResidualBlock(
             cost_function,
             loss_function,
-            image.frame_ptr->RigFromWorld().translation.data(),
+            image.frame_ptr->RigFromWorld().translation().data(),
             tracks[track_id].xyz.data(),
             &scale,
             &rig_scales_[rig_id]);
@@ -358,14 +358,14 @@ void GlobalPositioner::AddTrackToProblem(
         // global one
         ceres::CostFunction* cost_function =
             RigUnknownBATAPairwiseDirectionError::Create(
-                translation, image.frame_ptr->RigFromWorld().rotation);
+                translation, image.frame_ptr->RigFromWorld().rotation());
 
         problem_->AddResidualBlock(
             cost_function,
             loss_function,
             tracks[track_id].xyz.data(),
-            image.frame_ptr->RigFromWorld().translation.data(),
-            cam_from_rig.translation.data(),
+            image.frame_ptr->RigFromWorld().translation().data(),
+            cam_from_rig.translation().data(),
             &scale);
       }
     }
@@ -402,9 +402,9 @@ void GlobalPositioner::AddCamerasAndPointsToParameterGroups(
 
   for (auto& [frame_id, frame] : frames) {
     if (!frame.HasPose()) continue;
-    if (problem_->HasParameterBlock(frame.RigFromWorld().translation.data())) {
+    if (problem_->HasParameterBlock(frame.RigFromWorld().translation().data())) {
       parameter_ordering->AddElementToGroup(
-          frame.RigFromWorld().translation.data(), group_id);
+          frame.RigFromWorld().translation().data(), group_id);
     }
   }
 
@@ -412,9 +412,11 @@ void GlobalPositioner::AddCamerasAndPointsToParameterGroups(
   for (auto& [rig_id, rig] : rigs) {
     for (const auto& [sensor_id, sensor] : rig.NonRefSensors()) {
       if (sensor_id.type == SensorType::CAMERA) {
-        Eigen::Vector3d& translation = rig.SensorFromRig(sensor_id).translation;
-        if (problem_->HasParameterBlock(translation.data())) {
-          parameter_ordering->AddElementToGroup(translation.data(), group_id);
+        Rigid3d& sensor_from_rig = rig.SensorFromRig(sensor_id);
+        if (problem_->HasParameterBlock(
+                sensor_from_rig.translation().data())) {
+          parameter_ordering->AddElementToGroup(
+              sensor_from_rig.translation().data(), group_id);
         }
       }
     }
@@ -443,10 +445,11 @@ void GlobalPositioner::ParameterizeVariables(
     for (auto& [rig_id, rig] : rigs) {
       for (const auto& [sensor_id, sensor] : rig.NonRefSensors()) {
         if (sensor_id.type == SensorType::CAMERA) {
-          Eigen::Vector3d& translation =
-              rig.SensorFromRig(sensor_id).translation;
-          if (problem_->HasParameterBlock(translation.data())) {
-            translation = RandVector3d(random_generator_, -1, 1);
+          Rigid3d& sensor_from_rig = rig.SensorFromRig(sensor_id);
+          if (problem_->HasParameterBlock(
+                  sensor_from_rig.translation().data())) {
+            sensor_from_rig.translation() =
+                RandVector3d(random_generator_, -1, 1);
           }
         }
       }
@@ -457,9 +460,9 @@ void GlobalPositioner::ParameterizeVariables(
   if (!options_.optimize_positions) {
     for (auto& [frame_id, frame] : frames) {
       if (!frame.HasPose()) continue;
-      if (problem_->HasParameterBlock(frame.RigFromWorld().translation.data()))
+      if (problem_->HasParameterBlock(frame.RigFromWorld().translation().data()))
         problem_->SetParameterBlockConstant(
-            frame.RigFromWorld().translation.data());
+            frame.RigFromWorld().translation().data());
     }
   }
 
@@ -575,11 +578,11 @@ void GlobalPositioner::ConvertResults(
     std::unordered_map<frame_t, Frame>& frames) {
   // translation now stores the camera position, needs to convert back
   for (auto& [frame_id, frame] : frames) {
-    frame.RigFromWorld().translation =
-        -(frame.RigFromWorld().rotation * frame.RigFromWorld().translation);
+    frame.RigFromWorld().translation() =
+        -(frame.RigFromWorld().rotation() * frame.RigFromWorld().translation());
 
     rig_t idx_rig = frame.RigId();
-    frame.RigFromWorld().translation *= rig_scales_[idx_rig];
+    frame.RigFromWorld().translation() *= rig_scales_[idx_rig];
   }
 
   // Update the rig scales
@@ -587,13 +590,13 @@ void GlobalPositioner::ConvertResults(
     for (auto& [sensor_id, cam_from_rig] : rig.NonRefSensors()) {
       if (cam_from_rig.has_value()) {
         if (problem_->HasParameterBlock(
-                rig.SensorFromRig(sensor_id).translation.data())) {
-          cam_from_rig->translation =
-              -(cam_from_rig->rotation * cam_from_rig->translation);
+                rig.SensorFromRig(sensor_id).translation().data())) {
+          cam_from_rig->translation() =
+              -(cam_from_rig->rotation() * cam_from_rig->translation());
         } else {
           // If the camera is part of a rig, then scale the translation
           // by the rig scale
-          cam_from_rig->translation *= rig_scales_[rig_id];
+          cam_from_rig->translation() *= rig_scales_[rig_id];
         }
       }
     }

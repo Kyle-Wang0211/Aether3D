@@ -108,10 +108,10 @@ void EstimateRelativePoses(ViewGraph& view_graph,
 
         // Convert the relative pose to the glomap format
         for (int i = 0; i < 4; i++) {
-          image_pair.cam2_from_cam1.rotation.coeffs()[i] =
+          image_pair.cam2_from_cam1.rotation().coeffs()[i] =
               pose_rel_calc.q[(i + 1) % 4];
         }
-        image_pair.cam2_from_cam1.translation = pose_rel_calc.t;
+        image_pair.cam2_from_cam1.translation() = pose_rel_calc.t;
       });
     }
 

@@ -24,8 +24,8 @@ double ImagePairInliers::ScoreErrorEssential() {
 
   // eij = camera i on image j
   Eigen::Vector3d epipole12, epipole21;
-  epipole12 = cam2_from_cam1.translation;
-  epipole21 = Inverse(cam2_from_cam1).translation;
+  epipole12 = cam2_from_cam1.translation();
+  epipole21 = Inverse(cam2_from_cam1).translation();
 
   if (epipole12[2] < 0) epipole12 = -epipole12;
   if (epipole21[2] < 0) epipole21 = -epipole21;
@@ -69,7 +69,7 @@ double ImagePairInliers::ScoreErrorEssential() {
       bool not_denegerate = true;
 
       // Check whether two image rays are too close
-      double diff_angle = pt1.dot(cam2_from_cam1.rotation.inverse() * pt2);
+      double diff_angle = pt1.dot(cam2_from_cam1.rotation().inverse() * pt2);
       not_denegerate = (diff_angle < thres_angle);
 
       // Check whether two points are too close to the epipoles

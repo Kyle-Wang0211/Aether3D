@@ -139,6 +139,15 @@ bool GlobalMapper::Solve(const colmap::Database& database,
     // the global-positioning Ceres problem (the 3.2GB hotspot) is built.
     { std::unordered_map<track_t, Track>().swap(tracks_full); }
 
+    // [AETHER OPT-CUT2] Track establishment was the LAST reader of the per-pair
+    // raw match matrices (verified: after this point no glomap-src code touches
+    // ImagePair::matches; pruning/tree only read pair.inliers, which we KEEP).
+    // At dense-414 (85k pairs) these matrices are ~hundreds of MB held straight
+    // through the GP 3.2GB peak — free them before that problem is built.
+    for (auto& [pair_id, pair] : view_graph.image_pairs) {
+      pair.matches = Eigen::MatrixXi();
+    }
+
     run_timer.PrintSeconds();
   }
 

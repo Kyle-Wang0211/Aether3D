@@ -140,6 +140,53 @@ int aether_dsp_sift_extract_threaded(const uint8_t* gray,
   }
 }
 
+// Same as aether_dsp_sift_extract_threaded but with an explicit first_octave.
+// Used by the GPU e2e parity gate: the GPU pipeline runs first_octave=0 (the
+// validated M0/M1 baseline), so the apples-to-apples CPU reference must also use
+// first_octave=0 (production default is -1, which adds a 2x-upsampled octave and
+// ~2x the keypoints — a separate scope decision, not a descriptor difference).
+int aether_dsp_sift_extract_threaded_fo(const uint8_t* gray, int width,
+                                        int height, int max_features,
+                                        int num_threads, int first_octave,
+                                        float* out_xy, uint8_t* out_desc,
+                                        int out_cap, int* out_count) {
+  if (out_count) *out_count = 0;
+  try {
+    if (gray == nullptr || width <= 0 || height <= 0 || out_cap <= 0) return 1;
+    colmap::Bitmap bitmap(width, height, /*as_rgb=*/false);
+    bitmap.RowMajorData().assign(gray,
+                                 gray + static_cast<size_t>(width) * height);
+    colmap::SiftExtractionOptions sift;
+    sift.max_num_features = max_features > 0 ? max_features : 8192;
+    sift.first_octave = first_octave;
+    sift.estimate_affine_shape = true;
+    sift.domain_size_pooling = true;
+    colmap::FeatureKeypoints kps;
+    colmap::FeatureDescriptors desc;
+    if (!aether::ExtractCovariantSiftThreaded(sift, bitmap, &kps, &desc,
+                                              num_threads)) {
+      return 4;
+    }
+    int n = static_cast<int>(kps.size());
+    if (n > out_cap) n = out_cap;
+    if (out_xy != nullptr)
+      for (int i = 0; i < n; ++i) {
+        out_xy[2 * i] = kps[i].x;
+        out_xy[2 * i + 1] = kps[i].y;
+      }
+    if (out_desc != nullptr && desc.data.cols() == 128) {
+      const int dn = static_cast<int>(desc.data.rows());
+      const int m = n < dn ? n : dn;
+      for (int i = 0; i < m; ++i)
+        for (int d = 0; d < 128; ++d) out_desc[i * 128 + d] = desc.data(i, d);
+    }
+    if (out_count) *out_count = n;
+    return 0;
+  } catch (...) {
+    return 5;
+  }
+}
+
 // Validation harness: runs serial + threaded extraction on the SAME image and
 // reports both keypoint counts + the max abs byte difference between the two
 // descriptor sets. 0 == bit-identical (the correctness gate). Returns 0 on

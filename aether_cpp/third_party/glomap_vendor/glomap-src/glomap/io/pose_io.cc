@@ -66,12 +66,12 @@ void ReadRelPose(const std::string& file_path,
     Rigid3d pose_rel;
     for (int i = 0; i < 4; i++) {
       std::getline(line_stream, item, ' ');
-      pose_rel.rotation.coeffs()[(i + 3) % 4] = std::stod(item);
+      pose_rel.rotation().coeffs()[(i + 3) % 4] = std::stod(item);
     }
 
     for (int i = 0; i < 3; i++) {
       std::getline(line_stream, item, ' ');
-      pose_rel.translation[i] = std::stod(item);
+      pose_rel.translation()[i] = std::stod(item);
     }
 
     if (view_graph.image_pairs.find(pair_id) == view_graph.image_pairs.end()) {
@@ -171,7 +171,7 @@ void ReadGravity(const std::string& gravity_path,
         Rigid3d& cam_from_world = images[ite->second].frame_ptr->RigFromWorld();
         // Set the rotation from the camera to the world
         // Make sure the initialization is aligned with the gravity
-        cam_from_world.rotation = Eigen::Quaterniond(
+        cam_from_world.rotation() = Eigen::Quaterniond(
             images[ite->second].frame_ptr->gravity_info.GetRAlign());
       }
     }
@@ -194,7 +194,7 @@ void WriteGlobalRotation(const std::string& file_path,
     file << image.file_name;
     Rigid3d cam_from_world = image.CamFromWorld();
     for (int i = 0; i < 4; i++) {
-      file << " " << cam_from_world.rotation.coeffs()[(i + 3) % 4];
+      file << " " << cam_from_world.rotation().coeffs()[(i + 3) % 4];
     }
     file << "\n";
   }
@@ -222,10 +222,10 @@ void WriteRelPose(const std::string& file_path,
     file << images.at(image_pair.image_id1).file_name << " "
          << images.at(image_pair.image_id2).file_name;
     for (int i = 0; i < 4; i++) {
-      file << " " << image_pair.cam2_from_cam1.rotation.coeffs()[(i + 3) % 4];
+      file << " " << image_pair.cam2_from_cam1.rotation().coeffs()[(i + 3) % 4];
     }
     for (int i = 0; i < 3; i++) {
-      file << " " << image_pair.cam2_from_cam1.translation[i];
+      file << " " << image_pair.cam2_from_cam1.translation()[i];
     }
     file << "\n";
   }

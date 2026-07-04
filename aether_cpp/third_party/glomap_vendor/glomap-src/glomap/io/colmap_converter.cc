@@ -1,4 +1,5 @@
 #include "glomap/io/colmap_converter.h"
+#include <unordered_set>
 
 #include "glomap/math/two_view_geometry.h"
 
@@ -40,8 +41,44 @@ void ConvertGlomapToColmap(const std::unordered_map<rig_t, Rig>& rigs,
     reconstruction.AddRig(rig);
   }
 
+  // [AETHER FIX] Set of image ids that the image loops below will actually add
+  // to the reconstruction (same predicate as those loops). Used to keep frames
+  // and images consistent: a registered frame whose image is missing from the
+  // reconstruction makes colmap ops (DeRegisterFrame / BA setup) dereference
+  // the missing image and throw "Image with ID N does not exist".
+  std::unordered_set<image_t> aether_kept_images;
+  for (const auto& [image_id, image] : images) {
+    if (image.IsRegistered() &&
+        (cluster_id == -1 || image.ClusterId() == cluster_id)) {
+      aether_kept_images.insert(image_id);
+    }
+  }
+
   // Add frames
   for (auto& [frame_id, frame] : frames) {
+    // [AETHER FIX] Skip frames the deregistration loop below would remove, and
+    // frames referencing images that will NOT be added (e.g. an image absent
+    // from the images map entirely, or unregistered). colmap 4.0.4 AddFrame()
+    // auto-registers any frame that still HasPose(); GLOMAP's pruning clears
+    // frame.is_registered but does NOT clear the pose, so such frames end up
+    // registered while their images are missing -> downstream colmap ops throw
+    // "Image with ID N does not exist". Not adding the frame keeps the
+    // reconstruction self-consistent (DeRegisterFrame early-returns for frames
+    // that were never registered).
+    if ((cluster_id != 0 && !frame.is_registered) ||
+        (frame.cluster_id != cluster_id && cluster_id != -1)) {
+      continue;
+    }
+    bool aether_all_images_kept = true;
+    for (const auto& data_id : frame.ImageIds()) {
+      if (aether_kept_images.count(data_id.id) == 0) {
+        aether_all_images_kept = false;
+        break;
+      }
+    }
+    if (!aether_all_images_kept) {
+      continue;
+    }
     Frame frame_curr = frame;  // Copy the frame to avoid dangling pointer
     frame_curr.ResetRigPtr();
     reconstruction.AddFrame(frame_curr);
@@ -75,34 +112,23 @@ void ConvertGlomapToColmap(const std::unordered_map<rig_t, Rig>& rigs,
     }
   }
 
-  // Add points
-  for (const auto& [track_id, track] : tracks) {
-    colmap::Point3D colmap_point;
-    colmap_point.xyz = track.xyz;
-    colmap_point.color = track.color;
-    colmap_point.error = 0;
-
-    // Add track element
-    for (auto& observation : track.observations) {
-      const Image& image = images.at(observation.first);
-      if (!image.IsRegistered() ||
-          (cluster_id != -1 && image.ClusterId() != cluster_id))
-        continue;
-      colmap::TrackElement colmap_track_el;
-      colmap_track_el.image_id = observation.first;
-      colmap_track_el.point2D_idx = observation.second;
-
-      colmap_point.track.AddElement(colmap_track_el);
-    }
-
-    if (colmap_point.track.Length() < min_supports) continue;
-
-    colmap_point.track.Compress();
-    reconstruction.AddPoint3D(track_id, std::move(colmap_point));
-  }
-
-  // Add images
+  // [AETHER FIX — ORDER] Add images BEFORE points. colmap 4.0.4's
+  // AddPoint3D() dereferences Image(track_el.image_id) for every track element
+  // to maintain the 2D->3D back-references itself (3.x did not); with the old
+  // points-first order the very first AddPoint3D threw
+  // "Image with ID N does not exist" — the root cause of every converter
+  // crash (host RESULT errors and the on-device signal 11). With images added
+  // first, AddPoint3D sets the back-references; the ExistsPoint3D-guarded
+  // SetPoint3DForPoint2D below therefore no-ops (no points exist yet), which
+  // is correct — back-refs now come from AddPoint3D.
   for (const auto& [image_id, image] : images) {
+    // [AETHER FIX] Only add images whose frame was added above. Unfiltered,
+    // an unregistered image (its frame skipped by the frame-loop guard) gets
+    // AddImage'd with a frame_id pointing at a frame missing from the
+    // reconstruction -> inconsistent recon, downstream ops throw.
+    if (aether_kept_images.count(image_id) == 0) {
+      continue;
+    }
     colmap::Image image_colmap;
     bool keep_points =
         image_to_point3D.find(image_id) != image_to_point3D.end();
@@ -119,12 +145,62 @@ void ConvertGlomapToColmap(const std::unordered_map<rig_t, Rig>& rigs,
     reconstruction.AddImage(std::move(image_colmap));
   }
 
+  // Add points
+  for (const auto& [track_id, track] : tracks) {
+    colmap::Point3D colmap_point;
+    colmap_point.xyz = track.xyz;
+    colmap_point.color = track.color;
+    colmap_point.error = 0;
+
+    // Add track element
+    for (auto& observation : track.observations) {
+      const Image& image = images.at(observation.first);
+      if (!image.IsRegistered() ||
+          (cluster_id != -1 && image.ClusterId() != cluster_id))
+        continue;
+      // [AETHER FIX] AddPoint3D dereferences the image; keep track elements
+      // strictly within the set of images actually added above.
+      if (aether_kept_images.count(observation.first) == 0) continue;
+      colmap::TrackElement colmap_track_el;
+      colmap_track_el.image_id = observation.first;
+      colmap_track_el.point2D_idx = observation.second;
+
+      colmap_point.track.AddElement(colmap_track_el);
+    }
+
+    if (colmap_point.track.Length() < min_supports) continue;
+
+    colmap_point.track.Compress();
+    reconstruction.AddPoint3D(track_id, std::move(colmap_point));
+  }
+
   // Deregister frames
   for (auto& [frame_id, frame] : frames) {
     if ((cluster_id != 0 && !frame.is_registered) ||
         (frame.cluster_id != cluster_id && cluster_id != -1)) {
       reconstruction.DeRegisterFrame(frame_id);
     }
+  }
+
+  // [AETHER] Sanitize dangling track elements before UpdatePoint3DErrors.
+  // GLOMAP's final pruning can leave a Point3D track referencing an image that is
+  // not present in the colmap reconstruction (a frame flagged unregistered here was
+  // never registered in colmap, so DeRegisterFrame early-returns without cleaning
+  // its observations). UpdatePoint3DErrors then throws "Image with ID N does not
+  // exist". Drop those dangling elements; delete points that fall below 2 obs.
+  {
+    std::vector<colmap::point3D_t> to_delete;
+    for (const auto& [pid, p3d] : reconstruction.Points3D()) {
+      std::vector<colmap::TrackElement> dangling;
+      for (const auto& el : p3d.track.Elements())
+        if (!reconstruction.ExistsImage(el.image_id)) dangling.push_back(el);
+      if (dangling.empty()) continue;
+      colmap::Track& tr = reconstruction.Point3D(pid).track;
+      for (const auto& el : dangling)
+        tr.DeleteElement(el.image_id, el.point2D_idx);
+      if (tr.Length() < 2) to_delete.push_back(pid);
+    }
+    for (colmap::point3D_t pid : to_delete) reconstruction.DeletePoint3D(pid);
   }
 
   reconstruction.UpdatePoint3DErrors();
@@ -384,19 +460,19 @@ void ConvertDatabaseToGlomap(const colmap::Database& database,
 
     // Collect the fundemental matrices
     if (two_view.config == colmap::TwoViewGeometry::UNCALIBRATED) {
-      image_pair.F = two_view.F;
+      image_pair.F = *two_view.F;
     } else if (two_view.config == colmap::TwoViewGeometry::CALIBRATED) {
       FundamentalFromMotionAndCameras(
           cameras.at(images.at(image_pair.image_id1).camera_id),
           cameras.at(images.at(image_pair.image_id2).camera_id),
-          two_view.cam2_from_cam1,
+          *two_view.cam2_from_cam1,
           &image_pair.F);
     } else if (two_view.config == colmap::TwoViewGeometry::PLANAR ||
                two_view.config == colmap::TwoViewGeometry::PANORAMIC ||
                two_view.config ==
                    colmap::TwoViewGeometry::PLANAR_OR_PANORAMIC) {
-      image_pair.H = two_view.H;
-      image_pair.F = two_view.F;
+      image_pair.H = *two_view.H;
+      image_pair.F = *two_view.F;
     }
     image_pair.config = two_view.config;
 

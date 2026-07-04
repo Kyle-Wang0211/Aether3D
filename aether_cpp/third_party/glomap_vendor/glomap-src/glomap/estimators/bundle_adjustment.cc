@@ -1,10 +1,12 @@
 #include "bundle_adjustment.h"
 
-#include <colmap/estimators/cost_functions.h>
-#include <colmap/estimators/manifold.h>
+#include <colmap/estimators/cost_functions/manifold.h>
+#include <colmap/estimators/cost_functions/reprojection_error.h>
 #include <colmap/sensor/models.h>
 #include <colmap/util/cuda.h>
 #include <colmap/util/misc.h>
+
+#include <cstdlib>  // std::getenv (AETHER_BA_SPARSE solver A/B switch)
 
 namespace glomap {
 
@@ -102,9 +104,40 @@ bool BundleAdjuster::Solve(std::unordered_map<rig_t, Rig>& rigs,
   //                   ITERATIVE preconditioner, irrelevant for a direct sparse solve)
   if (num_images <= 200) {
     options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
-  } else {
+  } else if (std::getenv("AETHER_BA_SPARSE")) {
+    // [AETHER — QUALITY-REGRESSING, debug only] SPARSE_SCHUR + EIGEN_SPARSE is
+    // faster on dense-414 BUT the direct-factorization descent lands in a
+    // measurably worse basin: surface_variation 0.0612-0.0627 across 6 runs vs
+    // 0.0604 on the ITERATIVE path — while reproj is identical (1.029), i.e.
+    // reproj is blind to it. Caught by the full metrics_v2 battery and pinned
+    // by the T1 attribution run (2026-07-04). NEVER ship as default.
     options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
     options_.solver_options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+  } else if (std::getenv("AETHER_BA_CJ")) {
+    // ITERATIVE + CLUSTER_JACOBI: FAILED the gate on dense-414 (SV 0.0623,
+    // T2 run). Debug switch only.
+    options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+    options_.solver_options.preconditioner_type = ceres::CLUSTER_JACOBI;
+  } else {
+    // [AETHER DEFAULT — certified zero-quality-loss 2026-07-04] ITERATIVE_SCHUR
+    // + SCHUR_JACOBI: the ONLY config that passed the full 9-metric battery on
+    // BOTH replicates (T1 SV 0.0604 / T1b 0.0610 vs baseline 0.0604; SPARSE
+    // family spans 0.0612-0.0627 with no overlap). Costs ~+280s solve vs
+    // SPARSE on dense-414 host — accepted: quality gate is the hard line.
+    options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+    options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+    // [AETHER KNIFE9 — same solver family, faster preconditioner apply]
+    // Explicit Schur complement materializes the (tiny at ~414 cams) reduced
+    // system for the SCHUR_JACOBI preconditioner instead of implicit products:
+    // measured 2.1x on the extra BA (316->147s) with a full gate PASS (run C).
+    // Same ITERATIVE_SCHUR+SCHUR_JACOBI math -> expected same basin; the
+    // [KNIFE9 VERDICT 2026-07-04: REJECTED] E2/E2b replicates were wildly
+    // inconsistent (solve 223s vs 497s; E2 exploded 4 metrics + numeric blowup,
+    // E2b fell back to the bad-basin SV band 0.0624). Explicit SC perturbs the
+    // CG path enough to leave the certified implicit-SJ basin. Debug opt-in.
+    if (std::getenv("AETHER_INT_SC")) {
+      options_.solver_options.use_explicit_schur_complement = true;
+    }
   }
 
   options_.solver_options.minimizer_progress_to_stdout = VLOG_IS_ON(2);
@@ -149,12 +182,14 @@ void BundleAdjuster::AddPointToCameraConstraints(
             colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor>(
                 cameras[image.camera_id].model_id,
                 image.features[observation.second]);
+        // [4.0.4] ReprojErrorCostFunctor now takes 3 blocks: point3D(3),
+        // cam_from_world as a SINGLE contiguous 7-param pose (params.data()),
+        // camera_params. (3.14 split pose into separate rotation/translation.)
         problem_->AddResidualBlock(
             cost_function,
             loss_function_.get(),
-            frame_ptr->RigFromWorld().rotation.coeffs().data(),
-            frame_ptr->RigFromWorld().translation.data(),
             tracks[track_id].xyz.data(),
+            frame_ptr->RigFromWorld().params.data(),
             cameras[image.camera_id].params.data());
       } else if (!options_.optimize_rig_poses) {
         const Rigid3d& cam_from_rig = rigs[rig_id].SensorFromRig(
@@ -164,12 +199,12 @@ void BundleAdjuster::AddPointToCameraConstraints(
             cameras[image.camera_id].model_id,
             image.features[observation.second],
             cam_from_rig);
+        // [4.0.4] 3 blocks: point3D(3), rig_from_world(7 combined), cam_params.
         problem_->AddResidualBlock(
             cost_function,
             loss_function_.get(),
-            frame_ptr->RigFromWorld().rotation.coeffs().data(),
-            frame_ptr->RigFromWorld().translation.data(),
             tracks[track_id].xyz.data(),
+            frame_ptr->RigFromWorld().params.data(),
             cameras[image.camera_id].params.data());
       } else {
         // If the image is part of a camera rig, use the RigBATA error
@@ -180,14 +215,14 @@ void BundleAdjuster::AddPointToCameraConstraints(
             colmap::CreateCameraCostFunction<colmap::RigReprojErrorCostFunctor>(
                 cameras[image.camera_id].model_id,
                 image.features[observation.second]);
+        // [4.0.4] 4 blocks: point3D(3), cam_from_rig(7), rig_from_world(7),
+        // camera_params. (3.14 split each pose into rotation+translation.)
         problem_->AddResidualBlock(
             cost_function,
             loss_function_.get(),
-            cam_from_rig.rotation.coeffs().data(),
-            cam_from_rig.translation.data(),
-            frame_ptr->RigFromWorld().rotation.coeffs().data(),
-            frame_ptr->RigFromWorld().translation.data(),
             tracks[track_id].xyz.data(),
+            cam_from_rig.params.data(),
+            frame_ptr->RigFromWorld().params.data(),
             cameras[image.camera_id].params.data());
       }
 
@@ -219,14 +254,12 @@ void BundleAdjuster::AddCamerasAndPointsToParameterGroups(
       parameter_ordering->AddElementToGroup(track.xyz.data(), 0);
   }
 
-  // Add frame parameters to group 1.
+  // Add frame parameters to group 1. [4.0.4] pose is one 7-param block.
   for (auto& [frame_id, frame] : frames) {
     if (!frame.HasPose()) continue;
-    if (problem_->HasParameterBlock(frame.RigFromWorld().translation.data())) {
+    if (problem_->HasParameterBlock(frame.RigFromWorld().params.data())) {
       parameter_ordering->AddElementToGroup(
-          frame.RigFromWorld().translation.data(), 1);
-      parameter_ordering->AddElementToGroup(
-          frame.RigFromWorld().rotation.coeffs().data(), 1);
+          frame.RigFromWorld().params.data(), 1);
     }
   }
 
@@ -234,13 +267,10 @@ void BundleAdjuster::AddCamerasAndPointsToParameterGroups(
   for (auto& [rig_id, rig] : rigs) {
     for (const auto& [sensor_id, sensor] : rig.NonRefSensors()) {
       if (sensor_id.type == SensorType::CAMERA) {
-        Eigen::Vector3d& translation = rig.SensorFromRig(sensor_id).translation;
-        if (problem_->HasParameterBlock(translation.data())) {
-          parameter_ordering->AddElementToGroup(translation.data(), 1);
-        }
-        Eigen::Quaterniond& rotation = rig.SensorFromRig(sensor_id).rotation;
-        if (problem_->HasParameterBlock(rotation.coeffs().data())) {
-          parameter_ordering->AddElementToGroup(rotation.coeffs().data(), 1);
+        Rigid3d& sensor_from_rig = rig.SensorFromRig(sensor_id);
+        if (problem_->HasParameterBlock(sensor_from_rig.params.data())) {
+          parameter_ordering->AddElementToGroup(
+              sensor_from_rig.params.data(), 1);
         }
       }
     }
@@ -265,17 +295,21 @@ void BundleAdjuster::ParameterizeVariables(
   int counter = 0;
   for (auto& [frame_id, frame] : frames) {
     if (!frame.HasPose()) continue;
-    if (problem_->HasParameterBlock(
-            frame.RigFromWorld().rotation.coeffs().data())) {
-      colmap::SetQuaternionManifold(
-          problem_.get(), frame.RigFromWorld().rotation.coeffs().data());
+    // [4.0.4] pose is now a single 7-param block (params.data()); use the
+    // product manifold (quaternion(4) x Euclidean(3)) matching colmap's own BA.
+    if (problem_->HasParameterBlock(frame.RigFromWorld().params.data())) {
+      colmap::SetManifold(problem_.get(),
+                          frame.RigFromWorld().params.data(),
+                          colmap::CreateProductManifold(
+                              colmap::CreateEigenQuaternionManifold(),
+                              colmap::CreateEuclideanManifold<3>()));
 
-      if (!options_.optimize_rotations || counter == 0)
+      // The combined block is atomic: if rotation OR translation must be held
+      // (gauge fix on the first frame, or global disable), fix the whole pose.
+      if (!options_.optimize_rotations || !options_.optimize_translation ||
+          counter == 0)
         problem_->SetParameterBlockConstant(
-            frame.RigFromWorld().rotation.coeffs().data());
-      if (!options_.optimize_translation || counter == 0)
-        problem_->SetParameterBlockConstant(
-            frame.RigFromWorld().translation.data());
+            frame.RigFromWorld().params.data());
 
       counter++;
     }
@@ -289,10 +323,11 @@ void BundleAdjuster::ParameterizeVariables(
         for (auto idx : camera.PrincipalPointIdxs()) {
           principal_point_idxs.push_back(idx);
         }
-        colmap::SetSubsetManifold(camera.params.size(),
-                                  principal_point_idxs,
-                                  problem_.get(),
-                                  camera.params.data());
+        colmap::SetManifold(
+            problem_.get(),
+            camera.params.data(),
+            colmap::CreateSubsetManifold(camera.params.size(),
+                                         principal_point_idxs));
       }
     }
   } else if (!options_.optimize_intrinsics &&
@@ -309,10 +344,13 @@ void BundleAdjuster::ParameterizeVariables(
     for (auto& [rig_id, rig] : rigs) {
       for (const auto& [sensor_id, sensor] : rig.NonRefSensors()) {
         if (sensor_id.type == SensorType::CAMERA) {
-          Eigen::Quaterniond& rotation = rig.SensorFromRig(sensor_id).rotation;
-          if (problem_->HasParameterBlock(rotation.coeffs().data())) {
-            colmap::SetQuaternionManifold(problem_.get(),
-                                          rotation.coeffs().data());
+          Rigid3d& sensor_from_rig = rig.SensorFromRig(sensor_id);
+          if (problem_->HasParameterBlock(sensor_from_rig.params.data())) {
+            colmap::SetManifold(problem_.get(),
+                                sensor_from_rig.params.data(),
+                                colmap::CreateProductManifold(
+                                    colmap::CreateEigenQuaternionManifold(),
+                                    colmap::CreateEuclideanManifold<3>()));
           }
         }
       }
