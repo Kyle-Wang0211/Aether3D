@@ -10,8 +10,13 @@
 #include "glomap/processors/track_filter.h"
 #include "glomap/processors/view_graph_manipulation.h"
 
+#include <array>
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
+#include <queue>
 #include <sstream>
+#include <unordered_set>
 
 #include <colmap/util/file.h>
 #include <colmap/util/timer.h>
@@ -20,6 +25,134 @@
 extern "C" void aether_progress_stage(int stage);
 
 namespace glomap {
+
+namespace {
+
+// [AETHER BA-COVGAIN 2026-07-06] Faithful port of colmap 4.0.4
+// scene/reconstruction_pruning.cc FindRedundantPoints3D onto glomap
+// structures. Upstream idea: greedily select points by marginal image-tile
+// coverage gain (8x8 tiles per image, gain per observation =
+// 1/sqrt(n) - 1/sqrt(n+1) with n = 1 + #selected points already covering that
+// tile, lazy-greedy priority queue); points whose marginal gain drops to
+// <= min_coverage_gain are "redundant" for pose estimation. Upstream prunes
+// them from the reconstruction before BA and re-triangulates after; here we
+// only EXCLUDE them from the internal-BA problem (see
+// BundleAdjusterOptions::aether_exclude_tracks) — same two-step equivalence,
+// and our pipeline already runs retriangulation + full-set finishing BAs.
+//
+// Universe = tracks that would actually enter the BA problem
+// (observations >= min_num_view_per_track, observation image present), so the
+// exclusion ratio is measured against real BA participants.
+constexpr int kAetherCovTilesPerDim = 8;  // upstream kNumImageTilesPerDim
+constexpr int kAetherCovTiles = kAetherCovTilesPerDim * kAetherCovTilesPerDim;
+
+std::unordered_set<track_t> AetherFindRedundantTracks(
+    const double min_coverage_gain,
+    const std::unordered_map<camera_t, Camera>& cameras,
+    const std::unordered_map<image_t, Image>& images,
+    const std::unordered_map<track_t, Track>& tracks,
+    const int min_num_view_per_track) {
+  // Per-track (image_id, tile_idx) pairs, precomputed once (upstream
+  // precomputes per-image tile idx arrays; same math: distorted keypoint px
+  // over camera width/height).
+  std::vector<track_t> track_ids;
+  std::vector<std::vector<std::pair<image_t, int>>> track_tiles;
+  track_ids.reserve(tracks.size());
+  track_tiles.reserve(tracks.size());
+  // #selected tracks covering each image tile (value-initialized to zeros).
+  std::unordered_map<image_t, std::array<int, kAetherCovTiles>> tile_counts;
+  tile_counts.reserve(images.size());
+
+  for (const auto& [track_id, track] : tracks) {
+    if (static_cast<int>(track.observations.size()) < min_num_view_per_track)
+      continue;
+    std::vector<std::pair<image_t, int>> tiles;
+    tiles.reserve(track.observations.size());
+    for (const auto& obs : track.observations) {
+      const auto img_it = images.find(obs.first);
+      if (img_it == images.end()) continue;
+      const Image& image = img_it->second;
+      if (obs.second >= image.features.size()) continue;
+      const auto cam_it = cameras.find(image.camera_id);
+      if (cam_it == cameras.end()) continue;
+      const Camera& camera = cam_it->second;
+      if (camera.width == 0 || camera.height == 0) continue;
+      const Eigen::Vector2d& xy = image.features[obs.second];
+      const int tile_x = std::min(
+          std::max<int>(kAetherCovTilesPerDim * xy(0) / camera.width, 0),
+          kAetherCovTilesPerDim - 1);
+      const int tile_y = std::min(
+          std::max<int>(kAetherCovTilesPerDim * xy(1) / camera.height, 0),
+          kAetherCovTilesPerDim - 1);
+      tiles.emplace_back(obs.first,
+                         tile_x * kAetherCovTilesPerDim + tile_y);
+      tile_counts[obs.first];  // ensure zero-filled entry exists
+    }
+    if (tiles.empty()) continue;
+    track_ids.push_back(track_id);
+    track_tiles.push_back(std::move(tiles));
+  }
+
+  const auto compute_gain =
+      [&tile_counts](const std::vector<std::pair<image_t, int>>& tiles) {
+        double gain = 0;
+        for (const auto& [image_id, tile_idx] : tiles) {
+          const int n = 1 + tile_counts.at(image_id)[tile_idx];
+          gain += 1. / std::sqrt(static_cast<double>(n)) -
+                  1. / std::sqrt(static_cast<double>(1 + n));
+        }
+        return gain;
+      };
+
+  struct TrackCovInfo {
+    size_t idx;  // into track_ids / track_tiles
+    double gain;
+  };
+  const auto has_left_smaller_gain = [&track_ids](const TrackCovInfo& left,
+                                                  const TrackCovInfo& right) {
+    return std::tie(left.gain, track_ids[left.idx]) <
+           std::tie(right.gain, track_ids[right.idx]);
+  };
+  std::priority_queue<TrackCovInfo, std::vector<TrackCovInfo>,
+                      decltype(has_left_smaller_gain)>
+      priority_queue(has_left_smaller_gain);
+  for (size_t i = 0; i < track_ids.size(); ++i) {
+    priority_queue.push({i, compute_gain(track_tiles[i])});
+  }
+
+  std::vector<bool> selected(track_ids.size(), false);
+  size_t num_selected = 0;
+  while (!priority_queue.empty()) {
+    auto info = priority_queue.top();
+    priority_queue.pop();
+
+    if (info.gain <= min_coverage_gain) break;
+
+    // Lazy-greedy: another selection sharing an image tile may have lowered
+    // this track's gain; recompute and re-queue if stale (upstream verbatim).
+    const double updated_gain = compute_gain(track_tiles[info.idx]);
+    if (updated_gain < info.gain) {
+      info.gain = updated_gain;
+      priority_queue.push(info);
+      continue;
+    }
+
+    for (const auto& [image_id, tile_idx] : track_tiles[info.idx]) {
+      tile_counts.at(image_id)[tile_idx]++;
+    }
+    selected[info.idx] = true;
+    ++num_selected;
+  }
+
+  std::unordered_set<track_t> redundant;
+  redundant.reserve(track_ids.size() - num_selected);
+  for (size_t i = 0; i < track_ids.size(); ++i) {
+    if (!selected[i]) redundant.insert(track_ids[i]);
+  }
+  return redundant;
+}
+
+}  // namespace
 
 // TODO: Rig normalizaiton has not be done
 bool GlobalMapper::Solve(const colmap::Database& database,
@@ -299,6 +432,72 @@ bool GlobalMapper::Solve(const colmap::Database& database,
           LOG(INFO) << "[AETHER] BA round " << ite + 1
                     << " loss scale annealed to " << sc;
         }
+      }
+
+      // [AETHER BA-COVGAIN 2026-07-06] env knife AETHER_BA_COVGAIN=<min_gain>
+      // (e.g. 0.05, upstream colmap prune default): per BA round, compute the
+      // coverage-gain-redundant track set (port of colmap 4.0.4
+      // FindRedundantPoints3D, helper above) and exclude those tracks from
+      // BOTH stages of this round's problem. Recomputed each round because
+      // track filtering mutates the map between rounds. The set outlives both
+      // Solve() calls (scoped to this loop iteration). Unset env = the
+      // exclusion pointer stays nullptr = exact upstream behavior.
+      //
+      // [COVGAIN VERDICT 2026-07-06: REJECTED — debug switch only]
+      // dense-414 interleaved A/B (CG1/CT1/CG2 + CG3), all vs B_glomapCAUCHY:
+      //  * thinned round-1 stage-2 is BISTABLE: identical deterministic
+      //    exclusion (176,536/205,523 = 85.9%), CG1 collapsed to a degenerate
+      //    basin (cost 8.3e5->940 ~ 0.05px RMS, an order below the feature
+      //    noise floor) -> round-end filter nuked 205k/232k tracks -> retri
+      //    could not rebuild -> 19/414 images, 168 points. CG2 (same config)
+      //    landed healthy (8.3e5->4.3e5) and delivered 205,720 pts BUT failed
+      //    the SV gate (0.0655 > 0.0630 certified noise-band ceiling).
+      //  * +FREEZE_INTR (CG3) kills the collapse and the filter slaughter
+      //    (round-2 eligible stays ~202k) and is fastest (solve -23%), but
+      //    retriangulation then runs on never-refined intrinsics: only
+      //    178,380 pts (< red-line 198,312), weak-track% 7.78 (2x), SV 0.0745.
+      //  * control CT1 = PASS 9/9, zero covgain log lines, cost trajectory
+      //    bit-comparable to pre-knife R3b -> env-off is provably zero-change.
+      // Speed prize was real (CG2 solve -16%, CG3 -23%) but the quality
+      // red-lines don't hold. Do NOT enable in production.
+      std::unordered_set<track_t> aether_covgain_redundant;
+      if (const char* cg = std::getenv("AETHER_BA_COVGAIN")) {
+        const double min_coverage_gain = atof(cg);
+        colmap::Timer covgain_timer;
+        covgain_timer.Start();
+        aether_covgain_redundant = AetherFindRedundantTracks(
+            min_coverage_gain, cameras, images, tracks,
+            options_.opt_ba.min_num_view_per_track);
+        size_t num_ba_eligible = 0;
+        for (const auto& [track_id, track] : tracks) {
+          if (static_cast<int>(track.observations.size()) >=
+              options_.opt_ba.min_num_view_per_track)
+            ++num_ba_eligible;
+        }
+        ba_engine_options_inner.aether_exclude_tracks =
+            &aether_covgain_redundant;
+        // [AETHER BA-COVGAIN_FREEZE_INTR] CG1 post-mortem sub-knife: round-1
+        // stage-2 on the thinned problem collapsed to a degenerate basin
+        // (cost 8.3e5 -> 940 ~= 0.05px RMS, far below the feature noise
+        // floor), after which the round-end normalized-image filter nuked
+        // 205k/232k tracks and retriangulation could not recover (19/414
+        // images survived pruning). Suspected channel: per-camera intrinsics
+        // (f,k free per image) overfitting on ~560 obs/cam once rotations are
+        // freed. This flag freezes intrinsics during covgain-thinned rounds;
+        // they still get their full refinement in the full-set retri-BA and
+        // the extra CAUCHY BA downstream.
+        if (std::getenv("AETHER_BA_COVGAIN_FREEZE_INTR"))
+          ba_engine_options_inner.optimize_intrinsics = false;
+        LOG(INFO) << "[AETHER] BA round " << ite + 1 << " covgain("
+                  << min_coverage_gain << "): excluding "
+                  << aether_covgain_redundant.size() << " / "
+                  << num_ba_eligible << " BA-eligible tracks ("
+                  << (num_ba_eligible > 0
+                          ? 100.0 * aether_covgain_redundant.size() /
+                                num_ba_eligible
+                          : 0.0)
+                  << "%), selection took " << covgain_timer.ElapsedSeconds()
+                  << "s";
       }
 
       // Staged bundle adjustment

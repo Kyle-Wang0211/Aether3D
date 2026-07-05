@@ -7,10 +7,23 @@
 
 #include <ceres/ceres.h>
 
+#include <unordered_set>
+
 namespace glomap {
 
 struct BundleAdjusterOptions : public OptimizationBaseOptions {
  public:
+  // [AETHER BA-COVGAIN 2026-07-06] Optional redundant-track exclusion set
+  // (borrowed from colmap 4.0.4 FindRedundantPoints3D coverage-gain pruning,
+  // ported to glomap structures in global_mapper.cc). When non-null, tracks in
+  // the set are SKIPPED in AddPointToCameraConstraints — they contribute no
+  // residual blocks, shrinking the internal-BA problem. The tracks themselves
+  // stay in the map untouched (positions later refreshed by retriangulation +
+  // the full-set finishing BAs), so the delivered point cloud is unaffected.
+  // Default nullptr = exact upstream behavior. Non-owning; caller guarantees
+  // the set outlives Solve().
+  const std::unordered_set<track_t>* aether_exclude_tracks = nullptr;
+
   // Flags for which parameters to optimize
   bool optimize_rig_poses = false;  // Whether to optimize the rig poses
   bool optimize_rotations = true;

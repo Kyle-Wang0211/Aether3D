@@ -205,6 +205,14 @@ void BundleAdjuster::AddPointToCameraConstraints(
   for (auto& [track_id, track] : tracks) {
     if (track.observations.size() < options_.min_num_view_per_track) continue;
 
+    // [AETHER BA-COVGAIN 2026-07-06] coverage-gain redundant tracks are left
+    // out of the problem entirely (no residual blocks -> no parameter block;
+    // the HasParameterBlock guards downstream keep them out of ordering /
+    // manifold setup automatically). nullptr (default) = zero behavior change.
+    if (options_.aether_exclude_tracks != nullptr &&
+        options_.aether_exclude_tracks->count(track_id) > 0)
+      continue;
+
     for (const auto& observation : tracks[track_id].observations) {
       if (images.find(observation.first) == images.end()) continue;
 
