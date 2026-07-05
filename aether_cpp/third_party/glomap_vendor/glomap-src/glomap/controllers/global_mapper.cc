@@ -10,6 +10,8 @@
 #include "glomap/processors/track_filter.h"
 #include "glomap/processors/view_graph_manipulation.h"
 
+#include <fstream>
+
 #include <colmap/util/file.h>
 #include <colmap/util/timer.h>
 
@@ -176,7 +178,62 @@ bool GlobalMapper::Solve(const colmap::Database& database,
     // Skip images where an undistortion already been done
     UndistortImages(cameras, images, false);
 
-    GlobalPositioner gp_engine(options_.opt_gp);
+    // [AETHER GP WARM-START 2026-07-05] upstream leaves the door open:
+    // generate_random_positions=false makes GP consume the frames' existing
+    // poses as the position init (upstream default init is UNIFORM RANDOM in
+    // [-100,100]^3). AETHER_GP_INIT=<txt: name qw qx qy qz cx cy cz per line,
+    // ARKit world-to-cam rotation + camera center> loads ARKit priors,
+    // chordal-aligns the ARKit world to the post-RA GLOMAP world (mean of
+    // R_ra^T * R_ark over images, SVD-projected to SO(3)), and seeds every
+    // registered frame's position. Gauge/scale free for GP; gate-verified
+    // before any adoption.
+    GlobalPositionerOptions aether_gp_opts = options_.opt_gp;
+    if (const char* gpini = std::getenv("AETHER_GP_INIT")) {
+      std::ifstream fin(gpini);
+      std::unordered_map<std::string, std::pair<Eigen::Quaterniond,
+                                                Eigen::Vector3d>> ark;
+      std::string nm; double qw, qx, qy, qz, cx, cy, cz;
+      while (fin >> nm >> qw >> qx >> qy >> qz >> cx >> cy >> cz)
+        ark[nm] = {Eigen::Quaterniond(qw, qx, qy, qz),
+                   Eigen::Vector3d(cx, cy, cz)};
+      Eigen::Matrix3d acc = Eigen::Matrix3d::Zero();
+      int n_hit = 0;
+      for (auto& [iid, img] : images) {
+        auto it = ark.find(img.file_name);
+        if (it == ark.end() || img.frame_ptr == nullptr) continue;
+        const Eigen::Matrix3d R_ra =
+            img.frame_ptr->RigFromWorld().rotation().toRotationMatrix();
+        acc += R_ra.transpose() * it->second.first.toRotationMatrix();
+        n_hit++;
+      }
+      if (n_hit >= 3) {
+        Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+            acc, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        Eigen::Matrix3d R_align = svd.matrixU() * svd.matrixV().transpose();
+        if (R_align.determinant() < 0) {
+          Eigen::Matrix3d U = svd.matrixU();
+          U.col(2) *= -1;
+          R_align = U * svd.matrixV().transpose();
+        }
+        int n_seed = 0;
+        for (auto& [iid, img] : images) {
+          auto it = ark.find(img.file_name);
+          if (it == ark.end() || img.frame_ptr == nullptr) continue;
+          const Eigen::Vector3d C = R_align * it->second.second;
+          const Eigen::Matrix3d R_ra =
+              img.frame_ptr->RigFromWorld().rotation().toRotationMatrix();
+          img.frame_ptr->RigFromWorld().translation() = -(R_ra * C);
+          n_seed++;
+        }
+        aether_gp_opts.generate_random_positions = false;
+        LOG(INFO) << "[AETHER] GP warm-start: seeded " << n_seed << "/"
+                  << images.size() << " frames from ARKit priors";
+      } else {
+        LOG(WARNING) << "[AETHER] GP warm-start: only " << n_hit
+                     << " name matches — falling back to random init";
+      }
+    }
+    GlobalPositioner gp_engine(aether_gp_opts);
 
     // TODO: consider to support other modes as well
     if (!gp_engine.Solve(view_graph, rigs, cameras, frames, images, tracks)) {

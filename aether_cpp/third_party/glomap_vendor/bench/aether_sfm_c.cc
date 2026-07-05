@@ -77,6 +77,16 @@ extern "C" int aether_sift_match_pairs(const uint8_t* desc1, int n1,
                                        const uint8_t* desc2, int n2,
                                        double max_ratio, uint32_t* out_pairs,
                                        int max_pairs, int* out_num_matches);
+// GPU tiled-GEMM matcher, pairs variant (platform-side TU, e.g. pocketworld's
+// pwsfm_gpu_match.mm — simdgroup_matrix Metal, mutual cross-check INSIDE,
+// bench-proven 11568x11568 @ 119 ms on A16). WEAK for the same reason as
+// aether_dsp_sift_extract_gpu: host benches / non-Metal targets resolve it to
+// nullptr and add_frame stays on the CPU matcher. Selected via
+// options.use_gpu_match; any non-zero return falls back to CPU per pair.
+extern "C" __attribute__((weak)) int aether_gpu_match_gemm_pairs(
+    const uint8_t* desc1, int n1, const uint8_t* desc2, int n2,
+    double max_ratio, uint32_t* out_pairs, int max_pairs,
+    int* out_num_matches);
 
 // [MIGRATION 4.0.4 / STEP 5] The glomap::RetriangulateTracks linker stub was
 // removed together with GLOMAP. It existed only to satisfy -force_load of
@@ -507,6 +517,8 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                              : 0.7;
     const colmap::TwoViewGeometryOptions tvg_options;  // colmap defaults
     std::vector<uint32_t> pair_buf;
+    const bool gpu_match_avail =
+        s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
     for (int j = start; j < frame_id; ++j) {
       const FrameRecord& prev = s->frames[j];
       // Cross-checked matches are unique per left index → min(n1,n2) bounds.
@@ -514,9 +526,20 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                                          : rec.n_keypoints;
       pair_buf.resize(static_cast<size_t>(cap) * 2);
       int num_matches = 0;
-      const int mrc = aether_sift_match_pairs(
-          prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
-          rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
+      // GPU tiled-GEMM first when enabled+linked (mutual cross-check inside);
+      // any failure falls back to the CPU brute-force pairs matcher so a
+      // Metal hiccup can never cost the pair.
+      int mrc = 1;
+      if (gpu_match_avail) {
+        mrc = aether_gpu_match_gemm_pairs(
+            prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
+            rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
+      }
+      if (mrc != 0) {
+        mrc = aether_sift_match_pairs(
+            prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
+            rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
+      }
       if (mrc != 0 || num_matches <= 0) continue;
 
       colmap::FeatureMatches matches(num_matches);

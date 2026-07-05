@@ -572,8 +572,14 @@ void GlobalPositioner::ParameterizeVariables(
   // Schur complement, Eigen SimplicialLDLT handles it and beats ITERATIVE. tracks==0 has
   // no Schur complement (direct normal eqs) so it stays DENSE_NORMAL_CHOLESKY.
   if (tracks.size() > 0) {
-    if (num_images <= 200) {
+    int aether_dense_max = 200;
+    if (const char* dm = std::getenv("AETHER_DENSE_MAX"))
+      aether_dense_max = atoi(dm);  // [AETHER LAPACK spike] threshold knob
+    if (num_images <= aether_dense_max) {
       options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
+      if (std::getenv("AETHER_DENSE_LAPACK"))
+        options_.solver_options.dense_linear_algebra_library_type =
+            ceres::LAPACK;
     } else {
       // [AETHER] GP device-OOM salvage: ITERATIVE_SCHUR (CG, NO factorization/fill-in)
       // for the >200 global-positioning solve. SPARSE_SCHUR+EIGEN_SPARSE here OOM'd on

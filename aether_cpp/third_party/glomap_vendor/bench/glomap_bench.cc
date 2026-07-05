@@ -189,9 +189,14 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
     // dense-414 full chain show round 1 does ALL the real work (cost 2.41e6 ->
     // 1.08e6 @113 iters) while rounds 2/3 are marginal polish (0.02% cost
     // change, 15/2/15/28 iters) that the retri-BA + final CAUCHY BA redo
-    // anyway. Default 1 round; AETHER_BA_ROUNDS restores upstream 3 for A/B.
+    // [ROUNDS VERDICT 2026-07-05: knife-3 (rounds=1) REVOKED] rounds=1 caused
+    // a dense-level edge-softness regression INVISIBLE to the 9-metric gate
+    // (user blind-tested CasDiffMVS dense outputs; counterfactual R3 restored
+    // gold sharpness and is the gold model's nearest dense neighbor at 2.09mm).
+    // Default back to upstream 3; with the ftol knives rounds 2-3 converge in
+    // ~15 iters each so the cost is only ~+1.8min on dense-414 host.
     // Gated by the full metrics_v2 battery like every cut.
-    options.num_iteration_bundle_adjustment = 1;
+    options.num_iteration_bundle_adjustment = 3;
     if (const char* s = std::getenv("AETHER_BA_ROUNDS"))
       options.num_iteration_bundle_adjustment = std::atoi(s);
     // [AETHER KNIFE4 — exploratory, env-gated OFF] Skip the relative-pose
@@ -389,6 +394,14 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
             ceres::SCHUR_JACOBI;
         ba_options.ceres->solver_options.use_explicit_schur_complement = true;
       }
+      // [AETHER FTOL knife 2026-07-05] extra BA hit its 100-iteration cap
+      // NO_CONVERGENCE with the tail iterations moving cost only 0.4713->
+      // 0.4613 px — a finite ftol should cut the tail at zero quality cost.
+      // [CERTIFIED 2026-07-05] extra-BA converge-stop default 1e-5 (R3/R3b
+      // family: 9/9 gates + dense eyeball PASS at -59%); env still overrides.
+      ba_options.ceres->solver_options.function_tolerance = 1e-5;
+      if (const char* e = std::getenv("AETHER_EXTRA_FTOL"))
+        ba_options.ceres->solver_options.function_tolerance = atof(e);
       colmap::BundleAdjustmentConfig ba_config;
       for (const colmap::image_t image_id : recon->RegImageIds())
         ba_config.AddImage(image_id);

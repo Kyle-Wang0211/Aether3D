@@ -115,30 +115,35 @@ bool BundleAdjuster::Solve(std::unordered_map<rig_t, Rig>& rigs,
   //   <=200 frames -> DENSE_SCHUR (fastest at small scale)
   //   >200         -> SPARSE_SCHUR + EIGEN_SPARSE (full-capture; CLUSTER_JACOBI was an
   //                   ITERATIVE preconditioner, irrelevant for a direct sparse solve)
-  if (num_images <= 200) {
+  int aether_dense_max = 200;
+  if (const char* dm = std::getenv("AETHER_DENSE_MAX"))
+    aether_dense_max = atoi(dm);  // [AETHER LAPACK spike] threshold sweep knob
+  if (num_images <= aether_dense_max) {
     options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
-  } else if (std::getenv("AETHER_BA_SPARSE")) {
-    // [AETHER — QUALITY-REGRESSING, debug only] SPARSE_SCHUR + EIGEN_SPARSE is
-    // faster on dense-414 BUT the direct-factorization descent lands in a
-    // measurably worse basin: surface_variation 0.0612-0.0627 across 6 runs vs
-    // 0.0604 on the ITERATIVE path — while reproj is identical (1.029), i.e.
-    // reproj is blind to it. Caught by the full metrics_v2 battery and pinned
-    // by the T1 attribution run (2026-07-04). NEVER ship as default.
-    options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
-    options_.solver_options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+    if (std::getenv("AETHER_DENSE_LAPACK"))
+      options_.solver_options.dense_linear_algebra_library_type = ceres::LAPACK;
+  } else if (std::getenv("AETHER_BA_ITER")) {
+    // Former certified default (ITERATIVE_SCHUR+SCHUR_JACOBI), kept as an
+    // env fallback after the 2026-07-05 retrial flipped the default to
+    // SPARSE (below).
+    options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+    options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
   } else if (std::getenv("AETHER_BA_CJ")) {
     // ITERATIVE + CLUSTER_JACOBI: FAILED the gate on dense-414 (SV 0.0623,
     // T2 run). Debug switch only.
     options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
     options_.solver_options.preconditioner_type = ceres::CLUSTER_JACOBI;
   } else {
-    // [AETHER DEFAULT — certified zero-quality-loss 2026-07-04] ITERATIVE_SCHUR
-    // + SCHUR_JACOBI: the ONLY config that passed the full 9-metric battery on
-    // BOTH replicates (T1 SV 0.0604 / T1b 0.0610 vs baseline 0.0604; SPARSE
-    // family spans 0.0612-0.0627 with no overlap). Costs ~+280s solve vs
-    // SPARSE on dense-414 host — accepted: quality gate is the hard line.
-    options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
-    options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+    // [AETHER DEFAULT — RETRIAL VERDICT 2026-07-05, family-adjudicated]
+    // SPARSE_SCHUR + EIGEN_SPARSE. The 2026-07-04 "SPARSE = worse SV basin"
+    // conviction was a small-n mirage: interleaved families (SB n=4 vs C n=6,
+    // same #4354 binary, idle host) are indistinguishable on ALL 9 metrics
+    // (ARKit-position fully overlapping 9.385-9.412 vs 9.279-9.500; weak-track
+    // slightly BETTER) while solve is -27% (median 734.7s vs ~1006s, families
+    // cleanly separated). SV 0.060-0.063 is the certified run-noise band.
+    options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+    options_.solver_options.sparse_linear_algebra_library_type =
+        ceres::EIGEN_SPARSE;
     // [AETHER KNIFE9 — same solver family, faster preconditioner apply]
     // Explicit Schur complement materializes the (tiny at ~414 cams) reduced
     // system for the SCHUR_JACOBI preconditioner instead of implicit products:
@@ -165,6 +170,12 @@ bool BundleAdjuster::Solve(std::unordered_map<rig_t, Rig>& rigs,
     }
   }
 
+  // [AETHER FTOL knife 2026-07-05] converge-stop sweep knob (default 1e-5
+  // from optimization_base.h; the gftol=1e-6 precedent on the COLMAP finalize
+  // bought -30% at zero quality loss). Gate-verified before any adoption.
+  options_.solver_options.function_tolerance = 1e-4;  // [CERTIFIED 2026-07-05]
+  if (const char* e = std::getenv("AETHER_FTOL_BA"))
+    options_.solver_options.function_tolerance = atof(e);
   options_.solver_options.minimizer_progress_to_stdout = VLOG_IS_ON(2);
   AetherProgressIterCB aether_cb(5, options_.solver_options.max_num_iterations);
   options_.solver_options.callbacks.push_back(&aether_cb);

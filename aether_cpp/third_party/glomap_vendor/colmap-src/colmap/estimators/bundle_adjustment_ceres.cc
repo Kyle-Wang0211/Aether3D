@@ -29,6 +29,8 @@
 
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 
+#include <cstdlib>
+
 #include "colmap/estimators/alignment.h"
 #include "colmap/estimators/cost_functions/manifold.h"
 #include "colmap/estimators/cost_functions/pose_prior.h"
@@ -199,6 +201,16 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
     custom_solver_options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
   }
 
+  // [AETHER LAPACK spike 2026-07-05] env override wins over ALL routing below
+  // (the vendored routing ignores caller options by design; this hook lets a
+  // bench/device A/B force DENSE_SCHUR at any size + the Accelerate LAPACK
+  // dense backend — a DIFFERENT entry point from the crashing
+  // ACCELERATE_SPARSE).
+  if (std::getenv("AETHER_EXTRA_DENSE")) {
+    custom_solver_options.linear_solver_type = ceres::DENSE_SCHUR;
+    if (std::getenv("AETHER_DENSE_LAPACK"))
+      custom_solver_options.dense_linear_algebra_library_type = ceres::LAPACK;
+  } else
   // Auto-select solver type based on problem size, unless disabled.
   if (auto_select_solver_type) {
     if (num_images <= max_num_images_direct_dense_solver) {
