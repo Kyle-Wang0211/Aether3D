@@ -58,7 +58,12 @@ bool RotationEstimator::EstimateRotations(
     }
   }
   // Initialize the rotation from maximum spanning tree
-  if (!options_.skip_initialization && !options_.use_gravity) {
+  // [AETHER #4225 flip-fix backport 2026-07-05] upstream removed the
+  // "&& !use_gravity" guard: skipping MST init in gravity mode left yaw
+  // initialized at zero and caused ~0.5%/run 180-degree flips. MST init is
+  // gravity-compatible (the gravity constraint is enforced downstream in
+  // SetupLinearSystem / the L1-IRLS solves).
+  if (!options_.skip_initialization) {
     InitializeFromMaximumSpanningTree(view_graph, rigs, frames, images);
   }
 

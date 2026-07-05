@@ -210,6 +210,16 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
     custom_solver_options.linear_solver_type = ceres::DENSE_SCHUR;
     if (std::getenv("AETHER_DENSE_LAPACK"))
       custom_solver_options.dense_linear_algebra_library_type = ceres::LAPACK;
+  } else if (std::getenv("AETHER_EXTRA_SS")) {
+    // [AETHER gold-fingerprint probe] SPARSE_SCHUR + SuiteSparse/CHOLMOD —
+    // the June gold finalize ran inside the pycolmap wheel whose ceres links
+    // SuiteSparse; finalize backend numerics visibly affect dense edge
+    // sharpness (user eyeball: DENSE/LAPACK > SPARSE/EIGEN). Host homebrew
+    // ceres has SuiteSparse; iOS would NOT ship this (GPL-adjacent CHOLMOD),
+    // probe-only knob.
+    custom_solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+    custom_solver_options.sparse_linear_algebra_library_type =
+        ceres::SUITE_SPARSE;
   } else
   // Auto-select solver type based on problem size, unless disabled.
   if (auto_select_solver_type) {

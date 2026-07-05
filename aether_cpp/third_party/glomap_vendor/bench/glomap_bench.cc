@@ -11,7 +11,8 @@
 // replicate BundleAdjustmentController::Run() directly with the estimator API, which
 // IS in libglomap_full.a. Same result, no CLI-parsing dependency.
 #include "colmap/estimators/bundle_adjustment.h"
-#include "colmap/estimators/bundle_adjustment_ceres.h"  // CeresBundleAdjustmentOptions (CAUCHY loss / num_threads)
+#include "colmap/estimators/bundle_adjustment_ceres.h"
+#include "glomap/io/pose_io.h"  // CeresBundleAdjustmentOptions (CAUCHY loss / num_threads)
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/file.h"
 
@@ -98,6 +99,15 @@ extern "C" int glomap_bench(const char* db_path, char* out_json, int out_cap) {
     // unfairly high reproj 1.35 because it skips track refinement.)
     options.skip_retriangulation = false;
     options.skip_pruning = false;
+    // [AETHER RETRI knobs 2026-07-05] rounds (default 1) and complete/merge
+    // reproj thresholds (default 15px, loose); tightening ~8px + second pass
+    // = round-3 research lead #5 (longer purer tracks on refined poses).
+    if (const char* rr = std::getenv("AETHER_RETRI_ROUNDS"))
+      options.num_iteration_retriangulation = atoi(rr);
+    if (const char* tr = std::getenv("AETHER_TRI_REPROJ")) {
+      options.opt_triangulator.tri_complete_max_reproj_error = atof(tr);
+      options.opt_triangulator.tri_merge_max_reproj_error = atof(tr);
+    }
     GlobalMapper global_mapper(options);
 
     const double t_solve0 = NowMs();
@@ -170,8 +180,30 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
       return 1;
     }
     GlobalMapperOptions options;
+    // [AETHER GRAVITY 2026-07-05] per-image ARKit gravity into rotation
+    // averaging (3-DoF -> 1-DoF per image; GLOMAP-author lineage, ECCV24).
+    // File format per pose_io.h: IMAGE_NAME GX GY GZ with
+    // cam_from_world * [0,1,0]^T = g. Flip-fix (#4225 backport) applied in
+    // global_rotation_averaging.cc. Gate + dense eyeball before adoption.
+    if (const char* gpath = std::getenv("AETHER_GRAVITY")) {
+      glomap::ReadGravity(gpath, images);
+      int n_g = 0;
+      for (auto& [iid, img] : images)
+        if (img.frame_ptr && img.frame_ptr->gravity_info.has_gravity) n_g++;
+      options.opt_ra.use_gravity = true;
+      fprintf(stderr, "[AETHER] gravity: %d/%zu images seeded, use_gravity=1\n",
+              n_g, images.size());
+    }
     options.skip_retriangulation = false;
     options.skip_pruning = false;
+    // [AETHER RETRI knobs 2026-07-05] (write path — the one production/bench
+    // actually runs) rounds + complete/merge reproj thresholds, see fn above.
+    if (const char* rr = std::getenv("AETHER_RETRI_ROUNDS"))
+      options.num_iteration_retriangulation = atoi(rr);
+    if (const char* tr = std::getenv("AETHER_TRI_REPROJ")) {
+      options.opt_triangulator.tri_complete_max_reproj_error = atof(tr);
+      options.opt_triangulator.tri_merge_max_reproj_error = atof(tr);
+    }
     // [AETHER OOM salvage] Reduce the global-positioning / BA problem SIZE — the
     // real memory driver (the full-capture problem is ~224k tracks -> ~1.5M scale
     // vars + residual blocks; even ITERATIVE_SCHUR peaked at 3.3GB host / OOM'd at

@@ -11,6 +11,7 @@
 #include "glomap/processors/view_graph_manipulation.h"
 
 #include <fstream>
+#include <sstream>
 
 #include <colmap/util/file.h>
 #include <colmap/util/timer.h>
@@ -282,6 +283,23 @@ bool GlobalMapper::Solve(const colmap::Database& database,
       BundleAdjuster ba_engine(options_.opt_ba);
 
       BundleAdjusterOptions& ba_engine_options_inner = ba_engine.GetOptions();
+      // [AETHER LOSS-ANNEAL 2026-07-05] per-round robust-kernel tightening
+      // (e.g. AETHER_LOSS_ANNEAL="2,1,0.5"): principled version of the
+      // measured "early-stop preserves edges" effect — later rounds commit to
+      // a tighter consensus without over-smoothing. Gate + dense eyeball
+      // before adoption.
+      if (const char* ann = std::getenv("AETHER_LOSS_ANNEAL")) {
+        std::vector<double> scales;
+        std::stringstream ss_(ann);
+        std::string tok;
+        while (std::getline(ss_, tok, ',')) scales.push_back(atof(tok.c_str()));
+        if (!scales.empty()) {
+          const double sc = scales[std::min<size_t>(ite, scales.size() - 1)];
+          ba_engine_options_inner.thres_loss_function = sc;
+          LOG(INFO) << "[AETHER] BA round " << ite + 1
+                    << " loss scale annealed to " << sc;
+        }
+      }
 
       // Staged bundle adjustment
       // 6.1. First stage: optimize positions only
