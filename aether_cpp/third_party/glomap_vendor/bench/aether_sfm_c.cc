@@ -24,7 +24,9 @@
 #include "aether_sfm_c.h"
 
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/estimators/two_view_geometry.h"
 #include "colmap/feature/types.h"
+#include "colmap/feature/utils.h"
 #include "colmap/geometry/rigid3.h"
 #include "colmap/scene/camera.h"
 #include "colmap/scene/database.h"
@@ -68,6 +70,13 @@ extern "C" __attribute__((weak)) int aether_dsp_sift_extract_gpu(
 extern "C" int aether_sift_match(const uint8_t* desc1, int n1,
                                  const uint8_t* desc2, int n2, double max_ratio,
                                  int* out_num_matches);
+// Pairs-returning variant (dsp_sift_c.cc): identical cross-checked matcher,
+// but emits the [idx1, idx2] correspondence list add_frame persists via
+// WriteMatches/WriteTwoViewGeometry — the streaming-registration enabler.
+extern "C" int aether_sift_match_pairs(const uint8_t* desc1, int n1,
+                                       const uint8_t* desc2, int n2,
+                                       double max_ratio, uint32_t* out_pairs,
+                                       int max_pairs, int* out_num_matches);
 
 // [MIGRATION 4.0.4 / STEP 5] The glomap::RetriangulateTracks linker stub was
 // removed together with GLOMAP. It existed only to satisfy -force_load of
@@ -90,6 +99,10 @@ struct FrameRecord {
   colmap::image_t image_id = 0;
   int n_keypoints = 0;
   std::vector<uint8_t> descriptors;  // 128 * n_keypoints, RootSIFT
+  // Keypoint positions (pixel coords at the fed resolution), kept so the
+  // two-view geometry of every new pair can be estimated without a sqlite
+  // read-back. ~1.5k pts × 16 B ≈ 24 KB/frame — negligible.
+  std::vector<Eigen::Vector2d> points;
 };
 
 }  // namespace
@@ -104,6 +117,10 @@ struct aether_sfm_session {
   std::shared_ptr<colmap::Database> db;
   std::vector<FrameRecord> frames;
   colmap::camera_t camera_id = 0;
+  // Copy of the shared SIMPLE_PINHOLE camera written to the db on the first
+  // frame — needed by EstimateTwoViewGeometry for every subsequent pair
+  // (same object for both sides: single shared camera per session).
+  colmap::Camera camera;
 
   // Result of finalize()/run(): the largest reconstruction.
   std::shared_ptr<colmap::ReconstructionManager> recon_manager;
@@ -434,6 +451,10 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
       camera.SetPrincipalPointX(cx);
       camera.SetPrincipalPointY(cy);
       s->camera_id = s->db->WriteCamera(camera);
+      // Keep the camera on the session (with its db id) for the per-pair
+      // two-view geometry estimation below.
+      camera.camera_id = s->camera_id;
+      s->camera = camera;
     }
 
     // 3) Write image + keypoints + descriptors.
@@ -466,30 +487,50 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     rec.image_id = image_id;
     rec.n_keypoints = n;
     rec.descriptors.assign(desc.begin(), desc.begin() + (size_t)n * 128);
+    rec.points = colmap::FeatureKeypointsToPointsVector(kps);
 
-    // 4) Match against the previous k_neighbors frames (CPU brute-force; the
-    //    Metal GpuMatch path is wired platform-side via use_gpu_match — NOTE:
-    //    this v1 only records the match COUNT via aether_sift_match. The full
-    //    correspondence list + WriteTwoViewGeometry needs the matcher to return
-    //    the index pairs (currently aether_sift_match returns count only). See
-    //    the dsp_sift_c.cc matcher: extending it to emit the FeatureMatches
-    //    array is the next step to make incremental mapping consume this db.
+    // 4) Match against the previous k_neighbors frames (CPU brute-force,
+    //    MUTUALLY cross-checked inside aether_sift_match_pairs) and PERSIST
+    //    the correspondences — the exact sequence colmap's own matching
+    //    pipeline uses (feature_matching.cc): WriteMatches with the raw
+    //    cross-checked pairs, EstimateTwoViewGeometry (E/F/H RANSAC at
+    //    colmap defaults) over the same pairs, WriteTwoViewGeometry with the
+    //    verified inliers. finalize()'s IncrementalPipeline consumes the
+    //    two_view_geometries table as-is (min_num_matches=15 filters weak
+    //    pairs there). This closes the formerly-documented streaming gap
+    //    ("matcher returns count only") that left the matches table empty
+    //    and made every finalize return ERR_NOT_REGISTERED.
     const int k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 6;
     const int start = (frame_id - k) > 0 ? (frame_id - k) : 0;
+    const double ratio = s->options.match_max_ratio > 0
+                             ? s->options.match_max_ratio
+                             : 0.7;
+    const colmap::TwoViewGeometryOptions tvg_options;  // colmap defaults
+    std::vector<uint32_t> pair_buf;
     for (int j = start; j < frame_id; ++j) {
       const FrameRecord& prev = s->frames[j];
+      // Cross-checked matches are unique per left index → min(n1,n2) bounds.
+      const int cap = prev.n_keypoints < rec.n_keypoints ? prev.n_keypoints
+                                                         : rec.n_keypoints;
+      pair_buf.resize(static_cast<size_t>(cap) * 2);
       int num_matches = 0;
-      aether_sift_match(prev.descriptors.data(), prev.n_keypoints,
-                        rec.descriptors.data(), rec.n_keypoints,
-                        s->options.match_max_ratio > 0
-                            ? s->options.match_max_ratio
-                            : 0.7,
-                        &num_matches);
-      // NOTE: WriteMatches/WriteTwoViewGeometry require the actual index pairs.
-      // Pending the matcher returning them, we cannot persist correspondences
-      // here. This is the single remaining gap to make finalize() register the
-      // accumulated frames. Tracked in next_steps.
-      (void)num_matches;
+      const int mrc = aether_sift_match_pairs(
+          prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
+          rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
+      if (mrc != 0 || num_matches <= 0) continue;
+
+      colmap::FeatureMatches matches(num_matches);
+      for (int m = 0; m < num_matches; ++m) {
+        matches[m].point2D_idx1 = pair_buf[2 * m];
+        matches[m].point2D_idx2 = pair_buf[2 * m + 1];
+      }
+      s->db->WriteMatches(prev.image_id, image_id, matches);
+
+      colmap::TwoViewGeometry two_view_geometry =
+          colmap::EstimateTwoViewGeometry(s->camera, prev.points, s->camera,
+                                          rec.points, std::move(matches),
+                                          tvg_options);
+      s->db->WriteTwoViewGeometry(prev.image_id, image_id, two_view_geometry);
     }
 
     s->frames.push_back(std::move(rec));

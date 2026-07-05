@@ -258,17 +258,37 @@ int aether_dsp_sift_selfcheck(const uint8_t* gray,
 }
 
 // Match two frames' RootSIFT descriptors with colmap's CPU brute-force matcher
-// (SiftCPUFeatureMatcher, Eigen, no GPU) — UNMODIFIED. desc1/desc2 are 128*N
-// uint8 (as produced by aether_dsp_sift_extract). *out_num_matches = #matches.
-int aether_sift_match(const uint8_t* desc1,
-                      int n1,
-                      const uint8_t* desc2,
-                      int n2,
-                      double max_ratio,
-                      int* out_num_matches) {
+// (SiftCPUFeatureMatcher, Eigen, no GPU) — UNMODIFIED core — and return the
+// INDEX PAIRS, not just the count. This closes the streaming-SfM gap: with
+// the pairs in hand, aether_sfm_add_frame can WriteMatches +
+// WriteTwoViewGeometry so finalize()'s IncrementalPipeline finally has
+// correspondences to register (device forensics 2026-07-05: 30 frames,
+// keypoints/descriptors fully persisted, matches table 0 rows →
+// errNotRegistered every time).
+//
+// desc1/desc2 are 128*N uint8 (as produced by aether_dsp_sift_extract).
+// out_pairs (may be NULL for count-only): caller-allocated, 2*max_pairs
+// uint32 entries, filled as [idx1, idx2] per match. Cross-checked matches
+// are unique per idx1, so max_pairs = min(n1, n2) can never truncate.
+// *out_num_matches = number of pairs written (== total when not truncated).
+//
+// HARD CONSTRAINT (grounded 2026-06: one-directional matching feeds
+// many-to-one false matches that RANSAC does not de-duplicate → whole
+// blocks of the cloud drift): cross_check is set EXPLICITLY here, not left
+// to the SiftMatchingOptions default. colmap's FindBestMatchesBruteForce
+// then keeps (i1, i2) only when the A→B and B→A best matches agree.
+int aether_sift_match_pairs(const uint8_t* desc1,
+                            int n1,
+                            const uint8_t* desc2,
+                            int n2,
+                            double max_ratio,
+                            uint32_t* out_pairs,
+                            int max_pairs,
+                            int* out_num_matches) {
   if (out_num_matches) *out_num_matches = 0;
   try {
     if (desc1 == nullptr || desc2 == nullptr || n1 <= 0 || n2 <= 0) return 1;
+    if (out_pairs != nullptr && max_pairs <= 0) return 1;
 
     // [MIGRATION 4.0.4 / STEP 5] FeatureDescriptors is a struct now; the raw
     // matrix is `.data` and the matcher checks `.type == SIFT` (sift.cc:102).
@@ -288,7 +308,8 @@ int aether_sift_match(const uint8_t* desc1,
         colmap::FeatureMatcherType::SIFT_BRUTEFORCE);
     opts.sift = std::make_shared<colmap::SiftMatchingOptions>();
     opts.sift->max_ratio = max_ratio > 0 ? max_ratio : 0.7;
-    opts.sift->cpu_brute_force_matcher = true;  // streaming: match-per-pair, no index
+    opts.sift->cross_check = true;  // mutual B→A verification — see above
+    opts.sift->cpu_brute_force_matcher = true;
     opts.use_gpu = false;
 
     std::unique_ptr<colmap::FeatureMatcher> matcher =
@@ -304,11 +325,34 @@ int aether_sift_match(const uint8_t* desc1,
 
     colmap::FeatureMatches matches;
     matcher->Match(img1, img2, &matches);
-    if (out_num_matches) *out_num_matches = static_cast<int>(matches.size());
+
+    int n_out = static_cast<int>(matches.size());
+    if (out_pairs != nullptr) {
+      if (n_out > max_pairs) n_out = max_pairs;  // unreachable: see contract
+      for (int i = 0; i < n_out; ++i) {
+        out_pairs[2 * i] = matches[i].point2D_idx1;
+        out_pairs[2 * i + 1] = matches[i].point2D_idx2;
+      }
+    }
+    if (out_num_matches) *out_num_matches = n_out;
     return 0;
   } catch (...) {
     return 2;
   }
+}
+
+// Count-only compatibility wrapper (original streaming-v1 surface). Same
+// matcher, same cross-check — delegates to the pairs variant with a NULL
+// output buffer so behaviour stays identical for existing callers.
+int aether_sift_match(const uint8_t* desc1,
+                      int n1,
+                      const uint8_t* desc2,
+                      int n2,
+                      double max_ratio,
+                      int* out_num_matches) {
+  return aether_sift_match_pairs(desc1, n1, desc2, n2, max_ratio,
+                                 /*out_pairs=*/nullptr, /*max_pairs=*/0,
+                                 out_num_matches);
 }
 
 }  // extern "C"
