@@ -68,6 +68,9 @@ typedef struct aether_sfm_options {
   float match_max_ratio;  // 0.7 default (Lowe ratio for the matcher)
   int use_gpu_match;      // 1 = aether_gpu_match (Metal), 0 = CPU aether_sift_match
   int k_neighbors;        // K=6..8 sequential window of pair candidates
+  int use_gpu_extract;    // 1 = GPU DSP-SIFT (Dawn/WGSL, f16-on-A16, CPU
+                          //     fallback in-ABI), 0 = CPU aether_dsp_sift_extract.
+                          //     Default 0; the iOS/Flutter shim flips to 1.
 } aether_sfm_options_t;
 void aether_sfm_options_default(aether_sfm_options_t* out);
 
@@ -150,6 +153,35 @@ aether_sfm_result_t aether_sfm_get_points(aether_sfm_session_t* s,
                                           aether_sfm_point_t** out_points,
                                           int* out_count);
 void aether_sfm_points_free(aether_sfm_point_t* points);
+
+// ─── track observations (COLMAP-faithful color sampling) ───────────
+// One 2D observation of a 3D point: the frame it was DETECTED in and the
+// keypoint position in that frame's fed pixel space. Track membership is a
+// visibility proof — sampling photo colors at these coordinates is
+// occlusion-free by construction (exactly how COLMAP extract_colors works).
+// Reprojection-based sampling is NOT: a point occluded in the sampled frame
+// silently picks up the occluder's color.
+typedef struct aether_sfm_track_obs {
+  int32_t frame_id;  // matches aether_sfm_pose_t.frame_id (image_id - 1)
+  float x, y;        // keypoint coords in the fed frame's pixel space
+} aether_sfm_track_obs_t;
+
+// Atomic points+tracks snapshot. Same per-point payload as
+// aether_sfm_get_points PLUS the track observations, all read from ONE
+// Reconstruction snapshot (a separate get_points/get_tracks call pair could
+// straddle the async LOCAL→REFINED swap and disagree on point order/count).
+// Observations for point i live in
+//   out_obs[out_obs_offsets[i] .. out_obs_offsets[i+1])
+// and out_obs_offsets has *out_count + 1 entries. Free the points via
+// aether_sfm_points_free, the offsets+obs via aether_sfm_track_obs_free.
+aether_sfm_result_t aether_sfm_get_points_tracked(
+    aether_sfm_session_t* s,
+    aether_sfm_point_t** out_points,
+    int* out_count,
+    int32_t** out_obs_offsets,
+    aether_sfm_track_obs_t** out_obs,
+    int64_t* out_obs_count);
+void aether_sfm_track_obs_free(int32_t* offsets, aether_sfm_track_obs_t* obs);
 
 // Destroys session, drops the sqlite db file.
 void aether_sfm_free(aether_sfm_session_t* s);

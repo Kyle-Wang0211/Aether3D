@@ -715,6 +715,80 @@ void aether_sfm_points_free(aether_sfm_point_t* points) {
   std::free(points);
 }
 
+aether_sfm_result_t aether_sfm_get_points_tracked(
+    aether_sfm_session_t* s, aether_sfm_point_t** out_points, int* out_count,
+    int32_t** out_obs_offsets, aether_sfm_track_obs_t** out_obs,
+    int64_t* out_obs_count) {
+  if (!s || !out_points || !out_count || !out_obs_offsets || !out_obs ||
+      !out_obs_count) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+  std::shared_ptr<const colmap::Reconstruction> recon;
+  {
+    std::lock_guard<std::mutex> lk(s->recon_mutex);
+    recon = s->recon;  // stable snapshot; survives an async swap
+  }
+  if (!recon) return AETHER_SFM_ERR_NOT_REGISTERED;
+  const auto& pts = recon->Points3D();
+  const int n = static_cast<int>(pts.size());
+
+  int64_t total_obs = 0;
+  for (const auto& [point_id, point] : pts) {
+    total_obs += static_cast<int64_t>(point.track.Length());
+  }
+
+  auto* arr = static_cast<aether_sfm_point_t*>(
+      std::malloc(static_cast<size_t>(n) * sizeof(aether_sfm_point_t)));
+  auto* offs = static_cast<int32_t*>(
+      std::malloc((static_cast<size_t>(n) + 1) * sizeof(int32_t)));
+  auto* obs = static_cast<aether_sfm_track_obs_t*>(std::malloc(
+      static_cast<size_t>(total_obs) * sizeof(aether_sfm_track_obs_t)));
+  if ((n > 0 && (!arr || !offs)) || (total_obs > 0 && !obs)) {
+    std::free(arr);
+    std::free(offs);
+    std::free(obs);
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+
+  int i = 0;
+  int64_t w = 0;
+  for (const auto& [point_id, point] : pts) {
+    aether_sfm_point_t& o = arr[i];
+    o.x = static_cast<float>(point.xyz.x());
+    o.y = static_cast<float>(point.xyz.y());
+    o.z = static_cast<float>(point.xyz.z());
+    o.r = point.color(0);
+    o.g = point.color(1);
+    o.b = point.color(2);
+    o._pad[0] = o._pad[1] = 0;
+    offs[i] = static_cast<int32_t>(w);
+    for (const auto& el : point.track.Elements()) {
+      // Track elements always reference existing images in a valid model,
+      // but guard anyway — a dropped element only shortens this point's run.
+      if (!recon->ExistsImage(el.image_id)) continue;
+      const auto& xy = recon->Image(el.image_id).Point2D(el.point2D_idx).xy;
+      aether_sfm_track_obs_t& t = obs[w++];
+      // image_id is 1-based from WriteImage; frame_id mirrors get_poses.
+      t.frame_id = static_cast<int32_t>(el.image_id) - 1;
+      t.x = static_cast<float>(xy.x());
+      t.y = static_cast<float>(xy.y());
+    }
+    ++i;
+  }
+  offs[n] = static_cast<int32_t>(w);
+  *out_points = arr;
+  *out_count = n;
+  *out_obs_offsets = offs;
+  *out_obs = obs;
+  *out_obs_count = w;
+  return AETHER_SFM_OK;
+}
+
+void aether_sfm_track_obs_free(int32_t* offsets, aether_sfm_track_obs_t* obs) {
+  std::free(offsets);
+  std::free(obs);
+}
+
 void aether_sfm_free(aether_sfm_session_t* s) {
   if (!s) return;
   // The async-finalize worker captures `s`; it MUST finish before we delete.
