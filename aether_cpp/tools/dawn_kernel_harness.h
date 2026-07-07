@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace aether {
@@ -86,10 +87,56 @@ public:
                   const std::vector<wgpu::Buffer>& bindings,
                   uint32_t wg_x, uint32_t wg_y = 1, uint32_t wg_z = 1);
 
+    // ─── Batched dispatch (one command encoder, many passes, ONE wait) ───
+    // dispatch() submits + WaitAny-syncs PER call; for a chain of many small
+    // dispatches (e.g. the ~80 GSS blur passes) that per-call sync latency
+    // dominates. begin_batch()/dispatch_batched()/end_batch() encode an
+    // arbitrary number of compute passes into a SINGLE command buffer and wait
+    // exactly once. Storage-buffer hazards between consecutive passes are
+    // tracked by Dawn, so a later pass sees the earlier pass's writes (identical
+    // result to per-call dispatch — only the sync count changes). Bindings must
+    // outlive end_batch(): the bind-group references them until submit.
+    void begin_batch();
+    void dispatch_batched(const wgpu::ComputePipeline& pipeline,
+                          const std::vector<wgpu::Buffer>& bindings,
+                          uint32_t wg_x, uint32_t wg_y = 1, uint32_t wg_z = 1);
+    // Encode a buffer-to-buffer copy into the open batch (no submit). Used to
+    // assemble the packed pyramid in ONE submit instead of 48.
+    void copy_region_batched(const wgpu::Buffer& src, uint64_t src_offset,
+                             const wgpu::Buffer& dst, uint64_t dst_offset,
+                             size_t size);
+    void end_batch();  // submit + single WaitAny
+
+    // Bind `bindings` to @group(0) (same order convention as dispatch()) and
+    // dispatch an INDIRECT workgroup grid: the (wg_x, wg_y, wg_z) triple is
+    // read by the GPU from `indirect_buffer` at byte `indirect_offset` (three
+    // consecutive u32). The CPU never reads the count — this is the
+    // keypoint-sparse-collection path (GPU_DSP_SIFT_PLAN_AFFINE_OFF.md §3-①):
+    // an earlier pass writes indirect_args = [(count+WG-1)/WG, 1, 1] into the
+    // buffer, then S4/S5 launch over exactly the detected keypoints without a
+    // round-trip. `indirect_buffer` must carry BufferUsage::Indirect (the
+    // helper alloc_indirect_args() tags it). Synchronous: submits + waits.
+    void dispatch_indirect(const wgpu::ComputePipeline& pipeline,
+                           const std::vector<wgpu::Buffer>& bindings,
+                           const wgpu::Buffer& indirect_buffer,
+                           uint64_t indirect_offset = 0);
+
+    // Allocate a 3*u32 (12-byte, but rounded up by Dawn) indirect-args buffer
+    // usable both as a compute Storage target (a tiny pass writes the dispatch
+    // dims into it) AND as the source for dispatch_indirect. Usage =
+    // Storage | Indirect | CopySrc | CopyDst. Zero-initialized by Dawn.
+    wgpu::Buffer alloc_indirect_args();
+
     // Copy `size` bytes from `src` (any CopySrc-tagged buffer) to `dst`
     // (must be MapRead|CopyDst). Submits + waits.
     void copy_to_staging(const wgpu::Buffer& src, const wgpu::Buffer& dst,
                          size_t size);
+
+    // General buffer-to-buffer copy with explicit src/dst byte offsets (both
+    // must be 4-byte aligned per WebGPU). Used to assemble a packed pyramid
+    // buffer from per-level buffers without a host round-trip. Submits + waits.
+    void copy_region(const wgpu::Buffer& src, uint64_t src_offset,
+                     const wgpu::Buffer& dst, uint64_t dst_offset, size_t size);
 
     // Map a MapRead-usage buffer, copy its contents to a vector<uint8_t>,
     // unmap, return the vector. Spin-waits via WaitAny (Phase 6.2.F's
@@ -149,6 +196,12 @@ public:
         uint32_t w, uint32_t h,
         uint32_t bytes_per_pixel);
 
+    // True if the device was created with the ShaderF16 feature (the WGSL
+    // `enable f16;` extension is usable). Apple Silicon / A16 advertise it;
+    // some Adreno do not (and have an f16-crash history) → the f16 descriptor
+    // variant is gated on this and falls back to f32 when false.
+    bool has_f16() const { return has_f16_; }
+
     // Accessors for advanced callers.
     const wgpu::Instance& instance() const { return instance_; }
     const wgpu::Adapter&  adapter()  const { return adapter_; }
@@ -160,6 +213,21 @@ private:
     wgpu::Adapter adapter_;
     wgpu::Device device_;
     wgpu::Queue queue_;
+
+    // In-progress batch (begin_batch/dispatch_batched/end_batch). The bind
+    // groups must stay alive until end_batch() submits, so we retain them.
+    wgpu::CommandEncoder batch_encoder_;
+    std::vector<wgpu::BindGroup> batch_bind_groups_;
+
+    // Compiled-pipeline cache, keyed by (entry_point '\0' wgsl_source). The
+    // SIFT extractor reloads the SAME ~10 static kernel sources on every
+    // frame; CreateShaderModule+CreateComputePipeline is the dominant
+    // per-frame cost (~1.3s recompiled each frame). The harness outlives the
+    // per-frame loop, so memoizing here collapses N-frames×10 recompiles to
+    // 10 total. wgpu::ComputePipeline is a ref-counted handle (cheap to copy).
+    std::unordered_map<std::string, wgpu::ComputePipeline> pipeline_cache_;
+
+    bool has_f16_ = false;  // ShaderF16 was granted at device creation
 };
 
 }  // namespace tools

@@ -124,6 +124,12 @@ bool DawnKernelHarness::init() {
         // created. Apple Silicon supports up to 64; this 10 is well below
         // any modern GPU's max — verified by adapter introspection.
         required_limits.maxStorageBuffersPerShaderStage = 10;
+        // GPU DSP-SIFT Stage C: the packed fo=0 GSS pyramid (every octave×level
+        // concatenated) is ~320MB for a 4K capture, above WebGPU's default
+        // 256MB maxBufferSize / maxStorageBufferBindingSize. Bump both to 1GB
+        // (this adapter advertises 4GB; Apple Silicon / desktop all support it).
+        required_limits.maxBufferSize = 1024ull * 1024ull * 1024ull;
+        required_limits.maxStorageBufferBindingSize = 1024ull * 1024ull * 1024ull;
         device_desc.requiredLimits = &required_limits;
 
         // Phase 6.3a Step 6: Brush rasterize_backwards.wgsl uses
@@ -134,11 +140,19 @@ bool DawnKernelHarness::init() {
         // support it; if a future adapter doesn't, the device request
         // will fail loudly here rather than at first compile of a
         // training kernel.
-        static constexpr wgpu::FeatureName required_features[] = {
-            wgpu::FeatureName::Subgroups,
-        };
-        device_desc.requiredFeatureCount = 1;
-        device_desc.requiredFeatures = required_features;
+        // ShaderF16 enables WGSL `enable f16;` for the f16 descriptor variant.
+        // Requested only if the adapter advertises it (Apple Silicon / A16 do;
+        // some Adreno don't — there the f16 kernel is simply unavailable and the
+        // f32 path is used). Conditional so the device request never fails on an
+        // adapter lacking f16.
+        std::vector<wgpu::FeatureName> feats;
+        feats.push_back(wgpu::FeatureName::Subgroups);
+        if (adapter_.HasFeature(wgpu::FeatureName::ShaderF16)) {
+            feats.push_back(wgpu::FeatureName::ShaderF16);
+            has_f16_ = true;
+        }
+        device_desc.requiredFeatureCount = feats.size();
+        device_desc.requiredFeatures = feats.data();
         instance_.WaitAny(
             adapter_.RequestDevice(
                 &device_desc,
@@ -199,6 +213,19 @@ wgpu::Buffer DawnKernelHarness::alloc_staging_for_readback(size_t size) {
 wgpu::ComputePipeline
 DawnKernelHarness::load_compute(std::string_view wgsl_source,
                                 const char* entry_point) {
+    // ─── Pipeline cache (see pipeline_cache_ in the header) ───
+    // Key = entry_point + '\0' + full source. The extractor recompiles the
+    // same static kernels every frame; the '\0' separator keeps two distinct
+    // entry points on an identical source from colliding. String compare is
+    // O(len) but trivially cheap next to shader compile + pipeline creation.
+    std::string key(entry_point);
+    key.push_back('\0');
+    key.append(wgsl_source.data(), wgsl_source.size());
+    auto it = pipeline_cache_.find(key);
+    if (it != pipeline_cache_.end()) {
+        return it->second;
+    }
+
     wgpu::ShaderSourceWGSL wgsl_desc{};
     // wgpu::StringView from string_view: pointer + length (avoids strlen).
     wgsl_desc.code = wgpu::StringView{
@@ -212,7 +239,9 @@ DawnKernelHarness::load_compute(std::string_view wgsl_source,
     wgpu::ComputePipelineDescriptor pipeline_desc{};
     pipeline_desc.compute.module = shader;
     pipeline_desc.compute.entryPoint = wgpu::StringView{entry_point, WGPU_STRLEN};
-    return device_.CreateComputePipeline(&pipeline_desc);
+    wgpu::ComputePipeline pipeline = device_.CreateComputePipeline(&pipeline_desc);
+    pipeline_cache_.emplace(std::move(key), pipeline);
+    return pipeline;
 }
 
 void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
@@ -262,6 +291,116 @@ void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
     }
 }
 
+void DawnKernelHarness::begin_batch() {
+    batch_encoder_ = device_.CreateCommandEncoder();
+    batch_bind_groups_.clear();
+}
+
+void DawnKernelHarness::dispatch_batched(
+        const wgpu::ComputePipeline& pipeline,
+        const std::vector<wgpu::Buffer>& bindings,
+        uint32_t wg_x, uint32_t wg_y, uint32_t wg_z) {
+    std::vector<wgpu::BindGroupEntry> bg_entries(bindings.size());
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        bg_entries[i].binding = static_cast<uint32_t>(i);
+        bg_entries[i].buffer = bindings[i];
+        bg_entries[i].offset = 0;
+        bg_entries[i].size = WGPU_WHOLE_SIZE;
+    }
+    wgpu::BindGroupDescriptor bg_desc{};
+    bg_desc.layout = pipeline.GetBindGroupLayout(0);
+    bg_desc.entryCount = static_cast<uint32_t>(bg_entries.size());
+    bg_desc.entries = bg_entries.data();
+    wgpu::BindGroup bind_group = device_.CreateBindGroup(&bg_desc);
+    // retain so it outlives the (deferred) submit in end_batch().
+    batch_bind_groups_.push_back(bind_group);
+
+    wgpu::ComputePassEncoder pass = batch_encoder_.BeginComputePass();
+    pass.SetPipeline(pipeline);
+    pass.SetBindGroup(0, bind_group);
+    pass.DispatchWorkgroups(wg_x, wg_y, wg_z);
+    pass.End();
+}
+
+void DawnKernelHarness::copy_region_batched(const wgpu::Buffer& src,
+                                            uint64_t src_offset,
+                                            const wgpu::Buffer& dst,
+                                            uint64_t dst_offset, size_t size) {
+    batch_encoder_.CopyBufferToBuffer(src, src_offset, dst, dst_offset, size);
+}
+
+void DawnKernelHarness::end_batch() {
+    wgpu::CommandBuffer commands = batch_encoder_.Finish();
+    queue_.Submit(1, &commands);
+    bool done = false;
+    instance_.WaitAny(
+        queue_.OnSubmittedWorkDone(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&done](wgpu::QueueWorkDoneStatus, wgpu::StringView) { done = true; }),
+        UINT64_MAX);
+    if (!done) {
+        std::cerr << "[DawnKernelHarness] end_batch WaitAny did not complete\n";
+    }
+    batch_encoder_ = nullptr;
+    batch_bind_groups_.clear();
+}
+
+wgpu::Buffer DawnKernelHarness::alloc_indirect_args() {
+    wgpu::BufferDescriptor desc{
+        .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::Indirect |
+                 wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst,
+        // 3 * u32 dispatch dims. Dawn rounds buffer sizes up internally; keep
+        // it tight so a CopySrc readback of exactly 12 bytes is well-defined.
+        .size = 3 * sizeof(uint32_t),
+    };
+    return device_.CreateBuffer(&desc);
+}
+
+void DawnKernelHarness::dispatch_indirect(
+        const wgpu::ComputePipeline& pipeline,
+        const std::vector<wgpu::Buffer>& bindings,
+        const wgpu::Buffer& indirect_buffer,
+        uint64_t indirect_offset) {
+    // Same @group(0) bind-group construction as dispatch() — see the
+    // resize-not-push_back rationale there.
+    std::vector<wgpu::BindGroupEntry> bg_entries(bindings.size());
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        bg_entries[i].binding = static_cast<uint32_t>(i);
+        bg_entries[i].buffer = bindings[i];
+        bg_entries[i].offset = 0;
+        bg_entries[i].size = WGPU_WHOLE_SIZE;
+    }
+    wgpu::BindGroupDescriptor bg_desc{};
+    bg_desc.layout = pipeline.GetBindGroupLayout(0);
+    bg_desc.entryCount = static_cast<uint32_t>(bg_entries.size());
+    bg_desc.entries = bg_entries.data();
+    wgpu::BindGroup bind_group = device_.CreateBindGroup(&bg_desc);
+
+    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    {
+        wgpu::ComputePassEncoder pass = encoder.BeginComputePass();
+        pass.SetPipeline(pipeline);
+        pass.SetBindGroup(0, bind_group);
+        pass.DispatchWorkgroupsIndirect(indirect_buffer, indirect_offset);
+        pass.End();
+    }
+    wgpu::CommandBuffer commands = encoder.Finish();
+    queue_.Submit(1, &commands);
+
+    bool done = false;
+    instance_.WaitAny(
+        queue_.OnSubmittedWorkDone(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&done](wgpu::QueueWorkDoneStatus, wgpu::StringView) {
+                done = true;
+            }),
+        UINT64_MAX);
+    if (!done) {
+        std::cerr << "[DawnKernelHarness] dispatch_indirect WaitAny did not "
+                     "complete\n";
+    }
+}
+
 void DawnKernelHarness::copy_to_staging(const wgpu::Buffer& src,
                                          const wgpu::Buffer& dst,
                                          size_t size) {
@@ -281,6 +420,28 @@ void DawnKernelHarness::copy_to_staging(const wgpu::Buffer& src,
         UINT64_MAX);
     if (!done) {
         std::cerr << "[DawnKernelHarness] copy_to_staging WaitAny did not complete\n";
+    }
+}
+
+void DawnKernelHarness::copy_region(const wgpu::Buffer& src,
+                                     uint64_t src_offset,
+                                     const wgpu::Buffer& dst,
+                                     uint64_t dst_offset, size_t size) {
+    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    encoder.CopyBufferToBuffer(src, src_offset, dst, dst_offset, size);
+    wgpu::CommandBuffer commands = encoder.Finish();
+    queue_.Submit(1, &commands);
+
+    bool done = false;
+    instance_.WaitAny(
+        queue_.OnSubmittedWorkDone(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&done](wgpu::QueueWorkDoneStatus, wgpu::StringView) {
+                done = true;
+            }),
+        UINT64_MAX);
+    if (!done) {
+        std::cerr << "[DawnKernelHarness] copy_region WaitAny did not complete\n";
     }
 }
 
