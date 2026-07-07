@@ -464,6 +464,31 @@ if(BUILD_BENCH)
       ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
       ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
 
+    # ─── GPU DSP-SIFT: batch extractor for the GPU->SfM->9-gate validation ──
+    add_executable(gpu_extract_batch_exe
+      bench/gpu_extract_batch.cc
+      bench/dsp_sift_gpu_c.cc
+      bench/dsp_sift_c.cc
+      ${AT}/../tools/sift_extract_dawn.cc
+      ${AT}/../tools/sift_pyramid_dawn.cc)
+    set_target_properties(gpu_extract_batch_exe PROPERTIES CXX_STANDARD 20)
+    target_include_directories(gpu_extract_batch_exe PRIVATE
+      ${V}/stubs ${AT}/../tools ${AT}/stb
+      ${_DAWN_INC_STATIC} ${_DAWN_INC_GEN})
+    target_compile_definitions(gpu_extract_batch_exe PRIVATE
+      EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+      AETHER_WGSL_DIR="${AT}/../shaders/wgsl")
+    target_compile_options(gpu_extract_batch_exe PRIVATE -w)
+    target_link_libraries(gpu_extract_batch_exe PRIVATE
+      glomap_core
+      ${_DAWN_HARNESS_LIB}
+      ${_WEBGPU_DAWN_LIB}
+      /opt/homebrew/lib/libglog.dylib
+      "-lsqlite3"
+      ${ACCELERATE_FW}
+      ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
+      ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
+
     # ─── GPU DSP-SIFT M2-3: two-view end-to-end matching gate ───
     # gpu_extract_twoview_exe extracts a real image PAIR with the GPU pipeline +
     # CPU fo=0 baseline, cross-matches each track, and compares inlier geometry.
