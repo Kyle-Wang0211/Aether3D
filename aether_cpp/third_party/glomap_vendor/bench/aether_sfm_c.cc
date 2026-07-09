@@ -28,6 +28,7 @@
 #include "colmap/feature/types.h"
 #include "colmap/feature/utils.h"
 #include "colmap/geometry/rigid3.h"
+#include "colmap/geometry/triangulation.h"
 #include "colmap/scene/camera.h"
 #include "colmap/scene/database.h"
 #include "colmap/scene/image.h"
@@ -35,6 +36,10 @@
 #include "colmap/scene/reconstruction.h"
 #include "colmap/scene/reconstruction_manager.h"
 #include "colmap/scene/two_view_geometry.h"
+#include "colmap/scene/track.h"
+#include "colmap/estimators/bundle_adjustment.h"
+#include "colmap/estimators/bundle_adjustment_ceres.h"
+#include "colmap/sfm/observation_manager.h"
 
 #include <glog/logging.h>
 
@@ -45,9 +50,12 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // On-device DSP-SIFT extractor + CPU matcher (dsp_sift_c.cc, same archive set).
@@ -113,6 +121,10 @@ struct FrameRecord {
   // two-view geometry of every new pair can be estimated without a sqlite
   // read-back. ~1.5k pts × 16 B ≈ 24 KB/frame — negligible.
   std::vector<Eigen::Vector2d> points;
+  // ARKit CamFromWorld for this frame, ALREADY flipped into COLMAP camera axes
+  // (C = diag(1,-1,-1)); used ONLY by the throwaway live-preview triangulation.
+  colmap::Rigid3d cam_from_world;
+  bool has_pose = false;
 };
 
 }  // namespace
@@ -132,6 +144,32 @@ struct aether_sfm_session {
   // (same object for both sides: single shared camera per session).
   colmap::Camera camera;
 
+  // Rough live-preview cloud (throwaway): triangulated during capture from the
+  // per-frame matches + ARKit poses. World frame = ARKit world. The finalize
+  // pipeline is unchanged and still yields the authoritative model.
+  std::vector<Eigen::Vector3d> preview_points;
+  std::mutex preview_mutex;  // add_frame writer vs. get_preview_points reader
+
+  // ── Streaming live local-BA preview (replaces the raw-triangulation cloud) ──
+  // Incrementally grown Reconstruction: shared camera+rig seeded on frame 0, one
+  // registered image per posed frame (ARKit pose), tracks grown from the
+  // cross-checked matches, refined by a windowed Cauchy local BA each frame.
+  // Separate from `recon` (finalize output); owned solely by add_frame (worker).
+  colmap::Reconstruction live_recon;
+  bool live_recon_ready = false;                                // camera+rig added
+  std::vector<colmap::image_t> reg_order;                       // registration order → window
+  int ba_window = 12;    // W: most-recent frames refined per pass (K=12 validated)
+  int ba_every_n = 1;    // run the windowed BA every Nth frame (raise under thermal)
+  int ba_max_iters = 5;  // bounded ceres iters/frame for the ~2s budget
+  // Cumulative streaming-quality telemetry (whole capture) — surfaced by
+  // aether_sfm_stream_stats so the worker can log which floater filter did what.
+  int64_t stat_tvg_inlier_pairs = 0;  // grow/create pairs taken from TVG inliers
+  int64_t stat_raw_pairs = 0;         // pairs that fell back to raw (empty inliers)
+  int64_t stat_grow_rejected = 0;     // grow-gate reproj/cheirality rejections
+  int64_t stat_grow_accepted = 0;     // observations grown onto existing points
+  int64_t stat_reproj_filtered = 0;   // obs deleted by the post-BA reproj filter
+  int64_t stat_tri_filtered = 0;      // obs deleted by the post-BA tri-angle filter
+
   // Result of finalize()/run(): the largest reconstruction.
   std::shared_ptr<colmap::ReconstructionManager> recon_manager;
   std::shared_ptr<const colmap::Reconstruction> recon;  // best model, or null
@@ -145,6 +183,16 @@ struct aether_sfm_session {
   std::thread refine_thread;
   std::atomic<int> finalize_status{0};  // aether_sfm_finalize_status_t
   double refine_ms = 0.0;               // worker global-BA wall time
+
+  // Per-frame telemetry read back by aether_sfm_debug_last (perf diagnostics).
+  // The exact values behind the device log line
+  //   extract=<..>ms match=<..>ms cand=<..> gpuM=<..> cpuM=<..>
+  // Written at the end of each aether_sfm_add_frame; describe the LAST frame.
+  double last_extract_ms = 0.0;   // DSP-SIFT extract wall time (>~2000 => GPU->CPU fallback)
+  double last_match_ms = 0.0;     // total per-pair matching wall time this frame
+  int last_n_cand = 0;            // # previous frames in the window matched against
+  int last_gpu_matches = 0;       // matches accepted via the GPU GEMM matcher
+  int last_cpu_matches = 0;       // matches accepted via CPU fallback (>0 => GPU matcher failed)
 };
 
 namespace {
@@ -420,8 +468,10 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
   if (!s || !s->db || !gray || width <= 0 || height <= 0) {
     return AETHER_SFM_ERR_INVALID_ARG;
   }
-  (void)pose_qwxyz;  // pose prior is stored by the caller / used post-solve;
-  (void)pose_t;      // COLMAP estimates CamFromWorld itself in this v1.
+  // pose_qwxyz/pose_t = ARKit CamFromWorld (world->camera), quaternion [w,x,y,z],
+  // ARKit camera axes (+X right, +Y up, -Z forward). Consumed below to build the
+  // throwaway live-preview cloud only; the authoritative finalize still self-
+  // estimates CamFromWorld (this prior does NOT feed the v1 solve).
   try {
     const int max_features =
         s->options.max_features > 0 ? s->options.max_features : 2048;
@@ -435,6 +485,7 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     int n = 0;
     const bool gpu_avail =
         s->options.use_gpu_extract && (aether_dsp_sift_extract_gpu != nullptr);
+    const double t_extract0 = NowMs();
     const int erc =
         gpu_avail
             ? aether_dsp_sift_extract_gpu(gray, width, height, max_features,
@@ -442,7 +493,15 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                           desc.data(), max_features, &n)
             : aether_dsp_sift_extract(gray, width, height, max_features,
                                       xy.data(), desc.data(), max_features, &n);
-    if (erc != 0 || n <= 0) return AETHER_SFM_ERR_EXTRACT;
+    const double extract_ms = NowMs() - t_extract0;
+    if (erc != 0 || n <= 0) {
+      // Record the (possibly large) extract time even on failure so the log
+      // reflects a stalled/fallback extractor; zero the match-side counters.
+      s->last_extract_ms = extract_ms;
+      s->last_match_ms = 0.0;
+      s->last_n_cand = s->last_gpu_matches = s->last_cpu_matches = 0;
+      return AETHER_SFM_ERR_EXTRACT;
+    }
 
     // 2) Single shared camera (SIMPLE_PINHOLE: f, cx, cy), self-calibrated by
     //    BA — the RealityScan/RealityCapture default (soft-prior, refined per
@@ -465,6 +524,10 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
       // two-view geometry estimation below.
       camera.camera_id = s->camera_id;
       s->camera = camera;
+      // Seed the live Reconstruction's shared camera + its trivial rig once.
+      // Rig id == camera id, required before AddImageWithTrivialFrame.
+      s->live_recon.AddCameraWithTrivialRig(s->camera);
+      s->live_recon_ready = true;
     }
 
     // 3) Write image + keypoints + descriptors.
@@ -499,6 +562,35 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     rec.descriptors.assign(desc.begin(), desc.begin() + (size_t)n * 128);
     rec.points = colmap::FeatureKeypointsToPointsVector(kps);
 
+    // Build this frame's CamFromWorld in COLMAP convention (see header derivation):
+    //   X_colmapcam = C*(R_w2c*X_world + t_w2c),  C = diag(1,-1,-1) (180° about +X).
+    // Used ONLY by the throwaway live-preview triangulation below.
+    if (pose_qwxyz && pose_t) {
+      const Eigen::Quaterniond q_w2c(pose_qwxyz[0], pose_qwxyz[1],
+                                     pose_qwxyz[2], pose_qwxyz[3]);  // [w,x,y,z]
+      const Eigen::Matrix3d R_w2c = q_w2c.normalized().toRotationMatrix();
+      const Eigen::Vector3d t_w2c(pose_t[0], pose_t[1], pose_t[2]);
+      Eigen::Matrix3d C = Eigen::Matrix3d::Identity();
+      C(1, 1) = -1.0;
+      C(2, 2) = -1.0;
+      rec.cam_from_world = colmap::Rigid3d(
+          Eigen::Quaterniond(Eigen::Matrix3d(C * R_w2c)), C * t_w2c);
+      rec.has_pose = true;
+    }
+
+    // Register this frame into the live Reconstruction with its ARKit pose.
+    // Trivial rig/frame (frame_id == image_id); the 2-arg overload sets the
+    // pose AND RegisterFrame()s it in one call.
+    if (rec.has_pose && s->live_recon_ready) {
+      colmap::Image rimg;
+      rimg.SetImageId(image_id);
+      rimg.SetName(name);
+      rimg.SetCameraId(s->camera_id);
+      rimg.SetPoints2D(rec.points);  // kp order == point2D_idx
+      s->live_recon.AddImageWithTrivialFrame(std::move(rimg), rec.cam_from_world);
+      s->reg_order.push_back(image_id);
+    }
+
     // 4) Match against the previous k_neighbors frames (CPU brute-force,
     //    MUTUALLY cross-checked inside aether_sift_match_pairs) and PERSIST
     //    the correspondences — the exact sequence colmap's own matching
@@ -516,11 +608,22 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                              ? s->options.match_max_ratio
                              : 0.7;
     const colmap::TwoViewGeometryOptions tvg_options;  // colmap defaults
+    const double t_match0 = NowMs();
+    int n_cand = 0, gpu_matches = 0, cpu_matches = 0;
     std::vector<uint32_t> pair_buf;
+    // Live-preview triangulation scratch. Triangulate each NEW-frame keypoint at
+    // most once per add_frame (cheap dedup: a keypoint matched across several
+    // prev frames would otherwise emit several near-duplicate 3D points).
+    // Points created or grown in the live Reconstruction this frame → the
+    // variable set for the windowed local BA below.
+    std::unordered_set<colmap::point3D_t> touched;
+    constexpr double kMinTriAngleRad = 0.05235987755982988;  // 3.0 deg parallax
+    constexpr double kMaxReprojPx = 10.0;  // rough gate (fed-res px); ARKit drift
     const bool gpu_match_avail =
         s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
     for (int j = start; j < frame_id; ++j) {
       const FrameRecord& prev = s->frames[j];
+      ++n_cand;
       // Cross-checked matches are unique per left index → min(n1,n2) bounds.
       const int cap = prev.n_keypoints < rec.n_keypoints ? prev.n_keypoints
                                                          : rec.n_keypoints;
@@ -535,12 +638,14 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
             prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
             rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
       }
+      const bool used_gpu = (mrc == 0);
       if (mrc != 0) {
         mrc = aether_sift_match_pairs(
             prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
             rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
       }
       if (mrc != 0 || num_matches <= 0) continue;
+      if (used_gpu) gpu_matches += num_matches; else cpu_matches += num_matches;
 
       colmap::FeatureMatches matches(num_matches);
       for (int m = 0; m < num_matches; ++m) {
@@ -554,9 +659,192 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                           rec.points, std::move(matches),
                                           tvg_options);
       s->db->WriteTwoViewGeometry(prev.image_id, image_id, two_view_geometry);
+
+      // ── Incremental track growth into the live Reconstruction ──
+      // Consult the RECON's Point2D->Point3D links (the single source of truth)
+      // for track membership: create a new 2-view point or grow an existing
+      // track by one observation. Querying the recon directly — not a side map —
+      // means the per-frame floater filter below can freely DeletePoint3D /
+      // DeleteObservation (which reset those links) with NO dangling-id
+      // bookkeeping. The windowed BA after the loop refines these poses+points.
+      //
+      // Seed tracks from the GEOMETRICALLY-VERIFIED matches — the TwoViewGeometry
+      // RANSAC (E/F/H) inliers, not the raw cross-checked pairs. A raw pair that
+      // survives cross-check + Lowe ratio can still be geometrically inconsistent
+      // (repetitive texture, specular highlights) → it seeds a floater the
+      // creation gates don't always catch (the halo of scattered points around
+      // the surface). Inliers remove those at the source. Fall back to raw pairs
+      // only when the TVG was degenerate (empty inliers) so a hard two-view case
+      // still contributes rather than vanishing.
+      if (rec.has_pose && prev.has_pose && s->live_recon_ready) {
+        const Eigen::Matrix3x4d P_prev = prev.cam_from_world.ToMatrix();
+        const Eigen::Matrix3x4d P_cur = rec.cam_from_world.ToMatrix();
+        const Eigen::Vector3d c_prev = prev.cam_from_world.TgtOriginInSrc();
+        const Eigen::Vector3d c_cur = rec.cam_from_world.TgtOriginInSrc();
+        const colmap::FeatureMatches& inliers = two_view_geometry.inlier_matches;
+        const bool use_inliers = !inliers.empty();
+        const int grow_n =
+            use_inliers ? static_cast<int>(inliers.size()) : num_matches;
+        if (use_inliers) s->stat_tvg_inlier_pairs += grow_n;
+        else s->stat_raw_pairs += grow_n;
+        for (int mm = 0; mm < grow_n; ++mm) {
+          const uint32_t i1 = use_inliers ? inliers[mm].point2D_idx1
+                                          : pair_buf[2 * mm];      // prev kp index
+          const uint32_t i2 = use_inliers ? inliers[mm].point2D_idx2
+                                          : pair_buf[2 * mm + 1];  // cur kp index
+          if (i1 >= prev.points.size() || i2 >= rec.points.size()) continue;
+          const colmap::Point2D& o1 = s->live_recon.Image(prev.image_id).Point2D(i1);
+          const colmap::Point2D& o2 = s->live_recon.Image(image_id).Point2D(i2);
+          const bool has1 = o1.HasPoint3D();
+          const bool has2 = o2.HasPoint3D();
+
+          // Both assigned: same track = nothing; different tracks = a merge the
+          // live pass defers to the finalize global BA (no live loop closure).
+          if (has1 && has2) continue;
+
+          // One side assigned: grow that Point3D by the unassigned observation.
+          // GATE the growth the same way creation is gated: the new observation
+          // must be in front of the growing camera AND reproject near the
+          // existing point. An UNGATED AddObservation lets a geometrically-wrong
+          // match (one that survived cross-check + Lowe ratio but is still a
+          // mismatch) attach a foreign-surface observation to a good point —
+          // geometry barely moves (the point isn't re-triangulated) but the
+          // track-based colorizer averages that stray pixel in → color bleed (a
+          // red object's pixel pulled into a brown floor point). Rejecting it
+          // fixes the color with no point-count loss (the keypoint stays free to
+          // seed its own point).
+          if (has1 || has2) {
+            const colmap::point3D_t pid = has1 ? o1.point3D_id : o2.point3D_id;
+            const colmap::image_t gimg = has1 ? image_id : prev.image_id;
+            const colmap::point2D_t gidx = has1 ? i2 : i1;
+            const colmap::Rigid3d& gcfw =
+                has1 ? rec.cam_from_world : prev.cam_from_world;
+            const Eigen::Vector2d& gkp = has1 ? rec.points[i2] : prev.points[i1];
+            const Eigen::Vector3d Xg = gcfw * s->live_recon.Point3D(pid).xyz;
+            bool grown = false;
+            if (Xg.z() > 0.0) {                                    // cheirality
+              const std::optional<Eigen::Vector2d> pg = s->camera.ImgFromCam(Xg);
+              if (pg && (*pg - gkp).norm() <= kMaxReprojPx) {      // reproj gate
+                s->live_recon.AddObservation(pid, colmap::TrackElement(gimg, gidx));
+                touched.insert(pid);
+                grown = true;
+              }
+            }
+            if (grown) ++s->stat_grow_accepted;
+            else ++s->stat_grow_rejected;
+            continue;
+          }
+
+          // Neither assigned: brand-new 2-view track. Triangulate + gate.
+          const std::optional<Eigen::Vector2d> nn1 = s->camera.CamFromImg(prev.points[i1]);
+          const std::optional<Eigen::Vector2d> nn2 = s->camera.CamFromImg(rec.points[i2]);
+          if (!nn1 || !nn2) continue;
+          Eigen::Vector3d X_world;
+          if (!colmap::TriangulatePoint(P_prev, P_cur, *nn1, *nn2, &X_world)) continue;
+          const Eigen::Vector3d X_prev = prev.cam_from_world * X_world;
+          const Eigen::Vector3d X_cur = rec.cam_from_world * X_world;
+          if (X_prev.z() <= 0.0 || X_cur.z() <= 0.0) continue;             // cheirality
+          if (colmap::CalculateTriangulationAngle(c_prev, c_cur, X_world) <
+              kMinTriAngleRad) continue;                                    // parallax
+          const std::optional<Eigen::Vector2d> rr1 = s->camera.ImgFromCam(X_prev);
+          const std::optional<Eigen::Vector2d> rr2 = s->camera.ImgFromCam(X_cur);
+          if (!rr1 || !rr2) continue;
+          if ((*rr1 - prev.points[i1]).norm() > kMaxReprojPx ||
+              (*rr2 - rec.points[i2]).norm() > kMaxReprojPx) continue;      // reproj gate
+
+          colmap::Track track;
+          track.AddElement(prev.image_id, i1);
+          track.AddElement(image_id, i2);
+          const colmap::point3D_t pid =
+              s->live_recon.AddPoint3D(X_world, std::move(track), Eigen::Vector3ub::Zero());
+          touched.insert(pid);
+        }
+      }
+    }
+
+    // ── Windowed local bundle adjustment (Cauchy) over the last W frames ──
+    // Refines the window's poses+points each frame. Older structure is held
+    // constant automatically (a Point3D whose track extends beyond the window is
+    // fixed → anchors the window, bounds drift). Bounded ceres iters keep it in
+    // the ~2s/frame budget.
+    if (rec.has_pose && s->live_recon_ready && s->live_recon.NumRegImages() >= 3 &&
+        (frame_id % (s->ba_every_n > 0 ? s->ba_every_n : 1)) == 0) {
+      const int W = s->ba_window > 0 ? s->ba_window : 12;
+      const int n_reg = static_cast<int>(s->reg_order.size());
+      const int w0 = n_reg > W ? n_reg - W : 0;
+
+      colmap::BundleAdjustmentConfig ba_config;
+      ba_config.FixGauge(colmap::BundleAdjustmentGauge::THREE_POINTS);
+      for (int t = w0; t < n_reg; ++t) ba_config.AddImage(s->reg_order[t]);
+      // Fix intrinsics once frames exist outside the window; the finalize
+      // global BA refines focal.
+      if (n_reg > W) ba_config.SetConstantCamIntrinsics(s->camera_id);
+      // Variable points = those touched this frame with a short track (<=15),
+      // pulled in with their out-of-window observations as constant anchors.
+      for (const colmap::point3D_t pid : touched) {
+        if (s->live_recon.Point3D(pid).track.Length() <= 15)
+          ba_config.AddVariablePoint(pid);
+      }
+
+      colmap::BundleAdjustmentOptions ba_options;
+      ba_options.refine_rig_from_world = true;
+      ba_options.refine_points3D = true;
+      ba_options.refine_focal_length = true;  // config fixes it when windowed
+      ba_options.refine_principal_point = false;
+      ba_options.print_summary = false;
+      ba_options.ceres->loss_function_type =
+          colmap::CeresBundleAdjustmentOptions::LossFunctionType::CAUCHY;
+      ba_options.ceres->loss_function_scale = 1.0;
+      ba_options.ceres->solver_options.max_num_iterations =
+          s->ba_max_iters > 0 ? s->ba_max_iters : 5;
+
+      try {
+        auto ba =
+            colmap::CreateDefaultBundleAdjuster(ba_options, ba_config, s->live_recon);
+        ba->Solve();
+        // ── Floater cleanup on the refined window (COLMAP-standard) ──
+        // Runs at the BA cadence (already gated by ba_every_n). Deletes negative-
+        // depth observations + high-reproj points among those touched this frame;
+        // ExistsPoint3D-guarded internally (observation_manager.cc:377), so ids
+        // already removed by the negative-depth pass are skipped, not dereferenced.
+        // The recon's Point2D links are reset on delete, so the match-loop queries
+        // above stay correct — no obs map to invalidate.
+        colmap::ObservationManager obs_mgr(s->live_recon);
+        obs_mgr.FilterObservationsWithNegativeDepth();
+        s->stat_reproj_filtered +=
+            obs_mgr.FilterPoints3DWithLargeReprojectionError(/*max_error=*/4.0, touched);
+        // Multi-view min-parallax cull (the "多视角检查"): after BA moves the
+        // poses/points, a point whose whole track has collapsed to a tiny
+        // max-parallax is a depth-ambiguous floater the reproj gate can't see
+        // (it may still reproject cleanly). This is COLMAP's finalize signal
+        // (filter_min_tri_angle=1.5°). MUST run AFTER the reproj filter above
+        // (observation_manager.cc:313-315: else high-error obs inflate a fake
+        // angle). 1.5° (not the 3.0° creation gate) so it only deletes points BA
+        // itself pushed below finalize's own threshold — near-no-op on the early
+        // 2-view-heavy preview, so it barely thins the cloud.
+        s->stat_tri_filtered += obs_mgr.FilterPoints3DWithSmallTriangulationAngle(
+            /*min_tri_angle_deg=*/2.0, touched);
+      } catch (const std::exception&) {
+        // A degenerate window / filter error must not kill capture — carry on.
+      }
+    }
+
+    // Publish the BA-refined live cloud into preview_points (served unchanged by
+    // the getter). Short lock; the getter never blocks on the BA itself.
+    {
+      std::vector<Eigen::Vector3d> snap;
+      snap.reserve(s->live_recon.NumPoints3D());
+      for (const auto& [pid, pt] : s->live_recon.Points3D()) snap.push_back(pt.xyz);
+      std::lock_guard<std::mutex> lk(s->preview_mutex);
+      s->preview_points.swap(snap);
     }
 
     s->frames.push_back(std::move(rec));
+    s->last_extract_ms = extract_ms;
+    s->last_match_ms = NowMs() - t_match0;
+    s->last_n_cand = n_cand;
+    s->last_gpu_matches = gpu_matches;
+    s->last_cpu_matches = cpu_matches;
     if (out_frame_id) *out_frame_id = frame_id;
     return AETHER_SFM_OK;
   } catch (const std::exception&) {
@@ -787,6 +1075,138 @@ aether_sfm_result_t aether_sfm_get_points_tracked(
 void aether_sfm_track_obs_free(int32_t* offsets, aether_sfm_track_obs_t* obs) {
   std::free(offsets);
   std::free(obs);
+}
+
+// Sibling of aether_sfm_get_points_tracked that reads the LIVE streaming
+// local-BA reconstruction (s->live_recon) instead of the finalize output
+// (s->recon), so the worker can true-color the streaming cloud through the SAME
+// colorize path. Identical output contract: points via aether_sfm_points_free,
+// offsets+obs via aether_sfm_track_obs_free.
+//
+// THREADING: live_recon is single-writer, owned by aether_sfm_add_frame on the
+// capture worker isolate, and — unlike s->recon — is NEVER swapped by an async
+// thread. This getter therefore takes NO lock and MUST be called on that same
+// worker isolate, serially between add_frame calls. If the Dart binding ever
+// calls it off that thread, wrap live_recon's mutation in add_frame AND this
+// read in a shared mutex (a torn read of a live Reconstruction is UB).
+aether_sfm_result_t aether_sfm_get_preview_tracked(
+    aether_sfm_session_t* s, aether_sfm_point_t** out_points, int* out_count,
+    int32_t** out_obs_offsets, aether_sfm_track_obs_t** out_obs,
+    int64_t* out_obs_count) {
+  if (!s || !out_points || !out_count || !out_obs_offsets || !out_obs ||
+      !out_obs_count) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+  if (!s->live_recon_ready) return AETHER_SFM_ERR_NOT_REGISTERED;
+  const colmap::Reconstruction& recon = s->live_recon;
+  const auto& pts = recon.Points3D();
+  const int n = static_cast<int>(pts.size());
+
+  int64_t total_obs = 0;
+  for (const auto& [point_id, point] : pts)
+    total_obs += static_cast<int64_t>(point.track.Length());
+
+  auto* arr = static_cast<aether_sfm_point_t*>(
+      std::malloc(static_cast<size_t>(n) * sizeof(aether_sfm_point_t)));
+  auto* offs = static_cast<int32_t*>(
+      std::malloc((static_cast<size_t>(n) + 1) * sizeof(int32_t)));
+  auto* obs = static_cast<aether_sfm_track_obs_t*>(std::malloc(
+      static_cast<size_t>(total_obs) * sizeof(aether_sfm_track_obs_t)));
+  if ((n > 0 && (!arr || !offs)) || (total_obs > 0 && !obs)) {
+    std::free(arr);
+    std::free(offs);
+    std::free(obs);
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+
+  int i = 0;
+  int64_t w = 0;
+  for (const auto& [point_id, point] : pts) {
+    aether_sfm_point_t& o = arr[i];
+    o.x = static_cast<float>(point.xyz.x());
+    o.y = static_cast<float>(point.xyz.y());
+    o.z = static_cast<float>(point.xyz.z());
+    o.r = point.color(0);
+    o.g = point.color(1);
+    o.b = point.color(2);
+    o._pad[0] = o._pad[1] = 0;
+    offs[i] = static_cast<int32_t>(w);
+    for (const auto& el : point.track.Elements()) {
+      if (!recon.ExistsImage(el.image_id)) continue;
+      const auto& xy = recon.Image(el.image_id).Point2D(el.point2D_idx).xy;
+      aether_sfm_track_obs_t& t = obs[w++];
+      // image_id is 1-based from WriteImage; frame_id mirrors get_poses / get_points_tracked.
+      t.frame_id = static_cast<int32_t>(el.image_id) - 1;
+      t.x = static_cast<float>(xy.x());
+      t.y = static_cast<float>(xy.y());
+    }
+    ++i;
+  }
+  offs[n] = static_cast<int32_t>(w);
+  *out_points = arr;
+  *out_count = n;
+  *out_obs_offsets = offs;
+  *out_obs = obs;
+  *out_obs_count = w;
+  return AETHER_SFM_OK;
+}
+
+// Rough live-preview point cloud accumulated during capture (throwaway; built by
+// triangulating per-frame matches with the ARKit poses — NOT the authoritative
+// finalize model). World frame = ARKit world. Fills out_xyz with up to `cap`
+// points (cap*3 floats); *out_count = TOTAL available (may exceed cap — call once
+// with out_xyz=NULL to size, then again to fill).
+aether_sfm_result_t aether_sfm_get_preview_points(aether_sfm_session_t* s,
+                                                  float* out_xyz, int cap,
+                                                  int* out_count) {
+  if (!s || !out_count) return AETHER_SFM_ERR_INVALID_ARG;
+  std::lock_guard<std::mutex> lk(s->preview_mutex);
+  const int n = static_cast<int>(s->preview_points.size());
+  *out_count = n;
+  if (!out_xyz) return AETHER_SFM_OK;  // count-only sizing query
+  const int m = (n < cap) ? n : cap;
+  for (int i = 0; i < m; ++i) {
+    const Eigen::Vector3d& p = s->preview_points[i];
+    out_xyz[3 * i + 0] = static_cast<float>(p.x());
+    out_xyz[3 * i + 1] = static_cast<float>(p.y());
+    out_xyz[3 * i + 2] = static_cast<float>(p.z());
+  }
+  return AETHER_SFM_OK;
+}
+
+// Per-frame timing/counters of the LAST aether_sfm_add_frame (perf diagnostics;
+// see aether_sfm_c.h). Pure read-back of the values add_frame stashes on the
+// session — the numbers behind the device log line
+//   extract=<extract_ms>ms match=<match_ms>ms cand=<n_cand> gpuM=<..> cpuM=<..>
+// Any out-ptr may be NULL. Safe before the first add_frame (fields zero-init).
+void aether_sfm_debug_last(aether_sfm_session_t* s, double* extract_ms,
+                           double* match_ms, int* n_cand, int* gpu_matches,
+                           int* cpu_matches) {
+  if (!s) return;
+  if (extract_ms) *extract_ms = s->last_extract_ms;
+  if (match_ms) *match_ms = s->last_match_ms;
+  if (n_cand) *n_cand = s->last_n_cand;
+  if (gpu_matches) *gpu_matches = s->last_gpu_matches;
+  if (cpu_matches) *cpu_matches = s->last_cpu_matches;
+}
+
+// Cumulative streaming-quality counters over the whole capture (see the session
+// stat_* fields). Lets the worker log which floater filter did what:
+//   tvg_pairs/raw_pairs — geometric-inlier vs raw-fallback grow/create pairs
+//   grow_accepted/rejected — track-growth observations kept vs gated out
+//   reproj_filtered/tri_filtered — points/obs culled by each post-BA filter
+// Any out-ptr may be NULL. Safe before the first add_frame (fields zero-init).
+void aether_sfm_stream_stats(aether_sfm_session_t* s, int64_t* tvg_pairs,
+                             int64_t* raw_pairs, int64_t* grow_accepted,
+                             int64_t* grow_rejected, int64_t* reproj_filtered,
+                             int64_t* tri_filtered) {
+  if (!s) return;
+  if (tvg_pairs) *tvg_pairs = s->stat_tvg_inlier_pairs;
+  if (raw_pairs) *raw_pairs = s->stat_raw_pairs;
+  if (grow_accepted) *grow_accepted = s->stat_grow_accepted;
+  if (grow_rejected) *grow_rejected = s->stat_grow_rejected;
+  if (reproj_filtered) *reproj_filtered = s->stat_reproj_filtered;
+  if (tri_filtered) *tri_filtered = s->stat_tri_filtered;
 }
 
 void aether_sfm_free(aether_sfm_session_t* s) {

@@ -198,6 +198,20 @@ if(BUILD_BENCH)
     "-lsqlite3"
     ${ACCELERATE_FW})
 
+  # ─── ARKit-pose-primed BA fixture (validate streaming local-BA off-device) ───
+  add_executable(arkit_ba_bench_exe bench/arkit_ba_bench.cc)
+  target_include_directories(arkit_ba_bench_exe PRIVATE ${V}/stubs)
+  target_compile_definitions(arkit_ba_bench_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7)
+  target_compile_options(arkit_ba_bench_exe PRIVATE -w)
+  target_link_libraries(arkit_ba_bench_exe PRIVATE
+    colmap_only
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
+
   # ─── GPU DSP-SIFT M0: GSS pyramid parity gate (GPU Dawn vs CPU VLFeat) ───
   # gss_parity_exe builds the GPU GSS pyramid (tools/sift_pyramid_dawn) and the
   # CPU VLFeat reference with the identical covdet-DOG geometry, then compares
