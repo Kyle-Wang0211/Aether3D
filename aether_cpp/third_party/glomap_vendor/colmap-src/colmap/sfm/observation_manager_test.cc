@@ -40,7 +40,8 @@ void GenerateReconstruction(const image_t num_images,
                             Reconstruction& reconstruction) {
   const size_t kNumPoints2D = 10;
 
-  Camera camera = Camera::CreateFromModelName(1, "PINHOLE", 1, 1, 1);
+  Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 1, 1, 1);
   reconstruction.AddCamera(camera);
 
   Rig rig;
@@ -207,6 +208,62 @@ TEST(ObservationManager, FilterPoints3DWithLargeReprojectionErrorTypes) {
   EXPECT_EQ(obs_manager.FilterPoints3DWithLargeReprojectionError(
                 0.5, {id3}, ReprojectionErrorType::ANGULAR),
             2);
+}
+
+TEST(ObservationManager, FilterPoints3DSphericalSeam) {
+  Reconstruction reconstruction;
+  const camera_t kCameraId = 1;
+  Camera camera =
+      Camera::CreateFromModelId(kCameraId,
+                                EquirectangularCameraModel::model_id,
+                                /*focal_length=*/0.0,
+                                1000,
+                                500);
+  reconstruction.AddCamera(camera);
+
+  Rig rig;
+  rig.SetRigId(1);
+  rig.AddRefSensor(camera.SensorId());
+  reconstruction.AddRig(rig);
+
+  Frame frame;
+  frame.SetFrameId(1);
+  frame.SetRigId(rig.RigId());
+  frame.AddDataId(data_t(camera.SensorId(), 1));
+  frame.AddDataId(data_t(camera.SensorId(), 2));
+  frame.SetRigFromWorld(Rigid3d());
+  reconstruction.AddFrame(frame);
+
+  // Both images observe the back direction (0, 0, -1) at the x = 0 seam
+  // representation; the point projects to x = w. A raw pixel error would be
+  // ~width across the seam, but the spherical reprojection error is
+  // seam-invariant and ~0.
+  Image image1;
+  image1.SetImageId(1);
+  image1.SetCameraId(kCameraId);
+  image1.SetFrameId(1);
+  image1.SetPoints2D({Eigen::Vector2d(0, 250)});
+  reconstruction.AddImage(image1);
+
+  Image image2;
+  image2.SetImageId(2);
+  image2.SetCameraId(kCameraId);
+  image2.SetFrameId(1);
+  image2.SetPoints2D({Eigen::Vector2d(0, 250)});
+  reconstruction.AddImage(image2);
+
+  ObservationManager obs_manager(reconstruction);
+
+  const point3D_t id =
+      reconstruction.AddPoint3D(Eigen::Vector3d(0, 0, -2), Track());
+  reconstruction.AddObservation(id, TrackElement(1, 0));
+  reconstruction.AddObservation(id, TrackElement(2, 0));
+
+  // The seam-straddling exact match is not filtered (a pixel metric would
+  // wrongly drop it with a ~width error).
+  EXPECT_EQ(obs_manager.FilterPoints3DWithLargeReprojectionError(
+                /*max_error=*/1.0, {id}, ReprojectionErrorType::PIXEL),
+            0);
 }
 
 TEST(ObservationManager, FilterPoints3DInImages) {
@@ -636,6 +693,84 @@ TEST(ObservationManager, Point3DVisibilityScore) {
   obs_manager.IncrementCorrespondenceHasPoint3D(kImageId1, 2);
   EXPECT_EQ(obs_manager.Point3DVisibilityScore(kImageId1),
             2 * scores.sum() + 2 * scores.bottomRows(scores.size() - 1).sum());
+}
+
+TEST(ObservationManager, AddImage) {
+  // Images 1,2 start registered with a triangulated point. Image 3 arrives
+  // incrementally with a match on a previously-unmatched point in image 1,
+  // which increases image 1's num_observations in the correspondence graph.
+  // AddImage must refresh the cached stats for existing images to stay in sync.
+
+  auto graph = std::make_shared<CorrespondenceGraph>();
+  graph->AddImage(1, 10);
+  graph->AddImage(2, 10);
+  TwoViewGeometry tvg12;
+  tvg12.inlier_matches = {{0, 0}, {1, 1}};
+  graph->AddTwoViewGeometry(1, 2, tvg12);
+
+  Reconstruction reconstruction;
+  GenerateReconstruction(2, reconstruction);
+  ObservationManager obs_manager(reconstruction, graph);
+
+  // Triangulate a point connecting image1:0 and image2:0.
+  Track track;
+  track.AddElement(1, 0);
+  track.AddElement(2, 0);
+  const point3D_t point3D_id =
+      obs_manager.AddPoint3D(Eigen::Vector3d(0, 0, 1), track);
+
+  // Image 3 arrives. Match {2, 1} hits image1:2 which had no prior
+  // correspondences, so image 1's num_observations in the correspondence graph
+  // goes 2 -> 3.
+  graph->AddImage(3, 10);
+  TwoViewGeometry tvg13;
+  tvg13.inlier_matches = {{0, 0}, {2, 1}};
+  graph->AddTwoViewGeometry(1, 3, tvg13);
+  TwoViewGeometry tvg23;
+  tvg23.inlier_matches = {{0, 0}};
+  graph->AddTwoViewGeometry(2, 3, tvg23);
+
+  {
+    const Camera& camera = reconstruction.Camera(1);
+    Frame frame;
+    frame.SetFrameId(3);
+    frame.SetRigId(1);
+    frame.AddDataId(data_t(camera.SensorId(), 3));
+    reconstruction.AddFrame(frame);
+    Image image;
+    image.SetImageId(3);
+    image.SetCameraId(camera.camera_id);
+    image.SetFrameId(3);
+    image.SetName("image3");
+    image.SetPoints2D(
+        std::vector<Eigen::Vector2d>(10, Eigen::Vector2d::Zero()));
+    reconstruction.AddImage(image);
+  }
+  obs_manager.AddImage(3);
+
+  // Image 3 sees the triangulated point via retroactive visibility.
+  EXPECT_EQ(obs_manager.NumVisiblePoints3D(3), 1);
+  EXPECT_EQ(obs_manager.NumObservations(3), 2);
+  EXPECT_EQ(obs_manager.NumCorrespondences(3), 3);
+
+  // Verify AddImage refreshed image 1's cached stats (was 2 obs, now 3).
+  EXPECT_EQ(obs_manager.NumObservations(1), 3);
+  EXPECT_EQ(obs_manager.NumCorrespondences(1), 4);
+
+  // Register image 3 and add it to the existing track.
+  reconstruction.Frame(3).SetRigFromWorld(Rigid3d());
+  obs_manager.RegisterFrame(3);
+  obs_manager.AddObservation(point3D_id, TrackElement(3, 0));
+  EXPECT_EQ(reconstruction.Point3D(point3D_id).track.Length(), 3);
+
+  // Triangulate a new point on image1:2 <-> image3:1. This calls
+  // IncrementCorrespondenceHasPoint3D on image 1, which would violate
+  // THROW_CHECK_LE(num_visible_points3D, num_observations) if the cached
+  // stats were stale.
+  Track track2;
+  track2.AddElement(1, 2);
+  track2.AddElement(3, 1);
+  obs_manager.AddPoint3D(Eigen::Vector3d(1, 0, 1), track2);
 }
 
 }  // namespace

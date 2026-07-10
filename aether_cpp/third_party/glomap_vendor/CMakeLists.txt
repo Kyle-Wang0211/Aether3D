@@ -45,7 +45,13 @@ set(COLMAP_EXCLUDE
   # explicit sfm/ source list (we vendor incremental SfM only). colmap_bench uses the
   # incremental pipeline, so this TU is dead for our build -> exclude (matches 3.14's
   # CHOLMOD-stripped iOS vendoring).
-  ${COLMAP}/colmap/estimators/rotation_averaging_impl.cc)
+  ${COLMAP}/colmap/estimators/rotation_averaging_impl.cc
+  # [MIGRATION 4.1.0] Caspar GPU BA backend: the TU guards only its #include with
+  # CASPAR_ENABLED, not the implementation (upstream compiles it conditionally in
+  # their CMake). CASPAR_ENABLED is undefined here and every call site
+  # (bundle_adjustment.cc, incremental_pipeline.cc) is itself #ifdef-guarded, so
+  # the TU is dead for our build -> exclude (same pattern as rotation_averaging).
+  ${COLMAP}/colmap/estimators/bundle_adjustment_caspar.cc)
 list(REMOVE_ITEM COLMAP_SRC ${COLMAP_EXCLUDE})
 # feature/types.cc: defines FeatureKeypoint (needed by scene/database); clean (no FreeImage)
 list(APPEND COLMAP_SRC ${COLMAP}/colmap/feature/types.cc)
