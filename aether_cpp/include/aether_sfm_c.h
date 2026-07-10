@@ -67,7 +67,11 @@ typedef struct aether_sfm_options {
   int image_height;
   float match_max_ratio;  // 0.7 default (Lowe ratio for the matcher)
   int use_gpu_match;      // 1 = aether_gpu_match (Metal), 0 = CPU aether_sift_match
-  int k_neighbors;        // K=6..8 sequential window of pair candidates
+  int k_neighbors;        // K match candidates per frame (production 12).
+                          // [SPATIAL-FIRST 2026-07-11] selected spatial-first:
+                          // ARKit camera-center K-NN ∩ view-angle < 45°,
+                          // temporal fill to K; pure-temporal window when the
+                          // frame has no usable pose. Budget: at most K pairs.
   int use_gpu_extract;    // 1 = GPU DSP-SIFT (Dawn/WGSL, f16-on-A16, CPU
                           //     fallback in-ABI), 0 = CPU aether_dsp_sift_extract.
                           //     Default 0; the iOS/Flutter shim flips to 1.
@@ -84,8 +88,9 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
 // same as aether_dsp_sift_extract). ARKit intrinsics (fx,fy,cx,cy) +
 // world->cam pose prior (qw,qx,qy,qz, tx,ty,tz) supplied per frame.
 // Internally: aether_dsp_sift_extract -> WriteKeypoints/WriteDescriptors,
-// then match against the previous k_neighbors frames -> WriteMatches +
-// WriteTwoViewGeometry. Returns the assigned frame index in *out_frame_id.
+// then match against k_neighbors candidate frames (spatial-first selection;
+// see the k_neighbors field doc) -> WriteMatches + WriteTwoViewGeometry.
+// Returns the assigned frame index in *out_frame_id.
 aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                          const uint8_t* gray,
                                          int width, int height,
@@ -282,6 +287,25 @@ void aether_sfm_live_diag(aether_sfm_session_t* s, double* mean_reproj_px,
                           int64_t* n_obs, int64_t* merge_reject_shared_image,
                           int64_t* merge_reject_reproj,
                           int64_t* merge_reject_missing);
+
+// [SPATIAL-FIRST 2026-07-11] Capture-time candidate-selection attribution:
+// spatial_first_pairs = add_frame match candidates chosen by the spatial K-NN
+// ∩ view-angle rule; temporal_fallback_pairs = candidates from the temporal
+// fill (spatial set short) or the full no-pose temporal fallback. Their sum is
+// the total match pairs attempted during capture. Same threading contract as
+// aether_sfm_stream_stats (call from the add_frame worker). Nullable.
+void aether_sfm_candidate_stats(aether_sfm_session_t* s,
+                                int64_t* spatial_first_pairs,
+                                int64_t* temporal_fallback_pairs);
+
+// Finalize-output quality snapshot: the live_diag quality fields computed over
+// the CURRENT finalize reconstruction (LOCAL or REFINED — whichever the
+// getters serve; snapshotted under the recon mutex, safe alongside the async
+// refine). mean_reproj_px uses the recon's own BA-refined camera. All zeros
+// before finalize. Out-params nullable.
+void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
+                           int64_t* n_points, int64_t* n_track3plus,
+                           int64_t* n_obs);
 
 // Destroys session, drops the sqlite db file.
 void aether_sfm_free(aether_sfm_session_t* s);

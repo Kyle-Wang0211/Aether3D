@@ -129,7 +129,8 @@ double NowMs() {
 }
 
 // Per-frame record kept on the session for the streaming surface so we can
-// match a new frame against the previous k_neighbors without re-reading the db.
+// match a new frame against its k_neighbors candidates without re-reading the
+// db (candidates are spatial-first — see SelectStreamCandidates).
 struct FrameRecord {
   int frame_id = -1;
   colmap::image_t image_id = 0;
@@ -365,6 +366,11 @@ struct aether_sfm_session {
   int64_t stat_temporal_detail_conflicts = 0; // cross-track / duplicate-image skips
   int64_t stat_reproj_filtered = 0;   // obs deleted by the post-BA reproj filter
   int64_t stat_tri_filtered = 0;      // obs deleted by the post-BA tri-angle filter
+  // [SPATIAL-FIRST 2026-07-11] Capture-time candidate-selection attribution
+  // (aether_sfm_candidate_stats): how many add_frame match candidates came
+  // from the spatial K-NN ∩ view-angle rule vs the temporal fill/fallback.
+  int64_t stat_cand_spatial_first_pairs = 0;
+  int64_t stat_cand_temporal_fallback_pairs = 0;
 
   // Result of finalize()/run(): the largest reconstruction.
   std::shared_ptr<colmap::ReconstructionManager> recon_manager;
@@ -405,6 +411,109 @@ struct SpatialRevisitCandidate {
 
 Eigen::Vector3d CameraForwardWorld(const colmap::Rigid3d& cam_from_world) {
   return cam_from_world.rotation().inverse() * Eigen::Vector3d(0.0, 0.0, 1.0);
+}
+
+// [SPATIAL-FIRST 2026-07-11] Capture-time match-candidate selection.
+//
+// WHY: the previous policy matched each new frame against the last K frames by
+// TIME. Track length then depends on the user's walking pattern: revisiting a
+// region after more than K frames (backtracking, hopping between areas, uneven
+// pacing) never re-matches against the earlier frames that SEE the same
+// surface, so tracks fragment and finalize delivers fewer track>=3 points.
+// Camera-center proximity is the property that actually predicts covisibility
+// — 空间邻近应为第一标准,你没法控制用户的步伐 (architecture sign-off).
+//
+// POLICY (match budget unchanged — still at most K candidates per frame, same
+// matcher chain and handoff §0:12 contract: 8192 features / mutual cross-check
+// / a GPU-matcher failure skips the pair):
+//   1. Spatial-first: the K nearest previous frames by ARKit camera-center
+//      distance, gated on viewing-direction compatibility (forward-axis angle
+//      < 45° — a same-position opposite-facing frame shares no surface).
+//   2. Temporal fill: if the spatial set is short (< K), fill with the most
+//      recent frames not already selected (per-pair dedup by frame index; a
+//      (j, new) pair can never pre-exist in the db because the new frame id is
+//      fresh, so in-set dedup is the complete dedup).
+//   3. Degraded fallback: a frame WITHOUT a usable ARKit pose (tracking
+//      limited / pose missing) selects the legacy pure-temporal window via
+//      the same fill loop — the no-pose path behaves exactly as before.
+// In a smooth continuous walk the K nearest ARE mostly the last K frames, so
+// this converges to the old policy; it diverges exactly when the user's path
+// makes time a bad proxy for space.
+//
+// Exactness over pose_hash_grid.h: the orientation gate breaks the grid's
+// pure-kNN abstraction (the K compatible neighbours may sit arbitrarily many
+// shells out), and this linear scan costs ~ns per previous frame — invisible
+// next to the >=100 ms descriptor match each SELECTED candidate costs.
+// Revisit only if captures ever reach ~10^5 frames.
+constexpr double kStreamCandViewAngleMaxRad = 45.0 * M_PI / 180.0;
+
+std::vector<int> SelectStreamCandidates(const aether_sfm_session& s,
+                                        const FrameRecord& rec, int frame_id,
+                                        int k, int* out_spatial,
+                                        int* out_temporal) {
+  std::vector<int> selected;
+  if (out_spatial) *out_spatial = 0;
+  if (out_temporal) *out_temporal = 0;
+  if (k <= 0 || frame_id <= 0) return selected;
+  selected.reserve(k);
+
+  // Defensive: resume-rebuilt FrameRecords carry no in-memory descriptors and
+  // cannot be matched (add_frame is never called on resumed sessions; live
+  // frames always have descriptors when n_keypoints > 0).
+  const auto usable = [&](int j) {
+    const FrameRecord& prev = s.frames[j];
+    return prev.n_keypoints > 0 && !prev.descriptors.empty();
+  };
+
+  // Kill switch: AETHER_STREAM_TEMPORAL_ONLY=1 forces the legacy pure-temporal
+  // window (baseline arm of the host A/B; emergency same-binary revert on
+  // device via setenv before aether_sfm_create).
+  static const bool temporal_only = [] {
+    const char* e = std::getenv("AETHER_STREAM_TEMPORAL_ONLY");
+    return e && e[0] == '1';
+  }();
+
+  int n_spatial = 0;
+  if (!temporal_only && rec.has_pose) {
+    const Eigen::Vector3d center = rec.cam_from_world.TgtOriginInSrc();
+    const Eigen::Vector3d forward = CameraForwardWorld(rec.cam_from_world);
+    const double min_dot = std::cos(kStreamCandViewAngleMaxRad);
+    std::vector<std::pair<double, int>> compatible;  // (center dist^2, j)
+    compatible.reserve(frame_id);
+    for (int j = 0; j < frame_id; ++j) {
+      const FrameRecord& prev = s.frames[j];
+      if (!prev.has_pose || !usable(j)) continue;
+      const double dot = std::max(
+          -1.0,
+          std::min(1.0, forward.dot(CameraForwardWorld(prev.cam_from_world))));
+      if (dot < min_dot) continue;
+      compatible.emplace_back(
+          (center - prev.cam_from_world.TgtOriginInSrc()).squaredNorm(), j);
+    }
+    n_spatial = std::min(k, static_cast<int>(compatible.size()));
+    std::partial_sort(compatible.begin(), compatible.begin() + n_spatial,
+                      compatible.end());  // (dist^2 asc, j asc) — deterministic
+    for (int t = 0; t < n_spatial; ++t) {
+      selected.push_back(compatible[t].second);
+    }
+  }
+  if (out_spatial) *out_spatial = n_spatial;
+
+  // Temporal fill / full fallback: most recent first, dedup'd against the
+  // spatial picks.
+  if (static_cast<int>(selected.size()) < k) {
+    std::unordered_set<int> chosen(selected.begin(), selected.end());
+    for (int j = frame_id - 1;
+         j >= 0 && static_cast<int>(selected.size()) < k; --j) {
+      if (!usable(j) || !chosen.insert(j).second) continue;
+      selected.push_back(j);
+      if (out_temporal) ++*out_temporal;
+    }
+  }
+  // Chronological processing order — the caller's grow/merge sequencing stays
+  // oldest-first, exactly like the legacy ascending-j loop.
+  std::sort(selected.begin(), selected.end());
+  return selected;
 }
 
 constexpr int kSpatialCandidatePool = 12;
@@ -1666,7 +1775,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       s->reg_order.push_back(image_id);
     }
 
-    // 4) Match against the previous k_neighbors frames (CPU brute-force,
+    // 4) Match against k_neighbors candidate frames (CPU brute-force,
     //    MUTUALLY cross-checked inside aether_sift_match_pairs) and PERSIST
     //    the correspondences — the exact sequence colmap's own matching
     //    pipeline uses (feature_matching.cc): WriteMatches with the raw
@@ -1677,8 +1786,16 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     //    pairs there). This closes the formerly-documented streaming gap
     //    ("matcher returns count only") that left the matches table empty
     //    and made every finalize return ERR_NOT_REGISTERED.
+    //    [SPATIAL-FIRST 2026-07-11] Candidates are now SPATIAL-first (ARKit
+    //    camera-center K-NN ∩ view-angle < 45°), temporal-filled to K, with a
+    //    pure-temporal fallback when the frame has no usable pose — see
+    //    SelectStreamCandidates. Budget unchanged: at most K pairs matched.
     const int k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 6;
-    const int start = (frame_id - k) > 0 ? (frame_id - k) : 0;
+    int cand_spatial = 0, cand_temporal = 0;
+    const std::vector<int> candidates = SelectStreamCandidates(
+        *s, rec, frame_id, k, &cand_spatial, &cand_temporal);
+    s->stat_cand_spatial_first_pairs += cand_spatial;
+    s->stat_cand_temporal_fallback_pairs += cand_temporal;
     const double ratio = s->options.match_max_ratio > 0
                              ? s->options.match_max_ratio
                              : 0.7;
@@ -1706,7 +1823,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     const bool gpu_match_avail =
         s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
     std::unordered_set<PointIdPair, PointIdPairHash> merge_trials;
-    for (int j = start; j < frame_id; ++j) {
+    for (const int j : candidates) {
       const FrameRecord& prev = s->frames[j];
       ++n_cand;
       // Cross-checked matches are unique per left index → min(n1,n2) bounds.
@@ -2658,6 +2775,72 @@ void aether_sfm_live_diag(aether_sfm_session_t* s, double* mean_reproj_px,
       for (const auto& el : pt.track.Elements()) {
         if (!s->live_recon.ExistsImage(el.image_id)) continue;
         const colmap::Image& image = s->live_recon.Image(el.image_id);
+        if (!image.HasPose() || el.point2D_idx >= image.NumPoints2D()) continue;
+        const Eigen::Vector3d x_cam = image.CamFromWorld() * pt.xyz;
+        if (x_cam.z() <= 0.0) continue;
+        const colmap::Camera* cam = image.CameraPtr();
+        if (!cam) continue;
+        const std::optional<Eigen::Vector2d> px = cam->ImgFromCam(x_cam);
+        if (!px) continue;
+        err_sum += (*px - image.Point2D(el.point2D_idx).xy).norm();
+        ++err_n;
+      }
+    }
+  } catch (const std::exception&) {
+    // Diagnostic only — never throw across the ABI.
+  }
+  if (n_points) *n_points = pts;
+  if (n_track3plus) *n_track3plus = track3;
+  if (n_obs) *n_obs = obs;
+  if (mean_reproj_px) *mean_reproj_px = err_n > 0 ? err_sum / err_n : 0.0;
+}
+
+// [SPATIAL-FIRST 2026-07-11] Capture-time candidate-selection attribution.
+// spatial_first_pairs = candidates chosen by the spatial K-NN ∩ view-angle
+// rule; temporal_fallback_pairs = candidates from the temporal fill (spatial
+// set short) or the full no-pose fallback. Sum = total pairs attempted by
+// add_frame over the capture. Same threading contract as
+// aether_sfm_stream_stats. Nullable; zero before the first add_frame.
+void aether_sfm_candidate_stats(aether_sfm_session_t* s,
+                                int64_t* spatial_first_pairs,
+                                int64_t* temporal_fallback_pairs) {
+  if (!s) return;
+  if (spatial_first_pairs)
+    *spatial_first_pairs = s->stat_cand_spatial_first_pairs;
+  if (temporal_fallback_pairs)
+    *temporal_fallback_pairs = s->stat_cand_temporal_fallback_pairs;
+}
+
+// Finalize-output quality snapshot: the aether_sfm_live_diag fields computed
+// over the CURRENT finalize reconstruction (LOCAL or REFINED — whichever the
+// getters serve). mean_reproj_px is computed over every observation with the
+// recon's own (BA-refined) camera. Zeros before finalize.
+void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
+                           int64_t* n_points, int64_t* n_track3plus,
+                           int64_t* n_obs) {
+  if (mean_reproj_px) *mean_reproj_px = 0.0;
+  if (n_points) *n_points = 0;
+  if (n_track3plus) *n_track3plus = 0;
+  if (n_obs) *n_obs = 0;
+  if (!s) return;
+  std::shared_ptr<const colmap::Reconstruction> recon;
+  {
+    std::lock_guard<std::mutex> lk(s->recon_mutex);
+    recon = s->recon;  // stable snapshot; survives the async LOCAL→REFINED swap
+  }
+  if (!recon) return;
+  int64_t pts = 0, track3 = 0, obs = 0;
+  double err_sum = 0.0;
+  int64_t err_n = 0;
+  try {
+    for (const auto& [pid, pt] : recon->Points3D()) {
+      ++pts;
+      const size_t len = pt.track.Length();
+      obs += static_cast<int64_t>(len);
+      if (len >= 3) ++track3;
+      for (const auto& el : pt.track.Elements()) {
+        if (!recon->ExistsImage(el.image_id)) continue;
+        const colmap::Image& image = recon->Image(el.image_id);
         if (!image.HasPose() || el.point2D_idx >= image.NumPoints2D()) continue;
         const Eigen::Vector3d x_cam = image.CamFromWorld() * pt.xyz;
         if (x_cam.z() <= 0.0) continue;

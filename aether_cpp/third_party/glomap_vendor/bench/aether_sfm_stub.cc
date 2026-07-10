@@ -114,6 +114,24 @@ void aether_sfm_live_diag(aether_sfm_session_t* s, double* mean_reproj_px,
   if (merge_reject_missing) *merge_reject_missing = 0;
 }
 
+void aether_sfm_candidate_stats(aether_sfm_session_t* s,
+                                int64_t* spatial_first_pairs,
+                                int64_t* temporal_fallback_pairs) {
+  (void)s;
+  if (spatial_first_pairs) *spatial_first_pairs = 0;
+  if (temporal_fallback_pairs) *temporal_fallback_pairs = 0;
+}
+
+void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
+                           int64_t* n_points, int64_t* n_track3plus,
+                           int64_t* n_obs) {
+  (void)s;
+  if (mean_reproj_px) *mean_reproj_px = 0.0;
+  if (n_points) *n_points = 0;
+  if (n_track3plus) *n_track3plus = 0;
+  if (n_obs) *n_obs = 0;
+}
+
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   (void)s;
