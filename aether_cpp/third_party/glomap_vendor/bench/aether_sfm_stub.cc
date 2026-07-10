@@ -124,6 +124,16 @@ aether_sfm_result_t aether_sfm_get_points(aether_sfm_session_t* s,
 
 void aether_sfm_points_free(aether_sfm_point_t* points) { (void)points; }
 
+aether_sfm_result_t aether_sfm_get_preview_points(aether_sfm_session_t* s,
+                                                  float* out_xyz, int cap,
+                                                  int* out_count) {
+  (void)s;
+  (void)out_xyz;
+  (void)cap;
+  if (out_count) *out_count = 0;
+  return AETHER_SFM_ERR_UNSUPPORTED;
+}
+
 void aether_sfm_free(aether_sfm_session_t* s) { (void)s; }
 
 }  // extern "C"

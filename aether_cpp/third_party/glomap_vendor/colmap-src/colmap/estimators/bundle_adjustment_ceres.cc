@@ -42,6 +42,15 @@
 
 #include <iomanip>
 
+// [AETHER position-prior spike 2026-07-10]
+#include <cmath>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <Eigen/Geometry>  // Eigen::umeyama
+
 namespace colmap {
 
 namespace {
@@ -81,6 +90,61 @@ std::unique_ptr<ceres::LossFunction> CreateLossFunction(
 }
 
 }  // namespace
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [AETHER position-prior spike 2026-07-10] Soft per-frame camera-CENTER priors
+// from ARKit (metric, gravity-aligned) injected as extra residual blocks into
+// EVERY DefaultBundleAdjuster problem. Purpose: the streaming capture's double
+// wall is a two-pass ~2-3cm systematic offset that reprojection residuals alone
+// cannot pull together (cross-pass bridges are only ~3% of observations); ARKit
+// centers carry the missing INTER-PASS consistency. Design:
+//   cost = Huber( (C_colmap(frame) - C_prior_aligned(frame)) / sigma )
+// where C_prior_aligned = Sim3(metric->colmap) * C_arkit, re-estimated from the
+// CURRENT reconstruction centers every time a problem is built (COLMAP scale is
+// arbitrary and Normalize() runs between global BAs). sigma_colmap = sigma_m *
+// sim3_scale. A Sim3 has only 7 DOF, so it cannot absorb the per-pass relative
+// offset — the priors split the alignment error across the passes and pull the
+// two walls onto each other. Registry is process-global, set via the C entry
+// aether_ba_set_position_priors() (bench: colmap_bench --arkit=JSONL). Empty
+// registry (the default) = exact stock behavior.
+namespace {
+
+struct AetherPositionPriorRegistry {
+  std::mutex mutex;
+  // image name (e.g. "frame_000012.jpg") -> ARKit camera center [m], world.
+  std::unordered_map<std::string, Eigen::Vector3d> centers_metric;
+  double sigma_m = 0.03;
+};
+
+AetherPositionPriorRegistry& GetAetherPositionPriorRegistry() {
+  static auto* registry = new AetherPositionPriorRegistry();
+  return *registry;
+}
+
+}  // namespace
+
+// C ABI: register per-image metric camera-center priors (replaces any previous
+// set). names[i] must equal the COLMAP image name; xyz is packed x,y,z per
+// image; sigma_m is the isotropic prior stddev in METERS. n<=0 clears.
+extern "C" void aether_ba_set_position_priors(const char* const* names,
+                                              const double* xyz,
+                                              int n,
+                                              double sigma_m) {
+  auto& reg = GetAetherPositionPriorRegistry();
+  std::lock_guard<std::mutex> lock(reg.mutex);
+  reg.centers_metric.clear();
+  for (int i = 0; i < n; ++i) {
+    reg.centers_metric[names[i]] =
+        Eigen::Vector3d(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
+  }
+  if (sigma_m > 0) reg.sigma_m = sigma_m;
+}
+
+extern "C" void aether_ba_clear_position_priors() {
+  auto& reg = GetAetherPositionPriorRegistry();
+  std::lock_guard<std::mutex> lock(reg.mutex);
+  reg.centers_metric.clear();
+}
 
 std::shared_ptr<CeresBundleAdjustmentSummary>
 CeresBundleAdjustmentSummary::Create(ceres::Solver::Summary ceres_summary) {
@@ -236,6 +300,28 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
       // that CAUCHY forces on iOS (Accelerate can't do SPARSE on robust-reweighted eqns).
       custom_solver_options.preconditioner_type = ceres::CLUSTER_JACOBI;
     }
+  }
+
+  // [AETHER mixed-precision spike 2026-07-07] Factorize/solve the reduced camera
+  // (Schur) system in float32, then run iterative refinement back to double.
+  // Ceres 2.2 supports this for the CPU DENSE and EIGEN_SPARSE backends this
+  // build uses (DENSE_SCHUR <=1000 frames, EIGEN_SPARSE fallback) — halves the
+  // dominant dense-Cholesky cost. Near-lossless: refinement recovers double
+  // accuracy. Env-gated for A/B; applies on top of whatever solver was routed.
+  if (std::getenv("AETHER_MIXED_PREC")) {
+    custom_solver_options.use_mixed_precision_solves = true;
+    const char* refine = std::getenv("AETHER_MIXED_REFINE");
+    custom_solver_options.max_num_refinement_iterations = refine ? std::atoi(refine) : 2;
+  }
+
+  // [AETHER inner-iterations spike 2026-07-07] Variable-projection: each outer LM
+  // step analytically re-optimizes the 3D point blocks given the current cameras.
+  // The problem is point-dominated (~25k-250k points vs ~50-400 cameras), the
+  // regime where inner iterations cut outer LM steps (fewer expensive Schur
+  // solves) at the SAME optimum. No EvaluationCallback installed here (checked),
+  // so it is compatible. Env-gated for A/B.
+  if (std::getenv("AETHER_INNER_ITER")) {
+    custom_solver_options.use_inner_iterations = true;
   }
 
   if (problem.NumResiduals() < min_num_residuals_for_cpu_multi_threading) {
@@ -685,6 +771,10 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
       default:
         LOG(FATAL_THROW) << "Unknown BundleAdjustmentGauge";
     }
+
+    // [AETHER position-prior spike 2026-07-10] optional soft camera-center
+    // priors (no-op when the global registry is empty).
+    MaybeAddAetherPositionPriors(reconstruction);
   }
 
   std::shared_ptr<BundleAdjustmentSummary> Solve() override {
@@ -912,9 +1002,101 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
     }
   }
 
+  // [AETHER position-prior spike 2026-07-10] Inject soft camera-center priors
+  // for every parameterized image whose name is in the global registry.
+  // Alignment (Sim3, metric ARKit -> current COLMAP frame) is re-estimated per
+  // problem from the CURRENT reconstruction centers via Eigen::umeyama; sigma
+  // is scaled by the estimated Sim3 scale. Only trivial-frame (ref-in-frame)
+  // images with a VARIABLE rig_from_world block get a residual; needs >= 6
+  // matched frames so tiny problems (initial pair BA, single-image pose
+  // refinement) and degenerate umeyama fits are skipped.
+  void MaybeAddAetherPositionPriors(Reconstruction& reconstruction) {
+    auto& reg = GetAetherPositionPriorRegistry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    if (reg.centers_metric.empty()) {
+      return;
+    }
+
+    struct MatchedPrior {
+      Image* image;
+      Eigen::Vector3d center_metric;
+    };
+    std::vector<MatchedPrior> matched;
+    matched.reserve(parameterized_image_ids_.size());
+    for (const image_t image_id : parameterized_image_ids_) {
+      Image& image = reconstruction.Image(image_id);
+      if (!image.IsRefInFrame()) {
+        continue;  // capture rig is trivial frames; skip non-ref sensors
+      }
+      const auto it = reg.centers_metric.find(image.Name());
+      if (it == reg.centers_metric.end()) {
+        continue;
+      }
+      matched.push_back({&image, it->second});
+    }
+    if (matched.size() < 6) {
+      return;
+    }
+
+    Eigen::Matrix3Xd src(3, matched.size());
+    Eigen::Matrix3Xd dst(3, matched.size());
+    for (size_t i = 0; i < matched.size(); ++i) {
+      src.col(i) = matched[i].center_metric;
+      dst.col(i) = matched[i].image->ProjectionCenter();
+    }
+    const Eigen::Matrix4d tform =
+        Eigen::umeyama(src, dst, /*with_scaling=*/true);
+    const Eigen::Matrix3d scaled_rot = tform.topLeftCorner<3, 3>();
+    const Eigen::Vector3d translation = tform.topRightCorner<3, 1>();
+    const double scale = std::cbrt(scaled_rot.determinant());
+    if (!std::isfinite(scale) || scale <= 1e-12) {
+      return;
+    }
+    const double sigma_colmap = reg.sigma_m * scale;
+    const Eigen::Matrix3d prior_cov =
+        sigma_colmap * sigma_colmap * Eigen::Matrix3d::Identity();
+
+    if (!aether_prior_loss_) {
+      // Huber in units of sigma: quadratic inside 1 sigma, linear beyond.
+      aether_prior_loss_ = std::make_unique<ceres::HuberLoss>(1.0);
+    }
+
+    int num_added = 0;
+    double align_sq_sum = 0.0;
+    for (const auto& m : matched) {
+      Rigid3d& rig_from_world = m.image->FramePtr()->RigFromWorld();
+      double* pose_params = rig_from_world.params.data();
+      if (!problem_->HasParameterBlock(pose_params) ||
+          problem_->IsParameterBlockConstant(pose_params)) {
+        continue;  // constant pose: prior would be a no-op
+      }
+      const Eigen::Vector3d prior_in_colmap =
+          scaled_rot * m.center_metric + translation;
+      align_sq_sum +=
+          (prior_in_colmap - m.image->ProjectionCenter()).squaredNorm();
+      problem_->AddResidualBlock(
+          CovarianceWeightedCostFunctor<AbsolutePosePositionPriorCostFunctor>::
+              Create(prior_cov, prior_in_colmap),
+          aether_prior_loss_.get(),
+          pose_params);
+      ++num_added;
+    }
+    if (num_added > 0) {
+      LOG(INFO) << "[AETHER prior] injected " << num_added << "/"
+                << matched.size()
+                << " center priors, sim3_scale=" << scale
+                << " sigma_colmap=" << sigma_colmap << " align_rms="
+                << std::sqrt(align_sq_sum / num_added) << " ("
+                << std::sqrt(align_sq_sum / num_added) / scale << " m)";
+    }
+  }
+
  private:
   std::shared_ptr<ceres::Problem> problem_;
   std::unique_ptr<ceres::LossFunction> loss_function_;
+  // [AETHER position-prior spike] Huber for the center priors; problem uses
+  // DO_NOT_TAKE_OWNERSHIP, so it must outlive problem_.
+  std::unique_ptr<ceres::LossFunction> aether_prior_loss_;
 
   std::set<camera_t> parameterized_camera_ids_;
   std::set<image_t> parameterized_image_ids_;

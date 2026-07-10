@@ -47,6 +47,12 @@ int aether_dsp_sift_extract(const uint8_t* gray,
     opts.sift->max_num_features = max_features > 0 ? max_features : 8192;
     opts.sift->estimate_affine_shape = true;   // DSP-SIFT (covariant) path
     opts.sift->domain_size_pooling = true;
+    // LOW-TEXTURE EXPERIMENT (2026-07-08): lower peak (default 0.02/3≈0.0067) +
+    // raise edge (default 10) so subtle low-contrast keypoints on textureless
+    // surfaces get detected. Kept in lock-step with the GPU detector
+    // (sift_extract_dawn.h) so the dog-detect parity gates hold.
+    opts.sift->peak_threshold = 0.004;
+    opts.sift->edge_threshold = 15.0;
     // normalization defaults to L1_ROOT (RootSIFT) — matches the desktop recipe.
 
     std::unique_ptr<colmap::FeatureExtractor> extractor =
@@ -108,6 +114,9 @@ int aether_dsp_sift_extract_threaded(const uint8_t* gray,
     sift.max_num_features = max_features > 0 ? max_features : 8192;
     sift.estimate_affine_shape = true;   // DSP-SIFT (covariant) path
     sift.domain_size_pooling = true;
+    // LOW-TEXTURE EXPERIMENT (2026-07-08): see aether_dsp_sift_extract above.
+    sift.peak_threshold = 0.004;
+    sift.edge_threshold = 15.0;
 
     colmap::FeatureKeypoints kps;
     colmap::FeatureDescriptors desc;

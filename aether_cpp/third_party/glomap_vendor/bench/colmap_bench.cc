@@ -4,6 +4,11 @@
 // C ABI for Dart FFI / native harness.
 
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/controllers/feature_matching.h"  // [AETHER] --match prototype
+#include "colmap/controllers/pairing.h"           // [AETHER] ExhaustivePairingOptions
+#include "colmap/feature/matcher.h"                // [AETHER] FeatureMatchingOptions
+#include "colmap/feature/sift.h"                   // [AETHER] SiftMatchingOptions
+#include "colmap/estimators/two_view_geometry.h"   // [AETHER] TwoViewGeometryOptions
 #include "colmap/estimators/alignment.h"
 #include "colmap/geometry/sim3.h"
 #include "colmap/scene/database.h"  // [MIGRATION 4.0.4] Database::Open for the new ctor
@@ -411,6 +416,15 @@ extern "C" int aether_realsim_bench(const char* db_path, const char* image_path,
   }
 }
 
+// [AETHER position-prior spike 2026-07-10] C entry defined in
+// colmap/estimators/bundle_adjustment_ceres.cc — registers per-image metric
+// (ARKit) camera-center priors that every DefaultBundleAdjuster problem then
+// injects as Huber-robustified soft residuals (Sim3-aligned per problem).
+extern "C" void aether_ba_set_position_priors(const char* const* names,
+                                              const double* xyz,
+                                              int n,
+                                              double sigma_m);
+
 #ifdef COLMAP_BENCH_MAIN
 // Parameterized desktop driver: sweep the global/local BA option fields via argv
 // + report the PER-FRAME registration deltas (the SLA growth curve) + reproj.
@@ -419,6 +433,7 @@ extern "C" int aether_realsim_bench(const char* db_path, const char* image_path,
 //          --liter=N --lref=N --mt=N]
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 
 static int g_arg_i(int argc, char** argv, const char* key, int def) {
   const size_t kl = std::strlen(key);
@@ -438,6 +453,16 @@ static double g_arg_d(int argc, char** argv, const char* key, double def) {
     }
   return def;
 }
+static std::string g_arg_s(int argc, char** argv, const char* key,
+                           const char* def) {
+  const size_t kl = std::strlen(key);
+  for (int i = 1; i < argc; ++i)
+    if (std::strncmp(argv[i], key, kl) == 0) {
+      const char* eq = std::strchr(argv[i], '=');
+      if (eq) return eq + 1;
+    }
+  return def;
+}
 
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
@@ -450,6 +475,93 @@ int main(int argc, char** argv) {
   }
   const char* db_path = argv[1];
   const char* image_path = argv[2];
+
+  // [AETHER] --match=1: exhaustively RE-MATCH the db BEFORE finalize (prototype).
+  // The streaming db carries only k=6 TEMPORAL matches, so a long-gap REVISIT
+  // (orbit back to the same wall) has no cross-pass correspondence → the two
+  // passes triangulate as a double-wall. Exhaustive matching adds ALL pairs
+  // (incl. the missing revisit pairs); if the double-wall then fuses in finalize,
+  // it proves 'add revisit matches → BA closes the loop' (→ wire SpatialPairGen).
+  if (g_arg_i(argc, argv, "--match", 0)) {
+    colmap::ExhaustivePairingOptions pairing_opts;
+    colmap::FeatureMatchingOptions matching_opts;  // SIFT_BRUTEFORCE default
+    matching_opts.use_gpu = false;                 // host CPU
+    matching_opts.sift->cpu_brute_force_matcher = true;
+    matching_opts.sift->max_ratio = 0.7;           // match streaming ratio
+    matching_opts.sift->cross_check = true;        // mutual check (required)
+    colmap::TwoViewGeometryOptions geometry_opts;  // COLMAP defaults (E/F/H RANSAC)
+    std::fprintf(stderr, "[match] exhaustive re-match (CPU brute-force)...\n");
+    auto matcher = colmap::CreateExhaustiveFeatureMatcher(
+        pairing_opts, matching_opts, geometry_opts, db_path);
+    matcher->Start();
+    matcher->Wait();
+    std::fprintf(stderr, "[match] exhaustive re-match done\n");
+  }
+  const std::string pairs_path = g_arg_s(argc, argv, "--pairs", "");
+  if (!pairs_path.empty()) {
+    colmap::ImportedPairingOptions pairing_opts;
+    pairing_opts.match_list_path = pairs_path;
+    colmap::FeatureMatchingOptions matching_opts;  // SIFT_BRUTEFORCE default
+    matching_opts.use_gpu = false;                 // host CPU
+    matching_opts.sift->cpu_brute_force_matcher = true;
+    matching_opts.sift->max_ratio = 0.7;           // match streaming ratio
+    matching_opts.sift->cross_check = true;        // mutual check (required)
+    colmap::TwoViewGeometryOptions geometry_opts;  // COLMAP defaults (E/F/H RANSAC)
+    geometry_opts.ransac_options.max_error =
+        g_arg_d(argc, argv, "--pairs-max-error", 4.0);
+    geometry_opts.min_num_inliers =
+        g_arg_i(argc, argv, "--pairs-min-inliers", 15);
+    geometry_opts.min_inlier_ratio =
+        g_arg_d(argc, argv, "--pairs-min-ratio", 0.0);
+    std::fprintf(stderr, "[match] imported pairs from %s...\n",
+                 pairs_path.c_str());
+    auto matcher = colmap::CreateImagePairsFeatureMatcher(
+        pairing_opts, matching_opts, geometry_opts, db_path);
+    matcher->Start();
+    matcher->Wait();
+    std::fprintf(stderr, "[match] imported pairs done\n");
+  }
+
+  // [AETHER position-prior spike 2026-07-10] --arkit=sfm_fed_frames.jsonl
+  // [--priorsigma=0.03]: load per-frame ARKit camera centers (metric, gravity
+  // aligned) and register them as soft BA position priors. jsonl frameId N maps
+  // to the COLMAP image name frame_{N:06d}.jpg (the streaming feeder's naming).
+  const std::string arkit_path = g_arg_s(argc, argv, "--arkit", "");
+  if (!arkit_path.empty()) {
+    const double prior_sigma = g_arg_d(argc, argv, "--priorsigma", 0.03);
+    std::ifstream jf(arkit_path);
+    if (!jf) {
+      std::fprintf(stderr, "[arkit] FAILED to open %s\n", arkit_path.c_str());
+      return 1;
+    }
+    std::vector<std::string> prior_names;
+    std::vector<double> prior_xyz;
+    std::string line;
+    while (std::getline(jf, line)) {
+      const char* fid_p = std::strstr(line.c_str(), "\"frameId\":");
+      const char* ctr_p =
+          std::strstr(line.c_str(), "\"arkitCameraCenterWorld\":[");
+      if (!fid_p || !ctr_p) continue;
+      const int frame_id = std::atoi(fid_p + 10);
+      double x = 0, y = 0, z = 0;
+      if (std::sscanf(ctr_p + 26, "%lf,%lf,%lf", &x, &y, &z) != 3) continue;
+      char name_buf[64];
+      std::snprintf(name_buf, sizeof(name_buf), "frame_%06d.jpg", frame_id);
+      prior_names.emplace_back(name_buf);
+      prior_xyz.push_back(x);
+      prior_xyz.push_back(y);
+      prior_xyz.push_back(z);
+    }
+    std::vector<const char*> name_ptrs;
+    name_ptrs.reserve(prior_names.size());
+    for (const auto& s : prior_names) name_ptrs.push_back(s.c_str());
+    aether_ba_set_position_priors(name_ptrs.data(), prior_xyz.data(),
+                                  static_cast<int>(prior_names.size()),
+                                  prior_sigma);
+    std::fprintf(stderr, "[arkit] registered %zu center priors (sigma=%.3fm)\n",
+                 prior_names.size(), prior_sigma);
+  }
+
   auto options = std::make_shared<colmap::IncrementalPipelineOptions>();
   options->min_num_matches = 15;
   options->ba_global_max_refinements =
@@ -481,6 +593,23 @@ int main(int argc, char** argv) {
       g_arg_d(argc, argv, "--globalscale", options->ba_global_loss_scale);
   options->ba_global_loss_type =
       g_arg_i(argc, argv, "--globaltype", options->ba_global_loss_type);
+  // [AETHER official-pose-prior 2026-07-10] --useprior=1 enables COLMAP 4.0.4's
+  // NATIVE pose-prior path (pose_prior_mapper equivalent): priors are read from
+  // the db's pose_priors table; every GLOBAL BA becomes a PosePriorBundleAdjuster
+  // that (a) robustly Sim3-RANSAC-aligns the recon to the prior frame and (b) adds
+  // covariance-weighted position residuals. Distinct from the --arkit spike
+  // registry above (which stays empty / zero-behavior unless --arkit is passed).
+  // --priorrobust=1 puts a CAUCHY loss on the prior residuals with scale
+  // --priorlossscale (default chi2-95%-3dof = 7.815).
+  options->use_prior_position = g_arg_i(argc, argv, "--useprior", 0) != 0;
+  options->use_robust_loss_on_prior_position =
+      g_arg_i(argc, argv, "--priorrobust", 0) != 0;
+  options->prior_position_loss_scale = g_arg_d(
+      argc, argv, "--priorlossscale", options->prior_position_loss_scale);
+  if (options->use_prior_position)
+    std::fprintf(stderr, "[prior] OFFICIAL pose-prior path ON (robust=%d scale=%.3f)\n",
+                 options->use_robust_loss_on_prior_position ? 1 : 0,
+                 options->prior_position_loss_scale);
   std::string out_dir;  // [AETHER] --out=DIR -> WriteText best recon (for GT ATE)
   for (int i = 1; i < argc; ++i)
     if (std::strncmp(argv[i], "--out=", 6) == 0) out_dir = argv[i] + 6;
