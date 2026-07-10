@@ -55,6 +55,22 @@ extern const char prefix_sum_scan_wgsl[];
 extern const char prefix_sum_scan_sums_wgsl[];
 extern const char prefix_sum_add_scanned_sums_wgsl[];
 
+// GPU DSP-SIFT extraction chain (sift_extract_dawn.cc / libpwsfm_gpu_extract.a).
+// This header is manually maintained per its own note; these externs live on
+// the SfM branch but were missing from this (splat/render) checkout, so the
+// GPU-extractor archive build couldn't see them.
+extern const char sift_gray_to_f32_wgsl[];
+extern const char sift_gss_blur_wgsl[];
+extern const char sift_gss_resample_wgsl[];
+extern const char sift_dog_detect_wgsl[];
+extern const char sift_nonextrema_suppress_wgsl[];
+extern const char sift_affine_shape_wgsl[];
+extern const char sift_orientation_wgsl[];
+extern const char sift_dsp_descriptor_wgsl[];
+extern const char sift_dsp_descriptor_f16_wgsl[];
+extern const char sift_dsp_descriptor_par_wgsl[];
+extern const char sift_dsp_mean_wgsl[];
+
 }  // namespace shaders
 }  // namespace aether
 

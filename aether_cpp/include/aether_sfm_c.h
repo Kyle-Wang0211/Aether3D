@@ -208,6 +208,12 @@ aether_sfm_result_t aether_sfm_get_preview_tracked(
     aether_sfm_track_obs_t** out_obs,
     int64_t* out_obs_count);
 
+// Legacy experimental pure global BA over live_recon. It does not create
+// missing cross-view tracks, merge duplicate tracks, or retriangulate; do not
+// use it as the finish-time double-wall fix without a spatial-revisit bridge.
+// Device only: run on the capture worker isolate (see .cc threading).
+aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s);
+
 // Cumulative streaming-quality counters over the whole capture — which floater
 // filter did what. tvg_pairs/raw_pairs = grow/create pairs from the geometric
 // (TVG RANSAC) inliers vs raw-fallback; grow_accepted/rejected = growth
@@ -216,7 +222,37 @@ aether_sfm_result_t aether_sfm_get_preview_tracked(
 void aether_sfm_stream_stats(aether_sfm_session_t* s, int64_t* tvg_pairs,
                              int64_t* raw_pairs, int64_t* grow_accepted,
                              int64_t* grow_rejected, int64_t* reproj_filtered,
-                             int64_t* tri_filtered);
+                             int64_t* tri_filtered,
+                             int64_t* grow_reject_cheirality,
+                             int64_t* grow_reject_reproj,
+                             int64_t* create_reject_cheirality,
+                             int64_t* create_reject_tri_angle,
+                             int64_t* create_reject_reproj,
+                             int64_t* already_assigned,
+                             int64_t* merge_needed,
+                             int64_t* merge_accepted,
+                             int64_t* merge_rejected,
+                             int64_t* spatial_considered,
+                             int64_t* spatial_attempted,
+                             int64_t* spatial_written,
+                             int64_t* spatial_inliers,
+                             int64_t* spatial_anchor_attempted,
+                             int64_t* spatial_anchor_passed,
+                             int64_t* spatial_regions_confirmed,
+                             int64_t* spatial_expanded_attempted,
+                             int64_t* spatial_guided_pairs,
+                             int64_t* spatial_guided_inliers,
+                             int64_t* spatial_quadratic_attempted,
+                             int64_t* spatial_quadratic_written,
+                             int64_t* spatial_budget_skipped,
+                             int64_t* temporal_detail_pairs,
+                             int64_t* temporal_detail_matches,
+                             int64_t* temporal_detail_created,
+                             int64_t* temporal_detail_grown,
+                             int64_t* temporal_detail_reject_cheirality,
+                             int64_t* temporal_detail_reject_reproj,
+                             int64_t* temporal_detail_reject_tri_angle,
+                             int64_t* temporal_detail_conflicts);
 
 // Destroys session, drops the sqlite db file.
 void aether_sfm_free(aether_sfm_session_t* s);
