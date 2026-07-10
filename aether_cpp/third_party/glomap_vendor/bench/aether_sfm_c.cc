@@ -199,24 +199,94 @@ bool ReprojectsCleanlyToTrack(const colmap::Reconstruction& recon,
   return true;
 }
 
-bool CanMergeLivePoints(const colmap::Reconstruction& recon,
-                        const colmap::Camera& camera,
-                        colmap::point3D_t pid1,
-                        colmap::point3D_t pid2,
-                        double max_reproj_px) {
-  if (pid1 == pid2) return false;
-  if (!recon.ExistsPoint3D(pid1) || !recon.ExistsPoint3D(pid2)) return false;
+// Why a live merge attempt was rejected — surfaced via aether_sfm_live_diag so
+// the acceptance rate is attributable (the 2026-07-10 device run accepted
+// 3/13021 merge-needed signals and the reason was invisible).
+enum class MergeReject {
+  kNone = 0,        // merge is acceptable
+  kMissing,         // point deleted / empty track / broken obs (defensive)
+  kSharedImage,     // both tracks observe the same image (opt-in gate, off)
+  kReproj,          // union refit fails cheirality/reproj on some observation
+};
+
+// [MERGE-GATE 2026-07-11] Rewritten around a UNION-TRACK REFIT. The original
+// gate reprojected the length-weighted AVERAGE of the two current positions
+// (COLMAP's IncrementalTriangulator::Merge recipe) — correct in the mapper,
+// where both fragments are already optimized against consistent poses, but
+// nearly always wrong here: live fragments are independent low-parallax
+// 2-view triangulations under ARKit-seeded, windowed-BA poses, so their depth
+// error is large and the midpoint reprojects off BOTH tracks. Host replay of
+// the cap47 device db attributed 98% of merge rejections to exactly that
+// midpoint-reproj failure (12,892/13,142; the once-suspected disjoint-images
+// gate accounted for only 250). Refitting one DLT triangulation over the
+// UNION of observations uses the merged track's full (wider) baseline — the
+// very benefit the merge exists to unlock — and the acceptance test stays as
+// strict as before: EVERY observation of BOTH tracks must be in front of its
+// camera and reproject within max_reproj_px of the REFIT position. Two
+// physically-distinct points still cannot pass (no single 3D point fits both
+// tracks' rays within the gate). On success *out_refit_xyz carries the fitted
+// position for the caller to install on the merged point.
+//
+// The disjoint-images requirement is OPT-IN and OFF at the call site: COLMAP's
+// merge has no such requirement (Reconstruction::MergePoints3D concatenates
+// tracks that share images without complaint), and duplicate fragments of the
+// same physical point routinely co-observe an image (DSP-SIFT emits
+// near-identical keypoints at several scales, each seeding its own track).
+MergeReject CanMergeLivePoints(const colmap::Reconstruction& recon,
+                               const colmap::Camera& camera,
+                               colmap::point3D_t pid1,
+                               colmap::point3D_t pid2,
+                               double max_reproj_px,
+                               bool require_disjoint_images,
+                               Eigen::Vector3d* out_refit_xyz) {
+  if (pid1 == pid2) return MergeReject::kMissing;
+  if (!recon.ExistsPoint3D(pid1) || !recon.ExistsPoint3D(pid2)) {
+    return MergeReject::kMissing;
+  }
   const colmap::Point3D& p1 = recon.Point3D(pid1);
   const colmap::Point3D& p2 = recon.Point3D(pid2);
-  if (!TracksHaveDisjointImages(p1.track, p2.track)) return false;
-  const double n1 = static_cast<double>(p1.track.Length());
-  const double n2 = static_cast<double>(p2.track.Length());
-  if (n1 <= 0.0 || n2 <= 0.0) return false;
-  const Eigen::Vector3d merged_xyz = (n1 * p1.xyz + n2 * p2.xyz) / (n1 + n2);
-  return ReprojectsCleanlyToTrack(recon, camera, p1.track, merged_xyz,
-                                  max_reproj_px) &&
-         ReprojectsCleanlyToTrack(recon, camera, p2.track, merged_xyz,
-                                  max_reproj_px);
+  if (p1.track.Length() == 0 || p2.track.Length() == 0) {
+    return MergeReject::kMissing;
+  }
+  if (require_disjoint_images &&
+      !TracksHaveDisjointImages(p1.track, p2.track)) {
+    return MergeReject::kSharedImage;
+  }
+  // DLT refit over the union of observations.
+  std::vector<Eigen::Matrix3x4d> cams_from_world;
+  std::vector<Eigen::Vector2d> cam_points;
+  cams_from_world.reserve(p1.track.Length() + p2.track.Length());
+  cam_points.reserve(p1.track.Length() + p2.track.Length());
+  for (const colmap::Track* track : {&p1.track, &p2.track}) {
+    for (const auto& el : track->Elements()) {
+      if (!recon.ExistsImage(el.image_id)) return MergeReject::kMissing;
+      const colmap::Image& image = recon.Image(el.image_id);
+      if (!image.HasPose() || el.point2D_idx >= image.NumPoints2D()) {
+        return MergeReject::kMissing;
+      }
+      const std::optional<Eigen::Vector2d> np =
+          camera.CamFromImg(image.Point2D(el.point2D_idx).xy);
+      if (!np) return MergeReject::kReproj;
+      cams_from_world.push_back(image.CamFromWorld().ToMatrix());
+      cam_points.push_back(*np);
+    }
+  }
+  Eigen::Vector3d refit_xyz;
+  if (!colmap::TriangulateMultiViewPoint(
+          colmap::span<const Eigen::Matrix3x4d>(cams_from_world.data(),
+                                                cams_from_world.size()),
+          colmap::span<const Eigen::Vector2d>(cam_points.data(),
+                                              cam_points.size()),
+          &refit_xyz)) {
+    return MergeReject::kReproj;
+  }
+  const bool ok = ReprojectsCleanlyToTrack(recon, camera, p1.track, refit_xyz,
+                                           max_reproj_px) &&
+                  ReprojectsCleanlyToTrack(recon, camera, p2.track, refit_xyz,
+                                           max_reproj_px);
+  if (!ok) return MergeReject::kReproj;
+  if (out_refit_xyz) *out_refit_xyz = refit_xyz;
+  return MergeReject::kNone;
 }
 
 }  // namespace
@@ -268,6 +338,10 @@ struct aether_sfm_session {
   int64_t stat_merge_needed = 0;      // both observations on different tracks
   int64_t stat_merge_accepted = 0;    // conservative live track merges accepted
   int64_t stat_merge_rejected = 0;    // unique live merge attempts rejected
+  // Reject-reason breakdown of stat_merge_rejected (aether_sfm_live_diag).
+  int64_t stat_merge_reject_shared_image = 0;  // disjoint-images gate (if on)
+  int64_t stat_merge_reject_reproj = 0;        // merged-position reproj gate
+  int64_t stat_merge_reject_missing = 0;       // deleted point / empty track
   int64_t stat_spatial_pairs_considered = 0;  // ARKit-near/time-far candidates
   int64_t stat_spatial_pairs_attempted = 0;   // descriptor matches attempted
   int64_t stat_spatial_pairs_written = 0;     // TVG-verified pairs added to db
@@ -1281,6 +1355,18 @@ aether_sfm_result_t RunIncremental(
     pipeline_opts->ba_global_loss_scale = 1.0;
     pipeline_opts->ba_global_function_tolerance = 1e-6;  // converge-stop
     pipeline_opts->mapper.ba_local_num_images = 10;
+    // [TRI-ANGLE 2026-07-11] Creation parallax gate 1.5°(colmap default)→3.0°,
+    // aligned with BOTH streaming creation gates (add_frame kMinTriAngleRad and
+    // RestoreTemporalDetail — 3.0° each). The delivered cloud's low-parallax
+    // tail was born HERE: the mapper's IncrementalTriangulator created tracks
+    // down to 1.5° pairwise parallax (cap47 attribution: 25.9% of native
+    // 2-view delivered points sat below 3° — depth-ambiguous fuzz around thin
+    // structures). Creation-only: filter_min_tri_angle stays at its default,
+    // so BA may still keep an existing point that drifts into [1.5°, 3°) —
+    // same semantics as the live path. init_min_tri_angle (initial pair) is
+    // far above both and unaffected (incremental_pipeline.cc:459 overrides
+    // min_angle for the init pair only).
+    pipeline_opts->triangulation.min_angle = 3.0;
     // [AETHER] NOTE: ignore_redundant_points3D + freeze-intrinsics were tried (RAM
     // 2.36->1.45GB, 4x faster) but cost reproj 0.955->0.9952 (~4%) -> REVERTED per the
     // zero-quality-loss requirement. Full intrinsic refinement + all points stay.
@@ -1346,6 +1432,11 @@ void RefineGlobalBA(aether_sfm_session* s,
     popts->ba_global_function_tolerance = 1e-6;  // converge-stop
     popts->ba_global_max_refinements = 5;
     popts->ba_global_max_num_iterations = 50;
+    // [TRI-ANGLE 2026-07-11] Same 3.0° creation gate as RunIncremental:
+    // IterativeGlobalRefinement's CompleteAndMergeTracks/retriangulation reads
+    // Triangulation() too — keep phase 2 from re-admitting the <3° tail that
+    // phase 1 now refuses to create.
+    popts->triangulation.min_angle = 3.0;
     auto manager = std::make_shared<colmap::ReconstructionManager>();
     popts->image_path = s->image_path;  // [4.0.4] image_path moved into options
     colmap::IncrementalPipeline pipeline(
@@ -1476,51 +1567,17 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
   }
 }
 
-aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
-                                         const uint8_t* gray, int width,
-                                         int height, float fx, float fy,
-                                         float cx, float cy,
-                                         const double pose_qwxyz[4],
-                                         const double pose_t[3],
-                                         int* out_frame_id) {
-  if (!s || !s->db || !gray || width <= 0 || height <= 0) {
-    return AETHER_SFM_ERR_INVALID_ARG;
-  }
-  // pose_qwxyz/pose_t = ARKit CamFromWorld (world->camera), quaternion [w,x,y,z],
-  // ARKit camera axes (+X right, +Y up, -Z forward). Consumed below to build the
-  // throwaway live-preview cloud only; the authoritative finalize still self-
-  // estimates CamFromWorld (this prior does NOT feed the v1 solve).
+// Shared core of aether_sfm_add_frame (extraction upstream) and
+// aether_sfm_add_frame_features (features injected — host replay/verification
+// of the streaming path from a pulled sfm_live.db). Everything from the shared
+// camera write onward is identical between the two entries; extract_ms is the
+// caller-measured extraction time (0 for injected features).
+static aether_sfm_result_t AddFrameFeaturesImpl(
+    aether_sfm_session_t* s, const float* xy, const uint8_t* desc, int n,
+    int width, int height, float fx, float fy, float cx, float cy,
+    const double pose_qwxyz[4], const double pose_t[3], double extract_ms,
+    int* out_frame_id) {
   try {
-    const int max_features =
-        s->options.max_features > 0 ? s->options.max_features : 2048;
-
-    // 1) DSP-SIFT extraction. use_gpu_extract routes to the GPU DSP-SIFT
-    //    (Dawn/WGSL, f16 on A16) which is output-equivalent (xy/128-d/UBC/
-    //    RootSIFT) and falls back to the CPU _threaded path IN-ABI on any GPU
-    //    failure — so this call site is unaware which path ran. Default = CPU.
-    std::vector<float> xy(static_cast<size_t>(max_features) * 2);
-    std::vector<uint8_t> desc(static_cast<size_t>(max_features) * 128);
-    int n = 0;
-    const bool gpu_avail =
-        s->options.use_gpu_extract && (aether_dsp_sift_extract_gpu != nullptr);
-    const double t_extract0 = NowMs();
-    const int erc =
-        gpu_avail
-            ? aether_dsp_sift_extract_gpu(gray, width, height, max_features,
-                                          /*num_threads=*/0, xy.data(),
-                                          desc.data(), max_features, &n)
-            : aether_dsp_sift_extract(gray, width, height, max_features,
-                                      xy.data(), desc.data(), max_features, &n);
-    const double extract_ms = NowMs() - t_extract0;
-    if (erc != 0 || n <= 0) {
-      // Record the (possibly large) extract time even on failure so the log
-      // reflects a stalled/fallback extractor; zero the match-side counters.
-      s->last_extract_ms = extract_ms;
-      s->last_match_ms = 0.0;
-      s->last_n_cand = s->last_gpu_matches = s->last_cpu_matches = 0;
-      return AETHER_SFM_ERR_EXTRACT;
-    }
-
     // 2) Single shared camera (SIMPLE_PINHOLE: f, cx, cy), self-calibrated by
     //    BA — the RealityScan/RealityCapture default (soft-prior, refined per
     //    calibration group), and the only intrinsics model that is valid and
@@ -1568,7 +1625,7 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     colmap::FeatureDescriptors descriptors;
     descriptors.type = colmap::FeatureExtractorType::SIFT;
     descriptors.data.resize(n, 128);
-    std::memcpy(descriptors.data.data(), desc.data(),
+    std::memcpy(descriptors.data.data(), desc,
                 static_cast<size_t>(n) * 128);
     s->db->WriteKeypoints(image_id, kps);
     s->db->WriteDescriptors(image_id, descriptors);
@@ -1577,7 +1634,7 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     rec.frame_id = frame_id;
     rec.image_id = image_id;
     rec.n_keypoints = n;
-    rec.descriptors.assign(desc.begin(), desc.begin() + (size_t)n * 128);
+    rec.descriptors.assign(desc, desc + static_cast<size_t>(n) * 128);
     rec.points = colmap::FeatureKeypointsToPointsVector(kps);
 
     // Build this frame's CamFromWorld in COLMAP convention (see header derivation):
@@ -1639,6 +1696,13 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     constexpr double kMaxCreateReprojPx = 10.0;  // strict new-point gate
     constexpr double kMaxGrowReprojPx = 14.0;    // TVG-inlier grow absorbs ARKit drift
     constexpr double kMaxMergeReprojPx = 8.0;    // stricter: irreversible track merge
+    // [MERGE-GATE 2026-07-11] OFF = COLMAP-parity merge gating (COLMAP's merge
+    // has no disjoint-images requirement; the union-refit reproj gate in
+    // CanMergeLivePoints subsumes the safety concern). Host attribution on the
+    // cap47 db replay: shared-image rejections 250 vs 12,892 midpoint-reproj
+    // rejections — the real starvation was the midpoint test, fixed by the
+    // union refit; disjoint-off recovers the remaining legitimate fragments.
+    constexpr bool kMergeRequireDisjointImages = false;
     const bool gpu_match_avail =
         s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
     std::unordered_set<PointIdPair, PointIdPairHash> merge_trials;
@@ -1735,16 +1799,36 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
               const PointIdPair key =
                   CanonicalPointPair(o1.point3D_id, o2.point3D_id);
               if (!merge_trials.insert(key).second) continue;
-              if (CanMergeLivePoints(s->live_recon, s->camera, key.a, key.b,
-                                     kMaxMergeReprojPx)) {
+              Eigen::Vector3d refit_xyz;
+              const MergeReject verdict = CanMergeLivePoints(
+                  s->live_recon, s->camera, key.a, key.b, kMaxMergeReprojPx,
+                  kMergeRequireDisjointImages, &refit_xyz);
+              if (verdict == MergeReject::kNone) {
                 const colmap::point3D_t merged =
                     s->live_recon.MergePoints3D(key.a, key.b);
+                // Install the union refit (the position the gate validated),
+                // not MergePoints3D's length-weighted average of two noisy
+                // low-parallax estimates. The windowed BA below refines it
+                // further (merged is in `touched`), and the post-BA reproj/
+                // tri-angle filters police it like any other point.
+                s->live_recon.Point3D(merged).xyz = refit_xyz;
                 touched.erase(key.a);
                 touched.erase(key.b);
                 touched.insert(merged);
                 ++s->stat_merge_accepted;
               } else {
                 ++s->stat_merge_rejected;
+                switch (verdict) {
+                  case MergeReject::kSharedImage:
+                    ++s->stat_merge_reject_shared_image;
+                    break;
+                  case MergeReject::kReproj:
+                    ++s->stat_merge_reject_reproj;
+                    break;
+                  default:
+                    ++s->stat_merge_reject_missing;
+                    break;
+                }
               }
             }
             continue;
@@ -1921,6 +2005,80 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
   } catch (const std::exception&) {
     return AETHER_SFM_ERR_INTERNAL;
   }
+}
+
+aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
+                                         const uint8_t* gray, int width,
+                                         int height, float fx, float fy,
+                                         float cx, float cy,
+                                         const double pose_qwxyz[4],
+                                         const double pose_t[3],
+                                         int* out_frame_id) {
+  if (!s || !s->db || !gray || width <= 0 || height <= 0) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+  // pose_qwxyz/pose_t = ARKit CamFromWorld (world->camera), quaternion [w,x,y,z],
+  // ARKit camera axes (+X right, +Y up, -Z forward). Consumed by the impl to
+  // build the throwaway live-preview cloud only; the authoritative finalize
+  // still self-estimates CamFromWorld (this prior does NOT feed the v1 solve).
+  try {
+    const int max_features =
+        s->options.max_features > 0 ? s->options.max_features : 2048;
+
+    // 1) DSP-SIFT extraction. use_gpu_extract routes to the GPU DSP-SIFT
+    //    (Dawn/WGSL, f16 on A16) which is output-equivalent (xy/128-d/UBC/
+    //    RootSIFT) and falls back to the CPU _threaded path IN-ABI on any GPU
+    //    failure — so this call site is unaware which path ran. Default = CPU.
+    std::vector<float> xy(static_cast<size_t>(max_features) * 2);
+    std::vector<uint8_t> desc(static_cast<size_t>(max_features) * 128);
+    int n = 0;
+    const bool gpu_avail =
+        s->options.use_gpu_extract && (aether_dsp_sift_extract_gpu != nullptr);
+    const double t_extract0 = NowMs();
+    const int erc =
+        gpu_avail
+            ? aether_dsp_sift_extract_gpu(gray, width, height, max_features,
+                                          /*num_threads=*/0, xy.data(),
+                                          desc.data(), max_features, &n)
+            : aether_dsp_sift_extract(gray, width, height, max_features,
+                                      xy.data(), desc.data(), max_features, &n);
+    const double extract_ms = NowMs() - t_extract0;
+    if (erc != 0 || n <= 0) {
+      // Record the (possibly large) extract time even on failure so the log
+      // reflects a stalled/fallback extractor; zero the match-side counters.
+      s->last_extract_ms = extract_ms;
+      s->last_match_ms = 0.0;
+      s->last_n_cand = s->last_gpu_matches = s->last_cpu_matches = 0;
+      return AETHER_SFM_ERR_EXTRACT;
+    }
+
+    return AddFrameFeaturesImpl(s, xy.data(), desc.data(), n, width, height,
+                                fx, fy, cx, cy, pose_qwxyz, pose_t, extract_ms,
+                                out_frame_id);
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
+// Feature-injection sibling of aether_sfm_add_frame: skips extraction and
+// feeds precomputed keypoints (xy, +0.5 half-pixel convention, same as the
+// extractor output) + 128-d UBC RootSIFT u8 descriptors straight into the
+// shared streaming core. Purpose-built for HOST replay of a device capture
+// (keypoints/descriptors read back from a pulled sfm_live.db + the fed ARKit
+// poses) so streaming-path changes are verifiable off-device against real
+// captures. Production apps keep calling aether_sfm_add_frame.
+aether_sfm_result_t aether_sfm_add_frame_features(
+    aether_sfm_session_t* s, const float* xy, const uint8_t* desc,
+    int n_keypoints, int width, int height, float fx, float fy, float cx,
+    float cy, const double pose_qwxyz[4], const double pose_t[3],
+    int* out_frame_id) {
+  if (!s || !s->db || !xy || !desc || n_keypoints <= 0 || width <= 0 ||
+      height <= 0) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+  return AddFrameFeaturesImpl(s, xy, desc, n_keypoints, width, height, fx, fy,
+                              cx, cy, pose_qwxyz, pose_t, /*extract_ms=*/0.0,
+                              out_frame_id);
 }
 
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
@@ -2469,6 +2627,55 @@ void aether_sfm_stream_stats(aether_sfm_session_t* s, int64_t* tvg_pairs,
   }
   if (temporal_detail_conflicts)
     *temporal_detail_conflicts = s->stat_temporal_detail_conflicts;
+}
+
+// Live-recon quality snapshot + merge-gate reject reasons. Additive diagnostic
+// sibling of aether_sfm_stream_stats — same threading contract (call from the
+// add_frame worker thread; the live recon is single-writer). mean_reproj_px is
+// computed directly over every (point, observation) pair with the recon's own
+// (possibly BA-refined) camera, NOT from Point3D::error (never populated on
+// the live path).
+void aether_sfm_live_diag(aether_sfm_session_t* s, double* mean_reproj_px,
+                          int64_t* n_points, int64_t* n_track3plus,
+                          int64_t* n_obs, int64_t* merge_reject_shared_image,
+                          int64_t* merge_reject_reproj,
+                          int64_t* merge_reject_missing) {
+  if (!s) return;
+  if (merge_reject_shared_image)
+    *merge_reject_shared_image = s->stat_merge_reject_shared_image;
+  if (merge_reject_reproj) *merge_reject_reproj = s->stat_merge_reject_reproj;
+  if (merge_reject_missing)
+    *merge_reject_missing = s->stat_merge_reject_missing;
+  int64_t pts = 0, track3 = 0, obs = 0;
+  double err_sum = 0.0;
+  int64_t err_n = 0;
+  try {
+    for (const auto& [pid, pt] : s->live_recon.Points3D()) {
+      ++pts;
+      const size_t len = pt.track.Length();
+      obs += static_cast<int64_t>(len);
+      if (len >= 3) ++track3;
+      for (const auto& el : pt.track.Elements()) {
+        if (!s->live_recon.ExistsImage(el.image_id)) continue;
+        const colmap::Image& image = s->live_recon.Image(el.image_id);
+        if (!image.HasPose() || el.point2D_idx >= image.NumPoints2D()) continue;
+        const Eigen::Vector3d x_cam = image.CamFromWorld() * pt.xyz;
+        if (x_cam.z() <= 0.0) continue;
+        const colmap::Camera* cam = image.CameraPtr();
+        if (!cam) continue;
+        const std::optional<Eigen::Vector2d> px = cam->ImgFromCam(x_cam);
+        if (!px) continue;
+        err_sum += (*px - image.Point2D(el.point2D_idx).xy).norm();
+        ++err_n;
+      }
+    }
+  } catch (const std::exception&) {
+    // Diagnostic only — never throw across the ABI.
+  }
+  if (n_points) *n_points = pts;
+  if (n_track3plus) *n_track3plus = track3;
+  if (n_obs) *n_obs = obs;
+  if (mean_reproj_px) *mean_reproj_px = err_n > 0 ? err_sum / err_n : 0.0;
 }
 
 void aether_sfm_free(aether_sfm_session_t* s) {

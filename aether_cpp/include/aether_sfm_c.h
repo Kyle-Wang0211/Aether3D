@@ -95,6 +95,24 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                          const double pose_t[3],      // may be NULL
                                          int* out_frame_id);
 
+// Feature-injection sibling of aether_sfm_add_frame: skips extraction and
+// feeds precomputed keypoints (xy pairs, extractor's +0.5 half-pixel
+// convention) + n_keypoints×128 UBC RootSIFT u8 descriptors into the same
+// streaming core (camera/db writes, k-neighbor matching, live track growth,
+// windowed BA). Built for HOST replay of a pulled device sfm_live.db —
+// verifying streaming-path changes against real captures without the device.
+// Production capture keeps using aether_sfm_add_frame.
+aether_sfm_result_t aether_sfm_add_frame_features(aether_sfm_session_t* s,
+                                                  const float* xy,
+                                                  const uint8_t* desc,
+                                                  int n_keypoints,
+                                                  int width, int height,
+                                                  float fx, float fy,
+                                                  float cx, float cy,
+                                                  const double pose_qwxyz[4],
+                                                  const double pose_t[3],
+                                                  int* out_frame_id);
+
 // Run colmap::IncrementalPipeline over the accumulated db (native incremental
 // triangulation + re-triangulation + local/global BA). out_json (optional)
 // gets {solve_ms,n_registered,n_points3d,reproj_px}.
@@ -253,6 +271,17 @@ void aether_sfm_stream_stats(aether_sfm_session_t* s, int64_t* tvg_pairs,
                              int64_t* temporal_detail_reject_reproj,
                              int64_t* temporal_detail_reject_tri_angle,
                              int64_t* temporal_detail_conflicts);
+
+// Live-recon quality snapshot + merge-gate reject-reason breakdown (the
+// rejected total is in aether_sfm_stream_stats; these three attribute it).
+// mean_reproj_px is computed on demand over every live observation with the
+// recon's own camera. Same threading contract as aether_sfm_stream_stats:
+// call from the add_frame worker thread. All out-params nullable.
+void aether_sfm_live_diag(aether_sfm_session_t* s, double* mean_reproj_px,
+                          int64_t* n_points, int64_t* n_track3plus,
+                          int64_t* n_obs, int64_t* merge_reject_shared_image,
+                          int64_t* merge_reject_reproj,
+                          int64_t* merge_reject_missing);
 
 // Destroys session, drops the sqlite db file.
 void aether_sfm_free(aether_sfm_session_t* s);

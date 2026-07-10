@@ -88,6 +88,32 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
   return AETHER_SFM_ERR_UNSUPPORTED;
 }
 
+aether_sfm_result_t aether_sfm_add_frame_features(
+    aether_sfm_session_t* s, const float* xy, const uint8_t* desc,
+    int n_keypoints, int width, int height, float fx, float fy, float cx,
+    float cy, const double pose_qwxyz[4], const double pose_t[3],
+    int* out_frame_id) {
+  (void)s; (void)xy; (void)desc; (void)n_keypoints; (void)width; (void)height;
+  (void)fx; (void)fy; (void)cx; (void)cy; (void)pose_qwxyz; (void)pose_t;
+  if (out_frame_id) *out_frame_id = -1;
+  return AETHER_SFM_ERR_UNSUPPORTED;
+}
+
+void aether_sfm_live_diag(aether_sfm_session_t* s, double* mean_reproj_px,
+                          int64_t* n_points, int64_t* n_track3plus,
+                          int64_t* n_obs, int64_t* merge_reject_shared_image,
+                          int64_t* merge_reject_reproj,
+                          int64_t* merge_reject_missing) {
+  (void)s;
+  if (mean_reproj_px) *mean_reproj_px = 0.0;
+  if (n_points) *n_points = 0;
+  if (n_track3plus) *n_track3plus = 0;
+  if (n_obs) *n_obs = 0;
+  if (merge_reject_shared_image) *merge_reject_shared_image = 0;
+  if (merge_reject_reproj) *merge_reject_reproj = 0;
+  if (merge_reject_missing) *merge_reject_missing = 0;
+}
+
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   (void)s;
