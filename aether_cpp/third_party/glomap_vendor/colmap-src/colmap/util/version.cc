@@ -36,13 +36,13 @@
 namespace colmap {
 namespace {
 
-const char* COLMAP_VERSION = "4.0.4";
-const char* COLMAP_COMMIT_ID = "9c23f69";
-const char* COLMAP_COMMIT_DATE = "2026-04-27";
+const char* COLMAP_VERSION = "4.1.0";
+const char* COLMAP_COMMIT_ID = "fa8e3b3";
+const char* COLMAP_COMMIT_DATE = "2026-06-26";
 
 constexpr int kVersionMajor = 4;
-constexpr int kVersionMinor = 0;
-constexpr int kVersionPatch = 4;
+constexpr int kVersionMinor = 1;
+constexpr int kVersionPatch = 0;
 
 // Increment for database schema changes within a release.
 constexpr int kDatabaseSchemaRevision = 0;

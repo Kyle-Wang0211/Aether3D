@@ -90,18 +90,17 @@ void Bitmap::Fill(const BitmapColor<uint8_t>& color) {
   }
 }
 
-bool Bitmap::InterpolateNearestNeighbor(double x,
-                                        double y,
-                                        BitmapColor<uint8_t>* color) const {
+// [MIGRATION 4.1.0] GetPixel/Interpolate* now return std::optional (upstream
+// API change); GetPixel itself is inline in bitmap.h and needs no stub.
+std::optional<BitmapColor<uint8_t>> Bitmap::InterpolateNearestNeighbor(
+    double x, double y) const {
   return GetPixel(static_cast<int>(std::lround(x)),
-                  static_cast<int>(std::lround(y)),
-                  color);
+                  static_cast<int>(std::lround(y)));
 }
 
-bool Bitmap::InterpolateBilinear(double /*x*/,
-                                 double /*y*/,
-                                 BitmapColor<float>* /*color*/) const {
-  return false;
+std::optional<BitmapColor<float>> Bitmap::InterpolateBilinear(
+    double /*x*/, double /*y*/) const {
+  return std::nullopt;
 }
 
 // ---- EXIF (no embedded metadata on our path) -------------------------------
@@ -130,6 +129,12 @@ bool Bitmap::Write(const std::filesystem::path& /*path*/,
 void Bitmap::Rescale(int /*new_width*/,
                      int /*new_height*/,
                      RescaleFilter /*filter*/) {}
+
+// [MIGRATION 4.1.0] new upstream in-place downscale helper (bitmap.cc, excluded).
+// Rescale above is a no-op on this path, so report scale factor 1 (unchanged).
+double Bitmap::Thumbnail(int /*max_image_size*/, RescaleFilter /*filter*/) {
+  return 1.0;
+}
 
 void Bitmap::Rot90(int /*k*/) {}
 

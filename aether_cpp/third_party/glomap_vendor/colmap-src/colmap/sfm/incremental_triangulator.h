@@ -209,7 +209,6 @@ class IncrementalTriangulator {
   // recorded once with a single hashmap operation in either direction.
   // Uses the std::hash<std::pair<uint64_t, uint64_t>> specialization in
   // colmap/util/types.h.
-  // [AETHER] cherry-picked from upstream colmap PR #4354.
   std::unordered_set<std::pair<point3D_t, point3D_t>> merge_trials_;
 
   // Cache for found correspondences in the graph.
@@ -217,7 +216,6 @@ class IncrementalTriangulator {
 
   // Reusable BFS scratch buffers for Complete(). Held as members so each
   // invocation swap+clears instead of heap-allocating fresh vectors.
-  // [AETHER] cherry-picked from upstream colmap PR #4354.
   std::vector<TrackElement> complete_curr_queue_;
   std::vector<TrackElement> complete_next_queue_;
   // Dedupes (image_id, point2D_idx) pairs reached by Complete()'s BFS so

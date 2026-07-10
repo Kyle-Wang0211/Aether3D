@@ -66,6 +66,17 @@ TEST(ImagePairToPairId, Nominal) {
   }
 }
 
+TEST(Span, SizeAndEmpty) {
+  std::vector<int> container = {1, 2, 3};
+  const span<int> non_empty(container.data(), container.size());
+  EXPECT_EQ(non_empty.size(), 3);
+  EXPECT_FALSE(non_empty.empty());
+
+  const span<int> empty(container.data(), 0);
+  EXPECT_EQ(empty.size(), 0);
+  EXPECT_TRUE(empty.empty());
+}
+
 TEST(FilterView, Empty) {
   const std::vector<int> container;
   filter_view filtered_container(
@@ -129,7 +140,6 @@ TEST(FeatureMatchHashing, Nominal) {
   EXPECT_EQ(set.count(std::make_pair(2, 1)), 1);
 }
 
-// [AETHER] tests below cherry-picked from upstream colmap PR #4354.
 TEST(FeatureMatchHashing, LargeValues) {
   const point2D_t hi = std::numeric_limits<point2D_t>::max();
   const point2D_t lo = 1;

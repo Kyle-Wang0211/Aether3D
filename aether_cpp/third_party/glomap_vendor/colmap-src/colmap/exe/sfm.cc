@@ -35,6 +35,7 @@
 #include "colmap/controllers/hierarchical_pipeline.h"
 #include "colmap/controllers/option_manager.h"
 #include "colmap/controllers/rotation_averaging.h"
+#include "colmap/estimators/bundle_adjustment.h"
 #include "colmap/estimators/solvers/similarity_transform.h"
 #include "colmap/estimators/view_graph_calibration.h"
 #include "colmap/exe/gui.h"
@@ -88,6 +89,7 @@ int RunAutomaticReconstructor(int argc, char** argv) {
   std::string feature = "sift";
   std::string mapper = "incremental";
   std::string mesher = "poisson";
+  std::string ba_backend = "ceres";
 
   OptionManager options;
   options.AddRequiredOption("workspace_path",
@@ -120,6 +122,7 @@ int RunAutomaticReconstructor(int argc, char** argv) {
   options.AddDefaultOption("random_seed", &reconstruction_options.random_seed);
   options.AddDefaultOption("use_gpu", &reconstruction_options.use_gpu);
   options.AddDefaultOption("gpu_index", &reconstruction_options.gpu_index);
+  options.AddDefaultOption("Mapper.ba_backend", &ba_backend, "{ceres, caspar}");
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
@@ -147,6 +150,10 @@ int RunAutomaticReconstructor(int argc, char** argv) {
   StringToUpper(&mesher);
   reconstruction_options.mesher =
       AutomaticReconstructionController::MesherFromString(mesher);
+
+  StringToUpper(&ba_backend);
+  reconstruction_options.ba_backend =
+      BundleAdjustmentBackendFromString(ba_backend);
 
   auto reconstruction_manager = std::make_shared<ReconstructionManager>();
 
@@ -201,18 +208,20 @@ int RunBundleAdjuster(int argc, char** argv) {
 int RunColorExtractor(int argc, char** argv) {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
+  int num_threads = -1;
 
   OptionManager options;
   options.AddImageOptions();
   options.AddDefaultOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
+  options.AddDefaultOption("num_threads", &num_threads);
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
 
   Reconstruction reconstruction;
   reconstruction.Read(input_path);
-  reconstruction.ExtractColorsForAllImages(*options.image_path);
+  reconstruction.ExtractColorsForAllImages(*options.image_path, num_threads);
   reconstruction.Write(output_path);
 
   return EXIT_SUCCESS;

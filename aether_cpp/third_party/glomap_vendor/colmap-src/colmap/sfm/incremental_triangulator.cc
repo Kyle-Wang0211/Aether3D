@@ -607,7 +607,6 @@ size_t IncrementalTriangulator::Merge(const Options& options,
 
       // Canonical (min, max) pair so this merge is keyed identically
       // regardless of which side of the pair we are visiting from.
-      // [AETHER] cherry-picked from upstream colmap PR #4354.
       const std::pair<point3D_t, point3D_t> merge_trial_key =
           point3D_id < corr_point2D.point3D_id
               ? std::pair{point3D_id, corr_point2D.point3D_id}
@@ -692,7 +691,6 @@ size_t IncrementalTriangulator::Complete(const Options& options,
 
   // Reuse member-held BFS scratch buffers across Complete() invocations to
   // avoid per-call heap allocations.
-  // [AETHER] cherry-picked from upstream colmap PR #4354.
   complete_curr_queue_ = point3D.track.Elements();
   complete_next_queue_.clear();
   complete_visited_.clear();
