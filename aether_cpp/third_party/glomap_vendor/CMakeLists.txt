@@ -66,6 +66,12 @@ list(APPEND COLMAP_SRC
   ${COLMAP}/colmap/sfm/observation_manager.cc
   ${COLMAP}/colmap/controllers/incremental_pipeline.cc
   ${COLMAP}/colmap/controllers/bundle_adjustment.cc)
+# NOTE: COLMAP's exhaustive/spatial feature matcher + retrieval (feature_matching*,
+# matcher_cache, pairing, retrieval/*) is DELIBERATELY NOT here — it drags in FAISS
+# + OpenMP (<omp.h>), which the iOS toolchain lacks, and would break the device
+# glomap_core build. It exists ONLY for the HOST colmap_bench --match prototype and
+# is appended to COLMAP_ONLY_SRC below. Production streaming SfM uses its OWN GPU
+# matcher (aether_sfm_c.cc); the global-BA double-wall fix needs no re-matching.
 # iOS stubs (Bitmap without FreeImage)
 list(APPEND COLMAP_SRC ${V}/stubs/colmap_ios_stubs.cc)
 # threaded DSP-SIFT extractor — MUST live in glomap_core so it compiles with the
@@ -122,6 +128,18 @@ target_compile_options(glomap_core PRIVATE -w)   # silence warnings during bring
 # intact for glomap_bench_exe (out of scope for this migration step).
 set(COLMAP_ONLY_SRC ${COLMAP_SRC})
 list(REMOVE_ITEM COLMAP_ONLY_SRC ${V}/bench/aether_threaded_extract.cc)
+# [AETHER] HOST-ONLY exhaustive/spatial matcher + retrieval for the colmap_bench
+# --match prototype (needs FAISS + OpenMP; see the note in COLMAP_SRC above). Kept
+# out of the iOS glomap_core; colmap_only already adds libomp/faiss include dirs.
+list(APPEND COLMAP_ONLY_SRC
+  ${COLMAP}/colmap/controllers/feature_matching.cc
+  ${COLMAP}/colmap/controllers/feature_matching_utils.cc
+  ${COLMAP}/colmap/controllers/matcher_cache.cc
+  ${COLMAP}/colmap/controllers/pairing.cc
+  ${COLMAP}/colmap/retrieval/resources.cc
+  ${COLMAP}/colmap/retrieval/visual_index.cc
+  ${COLMAP}/colmap/retrieval/geometry.cc
+  ${COLMAP}/colmap/retrieval/vote_and_verify.cc)
 # [MIGRATION 4.0.4] COLMAP 4.0 now calls PoseLib minimal solvers directly (via
 # estimators/solvers/poselib_utils.cc + the solver wrappers) -> colmap depends on
 # poselib::p3p / gp3p / p4pf / Camera. PoseLib is Eigen-only and compiles clean, so
@@ -132,6 +150,8 @@ target_include_directories(colmap_only PUBLIC
   ${GLOG}
   ${CERES}/include ${CERESB}/include ${CERES}/config
   ${EIGEN}
+  /opt/homebrew/opt/libomp/include   # [AETHER] pairing.cc needs omp.h (host --match)
+  /opt/homebrew/include/faiss             # [AETHER] pairing.cc SpatialPairGenerator
   /opt/homebrew/include)
 target_compile_definitions(colmap_only PRIVATE
   EIGEN_MPL2_ONLY
@@ -195,6 +215,8 @@ if(BUILD_BENCH)
     colmap_only                          # [MIGRATION 4.0.4] colmap-only (no glomap/VLFeat)
     /opt/homebrew/lib/libceres.dylib
     /opt/homebrew/lib/libglog.dylib
+    /opt/homebrew/opt/libomp/lib/libomp.dylib   # [AETHER] pairing.cc omp symbols
+    /opt/homebrew/lib/libfaiss.dylib            # [AETHER] pairing.cc FAISS symbols
     "-lsqlite3"
     ${ACCELERATE_FW})
 

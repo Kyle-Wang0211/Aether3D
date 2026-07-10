@@ -43,11 +43,15 @@
 
 #include <glog/logging.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -56,6 +60,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 // On-device DSP-SIFT extractor + CPU matcher (dsp_sift_c.cc, same archive set).
@@ -90,10 +95,23 @@ extern "C" int aether_sift_match_pairs(const uint8_t* desc1, int n1,
 // bench-proven 11568x11568 @ 119 ms on A16). WEAK for the same reason as
 // aether_dsp_sift_extract_gpu: host benches / non-Metal targets resolve it to
 // nullptr and add_frame stays on the CPU matcher. Selected via
-// options.use_gpu_match; any non-zero return falls back to CPU per pair.
+// options.use_gpu_match; any non-zero return skips that pair on device. Host
+// benches without the weak symbol still use the CPU matcher.
 extern "C" __attribute__((weak)) int aether_gpu_match_gemm_pairs(
     const uint8_t* desc1, int n1, const uint8_t* desc2, int n2,
     double max_ratio, uint32_t* out_pairs, int max_pairs,
+    int* out_num_matches);
+// Geometry-guided Metal matcher. guide_mode 1 applies an E/F epipolar band;
+// guide_mode 2 applies a homography transfer-error gate. matrix12 maps the
+// first image into the second image's geometry and matrix21 is its reverse.
+// Spatial revisit matching is intentionally fail-closed when this device-side
+// symbol is unavailable or errors; it must never open the minutes-scale CPU
+// brute-force fallback during finish-time refinement.
+extern "C" __attribute__((weak)) int aether_gpu_match_gemm_pairs_guided(
+    const uint8_t* desc1, int n1, const float* xy1,
+    const uint8_t* desc2, int n2, const float* xy2, double max_ratio,
+    const float* matrix12, const float* matrix21, int guide_mode,
+    float max_residual, uint32_t* out_pairs, int max_pairs,
     int* out_num_matches);
 
 // [MIGRATION 4.0.4 / STEP 5] The glomap::RetriangulateTracks linker stub was
@@ -126,6 +144,80 @@ struct FrameRecord {
   colmap::Rigid3d cam_from_world;
   bool has_pose = false;
 };
+
+struct PointIdPair {
+  colmap::point3D_t a = 0;
+  colmap::point3D_t b = 0;
+
+  bool operator==(const PointIdPair& other) const {
+    return a == other.a && b == other.b;
+  }
+};
+
+struct PointIdPairHash {
+  size_t operator()(const PointIdPair& p) const {
+    const size_t h1 = std::hash<colmap::point3D_t>{}(p.a);
+    const size_t h2 = std::hash<colmap::point3D_t>{}(p.b);
+    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+  }
+};
+
+PointIdPair CanonicalPointPair(colmap::point3D_t p1, colmap::point3D_t p2) {
+  return p1 < p2 ? PointIdPair{p1, p2} : PointIdPair{p2, p1};
+}
+
+bool TracksHaveDisjointImages(const colmap::Track& t1,
+                              const colmap::Track& t2) {
+  std::unordered_set<colmap::image_t> images;
+  images.reserve(t1.Length() + t2.Length());
+  for (const auto& el : t1.Elements()) {
+    if (!images.insert(el.image_id).second) return false;
+  }
+  for (const auto& el : t2.Elements()) {
+    if (!images.insert(el.image_id).second) return false;
+  }
+  return true;
+}
+
+bool ReprojectsCleanlyToTrack(const colmap::Reconstruction& recon,
+                              const colmap::Camera& camera,
+                              const colmap::Track& track,
+                              const Eigen::Vector3d& xyz,
+                              double max_reproj_px) {
+  for (const auto& el : track.Elements()) {
+    if (!recon.ExistsImage(el.image_id)) return false;
+    const colmap::Image& image = recon.Image(el.image_id);
+    if (!image.HasPose() || el.point2D_idx >= image.NumPoints2D()) return false;
+    const Eigen::Vector3d x_cam = image.CamFromWorld() * xyz;
+    if (x_cam.z() <= 0.0) return false;
+    const std::optional<Eigen::Vector2d> px = camera.ImgFromCam(x_cam);
+    if (!px) return false;
+    if ((*px - image.Point2D(el.point2D_idx).xy).norm() > max_reproj_px) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CanMergeLivePoints(const colmap::Reconstruction& recon,
+                        const colmap::Camera& camera,
+                        colmap::point3D_t pid1,
+                        colmap::point3D_t pid2,
+                        double max_reproj_px) {
+  if (pid1 == pid2) return false;
+  if (!recon.ExistsPoint3D(pid1) || !recon.ExistsPoint3D(pid2)) return false;
+  const colmap::Point3D& p1 = recon.Point3D(pid1);
+  const colmap::Point3D& p2 = recon.Point3D(pid2);
+  if (!TracksHaveDisjointImages(p1.track, p2.track)) return false;
+  const double n1 = static_cast<double>(p1.track.Length());
+  const double n2 = static_cast<double>(p2.track.Length());
+  if (n1 <= 0.0 || n2 <= 0.0) return false;
+  const Eigen::Vector3d merged_xyz = (n1 * p1.xyz + n2 * p2.xyz) / (n1 + n2);
+  return ReprojectsCleanlyToTrack(recon, camera, p1.track, merged_xyz,
+                                  max_reproj_px) &&
+         ReprojectsCleanlyToTrack(recon, camera, p2.track, merged_xyz,
+                                  max_reproj_px);
+}
 
 }  // namespace
 
@@ -167,6 +259,36 @@ struct aether_sfm_session {
   int64_t stat_raw_pairs = 0;         // pairs that fell back to raw (empty inliers)
   int64_t stat_grow_rejected = 0;     // grow-gate reproj/cheirality rejections
   int64_t stat_grow_accepted = 0;     // observations grown onto existing points
+  int64_t stat_grow_reject_cheirality = 0;
+  int64_t stat_grow_reject_reproj = 0;
+  int64_t stat_create_reject_cheirality = 0;
+  int64_t stat_create_reject_tri_angle = 0;
+  int64_t stat_create_reject_reproj = 0;
+  int64_t stat_already_assigned = 0;  // both observations already on same track
+  int64_t stat_merge_needed = 0;      // both observations on different tracks
+  int64_t stat_merge_accepted = 0;    // conservative live track merges accepted
+  int64_t stat_merge_rejected = 0;    // unique live merge attempts rejected
+  int64_t stat_spatial_pairs_considered = 0;  // ARKit-near/time-far candidates
+  int64_t stat_spatial_pairs_attempted = 0;   // descriptor matches attempted
+  int64_t stat_spatial_pairs_written = 0;     // TVG-verified pairs added to db
+  int64_t stat_spatial_inliers = 0;           // total TVG inlier matches written
+  int64_t stat_spatial_anchor_attempted = 0;  // globally scheduled center anchors
+  int64_t stat_spatial_anchor_passed = 0;     // centers passing strict guided gate
+  int64_t stat_spatial_regions_confirmed = 0; // revisit regions passing 2-of-3
+  int64_t stat_spatial_expanded_attempted = 0;// i+/-2 x j+/-2 pair attempts
+  int64_t stat_spatial_guided_pairs = 0;      // guided matcher calls completed
+  int64_t stat_spatial_guided_inliers = 0;    // matches returned by guided calls
+  int64_t stat_spatial_quadratic_attempted = 0;// exponential-time fallback work
+  int64_t stat_spatial_quadratic_written = 0; // fallback pairs committed to db
+  int64_t stat_spatial_budget_skipped = 0;    // fair scheduler work omitted at cap
+  int64_t stat_temporal_detail_pairs = 0;     // K-neighbor TVGs revisited post-BA
+  int64_t stat_temporal_detail_matches = 0;   // temporal TVG inliers inspected
+  int64_t stat_temporal_detail_created = 0;   // new final-pose detail points
+  int64_t stat_temporal_detail_grown = 0;     // observations added to final tracks
+  int64_t stat_temporal_detail_reject_cheirality = 0;
+  int64_t stat_temporal_detail_reject_reproj = 0;
+  int64_t stat_temporal_detail_reject_tri_angle = 0;
+  int64_t stat_temporal_detail_conflicts = 0; // cross-track / duplicate-image skips
   int64_t stat_reproj_filtered = 0;   // obs deleted by the post-BA reproj filter
   int64_t stat_tri_filtered = 0;      // obs deleted by the post-BA tri-angle filter
 
@@ -196,6 +318,806 @@ struct aether_sfm_session {
 };
 
 namespace {
+
+struct SpatialRevisitCandidate {
+  int i = -1;
+  int j = -1;
+  double distance_m = 0.0;
+  double angle_rad = 0.0;
+  double score = 0.0;
+  int anchor_rank = 0;
+  bool quadratic = false;
+};
+
+Eigen::Vector3d CameraForwardWorld(const colmap::Rigid3d& cam_from_world) {
+  return cam_from_world.rotation().inverse() * Eigen::Vector3d(0.0, 0.0, 1.0);
+}
+
+constexpr int kSpatialCandidatePool = 12;
+constexpr int kSpatialAnchorsPerFrame = 3;
+constexpr int kSpatialPreliminaryInliers = 15;
+constexpr int kSpatialFinalInliers = 30;
+constexpr double kSpatialPreliminaryMinInlierRatio = 0.10;
+constexpr double kSpatialFinalMinInlierRatio = 0.25;
+constexpr double kSpatialMatchRatio = 0.8;
+constexpr double kGuidedMaxErrorPixels = 4.0;
+constexpr double kSpatialFinalMaxErrorPixels = 1.0;
+constexpr int kSpatialMaxTotalPairs = 1200;
+// Reserve finish-time budget for 2-of-3 confirmation, neighborhood expansion,
+// and the quadratic fallback. At 300-400 frames this still gives every frame
+// its best anchor before any frame consumes all three.
+constexpr int kSpatialInitialAnchorBudget = 720;
+
+enum class SpatialPairPurpose {
+  kAnchor,
+  kConfirm,
+  kExpansion,
+  kQuadraticAnchor,
+  kQuadraticConfirm,
+  kQuadraticExpansion,
+};
+
+struct VerifiedSpatialPair {
+  bool valid = false;
+  bool existing = false;
+  bool written = false;
+  int raw_matches = 0;
+  int initial_inliers = 0;
+  int final_inliers = 0;
+  colmap::FeatureMatches matches;
+  colmap::TwoViewGeometry geometry;
+};
+
+using SpatialPairCache = std::unordered_map<uint64_t, VerifiedSpatialPair>;
+
+uint64_t FramePairKey(int frame_idx1, int frame_idx2) {
+  const uint32_t hi = static_cast<uint32_t>(std::max(frame_idx1, frame_idx2));
+  const uint32_t lo = static_cast<uint32_t>(std::min(frame_idx1, frame_idx2));
+  return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+bool IsQuadraticPurpose(SpatialPairPurpose purpose) {
+  return purpose == SpatialPairPurpose::kQuadraticAnchor ||
+         purpose == SpatialPairPurpose::kQuadraticConfirm ||
+         purpose == SpatialPairPurpose::kQuadraticExpansion;
+}
+
+bool IsExpansionPurpose(SpatialPairPurpose purpose) {
+  return purpose == SpatialPairPurpose::kExpansion ||
+         purpose == SpatialPairPurpose::kQuadraticExpansion;
+}
+
+void CopyMatrixRowMajor(const Eigen::Matrix3d& matrix,
+                        std::array<float, 9>* out) {
+  for (int row = 0; row < 3; ++row) {
+    for (int col = 0; col < 3; ++col) {
+      (*out)[row * 3 + col] = static_cast<float>(matrix(row, col));
+    }
+  }
+}
+
+void CopyPixelPoints(const std::vector<Eigen::Vector2d>& points,
+                     std::vector<float>* out) {
+  out->resize(points.size() * 2);
+  for (size_t i = 0; i < points.size(); ++i) {
+    (*out)[2 * i] = static_cast<float>(points[i].x());
+    (*out)[2 * i + 1] = static_cast<float>(points[i].y());
+  }
+}
+
+void CopyNormalizedPoints(const colmap::Camera& camera,
+                          const std::vector<Eigen::Vector2d>& points,
+                          std::vector<float>* out) {
+  out->resize(points.size() * 2);
+  for (size_t i = 0; i < points.size(); ++i) {
+    const std::optional<Eigen::Vector2d> normalized = camera.CamFromImg(points[i]);
+    (*out)[2 * i] = normalized ? static_cast<float>(normalized->x()) : 1e6f;
+    (*out)[2 * i + 1] =
+        normalized ? static_cast<float>(normalized->y()) : 1e6f;
+  }
+}
+
+bool PrepareGuidedGeometry(const aether_sfm_session* s,
+                           const FrameRecord& a,
+                           const FrameRecord& b,
+                           const colmap::TwoViewGeometry& geometry,
+                           std::vector<float>* xy_a,
+                           std::vector<float>* xy_b,
+                           std::array<float, 9>* matrix_ab,
+                           std::array<float, 9>* matrix_ba,
+                           int* guide_mode,
+                           float* max_residual) {
+  if (!s || !xy_a || !xy_b || !matrix_ab || !matrix_ba || !guide_mode ||
+      !max_residual) {
+    return false;
+  }
+
+  const bool calibrated =
+      (geometry.config == colmap::TwoViewGeometry::CALIBRATED ||
+       geometry.config == colmap::TwoViewGeometry::CALIBRATED_RIG) &&
+      geometry.E.has_value();
+  const bool uncalibrated =
+      geometry.config == colmap::TwoViewGeometry::UNCALIBRATED &&
+      geometry.F.has_value();
+  const bool homography =
+      (geometry.config == colmap::TwoViewGeometry::PLANAR ||
+       geometry.config == colmap::TwoViewGeometry::PANORAMIC ||
+       geometry.config == colmap::TwoViewGeometry::PLANAR_OR_PANORAMIC) &&
+      geometry.H.has_value();
+
+  if (calibrated) {
+    CopyNormalizedPoints(s->camera, a.points, xy_a);
+    CopyNormalizedPoints(s->camera, b.points, xy_b);
+    CopyMatrixRowMajor(*geometry.E, matrix_ab);
+    CopyMatrixRowMajor(geometry.E->transpose(), matrix_ba);
+    const double normalized_error =
+        s->camera.CamFromImgThreshold(kGuidedMaxErrorPixels);
+    *max_residual = static_cast<float>(normalized_error * normalized_error);
+    *guide_mode = 1;
+    return true;
+  }
+  if (uncalibrated) {
+    CopyPixelPoints(a.points, xy_a);
+    CopyPixelPoints(b.points, xy_b);
+    CopyMatrixRowMajor(*geometry.F, matrix_ab);
+    CopyMatrixRowMajor(geometry.F->transpose(), matrix_ba);
+    *max_residual = static_cast<float>(kGuidedMaxErrorPixels *
+                                       kGuidedMaxErrorPixels);
+    *guide_mode = 1;
+    return true;
+  }
+  if (homography) {
+    if (!geometry.H->allFinite() || std::abs(geometry.H->determinant()) < 1e-12) {
+      return false;
+    }
+    const Eigen::Matrix3d inverse = geometry.H->inverse();
+    if (!inverse.allFinite()) return false;
+    CopyPixelPoints(a.points, xy_a);
+    CopyPixelPoints(b.points, xy_b);
+    CopyMatrixRowMajor(*geometry.H, matrix_ab);
+    CopyMatrixRowMajor(inverse, matrix_ba);
+    *max_residual = static_cast<float>(kGuidedMaxErrorPixels *
+                                       kGuidedMaxErrorPixels);
+    *guide_mode = 2;
+    return true;
+  }
+  return false;
+}
+
+bool RunGuidedSpatialMatch(aether_sfm_session* s,
+                           const FrameRecord& a,
+                           const FrameRecord& b,
+                           const colmap::TwoViewGeometry& geometry,
+                           colmap::FeatureMatches* guided_matches) {
+  if (!s || !guided_matches || !s->options.use_gpu_match ||
+      aether_gpu_match_gemm_pairs_guided == nullptr) {
+    return false;
+  }
+
+  std::vector<float> xy_a;
+  std::vector<float> xy_b;
+  std::array<float, 9> matrix_ab{};
+  std::array<float, 9> matrix_ba{};
+  int guide_mode = 0;
+  float max_residual = 0.0f;
+  if (!PrepareGuidedGeometry(s, a, b, geometry, &xy_a, &xy_b, &matrix_ab,
+                             &matrix_ba, &guide_mode, &max_residual)) {
+    return false;
+  }
+
+  const int cap = std::min(a.n_keypoints, b.n_keypoints);
+  if (cap < kSpatialFinalInliers) return false;
+  std::vector<uint32_t> pair_buf(static_cast<size_t>(cap) * 2);
+  int num_matches = 0;
+  const int rc = aether_gpu_match_gemm_pairs_guided(
+      a.descriptors.data(), a.n_keypoints, xy_a.data(), b.descriptors.data(),
+      b.n_keypoints, xy_b.data(), kSpatialMatchRatio, matrix_ab.data(),
+      matrix_ba.data(), guide_mode, max_residual, pair_buf.data(), cap,
+      &num_matches);
+  if (rc != 0) return false;
+
+  ++s->stat_spatial_guided_pairs;
+  s->stat_spatial_guided_inliers += num_matches;
+  guided_matches->resize(num_matches);
+  for (int m = 0; m < num_matches; ++m) {
+    (*guided_matches)[m].point2D_idx1 = pair_buf[2 * m];
+    (*guided_matches)[m].point2D_idx2 = pair_buf[2 * m + 1];
+  }
+  return true;
+}
+
+bool VerifySpatialPair(aether_sfm_session* s,
+                       int frame_idx1,
+                       int frame_idx2,
+                       SpatialPairPurpose purpose,
+                       SpatialPairCache* cache,
+                       int* attempted_total) {
+  if (!s || !s->db || !cache || !attempted_total || frame_idx1 == frame_idx2) {
+    return false;
+  }
+  const int later = std::max(frame_idx1, frame_idx2);
+  const int earlier = std::min(frame_idx1, frame_idx2);
+  if (earlier < 0 || later >= static_cast<int>(s->frames.size())) return false;
+
+  const uint64_t key = FramePairKey(later, earlier);
+  const auto cached = cache->find(key);
+  if (cached != cache->end()) return cached->second.valid;
+  auto [it, inserted] = cache->try_emplace(key);
+  (void)inserted;
+  VerifiedSpatialPair& result = it->second;
+  const FrameRecord& a = s->frames[earlier];
+  const FrameRecord& b = s->frames[later];
+  if (a.n_keypoints <= 0 || b.n_keypoints <= 0) return false;
+
+  if (s->db->ExistsMatches(a.image_id, b.image_id)) {
+    result.existing = true;
+    if (!s->db->ExistsTwoViewGeometry(a.image_id, b.image_id)) return false;
+    result.matches = s->db->ReadMatches(a.image_id, b.image_id);
+    result.geometry = s->db->ReadTwoViewGeometry(a.image_id, b.image_id);
+    result.raw_matches = static_cast<int>(result.matches.size());
+    result.initial_inliers =
+        static_cast<int>(result.geometry.inlier_matches.size());
+    result.final_inliers = result.initial_inliers;
+    result.valid = result.raw_matches >= kSpatialPreliminaryInliers &&
+                   result.final_inliers >= kSpatialFinalInliers &&
+                   static_cast<double>(result.initial_inliers) >=
+                       kSpatialFinalMinInlierRatio * result.raw_matches;
+    return result.valid;
+  }
+
+  if (*attempted_total >= kSpatialMaxTotalPairs) {
+    ++s->stat_spatial_budget_skipped;
+    return false;
+  }
+  ++*attempted_total;
+  ++s->stat_spatial_pairs_attempted;
+  if (purpose == SpatialPairPurpose::kAnchor ||
+      purpose == SpatialPairPurpose::kQuadraticAnchor) {
+    ++s->stat_spatial_anchor_attempted;
+  }
+  if (IsExpansionPurpose(purpose)) ++s->stat_spatial_expanded_attempted;
+  if (IsQuadraticPurpose(purpose)) ++s->stat_spatial_quadratic_attempted;
+
+  const int cap = std::min(a.n_keypoints, b.n_keypoints);
+  if (cap < kSpatialPreliminaryInliers) return false;
+  std::vector<uint32_t> pair_buf(static_cast<size_t>(cap) * 2);
+  int num_matches = 0;
+  int match_rc = 1;
+  if (s->options.use_gpu_match) {
+    // Device finish-time policy is fail-closed: missing/erroring Metal never
+    // falls into O(N^2) CPU matching and turns a short finalize into minutes.
+    if (aether_gpu_match_gemm_pairs == nullptr) return false;
+    match_rc = aether_gpu_match_gemm_pairs(
+        a.descriptors.data(), a.n_keypoints, b.descriptors.data(),
+        b.n_keypoints, kSpatialMatchRatio, pair_buf.data(), cap, &num_matches);
+    if (match_rc != 0) return false;
+  } else {
+    match_rc = aether_sift_match_pairs(
+        a.descriptors.data(), a.n_keypoints, b.descriptors.data(),
+        b.n_keypoints, kSpatialMatchRatio, pair_buf.data(), cap, &num_matches);
+  }
+  if (match_rc != 0 || num_matches < kSpatialPreliminaryInliers) return false;
+
+  colmap::FeatureMatches matches(num_matches);
+  for (int m = 0; m < num_matches; ++m) {
+    matches[m].point2D_idx1 = pair_buf[2 * m];
+    matches[m].point2D_idx2 = pair_buf[2 * m + 1];
+  }
+  colmap::FeatureMatches matches_for_tvg = matches;
+  const colmap::TwoViewGeometryOptions tvg_options;
+  colmap::TwoViewGeometry geometry = colmap::EstimateTwoViewGeometry(
+      s->camera, a.points, s->camera, b.points, std::move(matches_for_tvg),
+      tvg_options);
+  const int initial_inliers =
+      static_cast<int>(geometry.inlier_matches.size());
+  if (initial_inliers < kSpatialPreliminaryInliers ||
+      static_cast<double>(initial_inliers) <
+          kSpatialPreliminaryMinInlierRatio * num_matches) {
+    return false;
+  }
+
+  // Guided matching only proposes additional correspondences inside the
+  // initial geometry's 4px band. It does NOT prove they are inliers. COLMAP's
+  // global pipeline explicitly warns that writing guided candidates directly
+  // to two_view_geometries regresses reconstruction quality. Re-estimate TVG
+  // over the guided candidate set with the global mapper's strict gate before
+  // any correspondence reaches sqlite.
+  colmap::FeatureMatches guided_matches;
+  if (!RunGuidedSpatialMatch(s, a, b, geometry, &guided_matches)) return false;
+  colmap::TwoViewGeometryOptions final_tvg_options;
+  final_tvg_options.ransac_options.max_error = kSpatialFinalMaxErrorPixels;
+  final_tvg_options.min_num_inliers = kSpatialFinalInliers;
+  final_tvg_options.min_inlier_ratio = kSpatialFinalMinInlierRatio;
+  colmap::FeatureMatches guided_for_tvg = guided_matches;
+  colmap::TwoViewGeometry final_geometry = colmap::EstimateTwoViewGeometry(
+      s->camera, a.points, s->camera, b.points, std::move(guided_for_tvg),
+      final_tvg_options);
+  const int final_inliers =
+      static_cast<int>(final_geometry.inlier_matches.size());
+  if (final_inliers < kSpatialFinalInliers ||
+      static_cast<double>(final_inliers) <
+          kSpatialFinalMinInlierRatio * guided_matches.size()) {
+    return false;
+  }
+
+  result.raw_matches = static_cast<int>(guided_matches.size());
+  result.initial_inliers = initial_inliers;
+  result.final_inliers = final_inliers;
+  result.matches = std::move(guided_matches);
+  result.geometry = std::move(final_geometry);
+  result.valid = true;
+  return true;
+}
+
+bool WriteVerifiedSpatialPair(aether_sfm_session* s,
+                              int frame_idx1,
+                              int frame_idx2,
+                              bool quadratic,
+                              SpatialPairCache* cache) {
+  if (!s || !s->db || !cache || frame_idx1 == frame_idx2) return false;
+  const int later = std::max(frame_idx1, frame_idx2);
+  const int earlier = std::min(frame_idx1, frame_idx2);
+  const auto it = cache->find(FramePairKey(later, earlier));
+  if (it == cache->end() || !it->second.valid) return false;
+  VerifiedSpatialPair& result = it->second;
+  if (result.existing || result.written) return true;
+
+  const FrameRecord& a = s->frames[earlier];
+  const FrameRecord& b = s->frames[later];
+  if (s->db->ExistsMatches(a.image_id, b.image_id) ||
+      s->db->ExistsTwoViewGeometry(a.image_id, b.image_id)) {
+    return false;
+  }
+  s->db->WriteMatches(a.image_id, b.image_id, result.matches);
+  s->db->WriteTwoViewGeometry(a.image_id, b.image_id, result.geometry);
+  result.written = true;
+  ++s->stat_spatial_pairs_written;
+  s->stat_spatial_inliers += result.final_inliers;
+  if (quadratic) ++s->stat_spatial_quadratic_written;
+  return true;
+}
+
+std::vector<SpatialRevisitCandidate> SelectDiverseAnchors(
+    std::vector<SpatialRevisitCandidate> pool, int temporal_k) {
+  std::vector<SpatialRevisitCandidate> selected;
+  selected.reserve(kSpatialAnchorsPerFrame);
+  const int min_separation = std::max(3, temporal_k / 3);
+  for (const SpatialRevisitCandidate& candidate : pool) {
+    bool separated = true;
+    for (const SpatialRevisitCandidate& prior : selected) {
+      if (std::abs(candidate.j - prior.j) < min_separation) {
+        separated = false;
+        break;
+      }
+    }
+    if (separated) selected.push_back(candidate);
+    if (static_cast<int>(selected.size()) == kSpatialAnchorsPerFrame) break;
+  }
+  for (const SpatialRevisitCandidate& candidate : pool) {
+    if (static_cast<int>(selected.size()) == kSpatialAnchorsPerFrame) break;
+    const bool duplicate = std::any_of(
+        selected.begin(), selected.end(), [&](const SpatialRevisitCandidate& x) {
+          return x.i == candidate.i && x.j == candidate.j;
+        });
+    if (!duplicate) selected.push_back(candidate);
+  }
+  for (int rank = 0; rank < static_cast<int>(selected.size()); ++rank) {
+    selected[rank].anchor_rank = rank;
+  }
+  return selected;
+}
+
+std::vector<SpatialRevisitCandidate> BuildSpatialAnchors(
+    aether_sfm_session* s, int temporal_k) {
+  constexpr double kPrimaryDistanceMeters = 1.0;
+  constexpr double kFallbackDistanceMeters = 1.5;
+  constexpr double kPrimaryAngleRadians = 45.0 * M_PI / 180.0;
+  constexpr double kFallbackAngleRadians = 60.0 * M_PI / 180.0;
+  const double primary_min_dot = std::cos(kPrimaryAngleRadians);
+  const double fallback_min_dot = std::cos(kFallbackAngleRadians);
+  std::vector<SpatialRevisitCandidate> anchors;
+
+  for (int i = 0; i < static_cast<int>(s->frames.size()); ++i) {
+    const FrameRecord& current = s->frames[i];
+    if (!current.has_pose) continue;
+    const Eigen::Vector3d center = current.cam_from_world.TgtOriginInSrc();
+    const Eigen::Vector3d forward = CameraForwardWorld(current.cam_from_world);
+    std::vector<SpatialRevisitCandidate> primary;
+    std::vector<SpatialRevisitCandidate> fallback;
+    for (int j = 0; j + temporal_k < i; ++j) {
+      const FrameRecord& previous = s->frames[j];
+      if (!previous.has_pose) continue;
+      const double distance =
+          (center - previous.cam_from_world.TgtOriginInSrc()).norm();
+      if (distance > kFallbackDistanceMeters) continue;
+      const double dot = std::max(
+          -1.0, std::min(1.0, forward.dot(CameraForwardWorld(previous.cam_from_world))));
+      if (dot < fallback_min_dot) continue;
+      const double angle = std::acos(dot);
+      SpatialRevisitCandidate candidate;
+      candidate.i = i;
+      candidate.j = j;
+      candidate.distance_m = distance;
+      candidate.angle_rad = angle;
+      if (distance <= kPrimaryDistanceMeters && dot >= primary_min_dot) {
+        candidate.score = distance / kPrimaryDistanceMeters +
+                          angle / kPrimaryAngleRadians;
+        primary.push_back(candidate);
+      } else {
+        candidate.score = 2.0 + distance / kFallbackDistanceMeters +
+                          angle / kFallbackAngleRadians;
+        fallback.push_back(candidate);
+      }
+    }
+    const auto quality_order = [](const SpatialRevisitCandidate& a,
+                                  const SpatialRevisitCandidate& b) {
+      if (a.score != b.score) return a.score < b.score;
+      return std::abs(a.i - a.j) > std::abs(b.i - b.j);
+    };
+    std::sort(primary.begin(), primary.end(), quality_order);
+    std::sort(fallback.begin(), fallback.end(), quality_order);
+    std::vector<SpatialRevisitCandidate> pool;
+    pool.reserve(kSpatialCandidatePool);
+    for (const SpatialRevisitCandidate& candidate : primary) {
+      if (static_cast<int>(pool.size()) == kSpatialCandidatePool) break;
+      pool.push_back(candidate);
+    }
+    for (const SpatialRevisitCandidate& candidate : fallback) {
+      if (static_cast<int>(pool.size()) == kSpatialCandidatePool) break;
+      pool.push_back(candidate);
+    }
+    s->stat_spatial_pairs_considered += pool.size();
+    std::vector<SpatialRevisitCandidate> selected =
+        SelectDiverseAnchors(std::move(pool), temporal_k);
+    anchors.insert(anchors.end(), selected.begin(), selected.end());
+  }
+  return anchors;
+}
+
+std::vector<SpatialRevisitCandidate> BuildQuadraticAnchors(
+    const aether_sfm_session* s, int temporal_k) {
+  std::vector<SpatialRevisitCandidate> anchors;
+  for (int i = 0; i < static_cast<int>(s->frames.size()); ++i) {
+    int rank = 0;
+    for (int offset = 1; offset <= i; offset *= 2) {
+      if (offset > temporal_k) {
+        SpatialRevisitCandidate candidate;
+        candidate.i = i;
+        candidate.j = i - offset;
+        candidate.score = static_cast<double>(rank);
+        candidate.anchor_rank = rank;
+        candidate.quadratic = true;
+        anchors.push_back(candidate);
+        if (++rank == kSpatialAnchorsPerFrame) break;
+      }
+      if (offset > i / 2) break;
+    }
+  }
+  return anchors;
+}
+
+int ProcessRevisitAnchors(aether_sfm_session* s,
+                          std::vector<SpatialRevisitCandidate> anchors,
+                          bool quadratic,
+                          int anchor_attempt_limit,
+                          SpatialPairCache* cache,
+                          int* attempted_total) {
+  std::sort(anchors.begin(), anchors.end(),
+            [](const SpatialRevisitCandidate& a,
+               const SpatialRevisitCandidate& b) {
+              // Rank-first scheduling gives every frame its best candidate
+              // before any frame consumes candidate two or three. Quality then
+              // decides globally, so a chronological early return cannot starve
+              // the tail of a long capture.
+              if (a.anchor_rank != b.anchor_rank) {
+                return a.anchor_rank < b.anchor_rank;
+              }
+              if (a.score != b.score) return a.score < b.score;
+              if (a.i != b.i) return a.i < b.i;
+              return a.j < b.j;
+            });
+
+  std::vector<SpatialRevisitCandidate> successful;
+  size_t anchor_index = 0;
+  for (; anchor_index < anchors.size(); ++anchor_index) {
+    if (*attempted_total >= anchor_attempt_limit) break;
+    const SpatialPairPurpose purpose =
+        quadratic ? SpatialPairPurpose::kQuadraticAnchor
+                  : SpatialPairPurpose::kAnchor;
+    if (VerifySpatialPair(s, anchors[anchor_index].i, anchors[anchor_index].j,
+                          purpose, cache, attempted_total)) {
+      ++s->stat_spatial_anchor_passed;
+      successful.push_back(anchors[anchor_index]);
+    }
+  }
+  if (anchor_index < anchors.size()) {
+    s->stat_spatial_budget_skipped += anchors.size() - anchor_index;
+  }
+
+  std::sort(successful.begin(), successful.end(),
+            [&](const SpatialRevisitCandidate& a,
+                const SpatialRevisitCandidate& b) {
+              const int a_inliers = cache->at(FramePairKey(a.i, a.j)).final_inliers;
+              const int b_inliers = cache->at(FramePairKey(b.i, b.j)).final_inliers;
+              if (a_inliers != b_inliers) return a_inliers > b_inliers;
+              return a.score < b.score;
+            });
+
+  // Non-max suppression avoids proving and expanding the same physical revisit
+  // dozens of times when adjacent frames all selected the same loop closure.
+  std::vector<SpatialRevisitCandidate> seeds;
+  for (const SpatialRevisitCandidate& candidate : successful) {
+    const bool overlaps = std::any_of(
+        seeds.begin(), seeds.end(), [&](const SpatialRevisitCandidate& seed) {
+          return std::abs(candidate.i - seed.i) <= 4 &&
+                 std::abs(candidate.j - seed.j) <= 4;
+        });
+    if (!overlaps) seeds.push_back(candidate);
+  }
+
+  int confirmed_regions = 0;
+  for (const SpatialRevisitCandidate& seed : seeds) {
+    int available = 0;
+    int passed = 0;
+    std::vector<std::pair<int, int>> support_pairs;
+    for (int delta = -1; delta <= 1; ++delta) {
+      const int i = seed.i + delta;
+      const int j = seed.j + delta;
+      if (i < 0 || j < 0 || i >= static_cast<int>(s->frames.size()) ||
+          j >= static_cast<int>(s->frames.size()) || i == j) {
+        continue;
+      }
+      ++available;
+      const SpatialPairPurpose purpose =
+          quadratic ? SpatialPairPurpose::kQuadraticConfirm
+                    : SpatialPairPurpose::kConfirm;
+      if (VerifySpatialPair(s, i, j, purpose, cache, attempted_total)) {
+        ++passed;
+        support_pairs.emplace_back(i, j);
+      }
+    }
+    if (available < 2 || passed < 2) continue;
+
+    ++confirmed_regions;
+    ++s->stat_spatial_regions_confirmed;
+    for (const auto& pair : support_pairs) {
+      WriteVerifiedSpatialPair(s, pair.first, pair.second, quadratic, cache);
+    }
+
+    // A proven anchor seeds the complete local covisibility neighborhood. Each
+    // expanded pair still has to independently pass raw TVG, guided matching,
+    // >=20 inliers, and >=10% initial inlier ratio before it reaches sqlite.
+    for (int di = -2; di <= 2; ++di) {
+      for (int dj = -2; dj <= 2; ++dj) {
+        const int i = seed.i + di;
+        const int j = seed.j + dj;
+        if (i < 0 || j < 0 || i >= static_cast<int>(s->frames.size()) ||
+            j >= static_cast<int>(s->frames.size()) || i == j) {
+          continue;
+        }
+        const SpatialPairPurpose purpose =
+            quadratic ? SpatialPairPurpose::kQuadraticExpansion
+                      : SpatialPairPurpose::kExpansion;
+        if (VerifySpatialPair(s, i, j, purpose, cache, attempted_total)) {
+          WriteVerifiedSpatialPair(s, i, j, quadratic, cache);
+        }
+      }
+    }
+  }
+  return confirmed_regions;
+}
+
+void AddSpatialRevisitMatches(aether_sfm_session* s) {
+  if (!s || !s->db || s->frames.size() < 3 || s->camera_id == 0) return;
+  const int temporal_k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 12;
+  SpatialPairCache cache;
+  cache.reserve(kSpatialMaxTotalPairs * 2);
+  int attempted_total = 0;
+
+  const std::vector<SpatialRevisitCandidate> spatial_anchors =
+      BuildSpatialAnchors(s, temporal_k);
+  const int spatial_regions = ProcessRevisitAnchors(
+      s, spatial_anchors, false,
+      std::min(kSpatialInitialAnchorBudget, kSpatialMaxTotalPairs), &cache,
+      &attempted_total);
+
+  // COLMAP-style quadratic overlap is a sparse safety net, not parallel blind
+  // work: only use powers-of-two temporal gaps when ARKit produced no confirmed
+  // multi-frame revisit region at all.
+  if (spatial_regions == 0 && attempted_total < kSpatialMaxTotalPairs) {
+    const std::vector<SpatialRevisitCandidate> quadratic_anchors =
+        BuildQuadraticAnchors(s, temporal_k);
+    ProcessRevisitAnchors(s, quadratic_anchors, true, kSpatialMaxTotalPairs,
+                          &cache, &attempted_total);
+  }
+}
+
+// Rebuild the dense, locally stable detail layer after the global camera solve.
+// Spatial/guided pairs have already done their job by constraining loop closure;
+// this pass consumes only the original temporal K-neighbor TVG inliers. Camera
+// poses and intrinsics stay fixed: the pass may create points or add a clean
+// observation, but never merges existing points and never runs another BA.
+// Processing larger temporal gaps first gives each new point the strongest
+// available baseline inside K before adjacent frames try to grow its track.
+void RestoreTemporalDetail(aether_sfm_session* s,
+                           colmap::Reconstruction* reconstruction) {
+  if (!s || !reconstruction || s->frames.size() < 2) return;
+
+  constexpr double kMinTriAngleRad = 0.05235987755982988;  // 3 degrees
+  // 39-capture replay: 4 px kept one 2.8x-q99 ray; 3 px retained ~62.7k
+  // delivered points while reducing all added points below 1.18x-q99.
+  constexpr double kMaxReprojPx = 3.0;
+  const int temporal_k =
+      std::max(1, s->options.k_neighbors > 0 ? s->options.k_neighbors : 12);
+  const int num_frames = static_cast<int>(s->frames.size());
+  auto db = colmap::Database::Open(s->db_path);
+
+  const auto reprojects_cleanly = [&](const colmap::Image& image,
+                                      const colmap::Camera& camera,
+                                      colmap::point2D_t point2D_idx,
+                                      const Eigen::Vector3d& xyz) {
+    const Eigen::Vector3d x_cam = image.CamFromWorld() * xyz;
+    if (x_cam.z() <= 0.0) return false;
+    const std::optional<Eigen::Vector2d> projected = camera.ImgFromCam(x_cam);
+    return projected &&
+           (*projected - image.Point2D(point2D_idx).xy).norm() <=
+               kMaxReprojPx;
+  };
+
+  const auto has_image_in_track = [](const colmap::Track& track,
+                                     colmap::image_t image_id) {
+    return std::any_of(track.Elements().begin(), track.Elements().end(),
+                       [image_id](const colmap::TrackElement& element) {
+                         return element.image_id == image_id;
+                       });
+  };
+
+  const auto has_stable_baseline = [&](const colmap::Track& track,
+                                       const colmap::Image& candidate,
+                                       const Eigen::Vector3d& xyz) {
+    const Eigen::Vector3d candidate_center =
+        candidate.CamFromWorld().TgtOriginInSrc();
+    for (const colmap::TrackElement& element : track.Elements()) {
+      if (!reconstruction->ExistsImage(element.image_id)) continue;
+      const colmap::Image& observed = reconstruction->Image(element.image_id);
+      if (!observed.HasPose()) continue;
+      if (colmap::CalculateTriangulationAngle(
+              candidate_center, observed.CamFromWorld().TgtOriginInSrc(), xyz) >=
+          kMinTriAngleRad) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (int gap = std::min(temporal_k, num_frames - 1); gap >= 1; --gap) {
+    for (int right = gap; right < num_frames; ++right) {
+      const FrameRecord& frame1 = s->frames[right - gap];
+      const FrameRecord& frame2 = s->frames[right];
+      if (!reconstruction->ExistsImage(frame1.image_id) ||
+          !reconstruction->ExistsImage(frame2.image_id)) {
+        continue;
+      }
+      colmap::Image& image1 = reconstruction->Image(frame1.image_id);
+      colmap::Image& image2 = reconstruction->Image(frame2.image_id);
+      if (!image1.HasPose() || !image2.HasPose() ||
+          !db->ExistsTwoViewGeometry(frame1.image_id, frame2.image_id)) {
+        continue;
+      }
+
+      const colmap::TwoViewGeometry geometry =
+          db->ReadTwoViewGeometry(frame1.image_id, frame2.image_id);
+      if (geometry.inlier_matches.empty()) continue;
+      ++s->stat_temporal_detail_pairs;
+      s->stat_temporal_detail_matches += geometry.inlier_matches.size();
+
+      const colmap::Camera& camera1 =
+          reconstruction->Camera(image1.CameraId());
+      const colmap::Camera& camera2 =
+          reconstruction->Camera(image2.CameraId());
+      for (const colmap::FeatureMatch& match : geometry.inlier_matches) {
+        if (match.point2D_idx1 >= image1.NumPoints2D() ||
+            match.point2D_idx2 >= image2.NumPoints2D()) {
+          ++s->stat_temporal_detail_conflicts;
+          continue;
+        }
+
+        const colmap::Point2D& point1 =
+            image1.Point2D(match.point2D_idx1);
+        const colmap::Point2D& point2 =
+            image2.Point2D(match.point2D_idx2);
+        const bool has1 = point1.HasPoint3D();
+        const bool has2 = point2.HasPoint3D();
+
+        if (has1 && has2) {
+          if (point1.point3D_id != point2.point3D_id) {
+            ++s->stat_temporal_detail_conflicts;
+          }
+          continue;
+        }
+
+        if (has1 || has2) {
+          const colmap::point3D_t point3D_id =
+              has1 ? point1.point3D_id : point2.point3D_id;
+          const colmap::image_t grow_image_id =
+              has1 ? frame2.image_id : frame1.image_id;
+          const colmap::point2D_t grow_point2D_idx =
+              has1 ? match.point2D_idx2 : match.point2D_idx1;
+          colmap::Image& grow_image = has1 ? image2 : image1;
+          const colmap::Camera& grow_camera = has1 ? camera2 : camera1;
+          const colmap::Point3D& point3D =
+              reconstruction->Point3D(point3D_id);
+          if (has_image_in_track(point3D.track, grow_image_id)) {
+            ++s->stat_temporal_detail_conflicts;
+            continue;
+          }
+          const Eigen::Vector3d x_cam =
+              grow_image.CamFromWorld() * point3D.xyz;
+          if (x_cam.z() <= 0.0) {
+            ++s->stat_temporal_detail_reject_cheirality;
+            continue;
+          }
+          if (!reprojects_cleanly(grow_image, grow_camera,
+                                  grow_point2D_idx, point3D.xyz)) {
+            ++s->stat_temporal_detail_reject_reproj;
+            continue;
+          }
+          if (!has_stable_baseline(point3D.track, grow_image, point3D.xyz)) {
+            ++s->stat_temporal_detail_reject_tri_angle;
+            continue;
+          }
+          reconstruction->AddObservation(
+              point3D_id,
+              colmap::TrackElement(grow_image_id, grow_point2D_idx));
+          ++s->stat_temporal_detail_grown;
+          continue;
+        }
+
+        const std::optional<Eigen::Vector2d> cam_point1 =
+            camera1.CamFromImg(point1.xy);
+        const std::optional<Eigen::Vector2d> cam_point2 =
+            camera2.CamFromImg(point2.xy);
+        if (!cam_point1 || !cam_point2) {
+          ++s->stat_temporal_detail_reject_reproj;
+          continue;
+        }
+        Eigen::Vector3d xyz;
+        if (!colmap::TriangulatePoint(image1.CamFromWorld().ToMatrix(),
+                                     image2.CamFromWorld().ToMatrix(),
+                                     *cam_point1, *cam_point2, &xyz)) {
+          ++s->stat_temporal_detail_reject_tri_angle;
+          continue;
+        }
+        const Eigen::Vector3d x_cam1 = image1.CamFromWorld() * xyz;
+        const Eigen::Vector3d x_cam2 = image2.CamFromWorld() * xyz;
+        if (x_cam1.z() <= 0.0 || x_cam2.z() <= 0.0) {
+          ++s->stat_temporal_detail_reject_cheirality;
+          continue;
+        }
+        if (colmap::CalculateTriangulationAngle(
+                image1.CamFromWorld().TgtOriginInSrc(),
+                image2.CamFromWorld().TgtOriginInSrc(), xyz) <
+            kMinTriAngleRad) {
+          ++s->stat_temporal_detail_reject_tri_angle;
+          continue;
+        }
+        if (!reprojects_cleanly(image1, camera1, match.point2D_idx1, xyz) ||
+            !reprojects_cleanly(image2, camera2, match.point2D_idx2, xyz)) {
+          ++s->stat_temporal_detail_reject_reproj;
+          continue;
+        }
+
+        colmap::Track track;
+        track.AddElement(frame1.image_id, match.point2D_idx1);
+        track.AddElement(frame2.image_id, match.point2D_idx2);
+        reconstruction->AddPoint3D(xyz, std::move(track),
+                                   Eigen::Vector3ub::Zero());
+        ++s->stat_temporal_detail_created;
+      }
+    }
+  }
+  db->Close();
+}
 
 // Pick the largest reconstruction in the manager and write the JSON summary.
 std::shared_ptr<const colmap::Reconstruction> PickBestAndReport(
@@ -315,12 +1237,13 @@ aether_sfm_result_t RunIncremental(
   }
 }
 
-// Async-finalize worker: deep-copy the local-only reconstruction, run the global
-// BA (retriangulation + global bundle adjustment) via the pipeline's PUBLIC
-// TriangulateReconstruction — the same validated plumbing the synchronous
-// finalize uses — then atomically swap the refined model into the session. Runs
-// off the UI thread so the caller already has the instant local result. db_path
-// must be readable (the session closed its handle before spawning this).
+// Async-finalize worker: deep-copy the local-only reconstruction, run global bundle
+// adjustment via the pipeline's PUBLIC RefineReconstruction() (iterative global
+// refinement + FilterFrames + UpdatePoint3DErrors — NO per-image re-triangulation;
+// TriangulateReconstruction() would add that and is a separate A/B), then atomically
+// swap the refined model into the session. Runs off the UI thread so the caller
+// already has the instant local result. db_path must be readable (the session closed
+// its handle before spawning this).
 void RefineGlobalBA(aether_sfm_session* s,
                     std::shared_ptr<const colmap::Reconstruction> local) {
   try {
@@ -329,14 +1252,26 @@ void RefineGlobalBA(aether_sfm_session* s,
     auto popts = std::make_shared<colmap::IncrementalPipelineOptions>();
     popts->min_num_matches = 15;
     popts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
-    // Global BA at FULL convergence (default gref5/giter50) = the validated
-    // finalize quality (reproj 1.1455). TriangulateReconstruction reads
-    // ba_global_* + Mapper() + Triangulation() from these options.
+    // [2026-07-10] COMPLETE the phase-2 Cauchy config. This block previously set only
+    // min_num_matches + residuals, so ba_global_loss_type defaulted to 0 (TRIVIAL) —
+    // phase 2 was NOT the full Cauchy it was described as. Set the SAME validated global
+    // config the synchronous RunPipeline uses (aether_sfm_c.cc:1200-1202): Cauchy@1.0,
+    // gftol 1e-6, gref5/giter50 (defaults, set explicit so they hit the log).
+    // RefineReconstruction (below) runs iterative global refinement, which reads
+    // ba_global_* for its loss. NOTE: this changes ONLY the loss config; the
+    // RefineReconstruction-vs-TriangulateReconstruction choice is a SEPARATE algorithmic
+    // decision, intentionally left unchanged here for a controlled A/B.
+    popts->ba_global_loss_type = 2;              // CAUCHY (was defaulting to 0=TRIVIAL)
+    popts->ba_global_loss_scale = 1.0;
+    popts->ba_global_function_tolerance = 1e-6;  // converge-stop
+    popts->ba_global_max_refinements = 5;
+    popts->ba_global_max_num_iterations = 50;
     auto manager = std::make_shared<colmap::ReconstructionManager>();
     popts->image_path = s->image_path;  // [4.0.4] image_path moved into options
     colmap::IncrementalPipeline pipeline(
         popts, colmap::Database::Open(s->db_path), manager);
     pipeline.RefineReconstruction(refined);
+    RestoreTemporalDetail(s, refined.get());
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
       s->recon = refined;
@@ -445,7 +1380,10 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
       aether_sfm_options_default(&s->options);
     }
     s->db_path = db_path;
-    s->owns_db_file = true;
+    // Streaming callers pass a capture-owned db path (`sfm_live.db`). Keep it
+    // after free so detached/background finalize or the launch-time recovery
+    // sweep can retry if the app is killed mid-solve.
+    s->owns_db_file = false;
     s->db = colmap::Database::Open(db_path);
     if (!s->db) {
       delete s;
@@ -618,9 +1556,12 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
     // variable set for the windowed local BA below.
     std::unordered_set<colmap::point3D_t> touched;
     constexpr double kMinTriAngleRad = 0.05235987755982988;  // 3.0 deg parallax
-    constexpr double kMaxReprojPx = 10.0;  // rough gate (fed-res px); ARKit drift
+    constexpr double kMaxCreateReprojPx = 10.0;  // strict new-point gate
+    constexpr double kMaxGrowReprojPx = 14.0;    // TVG-inlier grow absorbs ARKit drift
+    constexpr double kMaxMergeReprojPx = 8.0;    // stricter: irreversible track merge
     const bool gpu_match_avail =
         s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
+    std::unordered_set<PointIdPair, PointIdPairHash> merge_trials;
     for (int j = start; j < frame_id; ++j) {
       const FrameRecord& prev = s->frames[j];
       ++n_cand;
@@ -629,17 +1570,20 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                                          : rec.n_keypoints;
       pair_buf.resize(static_cast<size_t>(cap) * 2);
       int num_matches = 0;
-      // GPU tiled-GEMM first when enabled+linked (mutual cross-check inside);
-      // any failure falls back to the CPU brute-force pairs matcher so a
-      // Metal hiccup can never cost the pair.
+      // GPU tiled-GEMM first when enabled+linked (mutual cross-check inside).
+      // On device, a Metal failure used to fall back to the CPU brute-force
+      // matcher and could stall the streaming queue for minutes. If the GPU
+      // symbol is present but this pair fails, skip the pair; CPU remains the
+      // host/no-Metal fallback when the weak GPU symbol is absent.
       int mrc = 1;
+      bool used_gpu = false;
       if (gpu_match_avail) {
         mrc = aether_gpu_match_gemm_pairs(
             prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
             rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
-      }
-      const bool used_gpu = (mrc == 0);
-      if (mrc != 0) {
+        if (mrc != 0) continue;
+        used_gpu = true;
+      } else {
         mrc = aether_sift_match_pairs(
             prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
             rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
@@ -698,9 +1642,33 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
           const bool has1 = o1.HasPoint3D();
           const bool has2 = o2.HasPoint3D();
 
-          // Both assigned: same track = nothing; different tracks = a merge the
-          // live pass defers to the finalize global BA (no live loop closure).
-          if (has1 && has2) continue;
+          // Both assigned: same track = nothing; different tracks = try a
+          // conservative live MergePoints3D. This directly attacks duplicate
+          // fragmented tracks without a finish-time global BA. Only TVG
+          // inliers are allowed to merge; raw fallback pairs still just log the
+          // signal so they cannot glue unrelated texture repeats together.
+          if (has1 && has2) {
+            if (o1.point3D_id == o2.point3D_id) ++s->stat_already_assigned;
+            else {
+              ++s->stat_merge_needed;
+              if (!use_inliers) continue;
+              const PointIdPair key =
+                  CanonicalPointPair(o1.point3D_id, o2.point3D_id);
+              if (!merge_trials.insert(key).second) continue;
+              if (CanMergeLivePoints(s->live_recon, s->camera, key.a, key.b,
+                                     kMaxMergeReprojPx)) {
+                const colmap::point3D_t merged =
+                    s->live_recon.MergePoints3D(key.a, key.b);
+                touched.erase(key.a);
+                touched.erase(key.b);
+                touched.insert(merged);
+                ++s->stat_merge_accepted;
+              } else {
+                ++s->stat_merge_rejected;
+              }
+            }
+            continue;
+          }
 
           // One side assigned: grow that Point3D by the unassigned observation.
           // GATE the growth the same way creation is gated: the new observation
@@ -721,36 +1689,59 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                 has1 ? rec.cam_from_world : prev.cam_from_world;
             const Eigen::Vector2d& gkp = has1 ? rec.points[i2] : prev.points[i1];
             const Eigen::Vector3d Xg = gcfw * s->live_recon.Point3D(pid).xyz;
-            bool grown = false;
-            if (Xg.z() > 0.0) {                                    // cheirality
-              const std::optional<Eigen::Vector2d> pg = s->camera.ImgFromCam(Xg);
-              if (pg && (*pg - gkp).norm() <= kMaxReprojPx) {      // reproj gate
-                s->live_recon.AddObservation(pid, colmap::TrackElement(gimg, gidx));
-                touched.insert(pid);
-                grown = true;
-              }
+            if (Xg.z() <= 0.0) {
+              ++s->stat_grow_rejected;
+              ++s->stat_grow_reject_cheirality;
+              continue;
             }
-            if (grown) ++s->stat_grow_accepted;
-            else ++s->stat_grow_rejected;
+            const std::optional<Eigen::Vector2d> pg = s->camera.ImgFromCam(Xg);
+            const double grow_gate = use_inliers ? kMaxGrowReprojPx
+                                                 : kMaxCreateReprojPx;
+            if (!pg || (*pg - gkp).norm() > grow_gate) {
+              ++s->stat_grow_rejected;
+              ++s->stat_grow_reject_reproj;
+              continue;
+            }
+            s->live_recon.AddObservation(pid, colmap::TrackElement(gimg, gidx));
+            touched.insert(pid);
+            ++s->stat_grow_accepted;
             continue;
           }
 
           // Neither assigned: brand-new 2-view track. Triangulate + gate.
           const std::optional<Eigen::Vector2d> nn1 = s->camera.CamFromImg(prev.points[i1]);
           const std::optional<Eigen::Vector2d> nn2 = s->camera.CamFromImg(rec.points[i2]);
-          if (!nn1 || !nn2) continue;
+          if (!nn1 || !nn2) {
+            ++s->stat_create_reject_reproj;
+            continue;
+          }
           Eigen::Vector3d X_world;
-          if (!colmap::TriangulatePoint(P_prev, P_cur, *nn1, *nn2, &X_world)) continue;
+          if (!colmap::TriangulatePoint(P_prev, P_cur, *nn1, *nn2, &X_world)) {
+            ++s->stat_create_reject_tri_angle;
+            continue;
+          }
           const Eigen::Vector3d X_prev = prev.cam_from_world * X_world;
           const Eigen::Vector3d X_cur = rec.cam_from_world * X_world;
-          if (X_prev.z() <= 0.0 || X_cur.z() <= 0.0) continue;             // cheirality
+          if (X_prev.z() <= 0.0 || X_cur.z() <= 0.0) {
+            ++s->stat_create_reject_cheirality;
+            continue;
+          }
           if (colmap::CalculateTriangulationAngle(c_prev, c_cur, X_world) <
-              kMinTriAngleRad) continue;                                    // parallax
+              kMinTriAngleRad) {
+            ++s->stat_create_reject_tri_angle;
+            continue;
+          }
           const std::optional<Eigen::Vector2d> rr1 = s->camera.ImgFromCam(X_prev);
           const std::optional<Eigen::Vector2d> rr2 = s->camera.ImgFromCam(X_cur);
-          if (!rr1 || !rr2) continue;
-          if ((*rr1 - prev.points[i1]).norm() > kMaxReprojPx ||
-              (*rr2 - rec.points[i2]).norm() > kMaxReprojPx) continue;      // reproj gate
+          if (!rr1 || !rr2) {
+            ++s->stat_create_reject_reproj;
+            continue;
+          }
+          if ((*rr1 - prev.points[i1]).norm() > kMaxCreateReprojPx ||
+              (*rr2 - rec.points[i2]).norm() > kMaxCreateReprojPx) {
+            ++s->stat_create_reject_reproj;
+            continue;
+          }
 
           colmap::Track track;
           track.AddElement(prev.image_id, i1);
@@ -856,6 +1847,7 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
   try {
+    AddSpatialRevisitMatches(s);
     if (s->db) s->db->Close();  // flush sqlite before the pipeline re-opens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> recon;
@@ -888,6 +1880,7 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
   if (s->refine_thread.joinable()) s->refine_thread.join();  // drain prior run
   try {
+    AddSpatialRevisitMatches(s);
     if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> local;
@@ -1151,6 +2144,107 @@ aether_sfm_result_t aether_sfm_get_preview_tracked(
   return AETHER_SFM_OK;
 }
 
+// Legacy experimental one-shot GLOBAL BA over the streaming live_recon. This is
+// intentionally NOT the finish-time delivery path: device tests showed pure BA
+// can refine existing tracks but cannot create missing cross-view tracks, merge
+// duplicate tracks, or retriangulate a revisit into a single wall. Keep it as an
+// explicit experiment only; spatial-revisit matching + track merge/retriangulate
+// must provide the bridge before any global solve can close a double wall.
+//
+// Refines live_recon IN PLACE + republishes preview_points. Idempotent-ish
+// (re-running just re-optimizes). On any failure the windowed cloud is kept.
+// THREADING: like get_preview_tracked, must run on the capture worker isolate
+// (mutates live_recon); the getter is called after this returns.
+aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  if (!s->live_recon_ready || s->live_recon.NumRegImages() < 3)
+    return AETHER_SFM_ERR_NOT_REGISTERED;
+  try {
+    // ---- STAGE 1: pose-correcting global BA, OBSERVATION-CAPPED --------------
+    // Double-wall = accumulated pose drift, NOT a per-point error. So the drift
+    // fix only needs the POSES optimized against a well-distributed subset of
+    // long tracks — NOT every one of the (up to millions of) points. We cap the
+    // residuals fed to this pass so its cost is bounded and DECOUPLED from total
+    // frame/point count: at any capture size stage-1 stays a few seconds. The
+    // longest tracks are the ones that SPAN revisits (a wall seen twice → one
+    // long track linking both visits), so ranking by length and taking the top
+    // until the obs budget is hit is exactly what collapses the two layers.
+    const size_t n_frames = s->reg_order.size();
+    // ~120 obs/frame keeps per-pose constraint density healthy, floored at 80k
+    // (tiny captures) and ceilinged at 400k (huge captures stay bounded).
+    const size_t kMaxObs =
+        std::min<size_t>(400000, std::max<size_t>(80000, n_frames * 120));
+
+    std::vector<std::pair<int, colmap::point3D_t>> ranked;  // (track_len, pid)
+    ranked.reserve(s->live_recon.NumPoints3D());
+    for (const auto& [pid, pt] : s->live_recon.Points3D())
+      ranked.emplace_back(static_cast<int>(pt.track.Length()), pid);
+    std::sort(ranked.begin(), ranked.end(),
+              std::greater<std::pair<int, colmap::point3D_t>>());  // longest first
+
+    colmap::BundleAdjustmentConfig cfg1;
+    cfg1.FixGauge(colmap::BundleAdjustmentGauge::THREE_POINTS);
+    for (const colmap::image_t img_id : s->reg_order) cfg1.AddImage(img_id);
+    size_t obs_budget = 0;
+    for (const auto& [len, pid] : ranked) {
+      if (obs_budget >= kMaxObs) break;
+      cfg1.AddVariablePoint(pid);
+      obs_budget += static_cast<size_t>(len);
+    }
+
+    colmap::BundleAdjustmentOptions opt1;
+    opt1.refine_rig_from_world = true;   // poses FREE → drift redistributes
+    opt1.refine_points3D = true;
+    opt1.refine_focal_length = false;    // trust the ARKit focal (one shared cam)
+    opt1.refine_principal_point = false;
+    opt1.print_summary = false;
+    opt1.ceres->loss_function_type =
+        colmap::CeresBundleAdjustmentOptions::LossFunctionType::CAUCHY;
+    opt1.ceres->loss_function_scale = 1.0;
+    opt1.ceres->solver_options.max_num_iterations = 25;  // gref=1, giter~20-25
+    colmap::CreateDefaultBundleAdjuster(opt1, cfg1, s->live_recon)->Solve();
+
+    // ---- STAGE 2: structure-only refit, ALL points, POSES FIXED -------------
+    // Stage 1 moved the poses; every point NOT in the capped subset is now stale
+    // (it was triangulated under the old drifted poses). With poses held CONSTANT
+    // the per-point problems are separable — Ceres solves millions of tiny 3-DOF
+    // fits in one linear-cost pass — so this refits the WHOLE cloud onto the
+    // corrected geometry cheaply, regardless of point count. (No gauge fix
+    // needed: fixed poses already pin the gauge.)
+    colmap::BundleAdjustmentConfig cfg2;
+    for (const colmap::image_t img_id : s->reg_order) cfg2.AddImage(img_id);
+    for (const auto& [pid, pt] : s->live_recon.Points3D())
+      cfg2.AddVariablePoint(pid);
+
+    colmap::BundleAdjustmentOptions opt2 = opt1;
+    opt2.refine_rig_from_world = false;  // poses FROZEN → structure-only, fast
+    opt2.ceres->solver_options.max_num_iterations = 10;
+    colmap::CreateDefaultBundleAdjuster(opt2, cfg2, s->live_recon)->Solve();
+
+    // Global floater cleanup (all points now, not just a window's touched set).
+    colmap::ObservationManager obs_mgr(s->live_recon);
+    obs_mgr.FilterObservationsWithNegativeDepth();
+    std::unordered_set<colmap::point3D_t> all_pts;
+    all_pts.reserve(s->live_recon.NumPoints3D());
+    for (const auto& [pid, pt] : s->live_recon.Points3D()) all_pts.insert(pid);
+    obs_mgr.FilterPoints3DWithLargeReprojectionError(/*max_error=*/4.0, all_pts);
+    obs_mgr.FilterPoints3DWithSmallTriangulationAngle(/*min_tri_angle_deg=*/2.0,
+                                                      all_pts);
+
+    // Republish the collapsed cloud into preview_points.
+    std::vector<Eigen::Vector3d> snap;
+    snap.reserve(s->live_recon.NumPoints3D());
+    for (const auto& [pid, pt] : s->live_recon.Points3D()) snap.push_back(pt.xyz);
+    {
+      std::lock_guard<std::mutex> lk(s->preview_mutex);
+      s->preview_points.swap(snap);
+    }
+    return AETHER_SFM_OK;
+  } catch (const std::exception&) {
+    return AETHER_SFM_ERR_INTERNAL;  // keep the windowed cloud on failure
+  }
+}
+
 // Rough live-preview point cloud accumulated during capture (throwaway; built by
 // triangulating per-frame matches with the ARKit poses — NOT the authoritative
 // finalize model). World frame = ARKit world. Fills out_xyz with up to `cap`
@@ -1199,7 +2293,37 @@ void aether_sfm_debug_last(aether_sfm_session_t* s, double* extract_ms,
 void aether_sfm_stream_stats(aether_sfm_session_t* s, int64_t* tvg_pairs,
                              int64_t* raw_pairs, int64_t* grow_accepted,
                              int64_t* grow_rejected, int64_t* reproj_filtered,
-                             int64_t* tri_filtered) {
+                             int64_t* tri_filtered,
+                             int64_t* grow_reject_cheirality,
+                             int64_t* grow_reject_reproj,
+                             int64_t* create_reject_cheirality,
+                             int64_t* create_reject_tri_angle,
+                             int64_t* create_reject_reproj,
+                             int64_t* already_assigned,
+                             int64_t* merge_needed,
+                             int64_t* merge_accepted,
+                             int64_t* merge_rejected,
+                             int64_t* spatial_considered,
+                             int64_t* spatial_attempted,
+                             int64_t* spatial_written,
+                             int64_t* spatial_inliers,
+                             int64_t* spatial_anchor_attempted,
+                             int64_t* spatial_anchor_passed,
+                             int64_t* spatial_regions_confirmed,
+                             int64_t* spatial_expanded_attempted,
+                             int64_t* spatial_guided_pairs,
+                             int64_t* spatial_guided_inliers,
+                             int64_t* spatial_quadratic_attempted,
+                             int64_t* spatial_quadratic_written,
+                             int64_t* spatial_budget_skipped,
+                             int64_t* temporal_detail_pairs,
+                             int64_t* temporal_detail_matches,
+                             int64_t* temporal_detail_created,
+                             int64_t* temporal_detail_grown,
+                             int64_t* temporal_detail_reject_cheirality,
+                             int64_t* temporal_detail_reject_reproj,
+                             int64_t* temporal_detail_reject_tri_angle,
+                             int64_t* temporal_detail_conflicts) {
   if (!s) return;
   if (tvg_pairs) *tvg_pairs = s->stat_tvg_inlier_pairs;
   if (raw_pairs) *raw_pairs = s->stat_raw_pairs;
@@ -1207,6 +2331,62 @@ void aether_sfm_stream_stats(aether_sfm_session_t* s, int64_t* tvg_pairs,
   if (grow_rejected) *grow_rejected = s->stat_grow_rejected;
   if (reproj_filtered) *reproj_filtered = s->stat_reproj_filtered;
   if (tri_filtered) *tri_filtered = s->stat_tri_filtered;
+  if (grow_reject_cheirality)
+    *grow_reject_cheirality = s->stat_grow_reject_cheirality;
+  if (grow_reject_reproj) *grow_reject_reproj = s->stat_grow_reject_reproj;
+  if (create_reject_cheirality)
+    *create_reject_cheirality = s->stat_create_reject_cheirality;
+  if (create_reject_tri_angle)
+    *create_reject_tri_angle = s->stat_create_reject_tri_angle;
+  if (create_reject_reproj)
+    *create_reject_reproj = s->stat_create_reject_reproj;
+  if (already_assigned) *already_assigned = s->stat_already_assigned;
+  if (merge_needed) *merge_needed = s->stat_merge_needed;
+  if (merge_accepted) *merge_accepted = s->stat_merge_accepted;
+  if (merge_rejected) *merge_rejected = s->stat_merge_rejected;
+  if (spatial_considered)
+    *spatial_considered = s->stat_spatial_pairs_considered;
+  if (spatial_attempted) *spatial_attempted = s->stat_spatial_pairs_attempted;
+  if (spatial_written) *spatial_written = s->stat_spatial_pairs_written;
+  if (spatial_inliers) *spatial_inliers = s->stat_spatial_inliers;
+  if (spatial_anchor_attempted)
+    *spatial_anchor_attempted = s->stat_spatial_anchor_attempted;
+  if (spatial_anchor_passed)
+    *spatial_anchor_passed = s->stat_spatial_anchor_passed;
+  if (spatial_regions_confirmed)
+    *spatial_regions_confirmed = s->stat_spatial_regions_confirmed;
+  if (spatial_expanded_attempted)
+    *spatial_expanded_attempted = s->stat_spatial_expanded_attempted;
+  if (spatial_guided_pairs)
+    *spatial_guided_pairs = s->stat_spatial_guided_pairs;
+  if (spatial_guided_inliers)
+    *spatial_guided_inliers = s->stat_spatial_guided_inliers;
+  if (spatial_quadratic_attempted)
+    *spatial_quadratic_attempted = s->stat_spatial_quadratic_attempted;
+  if (spatial_quadratic_written)
+    *spatial_quadratic_written = s->stat_spatial_quadratic_written;
+  if (spatial_budget_skipped)
+    *spatial_budget_skipped = s->stat_spatial_budget_skipped;
+  if (temporal_detail_pairs)
+    *temporal_detail_pairs = s->stat_temporal_detail_pairs;
+  if (temporal_detail_matches)
+    *temporal_detail_matches = s->stat_temporal_detail_matches;
+  if (temporal_detail_created)
+    *temporal_detail_created = s->stat_temporal_detail_created;
+  if (temporal_detail_grown)
+    *temporal_detail_grown = s->stat_temporal_detail_grown;
+  if (temporal_detail_reject_cheirality) {
+    *temporal_detail_reject_cheirality =
+        s->stat_temporal_detail_reject_cheirality;
+  }
+  if (temporal_detail_reject_reproj)
+    *temporal_detail_reject_reproj = s->stat_temporal_detail_reject_reproj;
+  if (temporal_detail_reject_tri_angle) {
+    *temporal_detail_reject_tri_angle =
+        s->stat_temporal_detail_reject_tri_angle;
+  }
+  if (temporal_detail_conflicts)
+    *temporal_detail_conflicts = s->stat_temporal_detail_conflicts;
 }
 
 void aether_sfm_free(aether_sfm_session_t* s) {

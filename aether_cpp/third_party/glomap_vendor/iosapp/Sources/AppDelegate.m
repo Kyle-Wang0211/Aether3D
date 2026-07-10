@@ -241,7 +241,8 @@ static void StartMemSampler(void) {
       }
     }
     if (0)  // GLOMAP_BENCH: kept (gated off) as record. GLOMAP is OUT on device — it
-    {       // dies at global positioning (OOM/crash, both SPARSE+EIGEN and ITERATIVE).
+    {       // dies at global positioning (OOM/crash) — re-confirmed 2026-07-08: 50f
+            // std::bad_alloc @ global_positioning.cc:92, peak 2.7GB on iPhone 14 Pro.
       NSString* docs = NSSearchPathForDirectoriesInDomains(
           NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
       NSString* dbp = [docs stringByAppendingPathComponent:@"real414_v313_nodesc.db"];

@@ -17,8 +17,11 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>   // per-frame feature-count telemetry (file append)
+#include <cstdlib>  // getenv
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "dawn_kernel_harness.h"
@@ -172,6 +175,20 @@ int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
             prev_os = os;
         }
         if (out_count) *out_count = emitted;
+        // Per-frame detection telemetry (peak_threshold-tuning A/B): raw = #DoG
+        // keypoints detected BEFORE the 8192 (octave,scale) clamp — the direct
+        // signal a lower peak_threshold moves; kept = #emitted after the clamp.
+        // Appended to <container>/Documents/gpu_sift_feat.log so it pulls with
+        // the same devicectl copy as pw_device_log.txt (no root / os_log dance).
+        if (const char* home = std::getenv("HOME")) {
+            const std::string path =
+                std::string(home) + "/Documents/gpu_sift_feat.log";
+            if (FILE* lf = std::fopen(path.c_str(), "a")) {
+                std::fprintf(lf, "feat_raw=%d kept=%d %dx%d\n", K, emitted,
+                             width, height);
+                std::fclose(lf);
+            }
+        }
         return 0;
     } catch (...) {
         return fallback();
