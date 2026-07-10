@@ -565,6 +565,14 @@ bool VerifySpatialPair(aether_sfm_session* s,
     return result.valid;
   }
 
+  // [RESUME 2026-07-10] Frames rebuilt from the db by
+  // RebuildFrameRecordsForResume carry NO in-memory descriptors/keypoints —
+  // only the existing-matches fast path above can validate such pairs. Fail
+  // closed instead of handing the matchers a null descriptor pointer.
+  // Live-captured frames always have descriptors when n_keypoints > 0
+  // (add_frame assigns them unconditionally), so this is unreachable live.
+  if (a.descriptors.empty() || b.descriptors.empty()) return false;
+
   if (*attempted_total >= kSpatialMaxTotalPairs) {
     ++s->stat_spatial_budget_skipped;
     return false;
@@ -1117,6 +1125,78 @@ void RestoreTemporalDetail(aether_sfm_session* s,
     }
   }
   db->Close();
+}
+
+// ── Resume support: rebuild minimal FrameRecords from the db ────────────────
+// [RESUME 2026-07-10] A resumed finalize (launch-time "有db无PLY" recovery
+// sweep / retry after the app was killed mid-solve) reopens sfm_live.db via
+// aether_sfm_create + finalize(_async) WITHOUT replaying add_frame, so
+// s->frames is EMPTY. RunIncremental itself is db-driven and unaffected, but
+// BOTH finish-time enrichment passes are frame-driven and silently no-op:
+//   - RestoreTemporalDetail early-returns on frames.size() < 2 → the resumed
+//     model loses the whole temporal detail layer (observed on device: ~23k
+//     delivered points on resume vs ~60k live for the same capture).
+//   - AddSpatialRevisitMatches early-returns on frames.size() < 3 ||
+//     camera_id == 0.
+// Rebuild MINIMAL records: image_id (1-based WriteImage auto-increment ==
+// capture order; add_frame names images "frame_%06d.jpg" with frame_id ==
+// image_id-1, used as a cross-check) + n_keypoints, and refill the session
+// camera from the db (single shared SIMPLE_PINHOLE per session).
+//
+// Deliberately NOT restored (memory: ~1 MB/frame descriptors at 8192 kp):
+// descriptors, keypoint xy, ARKit poses. Consequences, by consumer:
+//   - RestoreTemporalDetail reads ONLY image_id here; TVGs come from the db →
+//     fully functional after this rebuild.
+//   - AddSpatialRevisitMatches: pairs ALREADY IN THE DB (written by a previous
+//     interrupted finalize) validate via VerifySpatialPair's existing-matches
+//     fast path. FRESH spatial pairs would need descriptors + keypoints (+ the
+//     GPU guided matcher); that is intentionally out of scope for resume —
+//     VerifySpatialPair fails such pairs closed (empty-descriptor guard there).
+//     has_pose stays false, so anchor building degrades to the quadratic
+//     fallback whose fresh pairs also fail closed. Acceptable: loop-closure
+//     pairs a previous finalize committed are consumed by RunIncremental from
+//     two_view_geometries regardless of s->frames.
+// Live sessions (frames non-empty) are untouched — strict no-op.
+void RebuildFrameRecordsForResume(aether_sfm_session* s) {
+  if (!s || !s->db || !s->frames.empty()) return;
+  try {
+    std::vector<colmap::Image> images = s->db->ReadAllImages();
+    if (images.empty()) return;
+    std::sort(images.begin(), images.end(),
+              [](const colmap::Image& a, const colmap::Image& b) {
+                return a.ImageId() < b.ImageId();
+              });
+    std::vector<FrameRecord> frames;
+    frames.reserve(images.size());
+    for (const colmap::Image& image : images) {
+      FrameRecord rec;
+      rec.image_id = image.ImageId();
+      // Cross-check against the add_frame naming convention; fall back to the
+      // 1-based-id convention if the name ever diverges.
+      int parsed = -1;
+      if (std::sscanf(image.Name().c_str(), "frame_%d.jpg", &parsed) == 1 &&
+          parsed >= 0) {
+        rec.frame_id = parsed;
+      } else {
+        rec.frame_id = static_cast<int>(image.ImageId()) - 1;
+      }
+      rec.n_keypoints =
+          static_cast<int>(s->db->NumKeypointsForImage(image.ImageId()));
+      frames.push_back(std::move(rec));
+    }
+    if (s->camera_id == 0) {
+      const std::vector<colmap::Camera> cameras = s->db->ReadAllCameras();
+      if (!cameras.empty()) {
+        s->camera = cameras.front();
+        s->camera_id = cameras.front().camera_id;
+      }
+    }
+    s->frames = std::move(frames);
+  } catch (const std::exception&) {
+    // Fail open into the pre-fix behavior: with frames still empty the
+    // enrichment passes skip themselves and the db-driven finalize proceeds.
+    s->frames.clear();
+  }
 }
 
 // Pick the largest reconstruction in the manager and write the JSON summary.
@@ -1847,6 +1927,7 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
   try {
+    RebuildFrameRecordsForResume(s);  // no-op unless frames empty (resume)
     AddSpatialRevisitMatches(s);
     if (s->db) s->db->Close();  // flush sqlite before the pipeline re-opens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
@@ -1880,6 +1961,7 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
   if (s->refine_thread.joinable()) s->refine_thread.join();  // drain prior run
   try {
+    RebuildFrameRecordsForResume(s);  // no-op unless frames empty (resume)
     AddSpatialRevisitMatches(s);
     if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
