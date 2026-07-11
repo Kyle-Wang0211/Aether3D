@@ -127,6 +127,18 @@ extern "C" __attribute__((weak)) int aether_gpu_match_gemm_pairs_guided(
 // longer compiled into glomap_core there is no such reference, so the stub is
 // dead. The colmap incremental pipeline this wrapper drives never used it.
 
+// [AETHER FINALIZE-SEGMENTS 2026-07-11] Telemetry-only accessor defined in
+// colmap/estimators/bundle_adjustment_ceres.cc: the observability fields of
+// the LAST ceres solve (the "[AETHER] solver_used=" log line's values), so
+// the finalize worker can persist them — stderr is lost in detached device
+// runs. Requires a libglomap_core.a built from the same source state.
+namespace colmap {
+void AetherLastBaSolveInfo(std::string* solver_used,
+                           std::string* sparse_backend,
+                           int* mixed,
+                           int* threads);
+}  // namespace colmap
+
 namespace {
 
 double NowMs() {
@@ -1964,6 +1976,79 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   return popts;
 }
 
+// [AETHER FINALIZE-SEGMENTS 2026-07-11] Persist the finalize worker's phase-2
+// internal segment timings + BA-solver observability as ONE JSON object at
+// <db_dir>/finalize_segments.json. Motivation (cap44): these numbers only ever
+// reached stderr, which a detached (unplugged) device run loses entirely —
+// the 105 s single-core finalize tail was unattributable. The Dart layer reads
+// this file after REFINED and forwards it into telemetry_dart.jsonl.
+// Telemetry-only: zero algorithm changes; best-effort (failures are logged and
+// swallowed). Written BEFORE finalize_status flips to REFINED so the Dart
+// reader never races a partial file (write-to-temp + atomic rename).
+void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
+                           double cache_pre_ms, double enrich_ms,
+                           double stage1_ms, int stage1_rounds,
+                           const char* stage1_state, double stage2_ms,
+                           int stage2_rounds_budget, double temporal_ms,
+                           double total_ms) {
+  try {
+    const std::filesystem::path dir =
+        std::filesystem::path(s->db_path).parent_path();
+    const std::filesystem::path tmp = dir / "finalize_segments.json.tmp";
+    const std::filesystem::path dst = dir / "finalize_segments.json";
+    std::string solver_used, sparse_backend;
+    int mixed = 0, threads = 0;
+    colmap::AetherLastBaSolveInfo(&solver_used, &sparse_backend, &mixed,
+                                  &threads);
+    const int64_t epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    char buf[1024];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "{\"t\":%lld,\"live_reuse\":%d,"
+        "\"cache_pre_ms\":%lld,\"enrich_ms\":%lld,"
+        "\"stage1_ms\":%lld,\"stage1_rounds\":%d,\"stage1_state\":\"%s\","
+        "\"stage2_ms\":%lld,\"stage2_rounds_budget\":%d,"
+        "\"temporal_ms\":%lld,\"total_ms\":%lld,"
+        "\"rematch_starved_frames\":%lld,\"rematch_candidates\":%lld,"
+        "\"rematch_attempted\":%lld,\"rematch_written\":%lld,"
+        "\"rematch_inliers\":%lld,\"rematch_failed\":%lld,"
+        "\"rematch_budget\":%d,"
+        "\"solver_used\":\"%s\",\"sparse_backend\":\"%s\","
+        "\"mixed\":%d,\"threads\":%d}\n",
+        static_cast<long long>(epoch_ms), live_reuse ? 1 : 0,
+        static_cast<long long>(cache_pre_ms),
+        static_cast<long long>(enrich_ms), static_cast<long long>(stage1_ms),
+        stage1_rounds, stage1_state, static_cast<long long>(stage2_ms),
+        stage2_rounds_budget, static_cast<long long>(temporal_ms),
+        static_cast<long long>(total_ms),
+        static_cast<long long>(s->stat_finalize_rematch_starved_frames),
+        static_cast<long long>(s->stat_finalize_rematch_candidates),
+        static_cast<long long>(s->stat_finalize_rematch_attempted),
+        static_cast<long long>(s->stat_finalize_rematch_written),
+        static_cast<long long>(s->stat_finalize_rematch_inliers),
+        static_cast<long long>(s->stat_finalize_rematch_failed),
+        kFinalizeRematchMaxPairs, solver_used.c_str(),
+        sparse_backend.c_str(), mixed, threads);
+    if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return;
+    FILE* f = std::fopen(tmp.string().c_str(), "w");
+    if (!f) return;
+    const size_t written = std::fwrite(buf, 1, static_cast<size_t>(n), f);
+    std::fclose(f);
+    if (written != static_cast<size_t>(n)) {
+      std::remove(tmp.string().c_str());
+      return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, dst, ec);  // atomic on the same volume
+    if (ec) std::remove(tmp.string().c_str());
+  } catch (...) {
+    // Telemetry only — never take the finalize down.
+  }
+}
+
 // Async-finalize worker.
 //
 // live_reuse=true (normal completion, [FINALIZE-ZEROCOPY + FINALIZE-OVERLAP
@@ -2005,6 +2090,14 @@ void RefineGlobalBA(aether_sfm_session* s,
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
 #endif
     const double t0 = NowMs();
+    // [AETHER FINALIZE-SEGMENTS 2026-07-11] Drop any segments file from a
+    // previous finalize of this run_dir (resume retries) so the Dart reader
+    // can never pick up a stale record if this attempt ends in the fallback.
+    try {
+      std::filesystem::remove(std::filesystem::path(s->db_path).parent_path() /
+                              "finalize_segments.json");
+    } catch (...) {
+    }
     auto popts = MakePhase2Options(s);
     std::shared_ptr<colmap::Reconstruction> refined;
     double enrich_ms = 0.0, cache_pre_ms = 0.0, stage1_ms = 0.0;
@@ -2171,6 +2264,7 @@ void RefineGlobalBA(aether_sfm_session* s,
     const double stage2_ms = NowMs() - t_s2;
     const double t_td = NowMs();
     RestoreTemporalDetail(s, refined.get());
+    const double temporal_ms = NowMs() - t_td;
     LOG(WARNING) << "[aether_sfm] finalize worker: cache_pre="
                  << static_cast<int64_t>(cache_pre_ms)
                  << "ms enrich=" << static_cast<int64_t>(enrich_ms)
@@ -2178,8 +2272,15 @@ void RefineGlobalBA(aether_sfm_session* s,
                  << stage1_state << ", rounds=" << stage1_rounds
                  << ") stage2=" << static_cast<int64_t>(stage2_ms)
                  << "ms (rounds<=" << popts->ba_global_max_refinements
-                 << ") temporal=" << static_cast<int64_t>(NowMs() - t_td)
+                 << ") temporal=" << static_cast<int64_t>(temporal_ms)
                  << "ms total=" << static_cast<int64_t>(NowMs() - t0) << "ms";
+    // [AETHER FINALIZE-SEGMENTS 2026-07-11] Same numbers into the persistent
+    // run_dir JSON (stderr double-write stays above) — BEFORE the status flips
+    // to REFINED so the Dart forwarder always sees a complete file.
+    WriteFinalizeSegments(s, live_reuse, cache_pre_ms, enrich_ms, stage1_ms,
+                          stage1_rounds, stage1_state, stage2_ms,
+                          popts->ba_global_max_refinements, temporal_ms,
+                          NowMs() - t0);
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
       s->recon = refined;

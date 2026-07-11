@@ -53,6 +53,34 @@
 
 namespace colmap {
 
+// [AETHER FINALIZE-SEGMENTS 2026-07-11] Telemetry-only stash of the LAST ceres
+// solve's observability fields (the same values the "[AETHER] solver_used="
+// log line prints). stderr is LOST when the device runs detached (cap44:
+// 13:11:36→13:14:08 log vacuum), so aether_sfm_c.cc's finalize worker reads
+// this stash and persists it into finalize_segments.json. Written after every
+// SolveWithGpuFallback; zero effect on the solve itself.
+namespace {
+std::mutex& AetherLastSolveMutex() {
+  static std::mutex m;
+  return m;
+}
+std::string g_aether_last_solver_used;     // e.g. "SPARSE_SCHUR"
+std::string g_aether_last_sparse_backend;  // e.g. "EIGEN_SPARSE"
+int g_aether_last_mixed = 0;
+int g_aether_last_threads = 0;
+}  // namespace
+
+void AetherLastBaSolveInfo(std::string* solver_used,
+                           std::string* sparse_backend,
+                           int* mixed,
+                           int* threads) {
+  std::lock_guard<std::mutex> lk(AetherLastSolveMutex());
+  if (solver_used) *solver_used = g_aether_last_solver_used;
+  if (sparse_backend) *sparse_backend = g_aether_last_sparse_backend;
+  if (mixed) *mixed = g_aether_last_mixed;
+  if (threads) *threads = g_aether_last_threads;
+}
+
 namespace {
 
 BundleAdjustmentTerminationType CeresTerminationTypeToTerminationType(
@@ -751,6 +779,20 @@ ceres::Solver::Summary SolveWithGpuFallback(
             // [AETHER BA-MIXED/THREADS 2026-07-11] A/B verification fields.
             << " mixed=" << (ceres_summary.mixed_precision_solves_used ? 1 : 0)
             << " threads=" << ceres_summary.num_threads_used;
+
+  // [AETHER FINALIZE-SEGMENTS 2026-07-11] Same fields into the process-wide
+  // stash (AetherLastBaSolveInfo) so the finalize worker can persist them —
+  // the LOG line above only reaches stderr, which detached device runs lose.
+  {
+    std::lock_guard<std::mutex> lk(AetherLastSolveMutex());
+    g_aether_last_solver_used = ceres::LinearSolverTypeToString(
+        ceres_summary.linear_solver_type_used);
+    g_aether_last_sparse_backend =
+        ceres::SparseLinearAlgebraLibraryTypeToString(
+            ceres_summary.sparse_linear_algebra_library_type);
+    g_aether_last_mixed = ceres_summary.mixed_precision_solves_used ? 1 : 0;
+    g_aether_last_threads = ceres_summary.num_threads_used;
+  }
 
   return ceres_summary;
 }
