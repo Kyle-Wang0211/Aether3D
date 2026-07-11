@@ -38,7 +38,7 @@ const MAGNIF : f32 = 3.0;
 const NBO : i32 = 8;
 const NBP : i32 = 4;
 const WINSIZE : f32 = 2.0;    // windowSize = NBP/2
-const DSP_NUM : u32 = 10u;
+const DSP_NUM : u32 = 6u;   // MUST match SiftExtractDawn::kDspNumScales (scale-6 certified 2026-07-11)
 const KP_STRIDE : u32 = 8u;
 const WG : u32 = 64u;
 const PI : f32 = 3.14159265358979323846;
@@ -65,8 +65,8 @@ struct Params {
 // One WORKGROUP per (keypoint, scale): wid.x = kp*DSP_NUM + sc. Computes ONE
 // DSP scale's normalized 128-bin descriptor and writes it to
 // scale_desc[(kp*DSP_NUM + sc)*128]. A separate mean pass (sift_dsp_mean.wgsl)
-// then averages the DSP_NUM scales per keypoint in fixed sc=0..9 order →
-// bit-identical to the serial accumulate. This parallelizes the 10 scales
+// then averages the DSP_NUM scales per keypoint in fixed sc=0..DSP_NUM-1 order →
+// bit-identical to the serial accumulate. This parallelizes the DSP_NUM scales
 // across the GPU's cores (memory budget is huge: peak ~54MB).
 @group(0) @binding(0) var<storage, read>       packed_gss : array<f32>;
 @group(0) @binding(1) var<storage, read>       level_meta : array<LevelMeta>;

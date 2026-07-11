@@ -50,7 +50,7 @@ const MAGNIF : f32 = 3.0;
 const NBO : i32 = 8;
 const NBP : i32 = 4;
 const WINSIZE : f32 = 2.0;    // windowSize = NBP/2
-const DSP_NUM : u32 = 10u;
+const DSP_NUM : u32 = 6u;   // MUST match SiftExtractDawn::kDspNumScales (scale-6 certified 2026-07-11)
 const KP_STRIDE : u32 = 8u;
 const WG : u32 = 64u;
 const PI : f32 = 3.14159265358979323846;
@@ -83,7 +83,7 @@ var<workgroup> A_sh   : array<f32, 4>;         // U*D for the warp (col-major)
 var<workgroup> T_sh   : array<f32, 2>;
 var<workgroup> dsh    : array<f32, 2>;         // d1,d2
 var<workgroup> hist   : array<f32, 128>;       // this-scale descriptor (shared, f32)
-var<workgroup> accum  : array<f32, 128>;       // running 10-scale sum (f32)
+var<workgroup> accum  : array<f32, 128>;       // running DSP_NUM-scale sum (f32)
 // Block reduction scratch: [WG lanes][BLK bins] so a single tree reduction
 // collapses BLK output bins at once (4 blocks × 7 barriers = 28 per scale, vs
 // the old 128 separate per-bin reductions = ~1024 barriers). 64*32*4 = 8 KB.
@@ -182,7 +182,7 @@ fn main(@builtin(workgroup_id) wid:vec3<u32>,
   let a21=bitcast<f32>(kp_in[base+4u]);
   let a22=bitcast<f32>(kp_in[base+5u]);
 
-  // zero the 10-scale accumulator.
+  // zero the DSP_NUM-scale accumulator.
   for(var b=lane; b<128u; b=b+WG){ accum[b]=0.0; }
   workgroupBarrier();
 
@@ -323,7 +323,7 @@ fn main(@builtin(workgroup_id) wid:vec3<u32>,
       for(var b=0u;b<128u;b=b+1u){ hist[b]=hist[b]/norm2; }
     }
     workgroupBarrier();
-    // accumulate into the 10-scale sum.
+    // accumulate into the DSP_NUM-scale sum.
     for(var b=lane;b<128u;b=b+WG){ accum[b]=accum[b]+hist[b]; }
     workgroupBarrier();
   }

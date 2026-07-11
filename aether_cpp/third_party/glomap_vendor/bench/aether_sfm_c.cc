@@ -711,10 +711,12 @@ constexpr int kSpatialInitialAnchorBudget = 720;
 // [SCAN-MATRIX ENV 2026-07-11] Threshold-scan hooks for the host gate matrix.
 // Same pattern as TriMinAngleDeg / FinalizeBaThreads: getenv once (static
 // cache), default == the shipped constant, so an UNSET environment is
-// bit-identical to the pre-hook binary (the 3.0° defaults return the exact
+// bit-identical to the shipped binary (the tri-angle defaults return the exact
 // radian literal, not a fresh degree→radian conversion). Context: every one of
 // these gates was calibrated in the pre-DSP-fix era; the hooks let the scan
-// matrix re-price them per-arm without rebuilding.
+// matrix re-price them per-arm without rebuilding. The matrix's first verdict
+// (T20 2026-07-11) re-priced all four tri-angle defaults 3.0°→2.0°; env
+// overrides remain live for future re-pricing.
 double EnvGateDouble(const char* name, double fallback) {
   const char* e = std::getenv(name);
   if (e && e[0]) {
@@ -725,7 +727,12 @@ double EnvGateDouble(const char* name, double fallback) {
 }
 
 // ① AETHER_LIVE_TRI_MIN_ANGLE — live add_frame 2-view CREATION parallax gate,
-//    degrees in the env, radians out. Default = shipped 3.0°.
+//    degrees in the env, radians out. Default = shipped 2.0°.
+//    [T20 2026-07-11] 3.0°→2.0° per the tri-angle scan matrix (cap44/cap45
+//    db-replay, all four gates moved together): T20 recovered the point count
+//    lost to the DSP-fix descriptors (+10-20%) with reproj/thickness inside
+//    the judge gates; T15 re-admitted low-parallax fuzz, T25 kept losing
+//    points. Combined-verified with the 6-scale DSP config before shipping.
 double LiveCreateTriMinAngleRad() {
   static const double cached = [] {
     const char* e = std::getenv("AETHER_LIVE_TRI_MIN_ANGLE");
@@ -733,7 +740,7 @@ double LiveCreateTriMinAngleRad() {
       const double deg = std::atof(e);
       if (deg > 0.0) return deg * M_PI / 180.0;
     }
-    return 0.05235987755982988;  // shipped 3.0° literal
+    return 0.03490658503988659;  // shipped 2.0° literal (T20)
   }();
   return cached;
 }
@@ -745,7 +752,9 @@ double LiveGrowMaxReprojPx() {
 }
 
 // ③ AETHER_TD_TRI_ANGLE / AETHER_TD_REPROJ_PX — RestoreTemporalDetail gates
-//    (tri-angle degrees in / radians out, reproj px). Defaults 3.0° / 3 px.
+//    (tri-angle degrees in / radians out, reproj px). Defaults 2.0° / 3 px.
+//    [T20 2026-07-11] 3.0°→2.0°, moved in lock-step with the other three
+//    tri-angle gates (see LiveCreateTriMinAngleRad).
 double TemporalDetailTriMinAngleRad() {
   static const double cached = [] {
     const char* e = std::getenv("AETHER_TD_TRI_ANGLE");
@@ -753,7 +762,7 @@ double TemporalDetailTriMinAngleRad() {
       const double deg = std::atof(e);
       if (deg > 0.0) return deg * M_PI / 180.0;
     }
-    return 0.05235987755982988;  // shipped 3.0° literal
+    return 0.03490658503988659;  // shipped 2.0° literal (T20)
   }();
   return cached;
 }
@@ -1442,7 +1451,7 @@ void RestoreTemporalDetail(aether_sfm_session* s,
                            colmap::Reconstruction* reconstruction) {
   if (!s || !reconstruction || s->frames.size() < 2) return;
 
-  // [SCAN-MATRIX ENV ③] defaults = shipped 3.0° / 3 px; AETHER_TD_TRI_ANGLE /
+  // [SCAN-MATRIX ENV ③] defaults = shipped 2.0° (T20) / 3 px; AETHER_TD_TRI_ANGLE /
   // AETHER_TD_REPROJ_PX override for the host gate matrix.
   const double kMinTriAngleRad = TemporalDetailTriMinAngleRad();
   // 39-capture replay: 4 px kept one 2.8x-q99 ray; 3 px retained ~62.7k
@@ -1961,14 +1970,16 @@ std::shared_ptr<const colmap::Reconstruction> PickBestAndReport(
 // registered on the first 3.0° build vs 75% on the 1.5° build). Phase 1
 // (RunIncremental / mapper registration) and phase 2 (RefineGlobalBA) read
 // SEPARATE env names so "registration-wide, refine-strict" configs can be
-// tested. Unset -> the shipped 3.0°.
+// tested. Unset -> the shipped 2.0° (T20 2026-07-11, scan-matrix verdict —
+// moved in lock-step with the two streaming gates, see
+// LiveCreateTriMinAngleRad).
 double TriMinAngleDeg(const char* env_name) {
   const char* e = std::getenv(env_name);
   if (e && e[0]) {
     const double d = std::atof(e);
     if (d > 0.0) return d;
   }
-  return 3.0;
+  return 2.0;
 }
 
 // [AETHER BA-MIXED 2026-07-11] Finalize global BA mixed-precision solves
@@ -2079,9 +2090,10 @@ aether_sfm_result_t RunIncremental(
     pipeline_opts->ba_global_mixed_precision = BaMixedEnabled();
     pipeline_opts->num_threads = FinalizeBaThreads();
     pipeline_opts->mapper.ba_local_num_images = 10;
-    // [TRI-ANGLE 2026-07-11] Creation parallax gate 1.5°(colmap default)→3.0°,
+    // [TRI-ANGLE 2026-07-11] Creation parallax gate 1.5°(colmap default)→2.0°
+    // (first shipped at 3.0°, re-priced to 2.0° by the T20 scan-matrix verdict),
     // aligned with BOTH streaming creation gates (add_frame kMinTriAngleRad and
-    // RestoreTemporalDetail — 3.0° each). The delivered cloud's low-parallax
+    // RestoreTemporalDetail — 2.0° each). The delivered cloud's low-parallax
     // tail was born HERE: the mapper's IncrementalTriangulator created tracks
     // down to 1.5° pairwise parallax (cap47 attribution: 25.9% of native
     // 2-view delivered points sat below 3° — depth-ambiguous fuzz around thin
@@ -2197,9 +2209,9 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   // RefineGlobalBA).
   popts->ba_global_mixed_precision = BaMixedEnabled();
   popts->num_threads = FinalizeBaThreads();
-  // [TRI-ANGLE 2026-07-11] Same 3.0° creation gate as RunIncremental:
+  // [TRI-ANGLE 2026-07-11] Same 2.0° (T20) creation gate as RunIncremental:
   // IterativeGlobalRefinement's CompleteAndMergeTracks/retriangulation reads
-  // Triangulation() too — keep phase 2 from re-admitting the <3° tail that
+  // Triangulation() too — keep phase 2 from re-admitting the <2° tail that
   // phase 1 now refuses to create.
   popts->triangulation.min_angle = TriMinAngleDeg("AETHER_TRI_MIN_ANGLE_P2");
   // [FINALIZE-OVERLAP 2026-07-11] Load ALL images into the DatabaseCache, not
@@ -2848,7 +2860,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     std::unordered_set<colmap::point3D_t> touched;
     // [SCAN-MATRIX ENV ①②] creation parallax + grow reproj gates, env-tunable
     // (AETHER_LIVE_TRI_MIN_ANGLE degrees / AETHER_GROW_REPROJ_PX px);
-    // defaults = shipped 3.0° / 14 px.
+    // defaults = shipped 2.0° (T20) / 14 px.
     const double kMinTriAngleRad = LiveCreateTriMinAngleRad();
     constexpr double kMaxCreateReprojPx = 10.0;  // strict new-point gate
     const double kMaxGrowReprojPx = LiveGrowMaxReprojPx();  // TVG-inlier grow absorbs ARKit drift

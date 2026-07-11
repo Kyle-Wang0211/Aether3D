@@ -41,7 +41,7 @@ public:
         std::vector<float> xy;          // 2*K (x,y interleaved, frame coords)
         std::vector<int> octave;        // K (for the 8192 clamp sort)
         std::vector<int> scale;         // K (sublevel s, for the clamp sort)
-        std::vector<float> raw_desc;    // K*128 (the 10-scale DSP mean, VLFeat bin order)
+        std::vector<float> raw_desc;    // K*128 (the kDspNumScales-scale DSP mean, VLFeat bin order)
         int count = 0;
     };
 
@@ -84,9 +84,17 @@ public:
     // under-allocates the ③ buffer → OOB reads) — the 2026-07-08 "S5 10→3"
     // attempt did exactly that: shader still pooled 10 scales but with 3.3×
     // spacing, pushing 6/10 scales past kDspMaxScale (max 8.67). It was NOT a
-    // valid 3-scale DSP; certified config is 10 (= CPU dsp_sift_c.cc path).
+    // valid 3-scale DSP; header + shaders must move TOGETHER (CPU reference
+    // dsp_sift_c.cc follows this constant automatically).
     // dsp_descriptor_parity.cc consumes this constant, so drift now fails the gate.
-    static constexpr int kDspNumScales = 10;
+    // [SCALE-6 2026-07-11] 10→6, a LEGAL identity change (unlike the S5
+    // attempt): both header and all 4 shaders move together, dstep becomes
+    // (3 - 1/6)/6 and the top pooled scale lands exactly at kDspMaxScale=3.0.
+    // Host A/B (cap44 87-frame replay): descriptor parity gate PASS, delivered
+    // cloud inside the noise band; host batch wall 25.9-26.4s → 24.1-24.2s
+    // (alternating runs, ~-7%; descriptor stage is a small share on M3 — the
+    // device share is larger but ungrounded until the next on-device capture).
+    static constexpr int kDspNumScales = 6;
 
 private:
     static constexpr uint32_t kKpStride = 8u;

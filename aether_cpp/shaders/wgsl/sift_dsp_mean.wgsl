@@ -9,7 +9,7 @@
 //
 // One thread per (keypoint, bin): gid.x in [0, count*128).
 
-const DSP_NUM : u32 = 10u;
+const DSP_NUM : u32 = 6u;   // MUST match SiftExtractDawn::kDspNumScales (scale-6 certified 2026-07-11)
 
 struct Params { count : u32 };
 
