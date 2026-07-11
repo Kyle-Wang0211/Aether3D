@@ -518,6 +518,22 @@ struct aether_sfm_session {
   double enrich_start_ms = 0.0;
   std::atomic<bool> enrich_stage1_done{false};
   int64_t stat_enrich_budget_stopped = 0;  // fresh attempts skipped by the gate
+  // [P2-FRAG-MERGE 2026-07-11] Finalize-tail fragment-merge attribution (see
+  // MergeFragmentTracks). Conservation invariant the pass must uphold:
+  // frag_post_npts + frag_accepted == frag_pre_npts (a merge DEDUPLICATES two
+  // fragments into one multi-view point — the count drop is not deletion).
+  int64_t stat_frag_links = 0;              // TVG-connected track-pair candidates
+  int64_t stat_frag_attempted = 0;          // pairs entering the union refit
+  int64_t stat_frag_accepted = 0;           // merges installed
+  int64_t stat_frag_obs_merged = 0;         // union track sizes of accepted merges
+  int64_t stat_frag_reject_reproj = 0;      // union refit reproj/cheirality fail
+  int64_t stat_frag_reject_theta = 0;       // θ_max did not strictly rise
+  int64_t stat_frag_reject_degenerate = 0;  // broken obs / DLT failure
+  int64_t stat_frag_pre_npts = 0, stat_frag_pre_2view = 0, stat_frag_pre_lt3 = 0;
+  int64_t stat_frag_post_npts = 0, stat_frag_post_2view = 0, stat_frag_post_lt3 = 0;
+  double frag_theta_p50_pre_deg = 0.0;
+  double frag_theta_p50_post_deg = 0.0;
+  double frag_ms = 0.0;
 
   // Result of finalize()/run(): the largest reconstruction.
   std::shared_ptr<colmap::ReconstructionManager> recon_manager;
@@ -970,6 +986,27 @@ bool EnrichTargetedEnabled() {
     const char* e = std::getenv("AETHER_ENRICH_TARGETED");
     return e && e[0] == '1';
   }();
+  return cached;
+}
+
+// [P2-FRAG-MERGE 2026-07-11] Finalize-tail duplicate-fragment merge pass
+// (see MergeFragmentTracks). Default OFF: an unset environment is
+// bit-identical to the shipped binary.
+bool FragMergeEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("AETHER_FRAG_MERGE");
+    return e && e[0] == '1';
+  }();
+  return cached;
+}
+// Merge acceptance reproj gate (px). Default = the RestoreTemporalDetail /
+// TrackUpgrade gate (3 px). AETHER_FRAG_MERGE_REPROJ_PX prices a wider gate
+// on the host matrix (live merges use 8 px, the mapper's Complete uses 4 px;
+// 83% of host merge attempts fail the 3 px all-observation fit) without
+// touching the default arm.
+double FragMergeMaxReprojPx() {
+  static const double cached =
+      EnvGateDouble("AETHER_FRAG_MERGE_REPROJ_PX", 0.0);
   return cached;
 }
 
@@ -2483,6 +2520,340 @@ void UpgradeLowParallaxTracks(aether_sfm_session* s,
   }
 }
 
+// [P2-FRAG-MERGE 2026-07-11] FragmentMerge — finalize-tail duplicate-track
+// merge pass (env AETHER_FRAG_MERGE=1, default OFF; runs AFTER
+// UpgradeLowParallaxTracks so upgraded tracks participate with their full
+// baselines).
+//
+// WHY: the remaining delivered thickness lives in REPEATED fragments of the
+// same physical surface point — DSP-SIFT emits near-identical keypoints at
+// several scales, each seeding its own low-parallax 2-view track (KNIFE-A
+// verdict: ~18k upgrade-eligible 2-view points whose partner observations
+// already sit on OTHER tracks; cap45 cross-track conflicts = 39,187).
+// TrackUpgrade deliberately skips partner keypoints that already carry a
+// Point3D ("taken — no merge here"); this pass handles exactly that case:
+// when the db's TVG inlier graph CONNECTS two tracks (a keypoint of track A
+// matched a keypoint of track B), they are fragment candidates of ONE point.
+// A union refit over ALL observations of BOTH tracks (DLT + pose-fixed GN —
+// the CanMergeLivePoints / KNIFE-A recipe) decides:
+//   accept ⇔ EVERY union observation is in front of its camera AND within
+//   the RestoreTemporalDetail reproj gate of the refit position AND the
+//   union's θ_max at the refit STRICTLY exceeds both fragments' current
+//   θ_max. 防误合并: two physically distinct points cannot both fit one 3D
+//   position within the all-observation reproj gate, and a merge that does
+//   not widen the effective baseline has no thickness value to bank.
+// Unlike TrackUpgrade there is NO candidate trimming: every union
+// observation belongs to one of the two DELIVERED tracks, and dropping one
+// would delete delivered data — a violating observation therefore rejects
+// the merge instead. Chains (A–B, B–C) merge fully within the single pass
+// via redirect chasing. Accounting (物理点守恒): each accepted merge removes
+// exactly one point id (two fragments → one multi-view point), so
+// frag_post_npts + frag_accepted == frag_pre_npts must hold; observations
+// are conserved exactly (MergePoints3D concatenates the tracks).
+void MergeFragmentTracks(aether_sfm_session* s,
+                         colmap::Reconstruction* reconstruction) {
+  if (!FragMergeEnabled() || !s || !reconstruction) return;
+  const double t0 = NowMs();
+  try {
+    const double kMaxReprojPx = FragMergeMaxReprojPx() > 0.0
+                                    ? FragMergeMaxReprojPx()
+                                    : TemporalDetailMaxReprojPx();
+    constexpr double kLowParallaxRad = 3.0 * M_PI / 180.0;
+
+    const auto theta_max = [&](const colmap::Track& track,
+                               const Eigen::Vector3d& xyz) {
+      double best = 0.0;
+      const auto& els = track.Elements();
+      for (size_t a = 0; a < els.size(); ++a) {
+        if (!reconstruction->ExistsImage(els[a].image_id)) continue;
+        const colmap::Image& ia = reconstruction->Image(els[a].image_id);
+        if (!ia.HasPose()) continue;
+        const Eigen::Vector3d ca = ia.CamFromWorld().TgtOriginInSrc();
+        for (size_t b = a + 1; b < els.size(); ++b) {
+          if (!reconstruction->ExistsImage(els[b].image_id)) continue;
+          const colmap::Image& ib = reconstruction->Image(els[b].image_id);
+          if (!ib.HasPose()) continue;
+          best = std::max(best,
+                          colmap::CalculateTriangulationAngle(
+                              ca, ib.CamFromWorld().TgtOriginInSrc(), xyz));
+        }
+      }
+      return best;
+    };
+    const auto summarize = [&](int64_t* n_out, int64_t* n2_out,
+                               int64_t* lt3_out, double* p50_out) {
+      std::vector<double> thetas;
+      thetas.reserve(reconstruction->NumPoints3D());
+      int64_t n2 = 0, lt3 = 0;
+      for (const auto& [pid, pt] : reconstruction->Points3D()) {
+        const double th = theta_max(pt.track, pt.xyz);
+        thetas.push_back(th);
+        if (pt.track.Length() == 2) ++n2;
+        if (th < kLowParallaxRad) ++lt3;
+      }
+      *n_out = static_cast<int64_t>(thetas.size());
+      *n2_out = n2;
+      *lt3_out = lt3;
+      if (!thetas.empty()) {
+        std::nth_element(thetas.begin(), thetas.begin() + thetas.size() / 2,
+                         thetas.end());
+        *p50_out = thetas[thetas.size() / 2] * 180.0 / M_PI;
+      }
+    };
+
+    // 1) Pre-pass distribution + eligible set: the 2-view / low-parallax
+    //    fragments the thickness lives in. The merge PARTNER may be any
+    //    track (folding a 2-view fragment into a healthy multi-view track is
+    //    the most valuable dedup of all).
+    std::vector<colmap::point3D_t> eligible;
+    {
+      std::vector<double> thetas;
+      thetas.reserve(reconstruction->NumPoints3D());
+      int64_t n2 = 0, lt3 = 0;
+      for (const auto& [pid, pt] : reconstruction->Points3D()) {
+        const double th = theta_max(pt.track, pt.xyz);
+        thetas.push_back(th);
+        const bool two_view = pt.track.Length() == 2;
+        if (two_view) ++n2;
+        if (th < kLowParallaxRad) ++lt3;
+        if (two_view || th < kLowParallaxRad) eligible.push_back(pid);
+      }
+      s->stat_frag_pre_npts = static_cast<int64_t>(thetas.size());
+      s->stat_frag_pre_2view = n2;
+      s->stat_frag_pre_lt3 = lt3;
+      if (!thetas.empty()) {
+        std::nth_element(thetas.begin(), thetas.begin() + thetas.size() / 2,
+                         thetas.end());
+        s->frag_theta_p50_pre_deg = thetas[thetas.size() / 2] * 180.0 / M_PI;
+      }
+    }
+    if (eligible.empty()) {
+      s->frag_ms = NowMs() - t0;
+      return;
+    }
+
+    // 2) TVG-inlier correspondence index restricted to the eligible tracks'
+    //    keypoints (same recipe/memory bound as TrackUpgrade step 2).
+    const auto key_of = [](colmap::image_t img, uint32_t idx) {
+      return (static_cast<uint64_t>(img) << 32) | idx;
+    };
+    std::unordered_set<uint64_t> needed;
+    needed.reserve(eligible.size() * 3);
+    for (const colmap::point3D_t pid : eligible) {
+      for (const colmap::TrackElement& el :
+           reconstruction->Point3D(pid).track.Elements()) {
+        needed.insert(key_of(el.image_id, el.point2D_idx));
+      }
+    }
+    std::unordered_map<uint64_t,
+                       std::vector<std::pair<colmap::image_t, uint32_t>>>
+        corr;
+    corr.reserve(needed.size());
+    {
+      auto db = colmap::Database::Open(s->db_path);
+      for (const auto& [pair_id, n_inliers] :
+           db->ReadTwoViewGeometryNumInliers()) {
+        if (n_inliers <= 0) continue;
+        const auto [id1, id2] = colmap::PairIdToImagePair(pair_id);
+        const colmap::TwoViewGeometry g = db->ReadTwoViewGeometry(id1, id2);
+        for (const colmap::FeatureMatch& m : g.inlier_matches) {
+          const uint64_t k1 = key_of(id1, m.point2D_idx1);
+          const uint64_t k2 = key_of(id2, m.point2D_idx2);
+          if (needed.count(k1)) corr[k1].emplace_back(id2, m.point2D_idx2);
+          if (needed.count(k2)) corr[k2].emplace_back(id1, m.point2D_idx1);
+        }
+      }
+      db->Close();
+    }
+
+    // 3) Candidate track pairs: an eligible track's keypoint matched (TVG
+    //    inlier) against a keypoint ASSIGNED to a different track = one
+    //    link; multiplicity = correspondence evidence strength.
+    std::unordered_map<PointIdPair, int, PointIdPairHash> links;
+    for (const colmap::point3D_t pid : eligible) {
+      if (!reconstruction->ExistsPoint3D(pid)) continue;  // defensive
+      for (const colmap::TrackElement& el :
+           reconstruction->Point3D(pid).track.Elements()) {
+        const auto it = corr.find(key_of(el.image_id, el.point2D_idx));
+        if (it == corr.end()) continue;
+        for (const auto& [img2, idx2] : it->second) {
+          if (!reconstruction->ExistsImage(img2)) continue;
+          const colmap::Image& im2 = reconstruction->Image(img2);
+          if (!im2.HasPose() || idx2 >= im2.NumPoints2D()) continue;
+          const colmap::Point2D& p2 = im2.Point2D(idx2);
+          if (!p2.HasPoint3D() || p2.point3D_id == pid) continue;
+          ++links[CanonicalPointPair(pid, p2.point3D_id)];
+        }
+      }
+    }
+    s->stat_frag_links = static_cast<int64_t>(links.size());
+
+    // 4) Deterministic strongest-evidence-first order.
+    std::vector<std::pair<PointIdPair, int>> ranked(links.begin(),
+                                                    links.end());
+    std::sort(ranked.begin(), ranked.end(),
+              [](const std::pair<PointIdPair, int>& a,
+                 const std::pair<PointIdPair, int>& b) {
+                if (a.second != b.second) return a.second > b.second;
+                if (a.first.a != b.first.a) return a.first.a < b.first.a;
+                return a.first.b < b.first.b;
+              });
+
+    // 5) Serial merge with redirect chasing (fragment CHAINS A–B, B–C fold
+    //    fully within this one pass).
+    std::unordered_map<colmap::point3D_t, colmap::point3D_t> redirect;
+    const auto resolve = [&](colmap::point3D_t pid) {
+      auto it = redirect.find(pid);
+      while (it != redirect.end()) {
+        pid = it->second;
+        it = redirect.find(pid);
+      }
+      return pid;
+    };
+    for (const auto& [pair, n_links] : ranked) {
+      const colmap::point3D_t a = resolve(pair.a);
+      const colmap::point3D_t b = resolve(pair.b);
+      if (a == b) continue;  // already folded into the same point
+      if (!reconstruction->ExistsPoint3D(a) ||
+          !reconstruction->ExistsPoint3D(b)) {
+        continue;
+      }
+      ++s->stat_frag_attempted;
+      const colmap::Point3D& pa = reconstruction->Point3D(a);
+      const colmap::Point3D& pb = reconstruction->Point3D(b);
+
+      // Union refit: DLT over every observation of both tracks + pose-fixed
+      // GN polish (the KNIFE-A recipe).
+      std::vector<Eigen::Matrix3x4d> cams_from_world;
+      std::vector<Eigen::Vector2d> cam_points;
+      std::vector<const colmap::Image*> imgs;
+      std::vector<const colmap::Camera*> cams;
+      std::vector<Eigen::Vector2d> px;
+      bool bad = false;
+      const auto push_track = [&](const colmap::Track& track) {
+        for (const colmap::TrackElement& el : track.Elements()) {
+          if (bad) return;
+          if (!reconstruction->ExistsImage(el.image_id)) {
+            bad = true;
+            return;
+          }
+          const colmap::Image& im = reconstruction->Image(el.image_id);
+          if (!im.HasPose() || el.point2D_idx >= im.NumPoints2D()) {
+            bad = true;
+            return;
+          }
+          const colmap::Camera& cm = reconstruction->Camera(im.CameraId());
+          const Eigen::Vector2d p = im.Point2D(el.point2D_idx).xy;
+          const std::optional<Eigen::Vector2d> nc = cm.CamFromImg(p);
+          if (!nc) {
+            bad = true;
+            return;
+          }
+          cams_from_world.push_back(im.CamFromWorld().ToMatrix());
+          cam_points.push_back(*nc);
+          imgs.push_back(&im);
+          cams.push_back(&cm);
+          px.push_back(p);
+        }
+      };
+      push_track(pa.track);
+      push_track(pb.track);
+      if (bad || cam_points.size() < 3) {
+        ++s->stat_frag_reject_degenerate;
+        continue;
+      }
+      Eigen::Vector3d X;
+      if (!colmap::TriangulateMultiViewPoint(
+              colmap::span<const Eigen::Matrix3x4d>(cams_from_world.data(),
+                                                    cams_from_world.size()),
+              colmap::span<const Eigen::Vector2d>(cam_points.data(),
+                                                  cam_points.size()),
+              &X)) {
+        ++s->stat_frag_reject_degenerate;
+        continue;
+      }
+      PolishPointGN(imgs, cams, px, &X);
+
+      // Acceptance 1: EVERY union observation in front of its camera and
+      // within the reproj gate of the refit position.
+      bool ok = true;
+      for (size_t o = 0; o < imgs.size(); ++o) {
+        const Eigen::Vector3d xc = imgs[o]->CamFromWorld() * X;
+        if (xc.z() <= 0.0) {
+          ok = false;
+          break;
+        }
+        const std::optional<Eigen::Vector2d> pp = cams[o]->ImgFromCam(xc);
+        if (!pp || (*pp - px[o]).norm() > kMaxReprojPx) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) {
+        ++s->stat_frag_reject_reproj;
+        continue;
+      }
+      // Acceptance 2: the union's θ_max at the refit must STRICTLY beat both
+      // fragments' current θ_max.
+      const double th_a = theta_max(pa.track, pa.xyz);
+      const double th_b = theta_max(pb.track, pb.xyz);
+      double th_union = 0.0;
+      for (size_t i2 = 0; i2 < imgs.size(); ++i2) {
+        const Eigen::Vector3d ci =
+            imgs[i2]->CamFromWorld().TgtOriginInSrc();
+        for (size_t j2 = i2 + 1; j2 < imgs.size(); ++j2) {
+          th_union = std::max(
+              th_union,
+              colmap::CalculateTriangulationAngle(
+                  ci, imgs[j2]->CamFromWorld().TgtOriginInSrc(), X));
+        }
+      }
+      if (th_union <= std::max(th_a, th_b)) {
+        ++s->stat_frag_reject_theta;
+        continue;
+      }
+
+      const size_t union_len = imgs.size();
+      const colmap::point3D_t merged = reconstruction->MergePoints3D(a, b);
+      // Install the refit position (the one the gates validated), not
+      // MergePoints3D's length-weighted average of two noisy fragments.
+      reconstruction->Point3D(merged).xyz = X;
+      redirect[a] = merged;
+      redirect[b] = merged;
+      ++s->stat_frag_accepted;
+      s->stat_frag_obs_merged += static_cast<int64_t>(union_len);
+    }
+
+    // 6) Post-pass distribution + the conservation invariant.
+    summarize(&s->stat_frag_post_npts, &s->stat_frag_post_2view,
+              &s->stat_frag_post_lt3, &s->frag_theta_p50_post_deg);
+    s->frag_ms = NowMs() - t0;
+    const bool conserved =
+        s->stat_frag_post_npts + s->stat_frag_accepted ==
+        s->stat_frag_pre_npts;
+    LOG(WARNING) << "[aether_sfm] frag-merge: links=" << s->stat_frag_links
+                 << " attempted=" << s->stat_frag_attempted
+                 << " accepted=" << s->stat_frag_accepted
+                 << " obs_merged=" << s->stat_frag_obs_merged
+                 << " rej{reproj=" << s->stat_frag_reject_reproj
+                 << " theta=" << s->stat_frag_reject_theta
+                 << " degen=" << s->stat_frag_reject_degenerate << "} pre{n="
+                 << s->stat_frag_pre_npts << " 2view="
+                 << s->stat_frag_pre_2view << " lt3=" << s->stat_frag_pre_lt3
+                 << " theta_p50=" << s->frag_theta_p50_pre_deg
+                 << "deg} post{n=" << s->stat_frag_post_npts << " 2view="
+                 << s->stat_frag_post_2view << " lt3="
+                 << s->stat_frag_post_lt3 << " theta_p50="
+                 << s->frag_theta_p50_post_deg << "deg} conservation="
+                 << (conserved ? "OK" : "VIOLATED") << " in "
+                 << static_cast<int64_t>(s->frag_ms) << "ms";
+  } catch (const std::exception& e) {
+    // Enhancement pass only — never take the finalize down.
+    s->frag_ms = NowMs() - t0;
+    LOG(WARNING) << "[aether_sfm] frag-merge aborted: " << e.what();
+  }
+}
+
 // ── Resume support: rebuild minimal FrameRecords from the db ────────────────
 // [RESUME 2026-07-10] A resumed finalize (launch-time "有db无PLY" recovery
 // sweep / retry after the app was killed mid-solve) reopens sfm_live.db via
@@ -3040,6 +3411,7 @@ void RefineFallbackFullRerun(aether_sfm_session* s, const char* why) {
     auto refined = std::make_shared<colmap::Reconstruction>(*recon);
     RestoreTemporalDetail(s, refined.get());
     UpgradeLowParallaxTracks(s, refined.get());  // env-gated no-op by default
+    MergeFragmentTracks(s, refined.get());       // env-gated no-op by default
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
       s->recon_manager = manager;
@@ -3157,6 +3529,16 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"theta_post_n\":%lld,\"theta_post_2view\":%lld,"
         "\"theta_post_lt3\":%lld,\"theta_post_p50_deg\":%.3f,"
         "\"enrich_targeted_tracks\":%lld,\"enrich_targeted_scored\":%lld,"
+        // [P2-FRAG-MERGE 2026-07-11] fragment-merge attribution (all zero
+        // unless AETHER_FRAG_MERGE=1).
+        "\"frag_links\":%lld,\"frag_attempted\":%lld,"
+        "\"frag_accepted\":%lld,\"frag_obs_merged\":%lld,"
+        "\"frag_reject_reproj\":%lld,\"frag_reject_theta\":%lld,"
+        "\"frag_reject_degenerate\":%lld,\"frag_ms\":%lld,"
+        "\"frag_pre_n\":%lld,\"frag_pre_2view\":%lld,\"frag_pre_lt3\":%lld,"
+        "\"frag_pre_p50_deg\":%.3f,"
+        "\"frag_post_n\":%lld,\"frag_post_2view\":%lld,"
+        "\"frag_post_lt3\":%lld,\"frag_post_p50_deg\":%.3f,"
         "\"solver_used\":\"%s\",\"sparse_backend\":\"%s\","
         "\"mixed\":%d,\"threads\":%d}\n",
         static_cast<long long>(epoch_ms), live_reuse ? 1 : 0,
@@ -3200,6 +3582,22 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         s->upgrade_theta_p50_post_deg,
         static_cast<long long>(s->stat_enrich_targeted_tracks),
         static_cast<long long>(s->stat_enrich_targeted_scored),
+        static_cast<long long>(s->stat_frag_links),
+        static_cast<long long>(s->stat_frag_attempted),
+        static_cast<long long>(s->stat_frag_accepted),
+        static_cast<long long>(s->stat_frag_obs_merged),
+        static_cast<long long>(s->stat_frag_reject_reproj),
+        static_cast<long long>(s->stat_frag_reject_theta),
+        static_cast<long long>(s->stat_frag_reject_degenerate),
+        static_cast<long long>(s->frag_ms),
+        static_cast<long long>(s->stat_frag_pre_npts),
+        static_cast<long long>(s->stat_frag_pre_2view),
+        static_cast<long long>(s->stat_frag_pre_lt3),
+        s->frag_theta_p50_pre_deg,
+        static_cast<long long>(s->stat_frag_post_npts),
+        static_cast<long long>(s->stat_frag_post_2view),
+        static_cast<long long>(s->stat_frag_post_lt3),
+        s->frag_theta_p50_post_deg,
         solver_used.c_str(), sparse_backend.c_str(), mixed, threads);
     if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return;
     FILE* f = std::fopen(tmp.string().c_str(), "w");
@@ -3469,6 +3867,9 @@ void RefineGlobalBA(aether_sfm_session* s,
     // [KNIFE-A ② 2026-07-11] Finalize-tail 2-view upgrade over the delivered
     // model (env-gated no-op by default; sets s->upgrade_ms + stat_upgrade_*).
     UpgradeLowParallaxTracks(s, refined.get());
+    // [P2-FRAG-MERGE 2026-07-11] Finalize-tail duplicate-fragment merge
+    // (env-gated no-op by default; sets s->frag_ms + stat_frag_*).
+    MergeFragmentTracks(s, refined.get());
     LOG(WARNING) << "[aether_sfm] finalize worker: cache_pre="
                  << static_cast<int64_t>(cache_pre_ms)
                  << "ms enrich=" << static_cast<int64_t>(enrich_ms)
