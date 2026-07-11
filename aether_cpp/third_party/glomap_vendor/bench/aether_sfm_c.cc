@@ -43,6 +43,10 @@
 
 #include <glog/logging.h>
 
+#if defined(__APPLE__)
+#include <pthread.h>  // pthread_set_qos_class_self_np (finalize refine QoS)
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1810,6 +1814,46 @@ aether_sfm_result_t RunIncremental(
   }
 }
 
+// [S3.5 RESTORE 2026-07-11] In-thread safety net for the refine worker: if the
+// primary phase-2 path throws, fall back to the validated db-driven FULL
+// pipeline re-run (registration + in-run Cauchy global BA) so the capture
+// still delivers a refined cloud instead of an ERROR. Motivating case: the
+// live-recon-reuse path registers frames by ARKit pose, so a frame whose
+// every db pair fell below min_num_matches=15 (total capture-time GPU-matcher
+// collapse that the finalize re-match could not repair — device still hot)
+// exists in the recon but NOT in the DatabaseCache correspondence graph, and
+// ObservationManager's bookkeeping loop throws std::out_of_range on it. The
+// old chain never hit this only because its phase 1 silently dropped such
+// frames. Cost: fallback duplicates the old full re-run — paid ONLY on an
+// exception that previously ended the whole finalize in ERROR.
+void RefineFallbackFullRerun(aether_sfm_session* s, const char* why) {
+  LOG(WARNING) << "[aether_sfm] refine failed (" << why
+               << ") — falling back to db-driven full re-run";
+  try {
+    const double t0 = NowMs();
+    std::shared_ptr<colmap::ReconstructionManager> manager;
+    std::shared_ptr<const colmap::Reconstruction> recon;
+    const aether_sfm_result_t rc =
+        RunIncremental(s->db_path, s->image_path, s->options, &manager, &recon,
+                       nullptr, 0, /*local_only=*/false);
+    if (rc != AETHER_SFM_OK || !recon || recon->NumRegImages() == 0) {
+      s->finalize_status.store(3);  // AETHER_SFM_FINALIZE_ERROR
+      return;
+    }
+    auto refined = std::make_shared<colmap::Reconstruction>(*recon);
+    RestoreTemporalDetail(s, refined.get());
+    {
+      std::lock_guard<std::mutex> lk(s->recon_mutex);
+      s->recon_manager = manager;
+      s->recon = refined;
+      s->refine_ms = NowMs() - t0;
+    }
+    s->finalize_status.store(2);  // AETHER_SFM_FINALIZE_REFINED
+  } catch (...) {
+    s->finalize_status.store(3);  // AETHER_SFM_FINALIZE_ERROR
+  }
+}
+
 // Async-finalize worker: deep-copy the local-only reconstruction, run global bundle
 // adjustment via the pipeline's PUBLIC RefineReconstruction() (iterative global
 // refinement + FilterFrames + UpdatePoint3DErrors — NO per-image re-triangulation;
@@ -1820,6 +1864,13 @@ aether_sfm_result_t RunIncremental(
 void RefineGlobalBA(aether_sfm_session* s,
                     std::shared_ptr<const colmap::Reconstruction> local) {
   try {
+#if defined(__APPLE__)
+    // [S3.5 RESTORE 2026-07-11] The refined model IS the user-visible result
+    // (no two-phase preview) and the user is waiting on the foreground waiting
+    // page — run the global BA at user-initiated QoS so a default/background
+    // QoS std::thread doesn't get E-core-throttled mid-wait.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
     const double t0 = NowMs();
     auto refined = std::make_shared<colmap::Reconstruction>(*local);
     auto popts = std::make_shared<colmap::IncrementalPipelineOptions>();
@@ -1856,8 +1907,10 @@ void RefineGlobalBA(aether_sfm_session* s,
       s->refine_ms = NowMs() - t0;
     }
     s->finalize_status.store(2);  // AETHER_SFM_FINALIZE_REFINED
+  } catch (const std::exception& e) {
+    RefineFallbackFullRerun(s, e.what());
   } catch (...) {
-    s->finalize_status.store(3);  // AETHER_SFM_FINALIZE_ERROR
+    RefineFallbackFullRerun(s, "unknown exception");
   }
 }
 
@@ -2532,22 +2585,76 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
   }
 }
 
-// Two-phase async finalize. Phase 1 (synchronous, this call): incremental
-// register + local BA only -> LOCAL reconstruction is live in *recon the instant
-// this returns OK (status = LOCAL_READY), so the UI can show the model now.
-// Phase 2 (background thread): the heavy O(N) global BA runs off the critical
-// path; when it converges the refined model is atomically swapped into *recon
-// (status = REFINED). The getters always read whatever is current under the
-// mutex (local first, refined later). out_json carries the LOCAL summary.
+// Two-phase async finalize. Phase 1 (synchronous, this call): finish-time db
+// enrichment (spatial revisit + starved-frame re-match) and then — S3.5
+// architecture — REUSE the capture-time live local-BA reconstruction as the
+// LOCAL model (status = LOCAL_READY). Phase 2 (background thread): the single
+// Cauchy global BA + track completion over the enriched db, then the refined
+// model is atomically swapped into *recon (status = REFINED). The getters
+// always read whatever is current under the mutex.
+//
+// [S3.5 RESTORE 2026-07-11] The live streaming reconstruction IS the phase-1
+// result; finalize adds only the global refinement. Historically phase 1
+// re-ran the FULL IncrementalPipeline from the db (RunIncremental local_only)
+// because async finalize (2026-06-22, 5f7350ba) predates the live local-BA
+// recon (2026-07-09, 74d5f477) and was never rewired — on device that full
+// re-run alone cost 112-154 s (captures 42/43) and re-computed registrations
+// the live path already held in memory, occasionally SPLITTING the capture
+// into n_models=2 and dropping every frame of the smaller model (capture 43:
+// 96/128 vs live 128/128). Reusing the live recon:
+//   - phase 1 becomes a deep copy (sub-second) — no duplicate reconstruction;
+//   - the model keeps ARKit-world gravity alignment + metric scale, and one
+//     connected model (pose-registered, never split by match topology);
+//   - the finalize-written db pairs (AddSpatialRevisitMatches +
+//     FinalizeRematchStarvedFrames) are consumed INCREMENTALLY by phase 2:
+//     RefineReconstruction's IterativeGlobalRefinement runs
+//     CompleteAndMergeTracks + Retriangulate over the enriched correspondence
+//     graph (track extension + new triangulations from the new pairs) before
+//     and between the Cauchy global BA rounds, and RestoreTemporalDetail
+//     consumes the re-matched temporal-window TVGs afterwards — nothing about
+//     phase 2 changed, it always worked this way on the phase-1 model.
+// RESUME sessions (launch-time "有db无PLY" recovery: no in-memory live recon)
+// keep the validated db-driven full re-run below — unchanged semantics.
 aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
                                               char* out_json, int out_cap) {
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
   if (s->refine_thread.joinable()) s->refine_thread.join();  // drain prior run
   try {
+    const double t_enter = NowMs();
     RebuildFrameRecordsForResume(s);  // no-op unless frames empty (resume)
     AddSpatialRevisitMatches(s);
     FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
     if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
+
+    // ── Normal completion path: live recon in memory → reuse it. ──
+    // Guard: a degenerate live recon (<2 registered frames / 0 points — e.g.
+    // ARKit poses never arrived) falls through to the db-driven re-run so the
+    // "采集必出点云" guarantee keeps its full-strength fallback.
+    if (s->live_recon_ready && s->live_recon.NumRegImages() >= 2 &&
+        s->live_recon.NumPoints3D() > 0) {
+      auto local = std::make_shared<colmap::Reconstruction>(s->live_recon);
+      local->UpdatePoint3DErrors();  // live path fills errors lazily
+      if (out_json && out_cap > 0) {
+        std::snprintf(
+            out_json, out_cap,
+            "{\"solve_ms\":%.1f,\"n_models\":1,\"n_registered\":%zu,"
+            "\"n_points3d\":%zu,\"reproj_px\":%.4f,\"track_len\":%.3f,"
+            "\"phase1\":\"live_reuse\"}",
+            NowMs() - t_enter, local->NumRegImages(), local->NumPoints3D(),
+            local->ComputeMeanReprojectionError(),
+            local->ComputeMeanTrackLength());
+      }
+      {
+        std::lock_guard<std::mutex> lk(s->recon_mutex);
+        s->recon_manager.reset();  // no mapper manager on this path
+        s->recon = local;
+      }
+      s->finalize_status.store(1);  // LOCAL_READY (== the live model)
+      s->refine_thread = std::thread(RefineGlobalBA, s, local);
+      return AETHER_SFM_OK;
+    }
+
+    // ── Resume / degenerate path: db-driven full re-run (unchanged). ──
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> local;
     const aether_sfm_result_t rc =
