@@ -128,20 +128,29 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s,
 // Progress flag for aether_sfm_finalize_async (poll via aether_sfm_finalize_status).
 typedef enum aether_sfm_finalize_status {
   AETHER_SFM_FINALIZE_IDLE = 0,         // not started
-  AETHER_SFM_FINALIZE_LOCAL_READY = 1,  // local recon live; global BA refining
+  AETHER_SFM_FINALIZE_LOCAL_READY = 1,  // worker refining (see note below)
   AETHER_SFM_FINALIZE_REFINED = 2,      // global BA done; recon swapped to refined
   AETHER_SFM_FINALIZE_ERROR = 3,        // refinement failed
 } aether_sfm_finalize_status_t;
 
-// Two-phase finalize for "拍完即出图". Phase 1 (this call, synchronous): runs the
-// incremental register + LOCAL BA only, so the LOCAL reconstruction is live the
-// instant this returns OK — read poses/points immediately (status becomes
-// LOCAL_READY). Phase 2 (background thread): the heavy O(N) finalize global BA
-// runs OFF the UI critical path; when it converges the globally-refined model is
-// atomically swapped in (status becomes REFINED) and the getters then return it.
-// out_json carries the LOCAL summary. The session owns the worker thread;
-// aether_sfm_free joins it. Downstream (depth/fusion) should wait for REFINED;
-// the live preview can use the LOCAL_READY model immediately.
+// Two-phase finalize for "拍完即出图". Phase 1 (this call): on the normal live
+// streaming path the capture-time live local-BA reconstruction is handed to
+// the background worker (milliseconds; out_json carries its summary with
+// phase1:"live_reuse"). Phase 2 (background worker): finish-time db
+// enrichment (spatial revisit + starved re-match, GPU) runs in parallel with
+// a stage-1 global refinement (CPU), then the stage-2 Cauchy global BA +
+// track completion consume the enriched db; the refined model is published
+// (status becomes REFINED) and the getters return it.
+//
+// [FINALIZE-ZEROCOPY 2026-07-11] On the live path the LOCAL model is NOT
+// published (product sign-off: it is never displayed) — get_poses/get_points
+// return AETHER_SFM_ERR_NOT_REGISTERED between LOCAL_READY and REFINED, and
+// the live-preview getters (get_preview_tracked / live_diag) also gate off
+// once this call returns. Resume sessions (rebuilt from an sfm_live.db, no
+// in-memory live recon) keep the old behavior: the db-driven LOCAL model is
+// published at LOCAL_READY and readable while the worker refines a copy.
+// The session owns the worker thread; aether_sfm_free joins it. Downstream
+// (colorize/depth/fusion) must wait for REFINED.
 aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
                                               char* out_json, int out_cap);
 
@@ -236,6 +245,17 @@ aether_sfm_result_t aether_sfm_get_preview_tracked(
 // use it as the finish-time double-wall fix without a spatial-revisit bridge.
 // Device only: run on the capture worker isolate (see .cc threading).
 aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s);
+
+// Per-frame timing/counters of the LAST aether_sfm_add_frame (perf
+// diagnostics) — the numbers behind the device log line
+//   extract=<..>ms match=<..>ms cand=<..> gpuM=<..> cpuM=<..>
+// extract_ms > ~2000 flags a GPU→CPU extractor fallback; cpu_matches > 0
+// flags a GPU matcher failure. Any out-ptr may be NULL; all fields are
+// zero before the first add_frame. (Declaration added 2026-07-11 — the
+// implementation predates it and the pwsfm shim already consumed it.)
+void aether_sfm_debug_last(aether_sfm_session_t* s, double* extract_ms,
+                           double* match_ms, int* n_cand, int* gpu_matches,
+                           int* cpu_matches);
 
 // Cumulative streaming-quality counters over the whole capture — which floater
 // filter did what. tvg_pairs/raw_pairs = grow/create pairs from the geometric

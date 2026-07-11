@@ -31,6 +31,7 @@
 #include "colmap/geometry/triangulation.h"
 #include "colmap/scene/camera.h"
 #include "colmap/scene/database.h"
+#include "colmap/scene/database_cache.h"
 #include "colmap/scene/image.h"
 #include "colmap/scene/point3d.h"
 #include "colmap/scene/reconstruction.h"
@@ -39,6 +40,7 @@
 #include "colmap/scene/track.h"
 #include "colmap/estimators/bundle_adjustment.h"
 #include "colmap/estimators/bundle_adjustment_ceres.h"
+#include "colmap/sfm/incremental_mapper.h"
 #include "colmap/sfm/observation_manager.h"
 
 #include <glog/logging.h>
@@ -322,7 +324,15 @@ struct aether_sfm_session {
   // registered image per posed frame (ARKit pose), tracks grown from the
   // cross-checked matches, refined by a windowed Cauchy local BA each frame.
   // Separate from `recon` (finalize output); owned solely by add_frame (worker).
-  colmap::Reconstruction live_recon;
+  //
+  // [FINALIZE-ZEROCOPY 2026-07-11] Held via shared_ptr so finalize_async can
+  // MOVE the pointer into the refine worker instead of deep-copying the whole
+  // model (colmap::Reconstruction has a user-defined copy ctor and NO move —
+  // std::move on a by-value member would silently copy; transferring the
+  // shared_ptr relocates nothing, so the Images' internal camera pointers stay
+  // valid). After the move live_recon is nullptr and live_recon_ready=false:
+  // every reader gates on the flag (and defensively on the pointer).
+  std::shared_ptr<colmap::Reconstruction> live_recon;
   bool live_recon_ready = false;                                // camera+rig added
   std::vector<colmap::image_t> reg_order;                       // registration order → window
   int ba_window = 12;    // W: most-recent frames refined per pass (K=12 validated)
@@ -1854,15 +1864,75 @@ void RefineFallbackFullRerun(aether_sfm_session* s, const char* why) {
   }
 }
 
-// Async-finalize worker: deep-copy the local-only reconstruction, run global bundle
-// adjustment via the pipeline's PUBLIC RefineReconstruction() (iterative global
-// refinement + FilterFrames + UpdatePoint3DErrors — NO per-image re-triangulation;
-// TriangulateReconstruction() would add that and is a separate A/B), then atomically
-// swap the refined model into the session. Runs off the UI thread so the caller
-// already has the instant local result. db_path must be readable (the session closed
-// its handle before spawning this).
+// Shared phase-2 pipeline options (the validated Cauchy global config).
+// [2026-07-10] COMPLETE the phase-2 Cauchy config. This block previously set only
+// min_num_matches + residuals, so ba_global_loss_type defaulted to 0 (TRIVIAL) —
+// phase 2 was NOT the full Cauchy it was described as. Set the SAME validated global
+// config the synchronous RunPipeline uses (RunIncremental above): Cauchy@1.0,
+// gftol 1e-6, gref5/giter50 (defaults, set explicit so they hit the log).
+// RefineReconstruction runs iterative global refinement, which reads
+// ba_global_* for its loss. NOTE: this sets ONLY the loss config; the
+// RefineReconstruction-vs-TriangulateReconstruction choice is a SEPARATE algorithmic
+// decision, intentionally left unchanged here for a controlled A/B.
+std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
+    const aether_sfm_session* s) {
+  auto popts = std::make_shared<colmap::IncrementalPipelineOptions>();
+  popts->min_num_matches = 15;
+  popts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
+  popts->ba_global_loss_type = 2;              // CAUCHY (was defaulting to 0=TRIVIAL)
+  popts->ba_global_loss_scale = 1.0;
+  popts->ba_global_function_tolerance = 1e-6;  // converge-stop
+  popts->ba_global_max_refinements = 5;
+  popts->ba_global_max_num_iterations = 50;
+  // [TRI-ANGLE 2026-07-11] Same 3.0° creation gate as RunIncremental:
+  // IterativeGlobalRefinement's CompleteAndMergeTracks/retriangulation reads
+  // Triangulation() too — keep phase 2 from re-admitting the <3° tail that
+  // phase 1 now refuses to create.
+  popts->triangulation.min_angle = TriMinAngleDeg("AETHER_TRI_MIN_ANGLE_P2");
+  // [FINALIZE-OVERLAP 2026-07-11] Load ALL images into the DatabaseCache, not
+  // just match-connected ones. The live-reuse recon registers frames by ARKit
+  // pose; a frame whose every db pair fell below min_num_matches exists in the
+  // recon but — without this — NOT in the cache, and ObservationManager's
+  // bookkeeping throws std::out_of_range (previously only caught by the full
+  // re-run fallback, which dropped the live registrations). Loading the image
+  // with zero correspondences keeps it inert but resolvable.
+  popts->load_all_images = true;
+  popts->image_path = s->image_path;  // [4.0.4] image_path moved into options
+  return popts;
+}
+
+// Async-finalize worker.
+//
+// live_reuse=true (normal completion, [FINALIZE-ZEROCOPY + FINALIZE-OVERLAP
+// 2026-07-11]): `model` IS the moved-out live recon (sole owner — user signed
+// off that the LOCAL model is never displayed, so nothing is published until
+// REFINED and the refinement runs IN PLACE, zero deep copies; the old chain
+// held live_recon + a LOCAL copy + a worker copy = 3 models at peak). The
+// finish-time db enrichment (AddSpatialRevisitMatches +
+// FinalizeRematchStarvedFrames — GPU matcher, writes the db) runs on a helper
+// thread IN PARALLEL with a stage-1 refinement over a PRE-enrichment
+// DatabaseCache snapshot (CPU: the same IterativeGlobalRefinement rounds the
+// old chain ran serially AFTER the enrichment — CompleteAndMergeTracks /
+// Retriangulate / Cauchy global BA over the capture-time pairs). Once both
+// finish, stage 2 = the UNCHANGED RefineReconstruction over the ENRICHED db:
+// its leading CompleteAndMergeTracks + Retriangulate consume the new spatial /
+// re-match pairs, its BA rounds converge-stop early because stage 1 already
+// converged the capture-graph part. Trade-off vs the serial baseline: the
+// enrichment pairs join the refinement only in stage 2 (late) instead of from
+// round 1 — accepted after the host 42/43 A/B held the quality gates (points
+// ±2%, reproj ±0.02); AETHER_FINALIZE_NO_OVERLAP=1 is the same-binary revert
+// (enrichment then a single full refinement, i.e. the exact serial order).
+// db concurrency: the stage-1 cache snapshot is taken from s->db BEFORE the
+// enrichment thread starts; during the overlap the enrichment thread is the
+// db's only user; stage 2 reopens the db after the join.
+//
+// live_reuse=false (resume / degenerate path): unchanged semantics — `model`
+// is the published LOCAL_READY model (db-driven RunIncremental output, still
+// readable through the getters), so refine a deep copy and swap on success.
+// Enrichment already ran synchronously in aether_sfm_finalize_async there.
 void RefineGlobalBA(aether_sfm_session* s,
-                    std::shared_ptr<const colmap::Reconstruction> local) {
+                    std::shared_ptr<colmap::Reconstruction> model,
+                    bool live_reuse) {
   try {
 #if defined(__APPLE__)
     // [S3.5 RESTORE 2026-07-11] The refined model IS the user-visible result
@@ -1872,35 +1942,175 @@ void RefineGlobalBA(aether_sfm_session* s,
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
 #endif
     const double t0 = NowMs();
-    auto refined = std::make_shared<colmap::Reconstruction>(*local);
-    auto popts = std::make_shared<colmap::IncrementalPipelineOptions>();
-    popts->min_num_matches = 15;
-    popts->ba_min_num_residuals_for_cpu_multi_threading = 6000;
-    // [2026-07-10] COMPLETE the phase-2 Cauchy config. This block previously set only
-    // min_num_matches + residuals, so ba_global_loss_type defaulted to 0 (TRIVIAL) —
-    // phase 2 was NOT the full Cauchy it was described as. Set the SAME validated global
-    // config the synchronous RunPipeline uses (aether_sfm_c.cc:1200-1202): Cauchy@1.0,
-    // gftol 1e-6, gref5/giter50 (defaults, set explicit so they hit the log).
-    // RefineReconstruction (below) runs iterative global refinement, which reads
-    // ba_global_* for its loss. NOTE: this changes ONLY the loss config; the
-    // RefineReconstruction-vs-TriangulateReconstruction choice is a SEPARATE algorithmic
-    // decision, intentionally left unchanged here for a controlled A/B.
-    popts->ba_global_loss_type = 2;              // CAUCHY (was defaulting to 0=TRIVIAL)
-    popts->ba_global_loss_scale = 1.0;
-    popts->ba_global_function_tolerance = 1e-6;  // converge-stop
-    popts->ba_global_max_refinements = 5;
-    popts->ba_global_max_num_iterations = 50;
-    // [TRI-ANGLE 2026-07-11] Same 3.0° creation gate as RunIncremental:
-    // IterativeGlobalRefinement's CompleteAndMergeTracks/retriangulation reads
-    // Triangulation() too — keep phase 2 from re-admitting the <3° tail that
-    // phase 1 now refuses to create.
-    popts->triangulation.min_angle = TriMinAngleDeg("AETHER_TRI_MIN_ANGLE_P2");
+    auto popts = MakePhase2Options(s);
+    std::shared_ptr<colmap::Reconstruction> refined;
+    double enrich_ms = 0.0, cache_pre_ms = 0.0, stage1_ms = 0.0;
+    int stage1_rounds = 0;
+    const char* stage1_state = "off";
+    if (live_reuse) {
+      refined = std::move(model);  // in place — nothing else holds this model
+      // Kill switch: AETHER_FINALIZE_NO_OVERLAP=1 restores the serial order
+      // (enrichment first, then one full refinement over the enriched db).
+      static const bool no_overlap = [] {
+        const char* e = std::getenv("AETHER_FINALIZE_NO_OVERLAP");
+        return e && e[0] == '1';
+      }();
+      // Stage-1 graph snapshot BEFORE the enrichment thread writes the db.
+      std::shared_ptr<colmap::DatabaseCache> cache_pre;
+      if (!no_overlap && s->db && s->frames.size() >= 2) {
+        try {
+          const double t_cache = NowMs();
+          colmap::DatabaseCache::Options copts;
+          copts.min_num_matches =
+              static_cast<size_t>(popts->min_num_matches);
+          copts.load_all_images = true;  // see MakePhase2Options
+          cache_pre = colmap::DatabaseCache::Create(*s->db, copts);
+          cache_pre_ms = NowMs() - t_cache;
+        } catch (const std::exception& e) {
+          cache_pre.reset();
+          LOG(WARNING) << "[aether_sfm] finalize stage-1 cache snapshot failed"
+                          " ("
+                       << e.what() << ") — no overlap, serial refinement";
+        }
+      }
+      // Enrichment thread: GPU matcher writes the db; the passes are already
+      // fail-soft internally, but an escaped exception here would terminate
+      // the process (thread boundary) — catch everything. enrich_done is the
+      // stage-1 window flag: stage-1 refinement rounds only run while the GPU
+      // enrichment is still working (its wall time is "free"), so the round
+      // budget adapts to the capture — a healthy capture whose enrichment is
+      // seconds runs ~0 stage-1 rounds (stage 2 then IS the serial baseline),
+      // a heavy revisit capture fills the whole window with useful rounds.
+      std::atomic<bool> enrich_done{false};
+      const double t_enrich0 = NowMs();
+      std::thread enrich([s, &enrich_ms, &enrich_done, t_enrich0] {
+#if defined(__APPLE__)
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+        try {
+          AddSpatialRevisitMatches(s);
+          FinalizeRematchStarvedFrames(s);
+        } catch (const std::exception& e) {
+          LOG(WARNING) << "[aether_sfm] finalize db enrichment aborted: "
+                       << e.what();
+        } catch (...) {
+          LOG(WARNING) << "[aether_sfm] finalize db enrichment aborted";
+        }
+        try {
+          if (s->db) s->db->Close();  // flush before stage 2 reopens it
+        } catch (...) {
+        }
+        enrich_ms = NowMs() - t_enrich0;
+        enrich_done.store(true);
+      });
+      // Stage-1 refinement (CPU) over the capture-time graph, in parallel
+      // with the enrichment: the SAME per-round sequence as colmap's
+      // IterativeGlobalRefinement (CompleteAndMergeTracks + Retriangulate
+      // once, then rounds of AdjustGlobalBundle + CompleteAndMergeTracks +
+      // FilterPoints with the identical converge-stop), except the loop also
+      // stops at the first round boundary after the enrichment finishes —
+      // stage-1 never spends meaningfully past the free window. Failure is
+      // non-fatal: stage 2 then simply runs the full refinement alone (== the
+      // serial baseline).
+      if (cache_pre) {
+        const double t_s1 = NowMs();
+#if defined(__APPLE__)
+        // During the overlap the ENRICHMENT is the critical path (its
+        // completion gates stage 2) while stage 1 is opportunistic filler —
+        // measured on cap43: with both at USER_INITIATED the stage-1 BA
+        // starved the enrichment's CPU side (TVG RANSAC) 42.9 s → 54.6 s.
+        // Drop the worker to UTILITY for stage 1 only; restored below.
+        pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+        try {
+          colmap::IncrementalMapper mapper(cache_pre);
+          mapper.BeginReconstruction(refined);
+          const auto mapper_opts = popts->Mapper();
+          auto ba_opts = popts->GlobalBundleAdjustment();
+          const auto tri_opts = popts->Triangulation();
+          // Halve the ceres thread pool for stage-1 solves only: the QoS drop
+          // alone did not stop the BA from starving the enrichment (ceres
+          // spawns its own default-QoS workers and the Schur solves saturate
+          // memory bandwidth — cap43 enrichment 42.9 s serial → 54.9 s under
+          // an all-cores stage 1). Stage 1 is window-bound filler, so slower
+          // rounds cost nothing; stage 2 keeps the full thread pool.
+          if (ba_opts.ceres) {
+            const unsigned hw = std::thread::hardware_concurrency();
+            ba_opts.ceres->solver_options.num_threads =
+                std::max(1, static_cast<int>(hw / 2));
+          }
+          // Window checks between the sub-steps too: a healthy capture whose
+          // enrichment finishes in seconds must not pay for a full merge +
+          // retriangulate pass it gains nothing from (stage 2 redoes both on
+          // the enriched graph).
+          if (!enrich_done.load()) mapper.CompleteAndMergeTracks(tri_opts);
+          if (!enrich_done.load()) mapper.Retriangulate(tri_opts);
+          for (int i = 0; i < popts->ba_global_max_refinements; ++i) {
+            if (enrich_done.load()) break;  // window closed
+            const size_t num_obs = refined->ComputeNumObservations();
+            mapper.AdjustGlobalBundle(mapper_opts, ba_opts);
+            size_t num_changed = mapper.CompleteAndMergeTracks(tri_opts);
+            num_changed += mapper.FilterPoints(mapper_opts);
+            ++stage1_rounds;
+            const double changed =
+                num_obs == 0 ? 0
+                             : static_cast<double>(num_changed) / num_obs;
+            if (changed < popts->ba_global_max_refinement_change) break;
+          }
+          mapper.EndReconstruction(/*discard=*/false);
+          stage1_state = "ok";
+        } catch (const std::exception& e) {
+          stage1_state = "failed";
+          stage1_rounds = 0;
+          LOG(WARNING) << "[aether_sfm] finalize stage-1 refine failed ("
+                       << e.what()
+                       << ") — stage 2 runs the full refinement alone";
+        } catch (...) {
+          stage1_state = "failed";
+          stage1_rounds = 0;
+          LOG(WARNING) << "[aether_sfm] finalize stage-1 refine failed — "
+                          "stage 2 runs the full refinement alone";
+        }
+        stage1_ms = NowMs() - t_s1;
+        cache_pre.reset();  // free the snapshot before stage 2 loads its own
+#if defined(__APPLE__)
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+      }
+      enrich.join();
+      // Stage 2 completes the round budget: baseline runs gref(=5) rounds
+      // total; stage 2 runs the remainder (floor 1 — the enriched graph's new
+      // pairs always get at least Retriangulate/CompleteAndMergeTracks + one
+      // Cauchy BA round + FilterPoints/FilterFrames). Without this cap the
+      // per-round merge/filter churn re-burns all 5 rounds in stage 2 and the
+      // parallel window buys nothing (measured cap42: 48.4 s ≈ serial 48.5 s).
+      if (stage1_rounds > 0) {
+        popts->ba_global_max_refinements =
+            std::max(1, popts->ba_global_max_refinements - stage1_rounds);
+      }
+    } else {
+      // Resume/degenerate path: the LOCAL model is published — refine a copy.
+      refined = std::make_shared<colmap::Reconstruction>(*model);
+    }
+    // Stage 2 / main refinement over the (enriched) db — unchanged semantics:
+    // IterativeGlobalRefinement + FilterFrames + UpdatePoint3DErrors.
+    const double t_s2 = NowMs();
     auto manager = std::make_shared<colmap::ReconstructionManager>();
-    popts->image_path = s->image_path;  // [4.0.4] image_path moved into options
     colmap::IncrementalPipeline pipeline(
         popts, colmap::Database::Open(s->db_path), manager);
     pipeline.RefineReconstruction(refined);
+    const double stage2_ms = NowMs() - t_s2;
+    const double t_td = NowMs();
     RestoreTemporalDetail(s, refined.get());
+    LOG(WARNING) << "[aether_sfm] finalize worker: cache_pre="
+                 << static_cast<int64_t>(cache_pre_ms)
+                 << "ms enrich=" << static_cast<int64_t>(enrich_ms)
+                 << "ms stage1=" << static_cast<int64_t>(stage1_ms) << "ms ("
+                 << stage1_state << ", rounds=" << stage1_rounds
+                 << ") stage2=" << static_cast<int64_t>(stage2_ms)
+                 << "ms (rounds<=" << popts->ba_global_max_refinements
+                 << ") temporal=" << static_cast<int64_t>(NowMs() - t_td)
+                 << "ms total=" << static_cast<int64_t>(NowMs() - t0) << "ms";
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
       s->recon = refined;
@@ -2010,6 +2220,10 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
     } else {
       aether_sfm_options_default(&s->options);
     }
+    // [FINALIZE-ZEROCOPY 2026-07-11] The live recon lives behind a shared_ptr
+    // (see the session struct comment); allocate it up front so every gated
+    // use can rely on non-null while live_recon_ready flags actual readiness.
+    s->live_recon = std::make_shared<colmap::Reconstruction>();
     s->db_path = db_path;
     // Streaming callers pass a capture-owned db path (`sfm_live.db`). Keep it
     // after free so detached/background finalize or the launch-time recovery
@@ -2061,8 +2275,10 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       s->camera = camera;
       // Seed the live Reconstruction's shared camera + its trivial rig once.
       // Rig id == camera id, required before AddImageWithTrivialFrame.
-      s->live_recon.AddCameraWithTrivialRig(s->camera);
-      s->live_recon_ready = true;
+      if (s->live_recon) {
+        s->live_recon->AddCameraWithTrivialRig(s->camera);
+        s->live_recon_ready = true;
+      }
     }
 
     // 3) Write image + keypoints + descriptors.
@@ -2122,7 +2338,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       rimg.SetName(name);
       rimg.SetCameraId(s->camera_id);
       rimg.SetPoints2D(rec.points);  // kp order == point2D_idx
-      s->live_recon.AddImageWithTrivialFrame(std::move(rimg), rec.cam_from_world);
+      s->live_recon->AddImageWithTrivialFrame(std::move(rimg), rec.cam_from_world);
       s->reg_order.push_back(image_id);
     }
 
@@ -2258,8 +2474,8 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
           const uint32_t i2 = use_inliers ? inliers[mm].point2D_idx2
                                           : pair_buf[2 * mm + 1];  // cur kp index
           if (i1 >= prev.points.size() || i2 >= rec.points.size()) continue;
-          const colmap::Point2D& o1 = s->live_recon.Image(prev.image_id).Point2D(i1);
-          const colmap::Point2D& o2 = s->live_recon.Image(image_id).Point2D(i2);
+          const colmap::Point2D& o1 = s->live_recon->Image(prev.image_id).Point2D(i1);
+          const colmap::Point2D& o2 = s->live_recon->Image(image_id).Point2D(i2);
           const bool has1 = o1.HasPoint3D();
           const bool has2 = o2.HasPoint3D();
 
@@ -2278,17 +2494,17 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
               if (!merge_trials.insert(key).second) continue;
               Eigen::Vector3d refit_xyz;
               const MergeReject verdict = CanMergeLivePoints(
-                  s->live_recon, s->camera, key.a, key.b, kMaxMergeReprojPx,
+                  *s->live_recon, s->camera, key.a, key.b, kMaxMergeReprojPx,
                   kMergeRequireDisjointImages, &refit_xyz);
               if (verdict == MergeReject::kNone) {
                 const colmap::point3D_t merged =
-                    s->live_recon.MergePoints3D(key.a, key.b);
+                    s->live_recon->MergePoints3D(key.a, key.b);
                 // Install the union refit (the position the gate validated),
                 // not MergePoints3D's length-weighted average of two noisy
                 // low-parallax estimates. The windowed BA below refines it
                 // further (merged is in `touched`), and the post-BA reproj/
                 // tri-angle filters police it like any other point.
-                s->live_recon.Point3D(merged).xyz = refit_xyz;
+                s->live_recon->Point3D(merged).xyz = refit_xyz;
                 touched.erase(key.a);
                 touched.erase(key.b);
                 touched.insert(merged);
@@ -2329,7 +2545,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
             const colmap::Rigid3d& gcfw =
                 has1 ? rec.cam_from_world : prev.cam_from_world;
             const Eigen::Vector2d& gkp = has1 ? rec.points[i2] : prev.points[i1];
-            const Eigen::Vector3d Xg = gcfw * s->live_recon.Point3D(pid).xyz;
+            const Eigen::Vector3d Xg = gcfw * s->live_recon->Point3D(pid).xyz;
             if (Xg.z() <= 0.0) {
               ++s->stat_grow_rejected;
               ++s->stat_grow_reject_cheirality;
@@ -2343,7 +2559,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
               ++s->stat_grow_reject_reproj;
               continue;
             }
-            s->live_recon.AddObservation(pid, colmap::TrackElement(gimg, gidx));
+            s->live_recon->AddObservation(pid, colmap::TrackElement(gimg, gidx));
             touched.insert(pid);
             ++s->stat_grow_accepted;
             continue;
@@ -2388,7 +2604,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
           track.AddElement(prev.image_id, i1);
           track.AddElement(image_id, i2);
           const colmap::point3D_t pid =
-              s->live_recon.AddPoint3D(X_world, std::move(track), Eigen::Vector3ub::Zero());
+              s->live_recon->AddPoint3D(X_world, std::move(track), Eigen::Vector3ub::Zero());
           touched.insert(pid);
         }
       }
@@ -2399,7 +2615,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     // constant automatically (a Point3D whose track extends beyond the window is
     // fixed → anchors the window, bounds drift). Bounded ceres iters keep it in
     // the ~2s/frame budget.
-    if (rec.has_pose && s->live_recon_ready && s->live_recon.NumRegImages() >= 3 &&
+    if (rec.has_pose && s->live_recon_ready && s->live_recon->NumRegImages() >= 3 &&
         (frame_id % (s->ba_every_n > 0 ? s->ba_every_n : 1)) == 0) {
       const int W = s->ba_window > 0 ? s->ba_window : 12;
       const int n_reg = static_cast<int>(s->reg_order.size());
@@ -2414,7 +2630,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       // Variable points = those touched this frame with a short track (<=15),
       // pulled in with their out-of-window observations as constant anchors.
       for (const colmap::point3D_t pid : touched) {
-        if (s->live_recon.Point3D(pid).track.Length() <= 15)
+        if (s->live_recon->Point3D(pid).track.Length() <= 15)
           ba_config.AddVariablePoint(pid);
       }
 
@@ -2432,7 +2648,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
 
       try {
         auto ba =
-            colmap::CreateDefaultBundleAdjuster(ba_options, ba_config, s->live_recon);
+            colmap::CreateDefaultBundleAdjuster(ba_options, ba_config, *s->live_recon);
         ba->Solve();
         // ── Floater cleanup on the refined window (COLMAP-standard) ──
         // Runs at the BA cadence (already gated by ba_every_n). Deletes negative-
@@ -2441,7 +2657,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
         // already removed by the negative-depth pass are skipped, not dereferenced.
         // The recon's Point2D links are reset on delete, so the match-loop queries
         // above stay correct — no obs map to invalidate.
-        colmap::ObservationManager obs_mgr(s->live_recon);
+        colmap::ObservationManager obs_mgr(*s->live_recon);
         obs_mgr.FilterObservationsWithNegativeDepth();
         s->stat_reproj_filtered +=
             obs_mgr.FilterPoints3DWithLargeReprojectionError(/*max_error=*/4.0, touched);
@@ -2463,10 +2679,10 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
 
     // Publish the BA-refined live cloud into preview_points (served unchanged by
     // the getter). Short lock; the getter never blocks on the BA itself.
-    {
+    if (s->live_recon) {
       std::vector<Eigen::Vector3d> snap;
-      snap.reserve(s->live_recon.NumPoints3D());
-      for (const auto& [pid, pt] : s->live_recon.Points3D()) snap.push_back(pt.xyz);
+      snap.reserve(s->live_recon->NumPoints3D());
+      for (const auto& [pid, pt] : s->live_recon->Points3D()) snap.push_back(pt.xyz);
       std::lock_guard<std::mutex> lk(s->preview_mutex);
       s->preview_points.swap(snap);
     }
@@ -2585,13 +2801,14 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
   }
 }
 
-// Two-phase async finalize. Phase 1 (synchronous, this call): finish-time db
-// enrichment (spatial revisit + starved-frame re-match) and then — S3.5
-// architecture — REUSE the capture-time live local-BA reconstruction as the
-// LOCAL model (status = LOCAL_READY). Phase 2 (background thread): the single
-// Cauchy global BA + track completion over the enriched db, then the refined
-// model is atomically swapped into *recon (status = REFINED). The getters
-// always read whatever is current under the mutex.
+// Two-phase async finalize. Phase 1 (this call, now milliseconds on the live
+// path): hand the capture-time live local-BA reconstruction to the refine
+// worker (status = LOCAL_READY). Phase 2 (background worker): finish-time db
+// enrichment (GPU) in parallel with a stage-1 refinement (CPU), then the
+// stage-2 Cauchy global BA + track completion over the enriched db; the
+// refined model is published into *recon (status = REFINED). On the live path
+// the getters serve nothing until REFINED (LOCAL is unpublished by sign-off);
+// on the resume path they serve the LOCAL model under the mutex as before.
 //
 // [S3.5 RESTORE 2026-07-11] The live streaming reconstruction IS the phase-1
 // result; finalize adds only the global refinement. Historically phase 1
@@ -2602,7 +2819,9 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
 // the live path already held in memory, occasionally SPLITTING the capture
 // into n_models=2 and dropping every frame of the smaller model (capture 43:
 // 96/128 vs live 128/128). Reusing the live recon:
-//   - phase 1 becomes a deep copy (sub-second) — no duplicate reconstruction;
+//   - phase 1 becomes a shared_ptr MOVE (instant; [FINALIZE-ZEROCOPY] — the
+//     original S3.5 cut deep-copied here and again in the worker, +17%/+11%
+//     peak RSS on the host 42/43 A/B) — no duplicate reconstruction;
 //   - the model keeps ARKit-world gravity alignment + metric scale, and one
 //     connected model (pose-registered, never split by match topology);
 //   - the finalize-written db pairs (AddSpatialRevisitMatches +
@@ -2622,39 +2841,62 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
   try {
     const double t_enter = NowMs();
     RebuildFrameRecordsForResume(s);  // no-op unless frames empty (resume)
-    AddSpatialRevisitMatches(s);
-    FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
-    if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
 
     // ── Normal completion path: live recon in memory → reuse it. ──
     // Guard: a degenerate live recon (<2 registered frames / 0 points — e.g.
     // ARKit poses never arrived) falls through to the db-driven re-run so the
     // "采集必出点云" guarantee keeps its full-strength fallback.
-    if (s->live_recon_ready && s->live_recon.NumRegImages() >= 2 &&
-        s->live_recon.NumPoints3D() > 0) {
-      auto local = std::make_shared<colmap::Reconstruction>(s->live_recon);
-      local->UpdatePoint3DErrors();  // live path fills errors lazily
+    //
+    // [FINALIZE-ZEROCOPY + FINALIZE-OVERLAP 2026-07-11] Three changes vs the
+    // first S3.5 cut, all grounded on the host 42/43 A/B (RSS +17%/+11%, the
+    // 17-40 s GPU enrichment serial in front of the 30-47 s CPU phase 2):
+    //   1. The live recon is MOVED into the worker (shared_ptr transfer), not
+    //      deep-copied — and phase 2 refines it IN PLACE. Zero extra copies.
+    //   2. NOTHING is published at LOCAL_READY on this path (user signed off:
+    //      the LOCAL model is never displayed; the Dart worker only reads the
+    //      getters after REFINED). get_points/get_poses between LOCAL_READY
+    //      and REFINED now return AETHER_SFM_ERR_NOT_REGISTERED here.
+    //   3. The finish-time db enrichment (spatial revisit + starved re-match,
+    //      GPU) moved INTO the worker, where it runs in parallel with the
+    //      stage-1 CPU refinement — see RefineGlobalBA. This call therefore
+    //      returns in milliseconds. Consequence: stream-stats read right
+    //      after this call no longer include the enrichment counters (they
+    //      are logged natively by the worker instead).
+    // The resume path (no in-memory live recon) below keeps the old serial
+    // enrichment + db-driven re-run + published LOCAL model, unchanged.
+    if (s->live_recon_ready && s->live_recon &&
+        s->live_recon->NumRegImages() >= 2 &&
+        s->live_recon->NumPoints3D() > 0) {
+      std::shared_ptr<colmap::Reconstruction> work = std::move(s->live_recon);
+      s->live_recon.reset();          // moved-from shared_ptr is null already; be explicit
+      s->live_recon_ready = false;    // live getters now gate off
+      work->UpdatePoint3DErrors();    // live path fills errors lazily
       if (out_json && out_cap > 0) {
         std::snprintf(
             out_json, out_cap,
             "{\"solve_ms\":%.1f,\"n_models\":1,\"n_registered\":%zu,"
             "\"n_points3d\":%zu,\"reproj_px\":%.4f,\"track_len\":%.3f,"
             "\"phase1\":\"live_reuse\"}",
-            NowMs() - t_enter, local->NumRegImages(), local->NumPoints3D(),
-            local->ComputeMeanReprojectionError(),
-            local->ComputeMeanTrackLength());
+            NowMs() - t_enter, work->NumRegImages(), work->NumPoints3D(),
+            work->ComputeMeanReprojectionError(),
+            work->ComputeMeanTrackLength());
       }
       {
         std::lock_guard<std::mutex> lk(s->recon_mutex);
         s->recon_manager.reset();  // no mapper manager on this path
-        s->recon = local;
+        s->recon.reset();          // LOCAL model intentionally unpublished
       }
-      s->finalize_status.store(1);  // LOCAL_READY (== the live model)
-      s->refine_thread = std::thread(RefineGlobalBA, s, local);
+      s->finalize_status.store(1);  // LOCAL_READY (worker refining)
+      s->refine_thread =
+          std::thread(RefineGlobalBA, s, std::move(work), /*live_reuse=*/true);
       return AETHER_SFM_OK;
     }
 
-    // ── Resume / degenerate path: db-driven full re-run (unchanged). ──
+    // ── Resume / degenerate path: serial enrichment + db-driven full re-run
+    // (unchanged semantics). ──
+    AddSpatialRevisitMatches(s);
+    FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
+    if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> local;
     const aether_sfm_result_t rc =
@@ -2674,7 +2916,11 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
       s->recon = local;
     }
     s->finalize_status.store(1);  // LOCAL_READY
-    s->refine_thread = std::thread(RefineGlobalBA, s, local);
+    // The worker's resume arm deep-copies before refining (LOCAL published).
+    s->refine_thread =
+        std::thread(RefineGlobalBA, s,
+                    std::const_pointer_cast<colmap::Reconstruction>(local),
+                    /*live_reuse=*/false);
     return AETHER_SFM_OK;
   } catch (const std::exception&) {
     s->finalize_status.store(3);
@@ -2863,8 +3109,10 @@ aether_sfm_result_t aether_sfm_get_preview_tracked(
       !out_obs_count) {
     return AETHER_SFM_ERR_INVALID_ARG;
   }
-  if (!s->live_recon_ready) return AETHER_SFM_ERR_NOT_REGISTERED;
-  const colmap::Reconstruction& recon = s->live_recon;
+  if (!s->live_recon_ready || !s->live_recon) {
+    return AETHER_SFM_ERR_NOT_REGISTERED;
+  }
+  const colmap::Reconstruction& recon = *s->live_recon;
   const auto& pts = recon.Points3D();
   const int n = static_cast<int>(pts.size());
 
@@ -2917,7 +3165,7 @@ aether_sfm_result_t aether_sfm_get_preview_tracked(
   return AETHER_SFM_OK;
 }
 
-// Legacy experimental one-shot GLOBAL BA over the streaming live_recon. This is
+// Legacy experimental one-shot GLOBAL BA over the streaming live_recon-> This is
 // intentionally NOT the finish-time delivery path: device tests showed pure BA
 // can refine existing tracks but cannot create missing cross-view tracks, merge
 // duplicate tracks, or retriangulate a revisit into a single wall. Keep it as an
@@ -2930,7 +3178,8 @@ aether_sfm_result_t aether_sfm_get_preview_tracked(
 // (mutates live_recon); the getter is called after this returns.
 aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
-  if (!s->live_recon_ready || s->live_recon.NumRegImages() < 3)
+  if (!s->live_recon_ready || !s->live_recon ||
+      s->live_recon->NumRegImages() < 3)
     return AETHER_SFM_ERR_NOT_REGISTERED;
   try {
     // ---- STAGE 1: pose-correcting global BA, OBSERVATION-CAPPED --------------
@@ -2949,8 +3198,8 @@ aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
         std::min<size_t>(400000, std::max<size_t>(80000, n_frames * 120));
 
     std::vector<std::pair<int, colmap::point3D_t>> ranked;  // (track_len, pid)
-    ranked.reserve(s->live_recon.NumPoints3D());
-    for (const auto& [pid, pt] : s->live_recon.Points3D())
+    ranked.reserve(s->live_recon->NumPoints3D());
+    for (const auto& [pid, pt] : s->live_recon->Points3D())
       ranked.emplace_back(static_cast<int>(pt.track.Length()), pid);
     std::sort(ranked.begin(), ranked.end(),
               std::greater<std::pair<int, colmap::point3D_t>>());  // longest first
@@ -2975,7 +3224,7 @@ aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
         colmap::CeresBundleAdjustmentOptions::LossFunctionType::CAUCHY;
     opt1.ceres->loss_function_scale = 1.0;
     opt1.ceres->solver_options.max_num_iterations = 25;  // gref=1, giter~20-25
-    colmap::CreateDefaultBundleAdjuster(opt1, cfg1, s->live_recon)->Solve();
+    colmap::CreateDefaultBundleAdjuster(opt1, cfg1, *s->live_recon)->Solve();
 
     // ---- STAGE 2: structure-only refit, ALL points, POSES FIXED -------------
     // Stage 1 moved the poses; every point NOT in the capped subset is now stale
@@ -2986,28 +3235,28 @@ aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
     // needed: fixed poses already pin the gauge.)
     colmap::BundleAdjustmentConfig cfg2;
     for (const colmap::image_t img_id : s->reg_order) cfg2.AddImage(img_id);
-    for (const auto& [pid, pt] : s->live_recon.Points3D())
+    for (const auto& [pid, pt] : s->live_recon->Points3D())
       cfg2.AddVariablePoint(pid);
 
     colmap::BundleAdjustmentOptions opt2 = opt1;
     opt2.refine_rig_from_world = false;  // poses FROZEN → structure-only, fast
     opt2.ceres->solver_options.max_num_iterations = 10;
-    colmap::CreateDefaultBundleAdjuster(opt2, cfg2, s->live_recon)->Solve();
+    colmap::CreateDefaultBundleAdjuster(opt2, cfg2, *s->live_recon)->Solve();
 
     // Global floater cleanup (all points now, not just a window's touched set).
-    colmap::ObservationManager obs_mgr(s->live_recon);
+    colmap::ObservationManager obs_mgr(*s->live_recon);
     obs_mgr.FilterObservationsWithNegativeDepth();
     std::unordered_set<colmap::point3D_t> all_pts;
-    all_pts.reserve(s->live_recon.NumPoints3D());
-    for (const auto& [pid, pt] : s->live_recon.Points3D()) all_pts.insert(pid);
+    all_pts.reserve(s->live_recon->NumPoints3D());
+    for (const auto& [pid, pt] : s->live_recon->Points3D()) all_pts.insert(pid);
     obs_mgr.FilterPoints3DWithLargeReprojectionError(/*max_error=*/4.0, all_pts);
     obs_mgr.FilterPoints3DWithSmallTriangulationAngle(/*min_tri_angle_deg=*/2.0,
                                                       all_pts);
 
     // Republish the collapsed cloud into preview_points.
     std::vector<Eigen::Vector3d> snap;
-    snap.reserve(s->live_recon.NumPoints3D());
-    for (const auto& [pid, pt] : s->live_recon.Points3D()) snap.push_back(pt.xyz);
+    snap.reserve(s->live_recon->NumPoints3D());
+    for (const auto& [pid, pt] : s->live_recon->Points3D()) snap.push_back(pt.xyz);
     {
       std::lock_guard<std::mutex> lk(s->preview_mutex);
       s->preview_points.swap(snap);
@@ -3182,15 +3431,24 @@ void aether_sfm_live_diag(aether_sfm_session_t* s, double* mean_reproj_px,
   int64_t pts = 0, track3 = 0, obs = 0;
   double err_sum = 0.0;
   int64_t err_n = 0;
+  // [FINALIZE-ZEROCOPY 2026-07-11] finalize_async moves the live recon into
+  // the refine worker; after that this diagnostic reports zeros.
+  if (!s->live_recon) {
+    if (n_points) *n_points = 0;
+    if (n_track3plus) *n_track3plus = 0;
+    if (n_obs) *n_obs = 0;
+    if (mean_reproj_px) *mean_reproj_px = 0.0;
+    return;
+  }
   try {
-    for (const auto& [pid, pt] : s->live_recon.Points3D()) {
+    for (const auto& [pid, pt] : s->live_recon->Points3D()) {
       ++pts;
       const size_t len = pt.track.Length();
       obs += static_cast<int64_t>(len);
       if (len >= 3) ++track3;
       for (const auto& el : pt.track.Elements()) {
-        if (!s->live_recon.ExistsImage(el.image_id)) continue;
-        const colmap::Image& image = s->live_recon.Image(el.image_id);
+        if (!s->live_recon->ExistsImage(el.image_id)) continue;
+        const colmap::Image& image = s->live_recon->Image(el.image_id);
         if (!image.HasPose() || el.point2D_idx >= image.NumPoints2D()) continue;
         const Eigen::Vector3d x_cam = image.CamFromWorld() * pt.xyz;
         if (x_cam.z() <= 0.0) continue;
