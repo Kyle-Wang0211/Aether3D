@@ -708,6 +708,85 @@ constexpr int kSpatialMaxTotalPairs = 1200;
 // its best anchor before any frame consumes all three.
 constexpr int kSpatialInitialAnchorBudget = 720;
 
+// [SCAN-MATRIX ENV 2026-07-11] Threshold-scan hooks for the host gate matrix.
+// Same pattern as TriMinAngleDeg / FinalizeBaThreads: getenv once (static
+// cache), default == the shipped constant, so an UNSET environment is
+// bit-identical to the pre-hook binary (the 3.0° defaults return the exact
+// radian literal, not a fresh degree→radian conversion). Context: every one of
+// these gates was calibrated in the pre-DSP-fix era; the hooks let the scan
+// matrix re-price them per-arm without rebuilding.
+double EnvGateDouble(const char* name, double fallback) {
+  const char* e = std::getenv(name);
+  if (e && e[0]) {
+    const double v = std::atof(e);
+    if (v > 0.0) return v;
+  }
+  return fallback;
+}
+
+// ① AETHER_LIVE_TRI_MIN_ANGLE — live add_frame 2-view CREATION parallax gate,
+//    degrees in the env, radians out. Default = shipped 3.0°.
+double LiveCreateTriMinAngleRad() {
+  static const double cached = [] {
+    const char* e = std::getenv("AETHER_LIVE_TRI_MIN_ANGLE");
+    if (e && e[0]) {
+      const double deg = std::atof(e);
+      if (deg > 0.0) return deg * M_PI / 180.0;
+    }
+    return 0.05235987755982988;  // shipped 3.0° literal
+  }();
+  return cached;
+}
+
+// ② AETHER_GROW_REPROJ_PX — live TVG-inlier grow reprojection gate. Default 14.
+double LiveGrowMaxReprojPx() {
+  static const double cached = EnvGateDouble("AETHER_GROW_REPROJ_PX", 14.0);
+  return cached;
+}
+
+// ③ AETHER_TD_TRI_ANGLE / AETHER_TD_REPROJ_PX — RestoreTemporalDetail gates
+//    (tri-angle degrees in / radians out, reproj px). Defaults 3.0° / 3 px.
+double TemporalDetailTriMinAngleRad() {
+  static const double cached = [] {
+    const char* e = std::getenv("AETHER_TD_TRI_ANGLE");
+    if (e && e[0]) {
+      const double deg = std::atof(e);
+      if (deg > 0.0) return deg * M_PI / 180.0;
+    }
+    return 0.05235987755982988;  // shipped 3.0° literal
+  }();
+  return cached;
+}
+double TemporalDetailMaxReprojPx() {
+  static const double cached = EnvGateDouble("AETHER_TD_REPROJ_PX", 3.0);
+  return cached;
+}
+
+// ④ AETHER_ENRICH_PAIR_CAP — spatial-revisit enrichment budget override.
+//    UNSET (returns 0) = legacy behavior exactly: anchor budget 720, hard cap
+//    1200, quadratic fallback only when no spatial region confirmed, and the
+//    ACTUAL attempted-pair count is whatever the anchor funnel yields (cap45
+//    device run: 7). SET to N: N replaces the hard cap AND acts as a floor —
+//    AddSpatialRevisitMatches appends a top-up pass over the remaining
+//    beyond-K pairs (closest camera centers first) until N pairs were actually
+//    attempted. Every top-up pair still passes the unchanged verification
+//    chain (raw match ≥15 → TVG RANSAC ≥15 @10% → guided re-match → strict
+//    TVG ≥30 inliers @1px, ratio ≥0.25) before it reaches sqlite.
+int EnrichPairCapOverride() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_ENRICH_PAIR_CAP")) {
+      const int v = std::atoi(e);
+      if (v > 0) return v;
+    }
+    return 0;
+  }();
+  return cached;
+}
+int SpatialTotalPairBudget() {
+  const int cap = EnrichPairCapOverride();
+  return cap > 0 ? cap : kSpatialMaxTotalPairs;
+}
+
 enum class SpatialPairPurpose {
   kAnchor,
   kConfirm,
@@ -933,7 +1012,7 @@ bool VerifySpatialPair(aether_sfm_session* s,
   // (add_frame assigns them unconditionally), so this is unreachable live.
   if (a.descriptors.empty() || b.descriptors.empty()) return false;
 
-  if (*attempted_total >= kSpatialMaxTotalPairs) {
+  if (*attempted_total >= SpatialTotalPairBudget()) {
     ++s->stat_spatial_budget_skipped;
     return false;
   }
@@ -1286,17 +1365,69 @@ void AddSpatialRevisitMatches(aether_sfm_session* s) {
       BuildSpatialAnchors(s, temporal_k);
   const int spatial_regions = ProcessRevisitAnchors(
       s, spatial_anchors, false,
-      std::min(kSpatialInitialAnchorBudget, kSpatialMaxTotalPairs), &cache,
+      std::min(kSpatialInitialAnchorBudget, SpatialTotalPairBudget()), &cache,
       &attempted_total);
 
   // COLMAP-style quadratic overlap is a sparse safety net, not parallel blind
   // work: only use powers-of-two temporal gaps when ARKit produced no confirmed
   // multi-frame revisit region at all.
-  if (spatial_regions == 0 && attempted_total < kSpatialMaxTotalPairs) {
+  if (spatial_regions == 0 && attempted_total < SpatialTotalPairBudget()) {
     const std::vector<SpatialRevisitCandidate> quadratic_anchors =
         BuildQuadraticAnchors(s, temporal_k);
-    ProcessRevisitAnchors(s, quadratic_anchors, true, kSpatialMaxTotalPairs,
+    ProcessRevisitAnchors(s, quadratic_anchors, true, SpatialTotalPairBudget(),
                           &cache, &attempted_total);
+  }
+
+  // [SCAN-MATRIX ENV ④ 2026-07-11] Enrichment top-up: with
+  // AETHER_ENRICH_PAIR_CAP=N set, N is a floor as well as the cap. The anchor
+  // funnel alone can starve enrichment (cap45 device run attempted only 7
+  // pairs — a short orbit barely produces pose-gated revisit candidates), so
+  // the matrix could never price "what do 200/300 extra finalize matches
+  // buy". Enumerate every beyond-K pair, closest camera centers first, and
+  // keep attempting until N pairs were actually matched. Verification is the
+  // unchanged strict chain; anchor-pass pairs that verified but were left
+  // unwritten pending 2-of-3 region confirmation are flushed from the cache
+  // for free. UNSET env skips this block entirely — default behavior is
+  // bit-identical to the pre-hook binary.
+  const int enrich_cap = EnrichPairCapOverride();
+  if (enrich_cap > 0) {
+    std::vector<SpatialRevisitCandidate> topup;
+    const int num_frames = static_cast<int>(s->frames.size());
+    for (int i = 0; i < num_frames; ++i) {
+      const FrameRecord& frame_i = s->frames[i];
+      for (int j = 0; j + temporal_k < i; ++j) {
+        const FrameRecord& frame_j = s->frames[j];
+        SpatialRevisitCandidate candidate;
+        candidate.i = i;
+        candidate.j = j;
+        if (frame_i.has_pose && frame_j.has_pose) {
+          candidate.distance_m =
+              (frame_i.cam_from_world.TgtOriginInSrc() -
+               frame_j.cam_from_world.TgtOriginInSrc())
+                  .norm();
+          candidate.score = candidate.distance_m;
+        } else {
+          // Pose-less frames sort last, smaller temporal gaps first.
+          candidate.score = 1.0e9 + static_cast<double>(i - j);
+        }
+        topup.push_back(candidate);
+      }
+    }
+    std::sort(topup.begin(), topup.end(),
+              [](const SpatialRevisitCandidate& a,
+                 const SpatialRevisitCandidate& b) {
+                if (a.score != b.score) return a.score < b.score;
+                if (a.i != b.i) return a.i < b.i;
+                return a.j < b.j;
+              });
+    for (const SpatialRevisitCandidate& candidate : topup) {
+      if (attempted_total >= enrich_cap) break;
+      if (VerifySpatialPair(s, candidate.i, candidate.j,
+                            SpatialPairPurpose::kExpansion, &cache,
+                            &attempted_total)) {
+        WriteVerifiedSpatialPair(s, candidate.i, candidate.j, false, &cache);
+      }
+    }
   }
 }
 
@@ -1311,10 +1442,12 @@ void RestoreTemporalDetail(aether_sfm_session* s,
                            colmap::Reconstruction* reconstruction) {
   if (!s || !reconstruction || s->frames.size() < 2) return;
 
-  constexpr double kMinTriAngleRad = 0.05235987755982988;  // 3 degrees
+  // [SCAN-MATRIX ENV ③] defaults = shipped 3.0° / 3 px; AETHER_TD_TRI_ANGLE /
+  // AETHER_TD_REPROJ_PX override for the host gate matrix.
+  const double kMinTriAngleRad = TemporalDetailTriMinAngleRad();
   // 39-capture replay: 4 px kept one 2.8x-q99 ray; 3 px retained ~62.7k
   // delivered points while reducing all added points below 1.18x-q99.
-  constexpr double kMaxReprojPx = 3.0;
+  const double kMaxReprojPx = TemporalDetailMaxReprojPx();
   const int temporal_k =
       std::max(1, s->options.k_neighbors > 0 ? s->options.k_neighbors : 12);
   const int num_frames = static_cast<int>(s->frames.size());
@@ -2713,9 +2846,12 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     // Points created or grown in the live Reconstruction this frame → the
     // variable set for the windowed local BA below.
     std::unordered_set<colmap::point3D_t> touched;
-    constexpr double kMinTriAngleRad = 0.05235987755982988;  // 3.0 deg parallax
+    // [SCAN-MATRIX ENV ①②] creation parallax + grow reproj gates, env-tunable
+    // (AETHER_LIVE_TRI_MIN_ANGLE degrees / AETHER_GROW_REPROJ_PX px);
+    // defaults = shipped 3.0° / 14 px.
+    const double kMinTriAngleRad = LiveCreateTriMinAngleRad();
     constexpr double kMaxCreateReprojPx = 10.0;  // strict new-point gate
-    constexpr double kMaxGrowReprojPx = 14.0;    // TVG-inlier grow absorbs ARKit drift
+    const double kMaxGrowReprojPx = LiveGrowMaxReprojPx();  // TVG-inlier grow absorbs ARKit drift
     constexpr double kMaxMergeReprojPx = 8.0;    // stricter: irreversible track merge
     // [MERGE-GATE 2026-07-11] OFF = COLMAP-parity merge gating (COLMAP's merge
     // has no disjoint-images requirement; the union-refit reproj gate in
