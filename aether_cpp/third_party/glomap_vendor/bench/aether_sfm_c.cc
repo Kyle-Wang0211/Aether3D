@@ -371,6 +371,28 @@ struct aether_sfm_session {
   // from the spatial K-NN ∩ view-angle rule vs the temporal fill/fallback.
   int64_t stat_cand_spatial_first_pairs = 0;
   int64_t stat_cand_temporal_fallback_pairs = 0;
+  // [MATCH-FAIL TELEMETRY 2026-07-11] Capture-time GPU matcher failure
+  // accounting — the formerly SILENT `mrc != 0 → continue` in add_frame.
+  // Device evidence (capture 43, iPhone 14 Pro): thermal=serious from ~f52 →
+  // aether_gpu_match_gemm_pairs failed for whole stretches of frames, the db
+  // silently lost those pairs, and 37/118 frames ended unregistered.
+  // by_rc buckets use the pwsfm_gpu_match.mm return codes (1=bad args,
+  // 2=Metal pipeline unavailable, 5/6=MTLBuffer alloc failed, 7=command-buffer
+  // error — e.g. GPU hang under thermal pressure); bucket 0 aggregates any
+  // out-of-range rc. rc=0 with zero matches is a LEGITIMATE empty pair and is
+  // never counted here.
+  int64_t stat_gpu_match_fail_total = 0;
+  int64_t stat_gpu_match_fail_by_rc[8] = {0};
+  int64_t stat_gpu_match_fail_max_streak = 0;  // longest consecutive-fail run
+  int64_t gpu_match_fail_streak = 0;  // internal running streak (not exposed)
+  // [FINALIZE-REMATCH 2026-07-11] Finalize-time starved-frame re-match pass
+  // counters (see FinalizeRematchStarvedFrames).
+  int64_t stat_finalize_rematch_starved_frames = 0;
+  int64_t stat_finalize_rematch_candidates = 0;  // missing window pairs found
+  int64_t stat_finalize_rematch_attempted = 0;   // matcher invocations
+  int64_t stat_finalize_rematch_written = 0;     // pairs persisted to the db
+  int64_t stat_finalize_rematch_inliers = 0;     // TVG inliers persisted
+  int64_t stat_finalize_rematch_failed = 0;      // matcher rc!=0 (skipped)
 
   // Result of finalize()/run(): the largest reconstruction.
   std::shared_ptr<colmap::ReconstructionManager> recon_manager;
@@ -514,6 +536,35 @@ std::vector<int> SelectStreamCandidates(const aether_sfm_session& s,
   // oldest-first, exactly like the legacy ascending-j loop.
   std::sort(selected.begin(), selected.end());
   return selected;
+}
+
+// [MATCH-FAIL TELEMETRY 2026-07-11] Record one capture-time GPU matcher
+// failure (add_frame's fail-closed `mrc != 0 → continue`). Counts total +
+// per-rc buckets + the consecutive-failure streak, and emits ONE warning line
+// when a failure SEGMENT emerges (capture 43's thermal collapse failed whole
+// frames of pairs back-to-back — a single skipped pair is normal noise, a run
+// of them means the block behind it will not register without the finalize
+// re-match). Re-logs every 64 further consecutive failures so an ongoing
+// collapse stays visible without per-pair spam.
+constexpr int kGpuMatchFailStreakWarn = 8;
+void NoteGpuMatchFailure(aether_sfm_session* s, int rc) {
+  ++s->stat_gpu_match_fail_total;
+  const int bucket = (rc >= 1 && rc <= 7) ? rc : 0;
+  ++s->stat_gpu_match_fail_by_rc[bucket];
+  ++s->gpu_match_fail_streak;
+  if (s->gpu_match_fail_streak > s->stat_gpu_match_fail_max_streak) {
+    s->stat_gpu_match_fail_max_streak = s->gpu_match_fail_streak;
+  }
+  if (s->gpu_match_fail_streak == kGpuMatchFailStreakWarn ||
+      (s->gpu_match_fail_streak > kGpuMatchFailStreakWarn &&
+       s->gpu_match_fail_streak % 64 == 0)) {
+    LOG(WARNING) << "[aether_sfm] GPU matcher failing in a segment: "
+                 << s->gpu_match_fail_streak
+                 << " consecutive pair failures (last rc=" << rc
+                 << ", total=" << s->stat_gpu_match_fail_total
+                 << "). Pairs are skipped fail-closed; finalize re-matches "
+                    "starved frames.";
+  }
 }
 
 constexpr int kSpatialCandidatePool = 12;
@@ -1382,6 +1433,237 @@ void RebuildFrameRecordsForResume(aether_sfm_session* s) {
   }
 }
 
+// ── Finalize-time starved-frame re-match ────────────────────────────────────
+// [FINALIZE-REMATCH 2026-07-11] Repairs the db after a capture-time GPU
+// matcher collapse. Device evidence (capture 43, iPhone 14 Pro): thermal=
+// serious from ~f52 → aether_gpu_match_gemm_pairs failed in whole segments,
+// add_frame skipped those pairs fail-closed, so the db simply LACKS the
+// matches for a contiguous block → 37/118 frames unregistered, delivery
+// collapsed to ~26k points. Host replay proved the block's DESCRIPTORS are
+// intact (features were full 8192/frame; re-matching registers the block), so
+// finalize — which runs after capture, typically cooler, with no 2 s/frame
+// budget — re-runs the MISSING temporal-window pairs through the SAME matcher
+// route before RunIncremental consumes the db.
+//
+// Starved trigger (calibrated on the capture-43 db): a frame is starved when
+// it participates in < kRematchMinValidWindowPairs db pairs with
+// >= kRematchValidInlierGate TVG inliers inside the temporal K-window.
+// cap43 separation is clean: healthy frames sit at 4-21 valid window pairs,
+// the collapsed block at 0-3.
+//
+// Candidates = temporal pairs (j, f) with gap <= K, ABSENT from `matches`,
+// where EITHER side is starved. Either-side bridges the block boundary (the
+// first healthy frame after a collapse still re-matches against the starved
+// tail behind it). Missing-only keeps the pass idempotent (add_frame never
+// writes a failed pair, so absence == never-succeeded) and write-once — the
+// exact WriteMatches → EstimateTwoViewGeometry → WriteTwoViewGeometry
+// sequence add_frame uses; RunIncremental's min_num_matches=15 then filters
+// weak pairs identically to capture-time pairs.
+//
+// Second trigger — near-adjacent chain holes: a missing (f-1, f) or (f-2, f)
+// pair is ALWAYS re-matched, starved or not. The capture-42 db showed the
+// milder failure shape: frames keep 5-14 valid window pairs (above the
+// starved gate) while the CONSECUTIVE chain has whole runs of never-attempted
+// pairs (f105-f128) — partly a spatial-first side effect (revisit segments
+// match across passes instead of adjacent frames) amplified by the thermal
+// failures. The incremental mapper leans on chain continuity; these holes are
+// cheap to close (cap42 +25 pairs, cap43 +2, healthy captures ~0).
+//
+// Budget: kFinalizeRematchMaxPairs bounds the extreme case (cap43's fully
+// collapsed tail needs 686 pairs; the GPU GEMM matcher is ~0.1 s/pair at
+// 8192 kp → ~1 min worst case, paid only by a capture that would otherwise
+// lose a whole registration block). Gap-ascending round-robin spends the
+// budget on the nearest (most registrable) neighbours of every starved frame
+// first.
+//
+// Matcher policy = capture parity (HANDOFF §0:12): use_gpu_match=1 routes to
+// the Metal GEMM matcher and a per-pair failure SKIPS that pair — CPU
+// brute-force is never a device fallback. use_gpu_match=0 (host replay /
+// no-Metal builds) uses the CPU matcher, exactly as capture did then. Resume
+// sessions (FrameRecords rebuilt without descriptors) load keypoints +
+// descriptors per frame from the db into a window-bounded cache (~K+1 frames
+// ≈ 16 MB at 8192 kp — transient, freed on return).
+constexpr int kRematchMinValidWindowPairs = 4;  // cap43-calibrated (see above)
+constexpr int kRematchValidInlierGate = 15;     // == pipeline min_num_matches
+constexpr int kRematchNearGap = 2;              // chain holes always re-matched
+constexpr int kFinalizeRematchMaxPairs = 800;   // > cap43 worst case (688)
+
+void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
+  if (!s || !s->db || s->frames.size() < 3 || s->camera_id == 0) return;
+  const bool gpu_avail =
+      s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
+  // Fail-closed like VerifySpatialPair: GPU requested but symbol absent →
+  // skip the whole pass rather than degrade into O(N²) CPU matching.
+  if (s->options.use_gpu_match && !gpu_avail) return;
+  try {
+    const int num_frames = static_cast<int>(s->frames.size());
+    const int K = s->options.k_neighbors > 0 ? s->options.k_neighbors : 12;
+
+    std::unordered_map<colmap::image_t, int> idx_of;
+    idx_of.reserve(s->frames.size());
+    for (int i = 0; i < num_frames; ++i) idx_of[s->frames[i].image_id] = i;
+
+    // 1) Per-frame valid-pair count inside the temporal K-window, from the
+    //    TVG table (counts capture-time pairs AND anything the spatial
+    //    revisit pass just wrote).
+    std::vector<int> win_valid(num_frames, 0);
+    for (const auto& [pair_id, n_inliers] :
+         s->db->ReadTwoViewGeometryNumInliers()) {
+      if (n_inliers < kRematchValidInlierGate) continue;
+      const auto [id1, id2] = colmap::PairIdToImagePair(pair_id);
+      const auto a = idx_of.find(id1);
+      const auto b = idx_of.find(id2);
+      if (a == idx_of.end() || b == idx_of.end()) continue;
+      if (std::abs(a->second - b->second) > K) continue;
+      ++win_valid[a->second];
+      ++win_valid[b->second];
+    }
+    std::vector<char> starved(num_frames, 0);
+    int64_t n_starved = 0;
+    for (int i = 0; i < num_frames; ++i) {
+      if (s->frames[i].n_keypoints > 0 &&
+          win_valid[i] < kRematchMinValidWindowPairs) {
+        starved[i] = 1;
+        ++n_starved;
+      }
+    }
+    s->stat_finalize_rematch_starved_frames += n_starved;
+
+    // 2) Missing pairs, gap-ascending round-robin so every frame gets its
+    //    nearest neighbours before the budget can clip anything:
+    //      gap <= kRematchNearGap  → always (chain-hole trigger),
+    //      gap <= K                → when either side is starved.
+    std::vector<std::pair<int, int>> todo;  // (j, f), j < f, frame indices
+    todo.reserve(kFinalizeRematchMaxPairs);
+    for (int gap = 1; gap <= K; ++gap) {
+      for (int f = gap; f < num_frames; ++f) {
+        const int j = f - gap;
+        if (gap > kRematchNearGap && !starved[f] && !starved[j]) continue;
+        if (s->frames[j].n_keypoints <= 0 || s->frames[f].n_keypoints <= 0) {
+          continue;
+        }
+        if (s->db->ExistsMatches(s->frames[j].image_id,
+                                 s->frames[f].image_id)) {
+          continue;
+        }
+        ++s->stat_finalize_rematch_candidates;
+        if (static_cast<int>(todo.size()) < kFinalizeRematchMaxPairs) {
+          todo.emplace_back(j, f);
+        }
+      }
+    }
+    if (todo.empty()) return;
+    // Cache locality for the resume-path db loads: process by later frame
+    // ascending; every needed partner then lives within the last K indices.
+    std::sort(todo.begin(), todo.end(),
+              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                if (a.second != b.second) return a.second < b.second;
+                return a.first < b.first;
+              });
+
+    // Feature access: borrow the in-memory FrameRecord (live sessions) or
+    // load keypoints+descriptors from the db (resume sessions), cached and
+    // evicted outside the sliding window.
+    struct RematchFeat {
+      const uint8_t* desc = nullptr;
+      const std::vector<Eigen::Vector2d>* pts = nullptr;
+      int n = 0;
+      std::vector<uint8_t> desc_store;
+      std::vector<Eigen::Vector2d> pts_store;
+    };
+    std::unordered_map<int, RematchFeat> cache;
+    const auto get_feat = [&](int i) -> const RematchFeat* {
+      const FrameRecord& fr = s->frames[i];
+      auto it = cache.find(i);
+      if (it != cache.end()) return it->second.n > 0 ? &it->second : nullptr;
+      RematchFeat& feat = cache[i];
+      if (!fr.descriptors.empty() && !fr.points.empty()) {
+        feat.desc = fr.descriptors.data();
+        feat.pts = &fr.points;
+        feat.n = fr.n_keypoints;
+        return &feat;
+      }
+      const colmap::FeatureKeypoints kps = s->db->ReadKeypoints(fr.image_id);
+      const colmap::FeatureDescriptors d = s->db->ReadDescriptors(fr.image_id);
+      const int n = static_cast<int>(kps.size());
+      if (n <= 0 || d.data.rows() != n || d.data.cols() != 128) {
+        feat.n = 0;  // negative-cache the malformed frame
+        return nullptr;
+      }
+      feat.desc_store.assign(d.data.data(),
+                             d.data.data() + static_cast<size_t>(n) * 128);
+      feat.pts_store = colmap::FeatureKeypointsToPointsVector(kps);
+      feat.desc = feat.desc_store.data();
+      feat.pts = &feat.pts_store;
+      feat.n = n;
+      return &feat;
+    };
+
+    // 3) Match + persist, mirroring add_frame's sequence and gates exactly.
+    const double ratio =
+        s->options.match_max_ratio > 0 ? s->options.match_max_ratio : 0.7;
+    const colmap::TwoViewGeometryOptions tvg_options;  // colmap defaults
+    std::vector<uint32_t> pair_buf;
+    for (const auto& [j, f] : todo) {
+      // Evict cache entries that fell out of the sliding window (memory
+      // bound for resume-path loads; borrowed live entries are cheap).
+      for (auto it = cache.begin(); it != cache.end();) {
+        if (it->first < f - K) it = cache.erase(it);
+        else ++it;
+      }
+      const RematchFeat* fa = get_feat(j);
+      const RematchFeat* fb = get_feat(f);
+      if (!fa || !fb) continue;
+      const int cap = fa->n < fb->n ? fa->n : fb->n;
+      pair_buf.resize(static_cast<size_t>(cap) * 2);
+      int num_matches = 0;
+      ++s->stat_finalize_rematch_attempted;
+      const int mrc =
+          gpu_avail
+              ? aether_gpu_match_gemm_pairs(fa->desc, fa->n, fb->desc, fb->n,
+                                            ratio, pair_buf.data(), cap,
+                                            &num_matches)
+              : aether_sift_match_pairs(fa->desc, fa->n, fb->desc, fb->n,
+                                        ratio, pair_buf.data(), cap,
+                                        &num_matches);
+      if (mrc != 0) {
+        // Still failing (device still hot / Metal unavailable): keep the
+        // capture-time semantics — skip the pair, never CPU brute-force.
+        ++s->stat_finalize_rematch_failed;
+        continue;
+      }
+      if (num_matches <= 0) continue;  // legitimate zero-match pair
+
+      colmap::FeatureMatches matches(num_matches);
+      for (int m = 0; m < num_matches; ++m) {
+        matches[m].point2D_idx1 = pair_buf[2 * m];
+        matches[m].point2D_idx2 = pair_buf[2 * m + 1];
+      }
+      s->db->WriteMatches(s->frames[j].image_id, s->frames[f].image_id,
+                          matches);
+      const colmap::TwoViewGeometry geometry = colmap::EstimateTwoViewGeometry(
+          s->camera, *fa->pts, s->camera, *fb->pts, std::move(matches),
+          tvg_options);
+      s->db->WriteTwoViewGeometry(s->frames[j].image_id,
+                                  s->frames[f].image_id, geometry);
+      ++s->stat_finalize_rematch_written;
+      s->stat_finalize_rematch_inliers +=
+          static_cast<int64_t>(geometry.inlier_matches.size());
+    }
+    LOG(WARNING) << "[aether_sfm] finalize re-match: starved_frames="
+                 << n_starved
+                 << " candidates=" << s->stat_finalize_rematch_candidates
+                 << " attempted=" << s->stat_finalize_rematch_attempted
+                 << " written=" << s->stat_finalize_rematch_written
+                 << " inliers=" << s->stat_finalize_rematch_inliers
+                 << " failed=" << s->stat_finalize_rematch_failed
+                 << " gpu_fail_capture=" << s->stat_gpu_match_fail_total;
+  } catch (const std::exception& e) {
+    // Enhancement pass only — a failure here must never take finalize down.
+    LOG(WARNING) << "[aether_sfm] finalize re-match aborted: " << e.what();
+  }
+}
+
 // Pick the largest reconstruction in the manager and write the JSON summary.
 std::shared_ptr<const colmap::Reconstruction> PickBestAndReport(
     const std::shared_ptr<colmap::ReconstructionManager>& manager,
@@ -1407,6 +1689,21 @@ std::shared_ptr<const colmap::Reconstruction> PickBestAndReport(
                   best_track);
   }
   return best;
+}
+
+// [TRI-ANGLE A/B 2026-07-11] Finalize triangulation CREATION gate, env-tunable
+// for host replay A/B (cap43 registration-rate investigation: device 81/118
+// registered on the first 3.0° build vs 75% on the 1.5° build). Phase 1
+// (RunIncremental / mapper registration) and phase 2 (RefineGlobalBA) read
+// SEPARATE env names so "registration-wide, refine-strict" configs can be
+// tested. Unset -> the shipped 3.0°.
+double TriMinAngleDeg(const char* env_name) {
+  const char* e = std::getenv(env_name);
+  if (e && e[0]) {
+    const double d = std::atof(e);
+    if (d > 0.0) return d;
+  }
+  return 3.0;
 }
 
 // Run the validated IncrementalPipeline over (db_path, image_path) into a fresh
@@ -1475,7 +1772,8 @@ aether_sfm_result_t RunIncremental(
     // same semantics as the live path. init_min_tri_angle (initial pair) is
     // far above both and unaffected (incremental_pipeline.cc:459 overrides
     // min_angle for the init pair only).
-    pipeline_opts->triangulation.min_angle = 3.0;
+    pipeline_opts->triangulation.min_angle =
+        TriMinAngleDeg("AETHER_TRI_MIN_ANGLE");
     // [AETHER] NOTE: ignore_redundant_points3D + freeze-intrinsics were tried (RAM
     // 2.36->1.45GB, 4x faster) but cost reproj 0.955->0.9952 (~4%) -> REVERTED per the
     // zero-quality-loss requirement. Full intrinsic refinement + all points stay.
@@ -1545,7 +1843,7 @@ void RefineGlobalBA(aether_sfm_session* s,
     // IterativeGlobalRefinement's CompleteAndMergeTracks/retriangulation reads
     // Triangulation() too — keep phase 2 from re-admitting the <3° tail that
     // phase 1 now refuses to create.
-    popts->triangulation.min_angle = 3.0;
+    popts->triangulation.min_angle = TriMinAngleDeg("AETHER_TRI_MIN_ANGLE_P2");
     auto manager = std::make_shared<colmap::ReconstructionManager>();
     popts->image_path = s->image_path;  // [4.0.4] image_path moved into options
     colmap::IncrementalPipeline pipeline(
@@ -1842,7 +2140,16 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
         mrc = aether_gpu_match_gemm_pairs(
             prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
             rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
-        if (mrc != 0) continue;
+        if (mrc != 0) {
+          // [MATCH-FAIL TELEMETRY 2026-07-11] Same fail-closed skip as before
+          // (no CPU fallback on device — a Metal failure used to stall the
+          // queue for minutes), but no longer SILENT: rc-bucketed counters +
+          // segment warning make a thermal matcher collapse visible, and the
+          // finalize re-match pass repairs the db afterwards.
+          NoteGpuMatchFailure(s, mrc);
+          continue;
+        }
+        s->gpu_match_fail_streak = 0;  // healthy pair ends a failure segment
         used_gpu = true;
       } else {
         mrc = aether_sift_match_pairs(
@@ -2204,6 +2511,7 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
   try {
     RebuildFrameRecordsForResume(s);  // no-op unless frames empty (resume)
     AddSpatialRevisitMatches(s);
+    FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
     if (s->db) s->db->Close();  // flush sqlite before the pipeline re-opens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> recon;
@@ -2238,6 +2546,7 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
   try {
     RebuildFrameRecordsForResume(s);  // no-op unless frames empty (resume)
     AddSpatialRevisitMatches(s);
+    FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
     if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> local;
@@ -2809,6 +3118,39 @@ void aether_sfm_candidate_stats(aether_sfm_session_t* s,
     *spatial_first_pairs = s->stat_cand_spatial_first_pairs;
   if (temporal_fallback_pairs)
     *temporal_fallback_pairs = s->stat_cand_temporal_fallback_pairs;
+}
+
+// [MATCH-FAIL TELEMETRY + FINALIZE-REMATCH 2026-07-11] Capture-time GPU
+// matcher failure accounting + the finalize starved-frame re-match counters.
+// Additive diagnostic sibling of aether_sfm_stream_stats (same threading
+// contract). gpu_fail_by_rc, if non-null, receives 8 int64 buckets indexed by
+// the pwsfm_gpu_match.mm return code (bucket 0 = out-of-range rc). Nullable.
+void aether_sfm_match_fail_stats(aether_sfm_session_t* s,
+                                 int64_t* gpu_fail_total,
+                                 int64_t* gpu_fail_by_rc,
+                                 int64_t* gpu_fail_max_streak,
+                                 int64_t* rematch_starved_frames,
+                                 int64_t* rematch_candidates,
+                                 int64_t* rematch_attempted,
+                                 int64_t* rematch_written,
+                                 int64_t* rematch_inliers,
+                                 int64_t* rematch_failed) {
+  if (!s) return;
+  if (gpu_fail_total) *gpu_fail_total = s->stat_gpu_match_fail_total;
+  if (gpu_fail_by_rc) {
+    for (int i = 0; i < 8; ++i) gpu_fail_by_rc[i] = s->stat_gpu_match_fail_by_rc[i];
+  }
+  if (gpu_fail_max_streak)
+    *gpu_fail_max_streak = s->stat_gpu_match_fail_max_streak;
+  if (rematch_starved_frames)
+    *rematch_starved_frames = s->stat_finalize_rematch_starved_frames;
+  if (rematch_candidates)
+    *rematch_candidates = s->stat_finalize_rematch_candidates;
+  if (rematch_attempted)
+    *rematch_attempted = s->stat_finalize_rematch_attempted;
+  if (rematch_written) *rematch_written = s->stat_finalize_rematch_written;
+  if (rematch_inliers) *rematch_inliers = s->stat_finalize_rematch_inliers;
+  if (rematch_failed) *rematch_failed = s->stat_finalize_rematch_failed;
 }
 
 // Finalize-output quality snapshot: the aether_sfm_live_diag fields computed

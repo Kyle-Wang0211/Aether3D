@@ -298,6 +298,29 @@ void aether_sfm_candidate_stats(aether_sfm_session_t* s,
                                 int64_t* spatial_first_pairs,
                                 int64_t* temporal_fallback_pairs);
 
+// [MATCH-FAIL TELEMETRY + FINALIZE-REMATCH 2026-07-11] Capture-time GPU
+// matcher failure accounting + finalize starved-frame re-match counters.
+// Motivation: a thermally throttled Metal matcher fails whole SEGMENTS of
+// pairs during capture (fail-closed skips → the db silently lacks those
+// matches → contiguous frame blocks never register). gpu_fail_* expose the
+// formerly-silent failures (by_rc = 8 int64 buckets indexed by the
+// pwsfm_gpu_match return code: 1=bad args, 2=Metal unavailable, 5/6=buffer
+// alloc, 7=command-buffer error; bucket 0 = out-of-range). rematch_* count
+// the finalize pass that re-runs missing temporal-window pairs for starved
+// frames through the same matcher route (cooler at finish time) before
+// RunIncremental consumes the db. Same threading contract as
+// aether_sfm_stream_stats. All out-params nullable.
+void aether_sfm_match_fail_stats(aether_sfm_session_t* s,
+                                 int64_t* gpu_fail_total,
+                                 int64_t* gpu_fail_by_rc,
+                                 int64_t* gpu_fail_max_streak,
+                                 int64_t* rematch_starved_frames,
+                                 int64_t* rematch_candidates,
+                                 int64_t* rematch_attempted,
+                                 int64_t* rematch_written,
+                                 int64_t* rematch_inliers,
+                                 int64_t* rematch_failed);
+
 // Finalize-output quality snapshot: the live_diag quality fields computed over
 // the CURRENT finalize reconstruction (LOCAL or REFINED — whichever the
 // getters serve; snapshotted under the recon mutex, safe alongside the async

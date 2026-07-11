@@ -122,6 +122,30 @@ void aether_sfm_candidate_stats(aether_sfm_session_t* s,
   if (temporal_fallback_pairs) *temporal_fallback_pairs = 0;
 }
 
+void aether_sfm_match_fail_stats(aether_sfm_session_t* s,
+                                 int64_t* gpu_fail_total,
+                                 int64_t* gpu_fail_by_rc,
+                                 int64_t* gpu_fail_max_streak,
+                                 int64_t* rematch_starved_frames,
+                                 int64_t* rematch_candidates,
+                                 int64_t* rematch_attempted,
+                                 int64_t* rematch_written,
+                                 int64_t* rematch_inliers,
+                                 int64_t* rematch_failed) {
+  (void)s;
+  if (gpu_fail_total) *gpu_fail_total = 0;
+  if (gpu_fail_by_rc) {
+    for (int i = 0; i < 8; ++i) gpu_fail_by_rc[i] = 0;
+  }
+  if (gpu_fail_max_streak) *gpu_fail_max_streak = 0;
+  if (rematch_starved_frames) *rematch_starved_frames = 0;
+  if (rematch_candidates) *rematch_candidates = 0;
+  if (rematch_attempted) *rematch_attempted = 0;
+  if (rematch_written) *rematch_written = 0;
+  if (rematch_inliers) *rematch_inliers = 0;
+  if (rematch_failed) *rematch_failed = 0;
+}
+
 void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
                            int64_t* n_points, int64_t* n_track3plus,
                            int64_t* n_obs) {
