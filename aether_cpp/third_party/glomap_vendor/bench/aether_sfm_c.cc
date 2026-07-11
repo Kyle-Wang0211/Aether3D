@@ -59,6 +59,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -266,6 +267,24 @@ enum class MergeReject {
 // tracks that share images without complaint), and duplicate fragments of the
 // same physical point routinely co-observe an image (DSP-SIFT emits
 // near-identical keypoints at several scales, each seeding its own track).
+// [KNIFE-A ③ 2026-07-11] Enrichment-targeting hint: the delivered model's
+// 2-view / low-parallax (θ_max < 3°) tracks, snapshotted from the live recon
+// BEFORE the finalize enrichment thread starts (the refine worker mutates the
+// model concurrently under the overlap schedule, so the enrichment pass must
+// never read the model directly). Consumed by AddSpatialRevisitMatches' top-up
+// ordering when AETHER_ENRICH_TARGETED=1: pairs are ranked by how many of
+// these tracks the pair can hand a ≥5°-parallax third observation — the exact
+// upgrade the TrackUpgrade pass then banks — instead of by camera-center
+// proximity (which is blind to WHY the extra pair is wanted).
+struct EnrichTargetHint {
+  struct LowTrack {
+    Eigen::Vector3d xyz;          // current (pre-refine) triangulated position
+    std::vector<int> frame_idxs;  // observing frames (indices into s->frames)
+  };
+  std::vector<LowTrack> tracks;
+  std::vector<std::vector<int32_t>> by_frame;  // frame idx -> track ids
+};
+
 MergeReject CanMergeLivePoints(const colmap::Reconstruction& recon,
                                const colmap::Camera& camera,
                                colmap::point3D_t pid1,
@@ -405,6 +424,33 @@ struct aether_sfm_session {
   int64_t stat_temporal_detail_reject_reproj = 0;
   int64_t stat_temporal_detail_reject_tri_angle = 0;
   int64_t stat_temporal_detail_conflicts = 0; // cross-track / duplicate-image skips
+  // [KNIFE-A 2026-07-11] 2-view 升维·并集重定位包 attribution.
+  // ① RestoreTemporalDetail grow-refit (AETHER_TD_GROW_REFIT=1):
+  int64_t stat_td_grow_refit_attempted = 0;  // grow candidates entering refit
+  int64_t stat_td_grow_refit_accepted = 0;   // union-refit accepted grows
+  int64_t stat_td_grow_refit_saved = 0;      // accepted where 3px@current would reject
+  // ② finalize-tail TrackUpgrade (AETHER_TRACK_UPGRADE=1):
+  int64_t stat_upgrade_eligible = 0;     // 2-view / θ_max<3° delivered points
+  int64_t stat_upgrade_attempted = 0;    // eligible points with ≥1 free candidate obs
+  int64_t stat_upgrade_accepted = 0;     // points union-refit upgraded
+  int64_t stat_upgrade_obs_added = 0;    // observations added by the pass
+  // per-point θ_max distribution summary, whole delivered model, pre/post:
+  int64_t stat_upgrade_pre_npts = 0;
+  int64_t stat_upgrade_pre_2view = 0;
+  int64_t stat_upgrade_pre_lt3 = 0;      // θ_max < 3°
+  int64_t stat_upgrade_post_npts = 0;
+  int64_t stat_upgrade_post_2view = 0;
+  int64_t stat_upgrade_post_lt3 = 0;
+  double upgrade_theta_p50_pre_deg = 0.0;
+  double upgrade_theta_p50_post_deg = 0.0;
+  double upgrade_ms = 0.0;
+  // ③ targeted enrichment (AETHER_ENRICH_TARGETED=1):
+  int64_t stat_enrich_targeted_tracks = 0;  // hint size (low-parallax tracks)
+  int64_t stat_enrich_targeted_scored = 0;  // top-up pairs with score > 0
+  // Snapshot for the ③ top-up ordering (see EnrichTargetHint). Written by the
+  // refine worker BEFORE the enrichment thread spawns; read only by that
+  // thread (happens-before via thread creation); reset after the join.
+  std::shared_ptr<const EnrichTargetHint> enrich_hint;
   int64_t stat_reproj_filtered = 0;   // obs deleted by the post-BA reproj filter
   int64_t stat_tri_filtered = 0;      // obs deleted by the post-BA tri-angle filter
   // [SPATIAL-FIRST 2026-07-11] Capture-time candidate-selection attribution
@@ -479,6 +525,9 @@ struct SpatialRevisitCandidate {
   double score = 0.0;
   int anchor_rank = 0;
   bool quadratic = false;
+  // [KNIFE-A ③] top-up targeting: # of 2-view/low-parallax tracks this pair
+  // can hand a ≥5°-parallax third observation (0 when the hint is absent).
+  int target_score = 0;
 };
 
 Eigen::Vector3d CameraForwardWorld(const colmap::Rigid3d& cam_from_world) {
@@ -793,7 +842,44 @@ int EnrichPairCapOverride() {
 }
 int SpatialTotalPairBudget() {
   const int cap = EnrichPairCapOverride();
-  return cap > 0 ? cap : kSpatialMaxTotalPairs;
+  // [KNIFE-A ③ 2026-07-11] max(default, N) semantics: AETHER_ENRICH_PAIR_CAP=N
+  // is a top-up FLOOR and must never REDUCE the legacy 1200 hard cap. The
+  // joint scan hit exactly this trap: N=300 silently shrank the anchor budget
+  // (min(720, 300)) and the total budget, so the "extra enrichment" arm was
+  // simultaneously STARVING the anchor funnel it was supposed to top up.
+  // UNSET stays bit-identical to the shipped binary.
+  return cap > 0 ? std::max(cap, kSpatialMaxTotalPairs) : kSpatialMaxTotalPairs;
+}
+
+// [KNIFE-A 2026-07-11] Env opt-ins for the 2-view upgrade package. All three
+// default OFF: an unset environment is bit-identical to the shipped binary.
+// ① RestoreTemporalDetail grow acceptance switches from "3 px at the CURRENT
+//    (never-refined) position" to a union refit over track+candidate — the
+//    CanMergeLivePoints recipe — installing the refit position on success.
+bool TdGrowRefitEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("AETHER_TD_GROW_REFIT");
+    return e && e[0] == '1';
+  }();
+  return cached;
+}
+// ② finalize-tail TrackUpgrade pass over the delivered model's 2-view /
+//    low-parallax points (see UpgradeLowParallaxTracks).
+bool TrackUpgradeEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("AETHER_TRACK_UPGRADE");
+    return e && e[0] == '1';
+  }();
+  return cached;
+}
+// ③ enrichment top-up ordering switches from camera-center proximity to the
+//    2-view-upgrade-potential score (see EnrichTargetHint / ScoreEnrichPair).
+bool EnrichTargetedEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("AETHER_ENRICH_TARGETED");
+    return e && e[0] == '1';
+  }();
+  return cached;
 }
 
 enum class SpatialPairPurpose {
@@ -1363,6 +1449,99 @@ int ProcessRevisitAnchors(aether_sfm_session* s,
   return confirmed_regions;
 }
 
+// [KNIFE-A ③ 2026-07-11] Snapshot the delivered model's 2-view / low-parallax
+// tracks into the enrichment-targeting hint (see EnrichTargetHint). Called by
+// the refine worker on the live-reuse path BEFORE the enrichment thread spawns
+// (the model is mutated concurrently afterwards). Track positions are the
+// pre-refine live estimates — noisy in depth, but the targeting predicate only
+// needs coarse visibility + parallax direction, both of which survive that
+// noise.
+constexpr double kEnrichTargetLowParallaxRad = 3.0 * M_PI / 180.0;
+constexpr double kEnrichTargetGainRad = 5.0 * M_PI / 180.0;
+
+std::shared_ptr<const EnrichTargetHint> BuildEnrichTargetHint(
+    const aether_sfm_session& s, const colmap::Reconstruction& recon) {
+  auto hint = std::make_shared<EnrichTargetHint>();
+  std::unordered_map<colmap::image_t, int> idx_of;
+  idx_of.reserve(s.frames.size());
+  for (int i = 0; i < static_cast<int>(s.frames.size()); ++i) {
+    idx_of[s.frames[i].image_id] = i;
+  }
+  hint->by_frame.assign(s.frames.size(), {});
+  std::vector<int> fidx;
+  for (const auto& [pid, pt] : recon.Points3D()) {
+    const auto& els = pt.track.Elements();
+    if (els.size() < 2) continue;
+    fidx.clear();
+    for (const auto& el : els) {
+      const auto it = idx_of.find(el.image_id);
+      if (it == idx_of.end() || !s.frames[it->second].has_pose) continue;
+      if (std::find(fidx.begin(), fidx.end(), it->second) == fidx.end()) {
+        fidx.push_back(it->second);
+      }
+    }
+    if (fidx.size() < 2) continue;
+    double max_ang = 0.0;
+    for (size_t a = 0; a < fidx.size(); ++a) {
+      const Eigen::Vector3d ca =
+          s.frames[fidx[a]].cam_from_world.TgtOriginInSrc();
+      for (size_t b = a + 1; b < fidx.size(); ++b) {
+        max_ang = std::max(
+            max_ang,
+            colmap::CalculateTriangulationAngle(
+                ca, s.frames[fidx[b]].cam_from_world.TgtOriginInSrc(),
+                pt.xyz));
+      }
+    }
+    if (els.size() != 2 && max_ang >= kEnrichTargetLowParallaxRad) continue;
+    const int32_t tid = static_cast<int32_t>(hint->tracks.size());
+    hint->tracks.push_back({pt.xyz, fidx});
+    for (const int f : fidx) hint->by_frame[f].push_back(tid);
+  }
+  return hint;
+}
+
+// [KNIFE-A ③] How many hint tracks can pair (i, j) upgrade: a track observed
+// by ONE side while the OTHER side (a) does not already observe it, (b) sees
+// its position inside the frame with positive depth, and (c) adds ≥5° parallax
+// against at least one existing observation. Pure poses + current positions —
+// no descriptors touched.
+int ScoreEnrichPair(const aether_sfm_session& s, const EnrichTargetHint& hint,
+                    int i, int j) {
+  const auto sees = [&](const FrameRecord& fr, const Eigen::Vector3d& X) {
+    const Eigen::Vector3d xc = fr.cam_from_world * X;
+    if (xc.z() <= 0.0) return false;
+    const std::optional<Eigen::Vector2d> px = s.camera.ImgFromCam(xc);
+    return px && px->x() >= 0.0 && px->y() >= 0.0 &&
+           px->x() < static_cast<double>(s.camera.width) &&
+           px->y() < static_cast<double>(s.camera.height);
+  };
+  const auto count_dir = [&](int obs_f, int new_f) {
+    if (obs_f < 0 || obs_f >= static_cast<int>(hint.by_frame.size())) return 0;
+    const FrameRecord& nf = s.frames[new_f];
+    const Eigen::Vector3d cn = nf.cam_from_world.TgtOriginInSrc();
+    int n = 0;
+    for (const int32_t tid : hint.by_frame[obs_f]) {
+      const EnrichTargetHint::LowTrack& t = hint.tracks[tid];
+      if (std::find(t.frame_idxs.begin(), t.frame_idxs.end(), new_f) !=
+          t.frame_idxs.end()) {
+        continue;  // both sides already observe it — no third view to gain
+      }
+      if (!sees(nf, t.xyz)) continue;
+      for (const int f : t.frame_idxs) {
+        if (colmap::CalculateTriangulationAngle(
+                cn, s.frames[f].cam_from_world.TgtOriginInSrc(), t.xyz) >=
+            kEnrichTargetGainRad) {
+          ++n;
+          break;
+        }
+      }
+    }
+    return n;
+  };
+  return count_dir(i, j) + count_dir(j, i);
+}
+
 void AddSpatialRevisitMatches(aether_sfm_session* s) {
   if (!s || !s->db || s->frames.size() < 3 || s->camera_id == 0) return;
   const int temporal_k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 12;
@@ -1400,6 +1579,19 @@ void AddSpatialRevisitMatches(aether_sfm_session* s) {
   // bit-identical to the pre-hook binary.
   const int enrich_cap = EnrichPairCapOverride();
   if (enrich_cap > 0) {
+    // [KNIFE-A ③ 2026-07-11] Targeted ordering: with AETHER_ENRICH_TARGETED=1
+    // and a hint snapshot available (live-reuse finalize), rank the top-up
+    // pairs by how many 2-view/low-parallax tracks each pair can hand a
+    // ≥5°-parallax third observation — the observation TrackUpgrade then
+    // banks — instead of by camera-center proximity, which is blind to the
+    // upgrade demand. Zero-score pairs keep the legacy distance order behind
+    // the scored ones, so the floor semantics still fills to N either way.
+    const std::shared_ptr<const EnrichTargetHint> hint =
+        EnrichTargetedEnabled() ? s->enrich_hint : nullptr;
+    if (hint) {
+      s->stat_enrich_targeted_tracks =
+          static_cast<int64_t>(hint->tracks.size());
+    }
     std::vector<SpatialRevisitCandidate> topup;
     const int num_frames = static_cast<int>(s->frames.size());
     for (int i = 0; i < num_frames; ++i) {
@@ -1415,6 +1607,10 @@ void AddSpatialRevisitMatches(aether_sfm_session* s) {
                frame_j.cam_from_world.TgtOriginInSrc())
                   .norm();
           candidate.score = candidate.distance_m;
+          if (hint) {
+            candidate.target_score = ScoreEnrichPair(*s, *hint, i, j);
+            if (candidate.target_score > 0) ++s->stat_enrich_targeted_scored;
+          }
         } else {
           // Pose-less frames sort last, smaller temporal gaps first.
           candidate.score = 1.0e9 + static_cast<double>(i - j);
@@ -1425,10 +1621,20 @@ void AddSpatialRevisitMatches(aether_sfm_session* s) {
     std::sort(topup.begin(), topup.end(),
               [](const SpatialRevisitCandidate& a,
                  const SpatialRevisitCandidate& b) {
+                if (a.target_score != b.target_score) {
+                  return a.target_score > b.target_score;  // upgrades first
+                }
                 if (a.score != b.score) return a.score < b.score;
                 if (a.i != b.i) return a.i < b.i;
                 return a.j < b.j;
               });
+    if (hint) {
+      LOG(WARNING) << "[aether_sfm] enrich top-up targeted: low-parallax "
+                      "tracks="
+                   << s->stat_enrich_targeted_tracks
+                   << " scored_pairs=" << s->stat_enrich_targeted_scored
+                   << " of " << topup.size() << " beyond-K pairs";
+    }
     for (const SpatialRevisitCandidate& candidate : topup) {
       if (attempted_total >= enrich_cap) break;
       if (VerifySpatialPair(s, candidate.i, candidate.j,
@@ -1439,6 +1645,14 @@ void AddSpatialRevisitMatches(aether_sfm_session* s) {
     }
   }
 }
+
+// [KNIFE-A 2026-07-11] Forward declaration (defined after RestoreTemporalDetail
+// next to its main consumer UpgradeLowParallaxTracks): pose-fixed point-only
+// Gauss-Newton polish used by both the ① grow refit and the ② track upgrade.
+void PolishPointGN(const std::vector<const colmap::Image*>& images,
+                   const std::vector<const colmap::Camera*>& cameras,
+                   const std::vector<Eigen::Vector2d>& obs_px,
+                   Eigen::Vector3d* xyz);
 
 // Rebuild the dense, locally stable detail layer after the global camera solve.
 // Spatial/guided pairs have already done their job by constraining loop closure;
@@ -1457,6 +1671,20 @@ void RestoreTemporalDetail(aether_sfm_session* s,
   // 39-capture replay: 4 px kept one 2.8x-q99 ray; 3 px retained ~62.7k
   // delivered points while reducing all added points below 1.18x-q99.
   const double kMaxReprojPx = TemporalDetailMaxReprojPx();
+  // [KNIFE-A ① 2026-07-11] AETHER_TD_GROW_REFIT=1: grow acceptance becomes a
+  // union refit (CanMergeLivePoints recipe) instead of "≤3 px at the CURRENT,
+  // never-refined position". The delivered 2-view thick points are born of
+  // low-parallax DLT depth noise; a wide-baseline observation of the SAME
+  // surface point reprojects ~3.6 px off that noisy position (p90: 5.3 px) and
+  // the current-position gate rejects exactly the observation that could fix
+  // it. The refit triangulates over track+candidate (full union baseline),
+  // accepts only if EVERY union observation is in front of its camera and
+  // within kMaxReprojPx of the REFIT position (+ the same stable-baseline
+  // rule, evaluated at the refit), and installs the refit position on accept.
+  // A failed refit falls through to the legacy gates, so acceptance is a
+  // strict superset of the default arm. Default OFF: unset env is
+  // bit-identical to the shipped behavior.
+  const bool kGrowRefit = TdGrowRefitEnabled();
   const int temporal_k =
       std::max(1, s->options.k_neighbors > 0 ? s->options.k_neighbors : 12);
   const int num_frames = static_cast<int>(s->frames.size());
@@ -1561,6 +1789,104 @@ void RestoreTemporalDetail(aether_sfm_session* s,
             ++s->stat_temporal_detail_conflicts;
             continue;
           }
+          // [KNIFE-A ①] union-refit grow acceptance (env-gated; see above).
+          if (kGrowRefit) {
+            ++s->stat_td_grow_refit_attempted;
+            // Legacy-gate verdict, attribution only: how many accepts the
+            // refit SAVED relative to the 3px@current gate.
+            const Eigen::Vector3d x_cam_cur =
+                grow_image.CamFromWorld() * point3D.xyz;
+            const bool legacy_ok =
+                x_cam_cur.z() > 0.0 &&
+                reprojects_cleanly(grow_image, grow_camera, grow_point2D_idx,
+                                   point3D.xyz) &&
+                has_stable_baseline(point3D.track, grow_image, point3D.xyz);
+            bool usable = true;
+            std::vector<Eigen::Matrix3x4d> cams_from_world;
+            std::vector<Eigen::Vector2d> cam_points;
+            std::vector<const colmap::Image*> union_imgs;
+            std::vector<const colmap::Camera*> union_cams;
+            std::vector<Eigen::Vector2d> union_px;
+            cams_from_world.reserve(point3D.track.Length() + 1);
+            cam_points.reserve(point3D.track.Length() + 1);
+            for (const colmap::TrackElement& el : point3D.track.Elements()) {
+              if (!reconstruction->ExistsImage(el.image_id)) {
+                usable = false;
+                break;
+              }
+              const colmap::Image& im = reconstruction->Image(el.image_id);
+              if (!im.HasPose() || el.point2D_idx >= im.NumPoints2D()) {
+                usable = false;
+                break;
+              }
+              const colmap::Camera& cm =
+                  reconstruction->Camera(im.CameraId());
+              const std::optional<Eigen::Vector2d> nc =
+                  cm.CamFromImg(im.Point2D(el.point2D_idx).xy);
+              if (!nc) {
+                usable = false;
+                break;
+              }
+              cams_from_world.push_back(im.CamFromWorld().ToMatrix());
+              cam_points.push_back(*nc);
+              union_imgs.push_back(&im);
+              union_cams.push_back(&cm);
+              union_px.push_back(im.Point2D(el.point2D_idx).xy);
+            }
+            const std::optional<Eigen::Vector2d> nc_cand =
+                grow_camera.CamFromImg(
+                    grow_image.Point2D(grow_point2D_idx).xy);
+            if (usable && nc_cand) {
+              cams_from_world.push_back(grow_image.CamFromWorld().ToMatrix());
+              cam_points.push_back(*nc_cand);
+              union_imgs.push_back(&grow_image);
+              union_cams.push_back(&grow_camera);
+              union_px.push_back(grow_image.Point2D(grow_point2D_idx).xy);
+              Eigen::Vector3d refit_xyz;
+              if (colmap::TriangulateMultiViewPoint(
+                      colmap::span<const Eigen::Matrix3x4d>(
+                          cams_from_world.data(), cams_from_world.size()),
+                      colmap::span<const Eigen::Vector2d>(cam_points.data(),
+                                                          cam_points.size()),
+                      &refit_xyz)) {
+                // Pose-fixed GN polish: the DLT minimizes an ALGEBRAIC
+                // residual; converge to the pixel-reproj optimum the
+                // acceptance gate below actually measures (raises rescue
+                // rate AND lowers the residual the added observation carries
+                // into the delivered model's mean reproj).
+                PolishPointGN(union_imgs, union_cams, union_px, &refit_xyz);
+                bool refit_ok = reprojects_cleanly(
+                    grow_image, grow_camera, grow_point2D_idx, refit_xyz);
+                if (refit_ok) {
+                  for (const colmap::TrackElement& el :
+                       point3D.track.Elements()) {
+                    const colmap::Image& im =
+                        reconstruction->Image(el.image_id);
+                    if (!reprojects_cleanly(
+                            im, reconstruction->Camera(im.CameraId()),
+                            el.point2D_idx, refit_xyz)) {
+                      refit_ok = false;
+                      break;
+                    }
+                  }
+                }
+                if (refit_ok &&
+                    has_stable_baseline(point3D.track, grow_image,
+                                        refit_xyz)) {
+                  reconstruction->Point3D(point3D_id).xyz = refit_xyz;
+                  reconstruction->AddObservation(
+                      point3D_id,
+                      colmap::TrackElement(grow_image_id, grow_point2D_idx));
+                  ++s->stat_temporal_detail_grown;
+                  ++s->stat_td_grow_refit_accepted;
+                  if (!legacy_ok) ++s->stat_td_grow_refit_saved;
+                  continue;
+                }
+              }
+            }
+            // Refit unusable/rejected: fall through to the legacy gates so
+            // this arm accepts a strict superset of the default arm.
+          }
           const Eigen::Vector3d x_cam =
               grow_image.CamFromWorld() * point3D.xyz;
           if (x_cam.z() <= 0.0) {
@@ -1627,6 +1953,353 @@ void RestoreTemporalDetail(aether_sfm_session* s,
     }
   }
   db->Close();
+}
+
+// [KNIFE-A ② 2026-07-11] Pose-fixed point-only Gauss-Newton polish (analytic
+// pinhole Jacobian, ≤4 iterations). The union DLT is algebraic (minimizes an
+// algebraic residual, not pixels); this polish converges the refit position to
+// the pixel-reproj optimum the acceptance gate actually measures. Poses and
+// intrinsics stay constant — this is the "每点位姿固定微 LM". Non-pinhole
+// cameras (never produced by this pipeline) skip the polish and keep the DLT
+// result; any degeneracy (behind-camera, singular H) also returns early with
+// the input position unchanged.
+void PolishPointGN(const std::vector<const colmap::Image*>& images,
+                   const std::vector<const colmap::Camera*>& cameras,
+                   const std::vector<Eigen::Vector2d>& obs_px,
+                   Eigen::Vector3d* xyz) {
+  for (int iter = 0; iter < 4; ++iter) {
+    Eigen::Matrix3d H = Eigen::Matrix3d::Zero();
+    Eigen::Vector3d b = Eigen::Vector3d::Zero();
+    int n_used = 0;
+    for (size_t i = 0; i < images.size(); ++i) {
+      const colmap::Camera& cam = *cameras[i];
+      if (cam.model_id != colmap::SimplePinholeCameraModel::model_id &&
+          cam.model_id != colmap::PinholeCameraModel::model_id) {
+        return;
+      }
+      const colmap::Rigid3d& cfw = images[i]->CamFromWorld();
+      const Eigen::Vector3d xc = cfw * (*xyz);
+      if (xc.z() <= 1e-9) return;
+      const std::optional<Eigen::Vector2d> px = cam.ImgFromCam(xc);
+      if (!px) return;
+      const double fx = cam.FocalLengthX();
+      const double fy = cam.FocalLengthY();
+      const double iz = 1.0 / xc.z();
+      const Eigen::Vector2d r = *px - obs_px[i];
+      Eigen::Matrix<double, 2, 3> jc;
+      jc << fx * iz, 0.0, -fx * xc.x() * iz * iz,  //
+          0.0, fy * iz, -fy * xc.y() * iz * iz;
+      const Eigen::Matrix<double, 2, 3> J =
+          jc * cfw.rotation().toRotationMatrix();
+      H += J.transpose() * J;
+      b += J.transpose() * r;
+      ++n_used;
+    }
+    if (n_used < 2) return;
+    H.diagonal().array() += 1e-8 * H.trace() + 1e-12;
+    const Eigen::Vector3d dx = H.ldlt().solve(b);
+    if (!dx.allFinite()) return;
+    *xyz -= dx;
+  }
+}
+
+// [KNIFE-A ② 2026-07-11] TrackUpgrade — finalize-tail 2-view upgrade pass
+// (env AETHER_TRACK_UPGRADE=1, default OFF; runs AFTER RestoreTemporalDetail
+// so the detail layer's fresh 2-view points are upgrade candidates too).
+//
+// WHY: the delivered cloud's thickness lives in its 2-view / low-parallax
+// (θ_max < 3°) points — live 2° creations plus RestoreTemporalDetail
+// creations, all triangulated OUTSIDE the BA's reach (pure DLT after stage 2,
+// never refined). The observations that could fix them usually EXIST in the
+// db (temporal TVGs RestoreTemporalDetail's gap≤K loop never pairs with them,
+// enrichment spatial TVGs it never consumes at all) but are unreachable:
+// the vendored mapper's Complete() gate rejects candidates >4 px from the
+// CURRENT noisy position — for a point with 0.0067 thickness, a 10°-baseline
+// observation sits ~3.6 px off (p90 points: 5.3 px), exactly the observation
+// that could repair it. This pass does refit-semantics itself instead of
+// touching the shared vendored mapper path:
+//   1. index EVERY db TVG inlier that touches an eligible track's keypoints;
+//   2. per eligible point, collect free (unassigned) partner keypoints from
+//      images outside the track — one per image;
+//   3. trimmed union refit: DLT over track+candidates, pose-fixed GN polish,
+//      accept only if EVERY union observation is in front of its camera and
+//      within the RestoreTemporalDetail reproj gate of the refit position;
+//      violating candidates are dropped (≤3 rounds) rather than failing the
+//      whole point;
+//   4. on accept: install the refit position + AddObservation the survivors.
+// Never deletes a point or an observation (点数只增不减); thickness improves
+// because the upgraded points move to their full-baseline positions.
+void UpgradeLowParallaxTracks(aether_sfm_session* s,
+                              colmap::Reconstruction* reconstruction) {
+  if (!TrackUpgradeEnabled() || !s || !reconstruction) return;
+  const double t0 = NowMs();
+  try {
+    const double kMaxReprojPx = TemporalDetailMaxReprojPx();
+    constexpr double kLowParallaxRad = 3.0 * M_PI / 180.0;
+
+    // θ_max (max pairwise triangulation angle) over a track's posed obs.
+    const auto theta_max = [&](const colmap::Track& track,
+                               const Eigen::Vector3d& xyz) {
+      double best = 0.0;
+      const auto& els = track.Elements();
+      for (size_t a = 0; a < els.size(); ++a) {
+        if (!reconstruction->ExistsImage(els[a].image_id)) continue;
+        const colmap::Image& ia = reconstruction->Image(els[a].image_id);
+        if (!ia.HasPose()) continue;
+        const Eigen::Vector3d ca = ia.CamFromWorld().TgtOriginInSrc();
+        for (size_t b = a + 1; b < els.size(); ++b) {
+          if (!reconstruction->ExistsImage(els[b].image_id)) continue;
+          const colmap::Image& ib = reconstruction->Image(els[b].image_id);
+          if (!ib.HasPose()) continue;
+          best = std::max(best,
+                          colmap::CalculateTriangulationAngle(
+                              ca, ib.CamFromWorld().TgtOriginInSrc(), xyz));
+        }
+      }
+      return best;
+    };
+    // Whole-model distribution summary (the 归因插桩): n / 2-view / θ<3° and
+    // the θ_max p50. Fills the stat triple passed in.
+    const auto summarize = [&](int64_t* n_out, int64_t* n2_out,
+                               int64_t* lt3_out, double* p50_out) {
+      std::vector<double> thetas;
+      thetas.reserve(reconstruction->NumPoints3D());
+      int64_t n2 = 0, lt3 = 0;
+      for (const auto& [pid, pt] : reconstruction->Points3D()) {
+        const double th = theta_max(pt.track, pt.xyz);
+        thetas.push_back(th);
+        if (pt.track.Length() == 2) ++n2;
+        if (th < kLowParallaxRad) ++lt3;
+      }
+      *n_out = static_cast<int64_t>(thetas.size());
+      *n2_out = n2;
+      *lt3_out = lt3;
+      if (!thetas.empty()) {
+        std::nth_element(thetas.begin(), thetas.begin() + thetas.size() / 2,
+                         thetas.end());
+        *p50_out = thetas[thetas.size() / 2] * 180.0 / M_PI;
+      }
+    };
+
+    // 1) Eligible set = 2-view tracks + low-parallax multi-view tracks, and
+    //    the pre-pass distribution.
+    std::vector<colmap::point3D_t> eligible;
+    {
+      std::vector<double> thetas;
+      thetas.reserve(reconstruction->NumPoints3D());
+      int64_t n2 = 0, lt3 = 0;
+      for (const auto& [pid, pt] : reconstruction->Points3D()) {
+        const double th = theta_max(pt.track, pt.xyz);
+        thetas.push_back(th);
+        const bool two_view = pt.track.Length() == 2;
+        if (two_view) ++n2;
+        if (th < kLowParallaxRad) ++lt3;
+        if (two_view || th < kLowParallaxRad) eligible.push_back(pid);
+      }
+      s->stat_upgrade_pre_npts = static_cast<int64_t>(thetas.size());
+      s->stat_upgrade_pre_2view = n2;
+      s->stat_upgrade_pre_lt3 = lt3;
+      if (!thetas.empty()) {
+        std::nth_element(thetas.begin(), thetas.begin() + thetas.size() / 2,
+                         thetas.end());
+        s->upgrade_theta_p50_pre_deg =
+            thetas[thetas.size() / 2] * 180.0 / M_PI;
+      }
+    }
+    s->stat_upgrade_eligible = static_cast<int64_t>(eligible.size());
+    if (eligible.empty()) {
+      s->upgrade_ms = NowMs() - t0;
+      return;
+    }
+
+    // 2) Correspondence index over ALL db TVG inliers (temporal, enrichment
+    //    spatial, finalize re-match — everything), restricted to the eligible
+    //    tracks' keypoints so memory stays bounded.
+    const auto key_of = [](colmap::image_t img, uint32_t idx) {
+      return (static_cast<uint64_t>(img) << 32) | idx;
+    };
+    std::unordered_set<uint64_t> needed;
+    needed.reserve(eligible.size() * 3);
+    for (const colmap::point3D_t pid : eligible) {
+      for (const colmap::TrackElement& el :
+           reconstruction->Point3D(pid).track.Elements()) {
+        needed.insert(key_of(el.image_id, el.point2D_idx));
+      }
+    }
+    std::unordered_map<uint64_t,
+                       std::vector<std::pair<colmap::image_t, uint32_t>>>
+        corr;
+    corr.reserve(needed.size());
+    {
+      auto db = colmap::Database::Open(s->db_path);
+      for (const auto& [pair_id, n_inliers] :
+           db->ReadTwoViewGeometryNumInliers()) {
+        if (n_inliers <= 0) continue;
+        const auto [id1, id2] = colmap::PairIdToImagePair(pair_id);
+        const colmap::TwoViewGeometry g = db->ReadTwoViewGeometry(id1, id2);
+        for (const colmap::FeatureMatch& m : g.inlier_matches) {
+          const uint64_t k1 = key_of(id1, m.point2D_idx1);
+          const uint64_t k2 = key_of(id2, m.point2D_idx2);
+          if (needed.count(k1)) corr[k1].emplace_back(id2, m.point2D_idx2);
+          if (needed.count(k2)) corr[k2].emplace_back(id1, m.point2D_idx1);
+        }
+      }
+      db->Close();
+    }
+
+    // 3) Per-point trimmed union refit. Serial by design: acceptance claims
+    //    free keypoints, and first-come-first-served needs a total order.
+    for (const colmap::point3D_t pid : eligible) {
+      if (!reconstruction->ExistsPoint3D(pid)) continue;  // defensive
+      const colmap::Point3D& point = reconstruction->Point3D(pid);
+
+      std::unordered_set<colmap::image_t> excluded;  // track ∪ picked images
+      for (const colmap::TrackElement& el : point.track.Elements()) {
+        excluded.insert(el.image_id);
+      }
+      std::vector<std::pair<colmap::image_t, uint32_t>> kept;
+      for (const colmap::TrackElement& el : point.track.Elements()) {
+        const auto it = corr.find(key_of(el.image_id, el.point2D_idx));
+        if (it == corr.end()) continue;
+        for (const auto& [img2, idx2] : it->second) {
+          if (excluded.count(img2)) continue;
+          if (!reconstruction->ExistsImage(img2)) continue;
+          const colmap::Image& im2 = reconstruction->Image(img2);
+          if (!im2.HasPose() || idx2 >= im2.NumPoints2D()) continue;
+          if (im2.Point2D(idx2).HasPoint3D()) continue;  // taken — no merge here
+          excluded.insert(img2);  // one candidate per image
+          kept.emplace_back(img2, idx2);
+        }
+      }
+      if (kept.empty()) continue;
+      ++s->stat_upgrade_attempted;
+
+      Eigen::Vector3d accepted_xyz = Eigen::Vector3d::Zero();
+      bool accepted = false;
+      for (int round = 0; round < 3 && !kept.empty(); ++round) {
+        std::vector<Eigen::Matrix3x4d> cams_from_world;
+        std::vector<Eigen::Vector2d> cam_points;
+        std::vector<const colmap::Image*> imgs;
+        std::vector<const colmap::Camera*> cams;
+        std::vector<Eigen::Vector2d> px;
+        bool bad = false;
+        const auto push_obs = [&](colmap::image_t img_id, uint32_t idx) {
+          if (bad) return;
+          if (!reconstruction->ExistsImage(img_id)) {
+            bad = true;
+            return;
+          }
+          const colmap::Image& im = reconstruction->Image(img_id);
+          if (!im.HasPose() || idx >= im.NumPoints2D()) {
+            bad = true;
+            return;
+          }
+          const colmap::Camera& cm = reconstruction->Camera(im.CameraId());
+          const Eigen::Vector2d p = im.Point2D(idx).xy;
+          const std::optional<Eigen::Vector2d> nc = cm.CamFromImg(p);
+          if (!nc) {
+            bad = true;
+            return;
+          }
+          cams_from_world.push_back(im.CamFromWorld().ToMatrix());
+          cam_points.push_back(*nc);
+          imgs.push_back(&im);
+          cams.push_back(&cm);
+          px.push_back(p);
+        };
+        for (const colmap::TrackElement& el : point.track.Elements()) {
+          push_obs(el.image_id, el.point2D_idx);
+        }
+        const size_t n_track = imgs.size();
+        for (const auto& [img2, idx2] : kept) push_obs(img2, idx2);
+        if (bad) break;
+
+        Eigen::Vector3d X;
+        if (!colmap::TriangulateMultiViewPoint(
+                colmap::span<const Eigen::Matrix3x4d>(cams_from_world.data(),
+                                                      cams_from_world.size()),
+                colmap::span<const Eigen::Vector2d>(cam_points.data(),
+                                                    cam_points.size()),
+                &X)) {
+          break;
+        }
+        PolishPointGN(imgs, cams, px, &X);
+
+        bool track_bad = false;
+        std::vector<size_t> drop;  // indices into kept, ascending
+        double worst_res = -1.0;
+        size_t worst_cand = static_cast<size_t>(-1);
+        for (size_t o = 0; o < imgs.size(); ++o) {
+          double res = std::numeric_limits<double>::infinity();
+          const Eigen::Vector3d xc = imgs[o]->CamFromWorld() * X;
+          if (xc.z() > 0.0) {
+            const std::optional<Eigen::Vector2d> pp = cams[o]->ImgFromCam(xc);
+            if (pp) res = (*pp - px[o]).norm();
+          }
+          const bool ok = res <= kMaxReprojPx;
+          if (o < n_track) {
+            if (!ok) track_bad = true;
+          } else {
+            const size_t ci = o - n_track;
+            if (!ok) drop.push_back(ci);
+            if (res > worst_res) {
+              worst_res = res;
+              worst_cand = ci;
+            }
+          }
+        }
+        if (!track_bad && drop.empty()) {
+          accepted = true;
+          accepted_xyz = X;
+          break;
+        }
+        if (!drop.empty()) {
+          for (auto it = drop.rbegin(); it != drop.rend(); ++it) {
+            kept.erase(kept.begin() + *it);
+          }
+        } else {
+          // Track violated while every candidate fits: the candidate set is
+          // self-consistent but pulls the point off its own track — shed the
+          // worst-residual candidate and retry.
+          if (worst_cand == static_cast<size_t>(-1)) break;
+          kept.erase(kept.begin() + worst_cand);
+        }
+      }
+
+      if (accepted && !kept.empty()) {
+        reconstruction->Point3D(pid).xyz = accepted_xyz;
+        for (const auto& [img2, idx2] : kept) {
+          reconstruction->AddObservation(
+              pid, colmap::TrackElement(img2, idx2));
+        }
+        ++s->stat_upgrade_accepted;
+        s->stat_upgrade_obs_added += static_cast<int64_t>(kept.size());
+      }
+    }
+
+    // 4) Post-pass distribution.
+    summarize(&s->stat_upgrade_post_npts, &s->stat_upgrade_post_2view,
+              &s->stat_upgrade_post_lt3, &s->upgrade_theta_p50_post_deg);
+    s->upgrade_ms = NowMs() - t0;
+    LOG(WARNING) << "[aether_sfm] track-upgrade: eligible="
+                 << s->stat_upgrade_eligible
+                 << " attempted=" << s->stat_upgrade_attempted
+                 << " accepted=" << s->stat_upgrade_accepted
+                 << " obs_added=" << s->stat_upgrade_obs_added << " pre{n="
+                 << s->stat_upgrade_pre_npts << " 2view="
+                 << s->stat_upgrade_pre_2view << " lt3="
+                 << s->stat_upgrade_pre_lt3 << " theta_p50="
+                 << s->upgrade_theta_p50_pre_deg << "deg} post{n="
+                 << s->stat_upgrade_post_npts << " 2view="
+                 << s->stat_upgrade_post_2view << " lt3="
+                 << s->stat_upgrade_post_lt3 << " theta_p50="
+                 << s->upgrade_theta_p50_post_deg << "deg} in "
+                 << static_cast<int64_t>(s->upgrade_ms) << "ms";
+  } catch (const std::exception& e) {
+    // Enhancement pass only — never take the finalize down.
+    s->upgrade_ms = NowMs() - t0;
+    LOG(WARNING) << "[aether_sfm] track-upgrade aborted: " << e.what();
+  }
 }
 
 // ── Resume support: rebuild minimal FrameRecords from the db ────────────────
@@ -2168,6 +2841,7 @@ void RefineFallbackFullRerun(aether_sfm_session* s, const char* why) {
     }
     auto refined = std::make_shared<colmap::Reconstruction>(*recon);
     RestoreTemporalDetail(s, refined.get());
+    UpgradeLowParallaxTracks(s, refined.get());  // env-gated no-op by default
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
       s->recon_manager = manager;
@@ -2254,7 +2928,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    char buf[1024];
+    char buf[2048];
     const int n = std::snprintf(
         buf, sizeof(buf),
         "{\"t\":%lld,\"live_reuse\":%d,"
@@ -2266,6 +2940,18 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"rematch_attempted\":%lld,\"rematch_written\":%lld,"
         "\"rematch_inliers\":%lld,\"rematch_failed\":%lld,"
         "\"rematch_budget\":%d,"
+        // [KNIFE-A 2026-07-11] 2-view upgrade attribution (all zero when the
+        // three env opt-ins are unset).
+        "\"grow_refit_attempted\":%lld,\"grow_refit_accepted\":%lld,"
+        "\"grow_refit_saved\":%lld,"
+        "\"upgrade_eligible\":%lld,\"upgrade_attempted\":%lld,"
+        "\"upgrade_accepted\":%lld,\"upgrade_obs_added\":%lld,"
+        "\"upgrade_ms\":%lld,"
+        "\"theta_pre_n\":%lld,\"theta_pre_2view\":%lld,"
+        "\"theta_pre_lt3\":%lld,\"theta_pre_p50_deg\":%.3f,"
+        "\"theta_post_n\":%lld,\"theta_post_2view\":%lld,"
+        "\"theta_post_lt3\":%lld,\"theta_post_p50_deg\":%.3f,"
+        "\"enrich_targeted_tracks\":%lld,\"enrich_targeted_scored\":%lld,"
         "\"solver_used\":\"%s\",\"sparse_backend\":\"%s\","
         "\"mixed\":%d,\"threads\":%d}\n",
         static_cast<long long>(epoch_ms), live_reuse ? 1 : 0,
@@ -2280,8 +2966,26 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_finalize_rematch_written),
         static_cast<long long>(s->stat_finalize_rematch_inliers),
         static_cast<long long>(s->stat_finalize_rematch_failed),
-        kFinalizeRematchMaxPairs, solver_used.c_str(),
-        sparse_backend.c_str(), mixed, threads);
+        kFinalizeRematchMaxPairs,
+        static_cast<long long>(s->stat_td_grow_refit_attempted),
+        static_cast<long long>(s->stat_td_grow_refit_accepted),
+        static_cast<long long>(s->stat_td_grow_refit_saved),
+        static_cast<long long>(s->stat_upgrade_eligible),
+        static_cast<long long>(s->stat_upgrade_attempted),
+        static_cast<long long>(s->stat_upgrade_accepted),
+        static_cast<long long>(s->stat_upgrade_obs_added),
+        static_cast<long long>(s->upgrade_ms),
+        static_cast<long long>(s->stat_upgrade_pre_npts),
+        static_cast<long long>(s->stat_upgrade_pre_2view),
+        static_cast<long long>(s->stat_upgrade_pre_lt3),
+        s->upgrade_theta_p50_pre_deg,
+        static_cast<long long>(s->stat_upgrade_post_npts),
+        static_cast<long long>(s->stat_upgrade_post_2view),
+        static_cast<long long>(s->stat_upgrade_post_lt3),
+        s->upgrade_theta_p50_post_deg,
+        static_cast<long long>(s->stat_enrich_targeted_tracks),
+        static_cast<long long>(s->stat_enrich_targeted_scored),
+        solver_used.c_str(), sparse_backend.c_str(), mixed, threads);
     if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return;
     FILE* f = std::fopen(tmp.string().c_str(), "w");
     if (!f) return;
@@ -2355,6 +3059,18 @@ void RefineGlobalBA(aether_sfm_session* s,
     const char* stage1_state = "off";
     if (live_reuse) {
       refined = std::move(model);  // in place — nothing else holds this model
+      // [KNIFE-A ③ 2026-07-11] Snapshot the enrichment-targeting hint from
+      // the (still-untouched) live model BEFORE the enrichment thread spawns
+      // and before stage 1 starts mutating `refined` — the enrichment thread
+      // must never read the model itself. Env-gated; nullptr = legacy
+      // distance ordering in the top-up.
+      if (EnrichTargetedEnabled() && s->frames.size() >= 3) {
+        try {
+          s->enrich_hint = BuildEnrichTargetHint(*s, *refined);
+        } catch (...) {
+          s->enrich_hint.reset();
+        }
+      }
       // Kill switch: AETHER_FINALIZE_NO_OVERLAP=1 restores the serial order
       // (enrichment first, then one full refinement over the enriched db).
       static const bool no_overlap = [] {
@@ -2490,6 +3206,7 @@ void RefineGlobalBA(aether_sfm_session* s,
 #endif
       }
       enrich.join();
+      s->enrich_hint.reset();  // [KNIFE-A ③] snapshot no longer needed
       // Stage 2 completes the round budget: baseline runs gref(=5) rounds
       // total; stage 2 runs the remainder (floor 1 — the enriched graph's new
       // pairs always get at least Retriangulate/CompleteAndMergeTracks + one
@@ -2515,6 +3232,9 @@ void RefineGlobalBA(aether_sfm_session* s,
     const double t_td = NowMs();
     RestoreTemporalDetail(s, refined.get());
     const double temporal_ms = NowMs() - t_td;
+    // [KNIFE-A ② 2026-07-11] Finalize-tail 2-view upgrade over the delivered
+    // model (env-gated no-op by default; sets s->upgrade_ms + stat_upgrade_*).
+    UpgradeLowParallaxTracks(s, refined.get());
     LOG(WARNING) << "[aether_sfm] finalize worker: cache_pre="
                  << static_cast<int64_t>(cache_pre_ms)
                  << "ms enrich=" << static_cast<int64_t>(enrich_ms)
@@ -2523,6 +3243,7 @@ void RefineGlobalBA(aether_sfm_session* s,
                  << ") stage2=" << static_cast<int64_t>(stage2_ms)
                  << "ms (rounds<=" << popts->ba_global_max_refinements
                  << ") temporal=" << static_cast<int64_t>(temporal_ms)
+                 << "ms upgrade=" << static_cast<int64_t>(s->upgrade_ms)
                  << "ms total=" << static_cast<int64_t>(NowMs() - t0) << "ms";
     // [AETHER FINALIZE-SEGMENTS 2026-07-11] Same numbers into the persistent
     // run_dir JSON (stderr double-write stays above) — BEFORE the status flips
