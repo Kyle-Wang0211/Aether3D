@@ -429,6 +429,9 @@ struct aether_sfm_session {
   int64_t stat_td_grow_refit_attempted = 0;  // grow candidates entering refit
   int64_t stat_td_grow_refit_accepted = 0;   // union-refit accepted grows
   int64_t stat_td_grow_refit_saved = 0;      // accepted where 3px@current would reject
+  // [P2-FRAG-MERGE-REPRICE] refit accepts refused by the MIN_THETA floor
+  // (candidate then fell through to the legacy gates)
+  int64_t stat_td_grow_refit_min_theta_rej = 0;
   // ② finalize-tail TrackUpgrade (AETHER_TRACK_UPGRADE=1):
   int64_t stat_upgrade_eligible = 0;     // 2-view / θ_max<3° delivered points
   int64_t stat_upgrade_attempted = 0;    // eligible points with ≥1 free candidate obs
@@ -472,6 +475,12 @@ struct aether_sfm_session {
   int64_t stat_gpu_match_fail_by_rc[8] = {0};
   int64_t stat_gpu_match_fail_max_streak = 0;  // longest consecutive-fail run
   int64_t gpu_match_fail_streak = 0;  // internal running streak (not exposed)
+  // [P1-REPAY-THERMAL2 2026-07-11] GPU pairs completed since the last rc=7
+  // (add_frame worker thread ownership, same as the streak above). Feeds the
+  // thermal=2 conditional-repay gate: repay at serious requires a clean
+  // recent GPU history. rc=7 resets; other rc codes are deterministic
+  // failures (bad args / pipeline / alloc), not thermal-pressure evidence.
+  int64_t gpu_pairs_since_rc7 = 0;
   // [THERMAL-THROTTLE 2026-07-11] Latest ProcessInfo thermal bucket pushed by
   // the platform layer (aether_sfm_set_thermal_state; 0 nominal · 1 fair ·
   // 2 serious · 3 critical, -1/unset = unknown → never throttles). Written by
@@ -528,6 +537,8 @@ struct aether_sfm_session {
   int64_t stat_frag_obs_merged = 0;         // union track sizes of accepted merges
   int64_t stat_frag_reject_reproj = 0;      // union refit reproj/cheirality fail
   int64_t stat_frag_reject_theta = 0;       // θ_max did not strictly rise
+  // [P2-FRAG-MERGE-REPRICE] union θ_max below AETHER_FRAG_MERGE_MIN_THETA_DEG
+  int64_t stat_frag_reject_min_theta = 0;
   int64_t stat_frag_reject_degenerate = 0;  // broken obs / DLT failure
   int64_t stat_frag_pre_npts = 0, stat_frag_pre_2view = 0, stat_frag_pre_lt3 = 0;
   int64_t stat_frag_post_npts = 0, stat_frag_post_2view = 0, stat_frag_post_lt3 = 0;
@@ -744,6 +755,9 @@ void NoteGpuMatchFailure(aether_sfm_session* s, int rc, int prev_frame_id,
   ++s->stat_gpu_match_fail_total;
   const int bucket = (rc >= 1 && rc <= 7) ? rc : 0;
   ++s->stat_gpu_match_fail_by_rc[bucket];
+  // [P1-REPAY-THERMAL2] rc=7 (thermal/GPU-pressure kill) dirties the clean
+  // history the conditional repay gate requires.
+  if (rc == 7) s->gpu_pairs_since_rc7 = 0;
   ++s->gpu_match_fail_streak;
   if (s->gpu_match_fail_streak > s->stat_gpu_match_fail_max_streak) {
     s->stat_gpu_match_fail_max_streak = s->gpu_match_fail_streak;
@@ -1007,6 +1021,59 @@ bool FragMergeEnabled() {
 double FragMergeMaxReprojPx() {
   static const double cached =
       EnvGateDouble("AETHER_FRAG_MERGE_REPROJ_PX", 0.0);
+  return cached;
+}
+// [P2-FRAG-MERGE-REPRICE 2026-07-11] AETHER_FRAG_MERGE_MIN_THETA_DEG: the
+// merged union's θ_max must ALSO reach at least this many degrees (on top of
+// the strictly-beats-both-fragments rule). Motivation (cap47 forensic): the
+// ghost second floor layer is built from merges whose union θ_max "rises"
+// but stays in the low-parallax depth-ambiguity band — coagulating the
+// diffuse noise shell into a coherent 2-3.5cm ghost plane (FRAG_MERGE@4px:
+// ghost 4.3% → 6.7% of the floor slab). A floor on the ABSOLUTE post-merge
+// parallax only banks merges whose union genuinely leaves the ambiguity
+// band. Default 0 = gate off, bit-identical to the current knife.
+double FragMergeMinThetaDeg() {
+  static const double cached =
+      EnvGateDouble("AETHER_FRAG_MERGE_MIN_THETA_DEG", 0.0);
+  return cached;
+}
+// [P2-FRAG-MERGE-REPRICE 2026-07-11] Same MIN_THETA floor for the KNIFE-A ①
+// grow refit (AETHER_TD_GROW_REFIT): a refit ACCEPT additionally requires the
+// union's θ_max at the refit position to reach this many degrees; otherwise
+// the candidate falls through to the legacy gates (the shipped acceptance),
+// so the arm stays a superset of the default arm. Default 0 = off.
+double TdGrowRefitMinThetaDeg() {
+  static const double cached =
+      EnvGateDouble("AETHER_TD_GROW_REFIT_MIN_THETA_DEG", 0.0);
+  return cached;
+}
+
+// [P1-STAGE1-RECIPE 2026-07-11] Stage-1 refinement round/ftol overrides for
+// the finalize-speedup pricing matrix. Context: on device (cap47) stage 1
+// burned 5 rounds × thermal-slowed BA = 82.5 s and — through the AUTO enrich
+// time gate, whose window is "stage-1 block finished" — kept the enrichment
+// accepting new attempts for the whole 83.7 s. Capping stage-1 rounds ends
+// BOTH earlier; the remainder formula hands the unused rounds to stage 2
+// (converge-stop bounded) unchanged.
+//   AETHER_STAGE1_ROUNDS_CAP=N (>0): stage-1 loop bound becomes
+//     min(ba_global_max_refinements, N). Unset/0 = shipped behavior.
+//   AETHER_STAGE1_FTOL=X (>0): stage-1 solves use ceres
+//     function_tolerance=X instead of the shipped ba_global_function_
+//     tolerance (1e-6). Stage 2 is NOT touched. Unset/0 = shipped.
+// (记忆锚:rounds3+ftol 组合在 Mac 'o' 收尾管线 −59% 全门过;stage1 语境
+// 由本矩阵重验,默认零漂移。)
+int Stage1RoundsCap() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_STAGE1_ROUNDS_CAP")) {
+      const int v = std::atoi(e);
+      if (v > 0) return v;
+    }
+    return 0;
+  }();
+  return cached;
+}
+double Stage1FtolOverride() {
+  static const double cached = EnvGateDouble("AETHER_STAGE1_FTOL", 0.0);
   return cached;
 }
 
@@ -2088,6 +2155,34 @@ void RestoreTemporalDetail(aether_sfm_session* s,
                     }
                   }
                 }
+                // [P2-FRAG-MERGE-REPRICE] Optional absolute parallax floor
+                // on the refit ACCEPT: the union's θ_max at the refit must
+                // reach AETHER_TD_GROW_REFIT_MIN_THETA_DEG. A union still
+                // inside the low-parallax ambiguity band keeps the noisy
+                // depth the ghost layer is made of (cap47: GROW_REFIT arm
+                // ghost 4.3%→5.5%); refusing the refit here drops the
+                // candidate to the legacy gates below (superset preserved).
+                static const double kGrowMinThetaRad =
+                    TdGrowRefitMinThetaDeg() * M_PI / 180.0;
+                if (refit_ok && kGrowMinThetaRad > 0.0) {
+                  double th_union = 0.0;
+                  for (size_t i2 = 0; i2 < union_imgs.size(); ++i2) {
+                    const Eigen::Vector3d ci =
+                        union_imgs[i2]->CamFromWorld().TgtOriginInSrc();
+                    for (size_t j2 = i2 + 1; j2 < union_imgs.size(); ++j2) {
+                      th_union = std::max(
+                          th_union,
+                          colmap::CalculateTriangulationAngle(
+                              ci,
+                              union_imgs[j2]->CamFromWorld().TgtOriginInSrc(),
+                              refit_xyz));
+                    }
+                  }
+                  if (th_union < kGrowMinThetaRad) {
+                    ++s->stat_td_grow_refit_min_theta_rej;
+                    refit_ok = false;
+                  }
+                }
                 if (refit_ok &&
                     has_stable_baseline(point3D.track, grow_image,
                                         refit_xyz)) {
@@ -2559,6 +2654,8 @@ void MergeFragmentTracks(aether_sfm_session* s,
                                     ? FragMergeMaxReprojPx()
                                     : TemporalDetailMaxReprojPx();
     constexpr double kLowParallaxRad = 3.0 * M_PI / 180.0;
+    // [P2-FRAG-MERGE-REPRICE] absolute post-merge parallax floor (0 = off).
+    const double kMinThetaRad = FragMergeMinThetaDeg() * M_PI / 180.0;
 
     const auto theta_max = [&](const colmap::Track& track,
                                const Eigen::Vector3d& xyz) {
@@ -2812,6 +2909,14 @@ void MergeFragmentTracks(aether_sfm_session* s,
         ++s->stat_frag_reject_theta;
         continue;
       }
+      // [P2-FRAG-MERGE-REPRICE] Acceptance 3: the union must LEAVE the
+      // low-parallax ambiguity band, not merely rise inside it — a merged
+      // point still below the floor keeps the depth-noise position that
+      // builds the coherent ghost layer (cap47 verdict). Off by default.
+      if (kMinThetaRad > 0.0 && th_union < kMinThetaRad) {
+        ++s->stat_frag_reject_min_theta;
+        continue;
+      }
 
       const size_t union_len = imgs.size();
       const colmap::point3D_t merged = reconstruction->MergePoints3D(a, b);
@@ -2837,6 +2942,7 @@ void MergeFragmentTracks(aether_sfm_session* s,
                  << " obs_merged=" << s->stat_frag_obs_merged
                  << " rej{reproj=" << s->stat_frag_reject_reproj
                  << " theta=" << s->stat_frag_reject_theta
+                 << " min_theta=" << s->stat_frag_reject_min_theta
                  << " degen=" << s->stat_frag_reject_degenerate << "} pre{n="
                  << s->stat_frag_pre_npts << " 2view="
                  << s->stat_frag_pre_2view << " lt3=" << s->stat_frag_pre_lt3
@@ -3520,7 +3626,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         // [KNIFE-A 2026-07-11] 2-view upgrade attribution (all zero when the
         // three env opt-ins are unset).
         "\"grow_refit_attempted\":%lld,\"grow_refit_accepted\":%lld,"
-        "\"grow_refit_saved\":%lld,"
+        "\"grow_refit_saved\":%lld,\"grow_refit_min_theta_rej\":%lld,"
         "\"upgrade_eligible\":%lld,\"upgrade_attempted\":%lld,"
         "\"upgrade_accepted\":%lld,\"upgrade_obs_added\":%lld,"
         "\"upgrade_ms\":%lld,"
@@ -3534,6 +3640,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"frag_links\":%lld,\"frag_attempted\":%lld,"
         "\"frag_accepted\":%lld,\"frag_obs_merged\":%lld,"
         "\"frag_reject_reproj\":%lld,\"frag_reject_theta\":%lld,"
+        "\"frag_reject_min_theta\":%lld,"
         "\"frag_reject_degenerate\":%lld,\"frag_ms\":%lld,"
         "\"frag_pre_n\":%lld,\"frag_pre_2view\":%lld,\"frag_pre_lt3\":%lld,"
         "\"frag_pre_p50_deg\":%.3f,"
@@ -3567,6 +3674,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_td_grow_refit_attempted),
         static_cast<long long>(s->stat_td_grow_refit_accepted),
         static_cast<long long>(s->stat_td_grow_refit_saved),
+        static_cast<long long>(s->stat_td_grow_refit_min_theta_rej),
         static_cast<long long>(s->stat_upgrade_eligible),
         static_cast<long long>(s->stat_upgrade_attempted),
         static_cast<long long>(s->stat_upgrade_accepted),
@@ -3588,6 +3696,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_frag_obs_merged),
         static_cast<long long>(s->stat_frag_reject_reproj),
         static_cast<long long>(s->stat_frag_reject_theta),
+        static_cast<long long>(s->stat_frag_reject_min_theta),
         static_cast<long long>(s->stat_frag_reject_degenerate),
         static_cast<long long>(s->frag_ms),
         static_cast<long long>(s->stat_frag_pre_npts),
@@ -3793,6 +3902,12 @@ void RefineGlobalBA(aether_sfm_session* s,
                     ? ba_opts.ceres->solver_options.num_threads
                     : static_cast<int>(std::thread::hardware_concurrency());
             ba_opts.ceres->solver_options.num_threads = std::max(1, full / 2);
+            // [P1-STAGE1-RECIPE] optional stage-1-only ftol override (stage 2
+            // keeps the shipped ba_global_function_tolerance untouched).
+            if (Stage1FtolOverride() > 0.0) {
+              ba_opts.ceres->solver_options.function_tolerance =
+                  Stage1FtolOverride();
+            }
           }
           // Window checks between the sub-steps too: a healthy capture whose
           // enrichment finishes in seconds must not pay for a full merge +
@@ -3800,7 +3915,16 @@ void RefineGlobalBA(aether_sfm_session* s,
           // the enriched graph).
           if (!enrich_done.load()) mapper.CompleteAndMergeTracks(tri_opts);
           if (!enrich_done.load()) mapper.Retriangulate(tri_opts);
-          for (int i = 0; i < popts->ba_global_max_refinements; ++i) {
+          // [P1-STAGE1-RECIPE] optional round cap: ends stage 1 — and, via
+          // the AUTO enrich gate keyed on enrich_stage1_done, the enrichment
+          // window — after N rounds. The stage-2 remainder formula below
+          // hands the unused rounds back to stage 2 unchanged.
+          const int s1_rounds_max =
+              Stage1RoundsCap() > 0
+                  ? std::min(popts->ba_global_max_refinements,
+                             Stage1RoundsCap())
+                  : popts->ba_global_max_refinements;
+          for (int i = 0; i < s1_rounds_max; ++i) {
             if (enrich_done.load()) break;  // window closed
             const size_t num_obs = refined->ComputeNumObservations();
             mapper.AdjustGlobalBundle(mapper_opts, ba_opts);
@@ -4264,6 +4388,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
           continue;
         }
         s->gpu_match_fail_streak = 0;  // healthy pair ends a failure segment
+        ++s->gpu_pairs_since_rc7;      // [P1-REPAY-THERMAL2] clean history
         used_gpu = true;
       } else {
         mrc = aether_sift_match_pairs(
@@ -5435,8 +5560,20 @@ void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
 // order of magnitude cheaper than repaying at finalize.
 //
 // Rules:
-//   - thermal serious/critical (state >= 2) → refuses outright (never adds
-//     GPU load to the exact condition that caused the debt);
+//   - thermal critical (state >= 3) → refuses outright;
+//   - thermal serious (state == 2) → SMALL conditional repayment only:
+//     [P1-REPAY-THERMAL2 2026-07-11] the old ">= 2 refuses outright" rule
+//     never repaid anything in practice — on cap47 the device sat at
+//     thermal=2 from min 2 of a 6.5-min capture (采集常态), so all 140 repay
+//     offers were refused and the whole debt hit the finalize re-match at
+//     ~410 ms/pair on a hot GPU. serious+idle with a HEALTHY matcher is
+//     exactly the cheap window; serious+struggling GPU is the freeze
+//     precondition (rc=7 forensic). Gate: allowed only when the last
+//     kRepayThermal2CleanN GPU pairs all succeeded (gpu_pairs_since_rc7,
+//     rc=7 resets), budget clamped to kRepayThermal2MaxPairs per call, and
+//     ANY matcher failure aborts the pass on the spot. Kill switch:
+//     AETHER_REPAY_THERMAL2_CLEAN_N=0 restores the old full refusal; N>0
+//     overrides the clean-history length (default 16);
 //   - starved = the live win_valid mirror of the finalize rule (< 4 valid
 //     window pairs, or fed_throttled), candidates = missing window pairs
 //     (gap <= K, either side starved; gap <= 2 chain holes always),
@@ -5448,12 +5585,40 @@ void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
 //     finalize (same descriptors, same matcher, same write sequence).
 // Returns pairs written this call (0 = nothing to do / refused), -1 on bad
 // args. Counters via aether_sfm_repair_stats.
+// [P1-REPAY-THERMAL2] thermal=2 conditional-repay knobs. MaxPairs is the
+// per-call budget clamp at serious (small on purpose: one idle offer repays
+// at most 2 pairs, ~30 ms healthy GPU); CleanN is the required healthy-GPU
+// run since the last rc=7 (0 = thermal=2 refuses outright, the old rule).
+constexpr int kRepayThermal2MaxPairs = 2;
+int RepayThermal2CleanN() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_REPAY_THERMAL2_CLEAN_N")) {
+      const int v = std::atoi(e);
+      if (v >= 0) return v;
+    }
+    return 16;  // conservative default: ≥16 consecutive healthy GPU pairs
+  }();
+  return cached;
+}
+
 int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
   if (!s || !s->db) return -1;
   if (max_pairs <= 0 || s->frames.size() < 3 || s->camera_id == 0) return 0;
-  if (s->thermal_state.load(std::memory_order_relaxed) >= 2) {
+  const int thermal_entry =
+      s->thermal_state.load(std::memory_order_relaxed);
+  bool thermal2_mode = false;
+  if (thermal_entry >= 3) {  // critical: never add GPU load
     ++s->stat_repay_skipped_thermal;
     return 0;
+  }
+  if (thermal_entry == 2) {
+    const int clean_n = RepayThermal2CleanN();
+    if (clean_n <= 0 || s->gpu_pairs_since_rc7 < clean_n) {
+      ++s->stat_repay_skipped_thermal;
+      return 0;
+    }
+    thermal2_mode = true;
+    max_pairs = std::min(max_pairs, kRepayThermal2MaxPairs);
   }
   const bool gpu_avail =
       s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
@@ -5493,9 +5658,16 @@ int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
           continue;
         }
         // Mid-call thermal check: a state push can arrive between pairs.
-        if (s->thermal_state.load(std::memory_order_relaxed) >= 2) {
-          ++s->stat_repay_skipped_thermal;
-          return written;
+        // critical always aborts; a cool→serious transition aborts too (the
+        // thermal2 clean-history gate was not evaluated for this call) —
+        // only a call that ENTERED at serious keeps its small clamped budget.
+        {
+          const int th_now =
+              s->thermal_state.load(std::memory_order_relaxed);
+          if (th_now >= 3 || (th_now >= 2 && !thermal2_mode)) {
+            ++s->stat_repay_skipped_thermal;
+            return written;
+          }
         }
         ++attempted;
         ++s->stat_repay_attempted;
@@ -5521,8 +5693,13 @@ int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
         s->live_pairs_done.insert(key);
         if (mrc != 0) {
           ++s->stat_repay_failed;
+          if (gpu_avail && mrc == 7) s->gpu_pairs_since_rc7 = 0;
+          // [P1-REPAY-THERMAL2] at serious, the FIRST struggling pair ends
+          // the pass — repay must never become the load that tips a hot GPU.
+          if (thermal2_mode) return written;
           continue;
         }
+        if (gpu_avail) ++s->gpu_pairs_since_rc7;
         if (num_matches <= 0) continue;  // legitimate empty pair — resolved
         colmap::FeatureMatches matches(num_matches);
         for (int m = 0; m < num_matches; ++m) {
