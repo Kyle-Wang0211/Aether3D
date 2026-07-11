@@ -143,6 +143,17 @@ struct IncrementalPipelineOptions {
   double ba_global_loss_scale = 1.0;
   int ba_global_loss_type = 0;
 
+  // [AETHER BA-MIXED 2026-07-11] Mixed-precision solves for the GLOBAL BA
+  // only (fp32 factorize/solve + fp64 refinement steps). Plumbed to
+  // CeresBundleAdjustmentOptions::use_mixed_precision_if_direct, which only
+  // engages on solvers that support it (DENSE_SCHUR / SPARSE_SCHUR non-SS;
+  // ITERATIVE_SCHUR stays fp64 — Ceres rejects the combination). Local BA is
+  // untouched. ⚠️ Stays false in production: the 2026-07-11 host A/B vetoed
+  // it (+9.2% points / +0.027 reproj / 9-gate 4/9 — near-singular CAUCHY
+  // Schur systems lose too much in fp32; see aether_sfm_c.cc
+  // BaMixedEnabled()). Experiment opt-in: AETHER_BA_MIXED=1.
+  bool ba_global_mixed_precision = false;
+
   // [AETHER] Defer ALL in-loop global bundle adjustment (periodic + recovery) to
   // the single finalize solve. On-device per-frame UI then pays local-BA-only
   // latency; the heavy O(N) global solve runs once post-capture (or async).

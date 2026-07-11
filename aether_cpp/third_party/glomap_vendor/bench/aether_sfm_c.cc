@@ -57,6 +57,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -1720,6 +1721,48 @@ double TriMinAngleDeg(const char* env_name) {
   return 3.0;
 }
 
+// [AETHER BA-MIXED 2026-07-11] Finalize global BA mixed-precision solves
+// (fp32 factorize/solve of the reduced camera system + fp64 iterative-
+// refinement steps). ⚠️ DEFAULT OFF — host A/B (cap42, spatial_ab streaming
+// driver, GPU matcher, thread-count controlled at 12) VETOED the default-on
+// plan: the mixed arm shifted the DELIVERED cloud far outside the noise band
+// (points 66752→72897 = +9.2%, mean reproj 1.0156→1.0430 = +0.027, 9-gate
+// 4/9: reproj_median +5.2%, tri_angle x0.943, weak_track +5.4%, arkit_pos
+// +15.7%). Attribution was exact: the threads-only arm was equal to baseline
+// to 4 decimals on every metric, the mixed-only arm reproduced the full
+// drift. Mechanism: the CAUCHY-reweighted Schur complement is near-singular
+// (the same conditioning that crashes Accelerate's fp64 sparse Cholesky);
+// fp32 factorization error scales with the condition number, iterative
+// refinement stalls on it, and the LM trajectory converges to a visibly
+// different (worse) state — NOT run-to-run noise. Opt-in for future
+// experiments: AETHER_BA_MIXED=1 (+AETHER_BA_MIXED_REFINE=N, default 3).
+// Capture-time LOCAL BA is never touched either way.
+bool BaMixedEnabled() {
+  const char* e = std::getenv("AETHER_BA_MIXED");
+  return e && e[0] == '1';
+}
+
+// [AETHER BA-THREADS 2026-07-11] Finalize BA ceres thread budget. Previous
+// behavior was num_threads=-1 -> hardware_concurrency (host M3 Pro 12, A16 6)
+// for every solve above the 6000-residual floor. New default = min(6, hw-2):
+// leaves headroom for the rest of the process (GPU-matcher CPU side, db I/O,
+// Dart/UI on device) instead of saturating every core with Schur workers —
+// A16: 4 threads (2P+2E stay free), host M3 Pro: 6. Env AETHER_BA_THREADS
+// overrides (any positive integer). The stage-1 overlap window still halves
+// whatever this returns (enrichment is the critical path there); stage 2 and
+// the full re-run run the full budget.
+int FinalizeBaThreads() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_BA_THREADS")) {
+      const int v = std::atoi(e);
+      if (v > 0) return v;
+    }
+    const int hw = static_cast<int>(std::thread::hardware_concurrency());
+    return std::max(1, std::min(6, hw - 2));
+  }();
+  return cached;
+}
+
 // Run the validated IncrementalPipeline over (db_path, image_path) into a fresh
 // reconstruction manager, fill *out_recon with the best model + write JSON.
 aether_sfm_result_t RunIncremental(
@@ -1774,6 +1817,17 @@ aether_sfm_result_t RunIncremental(
     pipeline_opts->ba_global_loss_type = 2;    // CAUCHY (-> DENSE_SCHUR via override)
     pipeline_opts->ba_global_loss_scale = 1.0;
     pipeline_opts->ba_global_function_tolerance = 1e-6;  // converge-stop
+    // [AETHER BA-MIXED/THREADS 2026-07-11] This is the db-driven batch /
+    // full-re-run finalize: global BA gets the finalize thread budget
+    // (AETHER_BA_THREADS override; default min(6, hw-2), was -1 -> all
+    // cores; quality equal to baseline to 4 decimals on every 9-gate metric,
+    // host A/B). Mixed precision stays OFF unless AETHER_BA_MIXED=1
+    // (A/B-vetoed default, see BaMixedEnabled). num_threads also feeds the
+    // local-BA solves of this batch path — intended: same headroom
+    // rationale, and the live capture-time local BA does NOT go through here
+    // (hand-built options in the streaming path).
+    pipeline_opts->ba_global_mixed_precision = BaMixedEnabled();
+    pipeline_opts->num_threads = FinalizeBaThreads();
     pipeline_opts->mapper.ba_local_num_images = 10;
     // [TRI-ANGLE 2026-07-11] Creation parallax gate 1.5°(colmap default)→3.0°,
     // aligned with BOTH streaming creation gates (add_frame kMinTriAngleRad and
@@ -1884,6 +1938,15 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   popts->ba_global_function_tolerance = 1e-6;  // converge-stop
   popts->ba_global_max_refinements = 5;
   popts->ba_global_max_num_iterations = 50;
+  // [AETHER BA-MIXED/THREADS 2026-07-11] Finalize phase-2 (stage 1 + stage 2)
+  // global BA: the finalize thread budget (default min(6, hw-2),
+  // AETHER_BA_THREADS override; quality equal to baseline to 4 decimals on
+  // every 9-gate metric, host A/B). Mixed precision stays OFF unless
+  // AETHER_BA_MIXED=1 (A/B-vetoed default, see BaMixedEnabled). Stage 1
+  // additionally halves the budget during the enrichment overlap window (see
+  // RefineGlobalBA).
+  popts->ba_global_mixed_precision = BaMixedEnabled();
+  popts->num_threads = FinalizeBaThreads();
   // [TRI-ANGLE 2026-07-11] Same 3.0° creation gate as RunIncremental:
   // IterativeGlobalRefinement's CompleteAndMergeTracks/retriangulation reads
   // Triangulation() too — keep phase 2 from re-admitting the <3° tail that
@@ -2034,10 +2097,16 @@ void RefineGlobalBA(aether_sfm_session* s,
           // memory bandwidth — cap43 enrichment 42.9 s serial → 54.9 s under
           // an all-cores stage 1). Stage 1 is window-bound filler, so slower
           // rounds cost nothing; stage 2 keeps the full thread pool.
+          // [AETHER BA-THREADS 2026-07-11] The base is now the finalize
+          // budget (min(6, hw-2) / AETHER_BA_THREADS) instead of raw
+          // hardware_concurrency: overlap window = budget/2, exclusive
+          // stage 2 = full budget.
           if (ba_opts.ceres) {
-            const unsigned hw = std::thread::hardware_concurrency();
-            ba_opts.ceres->solver_options.num_threads =
-                std::max(1, static_cast<int>(hw / 2));
+            const int full =
+                ba_opts.ceres->solver_options.num_threads > 0
+                    ? ba_opts.ceres->solver_options.num_threads
+                    : static_cast<int>(std::thread::hardware_concurrency());
+            ba_opts.ceres->solver_options.num_threads = std::max(1, full / 2);
           }
           // Window checks between the sub-steps too: a healthy capture whose
           // enrichment finishes in seconds must not pay for a full merge +
@@ -3566,6 +3635,29 @@ void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
   if (n_track3plus) *n_track3plus = track3;
   if (n_obs) *n_obs = obs;
   if (mean_reproj_px) *mean_reproj_px = err_n > 0 ? err_sum / err_n : 0.0;
+}
+
+aether_sfm_result_t aether_sfm_debug_dump_model(aether_sfm_session_t* s,
+                                                const char* dir) {
+  // [AETHER BA-MIXED A/B 2026-07-11] Debug/bench-only: write the current
+  // authoritative reconstruction as a COLMAP binary model
+  // (cameras.bin/images.bin/points3D.bin) so host A/B harnesses can score it
+  // with the pycolmap 9-gate scorer verbatim. Never called by the app.
+  if (!s || !dir || !dir[0]) return AETHER_SFM_ERR_INVALID_ARG;
+  std::shared_ptr<const colmap::Reconstruction> recon;
+  {
+    std::lock_guard<std::mutex> lk(s->recon_mutex);
+    recon = s->recon;
+  }
+  if (!recon) return AETHER_SFM_ERR_INTERNAL;
+  try {
+    std::filesystem::create_directories(dir);
+    recon->Write(dir);
+    return AETHER_SFM_OK;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[aether_sfm] debug_dump_model failed: " << e.what();
+    return AETHER_SFM_ERR_INTERNAL;
+  }
 }
 
 void aether_sfm_free(aether_sfm_session_t* s) {

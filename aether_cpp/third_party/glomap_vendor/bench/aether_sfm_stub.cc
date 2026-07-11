@@ -156,6 +156,13 @@ void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
   if (n_obs) *n_obs = 0;
 }
 
+aether_sfm_result_t aether_sfm_debug_dump_model(aether_sfm_session_t* s,
+                                                const char* dir) {
+  (void)s;
+  (void)dir;
+  return AETHER_SFM_ERR_UNSUPPORTED;
+}
+
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   (void)s;

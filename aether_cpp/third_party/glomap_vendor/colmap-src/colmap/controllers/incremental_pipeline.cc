@@ -262,6 +262,9 @@ BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
       if (const char* s = std::getenv("AETHER_SPARSE_THRESH"))
         options.ceres->max_num_images_direct_sparse_cpu_solver = std::atoi(s);
     }
+    // [AETHER BA-MIXED 2026-07-11] finalize global BA mixed-precision opt-in
+    // (solver-type-gated downstream in CreateSolverOptions).
+    options.ceres->use_mixed_precision_if_direct = ba_global_mixed_precision;
     options.ceres->use_gpu = ba_use_gpu;
     options.ceres->gpu_index = ba_gpu_index;
   }

@@ -350,6 +350,14 @@ void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
                            int64_t* n_points, int64_t* n_track3plus,
                            int64_t* n_obs);
 
+// [AETHER BA-MIXED A/B 2026-07-11] Debug/bench-only: write the current
+// authoritative reconstruction (refined after REFINED, else live/local) as a
+// COLMAP binary model (cameras.bin/images.bin/points3D.bin) into dir, so host
+// A/B harnesses can score it with pycolmap-based quality gates verbatim.
+// Never called by the app; snapshotted under the recon mutex.
+aether_sfm_result_t aether_sfm_debug_dump_model(aether_sfm_session_t* s,
+                                                const char* dir);
+
 // Destroys session, drops the sqlite db file.
 void aether_sfm_free(aether_sfm_session_t* s);
 

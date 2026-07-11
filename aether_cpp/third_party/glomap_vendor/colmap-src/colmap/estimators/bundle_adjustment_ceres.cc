@@ -314,6 +314,36 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
     custom_solver_options.max_num_refinement_iterations = refine ? std::atoi(refine) : 2;
   }
 
+  // [AETHER BA-MIXED 2026-07-11] Finalize global BA mixed precision (opted in
+  // per-options via use_mixed_precision_if_direct — set by the finalize
+  // builders in aether_sfm_c.cc ONLY when AETHER_BA_MIXED=1; ⚠️ default OFF,
+  // the 2026-07-11 host A/B vetoed default-on: +9.2% points / +0.027 reproj /
+  // 9-gate 4/9 — see BaMixedEnabled() in aether_sfm_c.cc for the full
+  // verdict). fp32 factorization + fp32 solve of the reduced camera system,
+  // then AETHER_BA_MIXED_REFINE (default 3) fp64 iterative-refinement steps.
+  // Gated on the ROUTED solver type:
+  //   DENSE_SCHUR            -> FloatEigenDenseCholesky (+RefinedDenseCholesky)
+  //   SPARSE_SCHUR non-SS    -> fp32 sparse Cholesky (+RefinedSparseCholesky)
+  //   ITERATIVE_SCHUR        -> NOT supported (IsValid rejects) — stays fp64.
+  if (use_mixed_precision_if_direct &&
+      !custom_solver_options.use_mixed_precision_solves) {
+    const ceres::LinearSolverType routed =
+        custom_solver_options.linear_solver_type;
+    const bool mixed_supported =
+        routed == ceres::DENSE_SCHUR ||
+        ((routed == ceres::SPARSE_SCHUR ||
+          routed == ceres::SPARSE_NORMAL_CHOLESKY) &&
+         custom_solver_options.sparse_linear_algebra_library_type !=
+             ceres::SUITE_SPARSE);
+    if (mixed_supported) {
+      custom_solver_options.use_mixed_precision_solves = true;
+      const char* refine = std::getenv("AETHER_BA_MIXED_REFINE");
+      const int n_refine = refine ? std::atoi(refine) : 3;
+      custom_solver_options.max_num_refinement_iterations =
+          n_refine > 0 ? n_refine : 3;
+    }
+  }
+
   // [AETHER inner-iterations spike 2026-07-07] Variable-projection: each outer LM
   // step analytically re-optimizes the 3D point blocks given the current cameras.
   // The problem is point-dominated (~25k-250k points vs ~50-400 cameras), the
@@ -717,7 +747,10 @@ ceres::Solver::Summary SolveWithGpuFallback(
   LOG(INFO) << "[AETHER] solver_used="
             << ceres::LinearSolverTypeToString(ceres_summary.linear_solver_type_used)
             << " sparse_backend=" << ceres::SparseLinearAlgebraLibraryTypeToString(
-                   ceres_summary.sparse_linear_algebra_library_type);
+                   ceres_summary.sparse_linear_algebra_library_type)
+            // [AETHER BA-MIXED/THREADS 2026-07-11] A/B verification fields.
+            << " mixed=" << (ceres_summary.mixed_precision_solves_used ? 1 : 0)
+            << " threads=" << ceres_summary.num_threads_used;
 
   return ceres_summary;
 }

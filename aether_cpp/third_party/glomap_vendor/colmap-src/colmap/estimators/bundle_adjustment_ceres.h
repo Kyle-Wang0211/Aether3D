@@ -76,6 +76,20 @@ struct CeresBundleAdjustmentOptions {
   // from solver_options directly.
   bool auto_select_solver_type = true;
 
+  // [AETHER BA-MIXED 2026-07-11] Finalize-only mixed-precision solves: when
+  // true, CreateSolverOptions enables use_mixed_precision_solves (+fp64
+  // iterative-refinement steps) IF AND ONLY IF the ROUTED solver supports it
+  // (DENSE_SCHUR / SPARSE_SCHUR with a non-SuiteSparse backend). The gate on
+  // the routed type is mandatory: Ceres 2.2 Solver::Options::IsValid REJECTS
+  // mixed precision with ITERATIVE_SCHUR, and CreateSolverOptions THROWs on
+  // an invalid options set — an unconditional flag would kill the >5000-frame
+  // iterative route. Set via IncrementalPipelineOptions::
+  // ba_global_mixed_precision (finalize global BA); capture-time local BA
+  // never sets this. ⚠️ Production keeps it OFF (2026-07-11 host A/B veto:
+  // +9.2% points / +0.027 reproj on the near-singular CAUCHY Schur systems);
+  // experiment opt-in via AETHER_BA_MIXED=1.
+  bool use_mixed_precision_if_direct = false;
+
   CeresBundleAdjustmentOptions();
 
   // Create loss function for given options.
