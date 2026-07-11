@@ -120,6 +120,13 @@ extern "C" __attribute__((weak)) int aether_gpu_match_gemm_pairs_guided(
     const float* matrix12, const float* matrix21, int guide_mode,
     float max_residual, uint32_t* out_pairs, int max_pairs,
     int* out_num_matches);
+// [RC7-FILELOG 2026-07-11] Last Metal command-buffer error description
+// (pwsfm_gpu_match.mm stashes it when it returns rc=7). WEAK for the same
+// reason as the matcher symbols: host CPU benches resolve it to nullptr and
+// the rc=7 jsonl line simply omits the Metal error text. Returns the number
+// of bytes written (0 = no error recorded yet).
+extern "C" __attribute__((weak)) int aether_gpu_match_last_error(char* buf,
+                                                                 int cap);
 
 // [MIGRATION 4.0.4 / STEP 5] The glomap::RetriangulateTracks linker stub was
 // removed together with GLOMAP. It existed only to satisfy -force_load of
@@ -163,6 +170,13 @@ struct FrameRecord {
   // (C = diag(1,-1,-1)); used ONLY by the throwaway live-preview triangulation.
   colmap::Rigid3d cam_from_world;
   bool has_pose = false;
+  // [THERMAL-THROTTLE 2026-07-11] True when this frame was matched against a
+  // REDUCED candidate window (thermal serious → live K 12→6, GPU relief for
+  // the camera pipeline). FinalizeRematchStarvedFrames treats such frames as
+  // starved so the full temporal-K pair topology is restored at finish time
+  // (cooler device, no 2 s/frame budget) — delivered quality is unchanged by
+  // construction, only capture-time pacing differs.
+  bool fed_throttled = false;
 };
 
 struct PointIdPair {
@@ -412,6 +426,15 @@ struct aether_sfm_session {
   int64_t stat_gpu_match_fail_by_rc[8] = {0};
   int64_t stat_gpu_match_fail_max_streak = 0;  // longest consecutive-fail run
   int64_t gpu_match_fail_streak = 0;  // internal running streak (not exposed)
+  // [THERMAL-THROTTLE 2026-07-11] Latest ProcessInfo thermal bucket pushed by
+  // the platform layer (aether_sfm_set_thermal_state; 0 nominal · 1 fair ·
+  // 2 serious · 3 critical, -1/unset = unknown → never throttles). Written by
+  // the Dart worker right before each add_frame; read by add_frame's
+  // candidate-K selection. Atomic only for cross-thread hygiene — the worker
+  // serializes set→add_frame on one thread.
+  std::atomic<int> thermal_state{-1};
+  int64_t stat_thermal_throttled_frames = 0;  // frames fed with reduced K
+  bool throttle_active_logged = false;        // transition-edge logging state
   // [FINALIZE-REMATCH 2026-07-11] Finalize-time starved-frame re-match pass
   // counters (see FinalizeRematchStarvedFrames).
   int64_t stat_finalize_rematch_starved_frames = 0;
@@ -574,13 +597,89 @@ std::vector<int> SelectStreamCandidates(const aether_sfm_session& s,
 // re-match). Re-logs every 64 further consecutive failures so an ongoing
 // collapse stays visible without per-pair spam.
 constexpr int kGpuMatchFailStreakWarn = 8;
-void NoteGpuMatchFailure(aether_sfm_session* s, int rc) {
+
+// [RC7-FILELOG 2026-07-11] Epoch-ms wall clock for the jsonl lines below
+// (NowMs above is steady_clock — good for durations, useless for correlating
+// against telemetry_native/telemetry_dart timestamps after a detached run).
+int64_t EpochMs() {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(system_clock::now().time_since_epoch())
+      .count();
+}
+
+// [RC7-FILELOG 2026-07-11] Append one JSONL line to <db_dir>/
+// sfm_match_fail.jsonl — the pull-able file record of capture-time GPU
+// matcher failures (and thermal-throttle transitions). Motivation: rc=7
+// (MTLCommandBufferStatusError) evidence previously lived only in NSLog +
+// in-memory counters; detached device runs (拔线) lose stderr/os_log, so the
+// cap44/45 freeze forensics had timestamps for everything EXCEPT the GPU
+// failures. The db directory is the app's Documents container on device —
+// exactly what `devicectl copy` already recovers. Best-effort by design:
+// open-append-close per event (events are rare; a thermal collapse writes a
+// few hundred ~150 B lines), any I/O failure is swallowed.
+void AppendMatchFailJsonl(aether_sfm_session* s, const std::string& line) {
+  try {
+    const std::filesystem::path p =
+        std::filesystem::path(s->db_path).parent_path() /
+        "sfm_match_fail.jsonl";
+    FILE* f = std::fopen(p.string().c_str(), "a");
+    if (!f) return;
+    std::fputs(line.c_str(), f);
+    std::fputc('\n', f);
+    std::fclose(f);
+  } catch (...) {
+    // telemetry only — never take add_frame down
+  }
+}
+
+// JSON string sanitizer for the Metal error text (quotes/backslashes/control
+// chars → space; keeps the line machine-parseable without a JSON library).
+std::string JsonSafe(const char* text, size_t max_len) {
+  std::string out;
+  if (!text) return out;
+  out.reserve(max_len);
+  for (size_t i = 0; text[i] != '\0' && i < max_len; ++i) {
+    const char c = text[i];
+    out.push_back((c == '"' || c == '\\' || (c >= 0 && c < 0x20)) ? ' ' : c);
+  }
+  return out;
+}
+
+void NoteGpuMatchFailure(aether_sfm_session* s, int rc, int prev_frame_id,
+                         int new_frame_id) {
   ++s->stat_gpu_match_fail_total;
   const int bucket = (rc >= 1 && rc <= 7) ? rc : 0;
   ++s->stat_gpu_match_fail_by_rc[bucket];
   ++s->gpu_match_fail_streak;
   if (s->gpu_match_fail_streak > s->stat_gpu_match_fail_max_streak) {
     s->stat_gpu_match_fail_max_streak = s->gpu_match_fail_streak;
+  }
+  // [RC7-FILELOG 2026-07-11] Every capture-time matcher failure lands one
+  // timestamped jsonl line WITH the pair id — 21 rc=7 events per capture is
+  // the observed worst case order of magnitude (cap45), a full thermal
+  // collapse (cap43, ~600) is still <100 KB. rc=7 lines carry the Metal
+  // error description when the platform TU (pwsfm_gpu_match.mm) recorded one.
+  {
+    char head[192];
+    std::snprintf(head, sizeof(head),
+                  "{\"t\":%lld,\"type\":\"gpu_match_fail\",\"rc\":%d,"
+                  "\"pair\":[%d,%d],\"streak\":%lld,\"total\":%lld,"
+                  "\"thermal\":%d",
+                  static_cast<long long>(EpochMs()), rc, prev_frame_id,
+                  new_frame_id, static_cast<long long>(s->gpu_match_fail_streak),
+                  static_cast<long long>(s->stat_gpu_match_fail_total),
+                  s->thermal_state.load(std::memory_order_relaxed));
+    std::string line(head);
+    if (rc == 7 && aether_gpu_match_last_error != nullptr) {
+      char err[192] = {0};
+      if (aether_gpu_match_last_error(err, sizeof(err)) > 0) {
+        line += ",\"metal_err\":\"";
+        line += JsonSafe(err, sizeof(err));
+        line += "\"";
+      }
+    }
+    line += "}";
+    AppendMatchFailJsonl(s, line);
   }
   if (s->gpu_match_fail_streak == kGpuMatchFailStreakWarn ||
       (s->gpu_match_fail_streak > kGpuMatchFailStreakWarn &&
@@ -1548,8 +1647,14 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
     std::vector<char> starved(num_frames, 0);
     int64_t n_starved = 0;
     for (int i = 0; i < num_frames; ++i) {
+      // [THERMAL-THROTTLE 2026-07-11] Frames fed with a reduced live K
+      // (thermal serious → 12→6) are ALWAYS treated as starved: they may sit
+      // above the valid-pair gate (6 healthy pairs > 4) yet still miss half
+      // their temporal window. Re-matching restores the full K topology at
+      // finish time, which is what keeps the throttle delivery-lossless.
       if (s->frames[i].n_keypoints > 0 &&
-          win_valid[i] < kRematchMinValidWindowPairs) {
+          (win_valid[i] < kRematchMinValidWindowPairs ||
+           s->frames[i].fed_throttled)) {
         starved[i] = 1;
         ++n_starved;
       }
@@ -2527,7 +2632,69 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     //    camera-center K-NN ∩ view-angle < 45°), temporal-filled to K, with a
     //    pure-temporal fallback when the frame has no usable pose — see
     //    SelectStreamCandidates. Budget unchanged: at most K pairs matched.
-    const int k = s->options.k_neighbors > 0 ? s->options.k_neighbors : 6;
+    //    [THERMAL-THROTTLE 2026-07-11] Live candidate K is now RUNTIME-tunable:
+    //      • base K: env AETHER_LIVE_CAND_K overrides options.k_neighbors
+    //        (production 12);
+    //      • hot K: when the platform-pushed thermal state is serious/critical
+    //        (>= 2, aether_sfm_set_thermal_state) the window drops to
+    //        AETHER_LIVE_CAND_K_HOT — halving the per-frame Metal matcher load
+    //        to give the camera/system GPU room (cap45 freeze: thermal-serious
+    //        GPU saturation → MTLCommandBufferStatusError → ARSession frame
+    //        stall ~2 min).
+    //    Throttled frames are marked fed_throttled and
+    //    FinalizeRematchStarvedFrames re-matches their missing temporal-window
+    //    pairs at finish time.
+    //    ⚠️ DEFAULT OFF (2026-07-11 host A/B verdict): the quality gate was
+    //    final points ±2% / reproj ±0.02 / registered ==. cap44 (109f) passed
+    //    (−0.36% / +0.0024 / 109==109), but cap45 (47f) exceeded the points
+    //    band in the POSITIVE direction on both K6 (+2.36%) and the K8 retry
+    //    (+2.69%) — the finalize backfill (temporal window) adds pairs the
+    //    live spatial-first K12 baseline never attempts, so the throttled arm
+    //    delivers MORE points (reproj in band, registered equal, baseline
+    //    rerun bit-identical ⇒ systematic, not noise). More-not-fewer is not
+    //    a loss, but it is outside the pre-agreed band → per the sign-off
+    //    rule the throttle ships DISABLED; AETHER_LIVE_CAND_K_HOT=<k> (e.g. 6)
+    //    is the opt-in knob pending a user decision on the new band.
+    static const int env_base_k = [] {
+      if (const char* e = std::getenv("AETHER_LIVE_CAND_K")) {
+        const int v = std::atoi(e);
+        if (v > 0) return v;
+      }
+      return 0;  // 0 = use options.k_neighbors
+    }();
+    static const int hot_k = [] {
+      if (const char* e = std::getenv("AETHER_LIVE_CAND_K_HOT")) {
+        return std::atoi(e);  // >0 enables the thermal throttle at that K
+      }
+      return 0;  // DEFAULT OFF (A/B verdict above)
+    }();
+    const int base_k = env_base_k > 0
+                           ? env_base_k
+                           : (s->options.k_neighbors > 0 ? s->options.k_neighbors
+                                                         : 6);
+    const int thermal_now = s->thermal_state.load(std::memory_order_relaxed);
+    const bool throttled = thermal_now >= 2 && hot_k > 0 && hot_k < base_k;
+    const int k = throttled ? hot_k : base_k;
+    if (throttled) {
+      rec.fed_throttled = true;
+      ++s->stat_thermal_throttled_frames;
+    }
+    if (throttled != s->throttle_active_logged) {
+      s->throttle_active_logged = throttled;
+      LOG(WARNING) << "[aether_sfm] thermal throttle "
+                   << (throttled ? "ON" : "OFF") << " at frame " << frame_id
+                   << " (thermal=" << thermal_now << ", live K "
+                   << (throttled ? base_k : hot_k) << "→"
+                   << (throttled ? hot_k : base_k)
+                   << "); finalize re-match restores the pair topology.";
+      char tline[160];
+      std::snprintf(tline, sizeof(tline),
+                    "{\"t\":%lld,\"type\":\"thermal_throttle\",\"on\":%d,"
+                    "\"frame\":%d,\"thermal\":%d,\"k\":%d}",
+                    static_cast<long long>(EpochMs()), throttled ? 1 : 0,
+                    frame_id, thermal_now, k);
+      AppendMatchFailJsonl(s, tline);
+    }
     int cand_spatial = 0, cand_temporal = 0;
     const std::vector<int> candidates = SelectStreamCandidates(
         *s, rec, frame_id, k, &cand_spatial, &cand_temporal);
@@ -2585,7 +2752,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
           // queue for minutes), but no longer SILENT: rc-bucketed counters +
           // segment warning make a thermal matcher collapse visible, and the
           // finalize re-match pass repairs the db afterwards.
-          NoteGpuMatchFailure(s, mrc);
+          NoteGpuMatchFailure(s, mrc, j, frame_id);
           continue;
         }
         s->gpu_match_fail_streak = 0;  // healthy pair ends a failure segment
@@ -3686,6 +3853,26 @@ void aether_sfm_match_fail_stats(aether_sfm_session_t* s,
   if (rematch_written) *rematch_written = s->stat_finalize_rematch_written;
   if (rematch_inliers) *rematch_inliers = s->stat_finalize_rematch_inliers;
   if (rematch_failed) *rematch_failed = s->stat_finalize_rematch_failed;
+}
+
+// [THERMAL-THROTTLE 2026-07-11] Platform push of the ProcessInfo thermal
+// bucket (0 nominal · 1 fair · 2 serious · 3 critical). The Dart worker calls
+// this right before each add_frame; state >= 2 halves the live match
+// candidate window (see add_frame; env AETHER_LIVE_CAND_K_HOT tunes/disables).
+// Values outside [0,3] are treated as unknown and never throttle. Safe on any
+// thread; no-op on a null session.
+void aether_sfm_set_thermal_state(aether_sfm_session_t* s, int state) {
+  if (!s) return;
+  s->thermal_state.store((state >= 0 && state <= 3) ? state : -1,
+                         std::memory_order_relaxed);
+}
+
+// [THERMAL-THROTTLE 2026-07-11] Telemetry: frames fed with a reduced live K
+// this capture (0 = throttle never engaged). Same threading contract as
+// aether_sfm_stream_stats.
+void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
+                                       int64_t* throttled_frames) {
+  if (throttled_frames) *throttled_frames = s ? s->stat_thermal_throttled_frames : 0;
 }
 
 // Finalize-output quality snapshot: the aether_sfm_live_diag fields computed

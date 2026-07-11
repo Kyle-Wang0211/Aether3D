@@ -341,6 +341,26 @@ void aether_sfm_match_fail_stats(aether_sfm_session_t* s,
                                  int64_t* rematch_inliers,
                                  int64_t* rematch_failed);
 
+// [THERMAL-THROTTLE 2026-07-11] Platform push of the ProcessInfo thermal
+// bucket (0 nominal · 1 fair · 2 serious · 3 critical; anything else =
+// unknown, never throttles). Call right before aether_sfm_add_frame. When the
+// state is serious/critical AND the throttle is enabled, add_frame reduces
+// its live match-candidate window (production 12 → AETHER_LIVE_CAND_K_HOT)
+// so the Metal matcher yields GPU time to the camera pipeline under thermal
+// pressure (cap45 camera-freeze root cause). Throttled frames are re-matched
+// to the full temporal window by the finalize starved-frame pass.
+// ⚠️ Throttle ships DEFAULT OFF (host A/B 2026-07-11: cap45 delivered +2.4%
+// MORE points than the ±2% gate — positive-direction band exceed via the
+// finalize backfill; see aether_sfm_c.cc). Opt-in: AETHER_LIVE_CAND_K_HOT=6.
+// Pushing the thermal state itself is always safe/no-op when disabled.
+void aether_sfm_set_thermal_state(aether_sfm_session_t* s, int state);
+
+// [THERMAL-THROTTLE 2026-07-11] Telemetry: frames fed with the reduced live K
+// this capture (0 = throttle never engaged). Same threading contract as
+// aether_sfm_stream_stats. Nullable out-param.
+void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
+                                       int64_t* throttled_frames);
+
 // Finalize-output quality snapshot: the live_diag quality fields computed over
 // the CURRENT finalize reconstruction (LOCAL or REFINED — whichever the
 // getters serve; snapshotted under the recon mutex, safe alongside the async
