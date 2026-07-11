@@ -31,6 +31,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include "sift_extract_dawn.h"
 #include "sift_pyramid_dawn.h"
 
 extern "C" {
@@ -118,7 +119,16 @@ int main(int argc,char** argv){
 
   const int octRes=SiftPyramidDawn::kOctaveResolution;
   const double kPeak=0.02/octRes,kEdge=10.0;
-  const float dsp_min=1.0f/6.0f, dsp_max=3.0f; const int dsp_num=10;
+  // DSP pooling params come from the PRODUCTION header (sift_extract_dawn.h),
+  // NOT local copies: the gate must upload the exact dstep the production
+  // extractor uploads, so a header drift against the .wgsl DSP_NUM contract
+  // (e.g. the 2026-07-08 kDspNumScales 10→3 bug: shader kept pooling 10 scales
+  // but with 3.3× spacing, 6/10 scales past dsp_max) fails HERE, loudly —
+  // conviction run: cosine median 0.97466, match-recall 31/36013 = 0.0009.
+  using aether::tools::SiftExtractDawn;
+  const float dsp_min=SiftExtractDawn::kDspMinScale;
+  const float dsp_max=SiftExtractDawn::kDspMaxScale;
+  const int dsp_num=SiftExtractDawn::kDspNumScales;
   const float dsp_step=(dsp_max-dsp_min)/dsp_num;
 
   // ── CPU: full production keypoint set (detect+suppress+affine+orient) ──
