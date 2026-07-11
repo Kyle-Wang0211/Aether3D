@@ -489,6 +489,35 @@ struct aether_sfm_session {
   int64_t stat_finalize_rematch_written = 0;     // pairs persisted to the db
   int64_t stat_finalize_rematch_inliers = 0;     // TVG inliers persisted
   int64_t stat_finalize_rematch_failed = 0;      // matcher rc!=0 (skipped)
+  // [P1-RC7-RETRY 2026-07-11] rc=7 backoff-retry accounting (see
+  // GpuMatchGemmPairsRetry): attempts = EXTRA matcher invocations spent on
+  // retries; recovered = pairs whose rc turned 0 on a retry (data that the
+  // old fail-closed skip lost outright).
+  int64_t stat_gpu_retry_attempts = 0;
+  int64_t stat_gpu_retry_recovered = 0;
+  // [P1-LIVE-REPAY 2026-07-11] Capture-idle debt-repayment pass counters
+  // (see aether_sfm_live_repay). Same worker-thread ownership as add_frame.
+  int64_t stat_repay_calls = 0;
+  int64_t stat_repay_attempted = 0;        // matcher invocations by repay
+  int64_t stat_repay_written = 0;          // pairs persisted to the db
+  int64_t stat_repay_inliers = 0;          // TVG inliers persisted by repay
+  int64_t stat_repay_failed = 0;           // matcher rc!=0 (left for finalize)
+  int64_t stat_repay_skipped_thermal = 0;  // repay calls refused at serious+
+  // Live pair bookkeeping for the repay scan (add_frame worker thread only):
+  // per-frame valid-window-pair counters mirroring FinalizeRematchStarved-
+  // Frames' win_valid (gap <= K, TVG inliers >= gate), plus the set of frame
+  // pairs already RESOLVED live (db row written, matched-empty, or repaid) so
+  // an idle scan never re-touches sqlite or the matcher for them. GPU-failed
+  // add_frame pairs are deliberately NOT in the set — they are the debt.
+  std::vector<int> live_win_valid;
+  std::unordered_set<uint64_t> live_pairs_done;
+  // [P1-ENRICH-BUDGET 2026-07-11] Finalize-enrichment time gate state (see
+  // EnrichBudgetExhausted). enrich_start_ms is written by the thread that
+  // runs the enrichment passes right before they start; stage1_done is the
+  // AUTO-mode window signal set by the refine worker after its stage-1 block.
+  double enrich_start_ms = 0.0;
+  std::atomic<bool> enrich_stage1_done{false};
+  int64_t stat_enrich_budget_stopped = 0;  // fresh attempts skipped by the gate
 
   // Result of finalize()/run(): the largest reconstruction.
   std::shared_ptr<colmap::ReconstructionManager> recon_manager;
@@ -742,6 +771,68 @@ void NoteGpuMatchFailure(aether_sfm_session* s, int rc, int prev_frame_id,
   }
 }
 
+// [P1-RC7-RETRY 2026-07-11] Backoff retry around the Metal GEMM matcher for
+// rc=7 ONLY (MTLCommandBufferStatusError — the transient "command buffer
+// killed under thermal/GPU pressure" failure). cap46 forensics: 49 rc=7
+// events during capture and 93 more during finalize re-match; descriptors
+// were intact throughout, i.e. the loss was recoverable by simply asking
+// again once the GPU had a breather. rc=1/2/5/6 are deterministic (bad args /
+// pipeline unavailable / MTLBuffer alloc) and are never retried. Two retries
+// with 50 ms then 100 ms backoff bound the extra latency of a persistently
+// dead pair at ~150 ms + two matcher calls. Default ON: the retry only
+// changes behavior on pairs that are currently dropped fail-closed (pure
+// recovery), host CPU-matcher builds never reach this path, and
+// AETHER_GPU_MATCH_RETRY=0 is the same-binary kill switch (N>0 overrides the
+// retry count).
+int GpuMatchRetryLimit() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_GPU_MATCH_RETRY")) {
+      const int v = std::atoi(e);
+      if (v >= 0) return v;
+    }
+    return 2;
+  }();
+  return cached;
+}
+
+int GpuMatchGemmPairsRetry(aether_sfm_session* s, const uint8_t* d1, int n1,
+                           const uint8_t* d2, int n2, double max_ratio,
+                           uint32_t* out_pairs, int max_pairs,
+                           int* out_num_matches) {
+  int rc = aether_gpu_match_gemm_pairs(d1, n1, d2, n2, max_ratio, out_pairs,
+                                       max_pairs, out_num_matches);
+  for (int attempt = 0; rc == 7 && attempt < GpuMatchRetryLimit(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50 * (attempt + 1)));
+    if (s) ++s->stat_gpu_retry_attempts;
+    rc = aether_gpu_match_gemm_pairs(d1, n1, d2, n2, max_ratio, out_pairs,
+                                     max_pairs, out_num_matches);
+    if (rc == 0 && s) ++s->stat_gpu_retry_recovered;
+  }
+  return rc;
+}
+
+// Guided-matcher sibling (same rc semantics; used by the enrichment verify
+// chain, where a transient rc=7 previously failed the whole spatial pair).
+int GpuMatchGuidedRetry(aether_sfm_session* s, const uint8_t* d1, int n1,
+                        const float* xy1, const uint8_t* d2, int n2,
+                        const float* xy2, double max_ratio,
+                        const float* matrix12, const float* matrix21,
+                        int guide_mode, float max_residual, uint32_t* out_pairs,
+                        int max_pairs, int* out_num_matches) {
+  int rc = aether_gpu_match_gemm_pairs_guided(
+      d1, n1, xy1, d2, n2, xy2, max_ratio, matrix12, matrix21, guide_mode,
+      max_residual, out_pairs, max_pairs, out_num_matches);
+  for (int attempt = 0; rc == 7 && attempt < GpuMatchRetryLimit(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50 * (attempt + 1)));
+    if (s) ++s->stat_gpu_retry_attempts;
+    rc = aether_gpu_match_gemm_pairs_guided(
+        d1, n1, xy1, d2, n2, xy2, max_ratio, matrix12, matrix21, guide_mode,
+        max_residual, out_pairs, max_pairs, out_num_matches);
+    if (rc == 0 && s) ++s->stat_gpu_retry_recovered;
+  }
+  return rc;
+}
+
 constexpr int kSpatialCandidatePool = 12;
 constexpr int kSpatialAnchorsPerFrame = 3;
 constexpr int kSpatialPreliminaryInliers = 15;
@@ -880,6 +971,86 @@ bool EnrichTargetedEnabled() {
     return e && e[0] == '1';
   }();
   return cached;
+}
+
+// [P1-ENRICH-BUDGET 2026-07-11] Finalize-enrichment TIME gate. Target: the
+// cap46 device finalize, where the GPU db enrichment (dominated by 336
+// starved-frame re-match pairs at ~410 ms each on a still-hot GPU) ran
+// 137.9 s against a 58.1 s stage-1 window — enrichment became the finalize
+// critical path by +80 s. The gate stops STARTING new matcher attempts once
+// the budget is exhausted; whatever pair is in flight completes and is kept.
+//
+// AETHER_ENRICH_TIME_BUDGET_MS:
+//   unset      → AUTO: the budget is the ACTUAL stage-1 refinement window —
+//                enrichment stops accepting new attempts once the refine
+//                worker's stage-1 block has finished AND at least
+//                kEnrichAutoFloorMs have elapsed (the floor protects healthy
+//                captures from an early-converging stage 1; host D arms run
+//                their whole enrichment in 10-23 s, well under it). Where no
+//                stage 1 runs (AETHER_FINALIZE_NO_OVERLAP=1, snapshot
+//                failure, resume/sync serial paths) AUTO never truncates —
+//                those paths keep legacy unlimited semantics.
+//   N > 0      → fixed wall budget of N ms for the enrichment passes (any
+//                path), for the host truncation-cost curve.
+//   N <= 0     → OFF: legacy unlimited (same-binary revert).
+//
+// Debt priority under an armed gate: the enrichment thread runs the starved-
+// frame re-match FIRST (registration-critical repair pairs, gap-ascending —
+// the most valuable debt) and the spatial-revisit pass second (anchor funnel
+// rank-first, then the KNIFE-A ③ targeted top-up). With the gate off the
+// legacy order is preserved bit-identically.
+enum class EnrichBudgetMode { kOff = 0, kAuto = 1, kFixed = 2 };
+constexpr double kEnrichAutoFloorMs = 30000.0;
+
+EnrichBudgetMode EnrichBudgetModeOf() {
+  static const EnrichBudgetMode cached = [] {
+    const char* e = std::getenv("AETHER_ENRICH_TIME_BUDGET_MS");
+    if (!e || !e[0]) return EnrichBudgetMode::kAuto;
+    const long v = std::atol(e);
+    if (v > 0) return EnrichBudgetMode::kFixed;
+    return EnrichBudgetMode::kOff;
+  }();
+  return cached;
+}
+
+double EnrichBudgetFixedMs() {
+  static const double cached = [] {
+    const char* e = std::getenv("AETHER_ENRICH_TIME_BUDGET_MS");
+    const long v = e && e[0] ? std::atol(e) : 0;
+    return v > 0 ? static_cast<double>(v) : 0.0;
+  }();
+  return cached;
+}
+
+// True once the enrichment passes must stop STARTING new matcher attempts.
+// Reads enrich_start_ms (written by the enriching thread itself before the
+// passes start) and the stage1_done atomic (written by the refine worker).
+bool EnrichBudgetExhausted(aether_sfm_session* s) {
+  if (!s || s->enrich_start_ms <= 0.0) return false;
+  switch (EnrichBudgetModeOf()) {
+    case EnrichBudgetMode::kOff:
+      return false;
+    case EnrichBudgetMode::kFixed:
+      return NowMs() - s->enrich_start_ms > EnrichBudgetFixedMs();
+    case EnrichBudgetMode::kAuto:
+      return s->enrich_stage1_done.load(std::memory_order_relaxed) &&
+             NowMs() - s->enrich_start_ms > kEnrichAutoFloorMs;
+  }
+  return false;
+}
+
+// Whether the gate can truncate THIS run (decides the debt-first order flip;
+// stage1_planned = the refine worker created a stage-1 cache snapshot).
+bool EnrichBudgetArmed(bool stage1_planned) {
+  switch (EnrichBudgetModeOf()) {
+    case EnrichBudgetMode::kOff:
+      return false;
+    case EnrichBudgetMode::kFixed:
+      return true;
+    case EnrichBudgetMode::kAuto:
+      return stage1_planned;
+  }
+  return false;
 }
 
 enum class SpatialPairPurpose {
@@ -1043,11 +1214,13 @@ bool RunGuidedSpatialMatch(aether_sfm_session* s,
   if (cap < kSpatialFinalInliers) return false;
   std::vector<uint32_t> pair_buf(static_cast<size_t>(cap) * 2);
   int num_matches = 0;
-  const int rc = aether_gpu_match_gemm_pairs_guided(
-      a.descriptors.data(), a.n_keypoints, xy_a.data(), b.descriptors.data(),
-      b.n_keypoints, xy_b.data(), kSpatialMatchRatio, matrix_ab.data(),
-      matrix_ba.data(), guide_mode, max_residual, pair_buf.data(), cap,
-      &num_matches);
+  // [P1-RC7-RETRY] transient rc=7 gets two backoff retries before the pair
+  // fails closed (see GpuMatchGuidedRetry).
+  const int rc = GpuMatchGuidedRetry(
+      s, a.descriptors.data(), a.n_keypoints, xy_a.data(),
+      b.descriptors.data(), b.n_keypoints, xy_b.data(), kSpatialMatchRatio,
+      matrix_ab.data(), matrix_ba.data(), guide_mode, max_residual,
+      pair_buf.data(), cap, &num_matches);
   if (rc != 0) return false;
 
   ++s->stat_spatial_guided_pairs;
@@ -1111,6 +1284,13 @@ bool VerifySpatialPair(aether_sfm_session* s,
     ++s->stat_spatial_budget_skipped;
     return false;
   }
+  // [P1-ENRICH-BUDGET] Time gate on FRESH matcher attempts only — the
+  // existing-matches db fast path above stays free, and an in-flight pair is
+  // never aborted. No-op unless a budget is armed (see EnrichBudgetExhausted).
+  if (EnrichBudgetExhausted(s)) {
+    ++s->stat_enrich_budget_stopped;
+    return false;
+  }
   ++*attempted_total;
   ++s->stat_spatial_pairs_attempted;
   if (purpose == SpatialPairPurpose::kAnchor ||
@@ -1128,9 +1308,10 @@ bool VerifySpatialPair(aether_sfm_session* s,
   if (s->options.use_gpu_match) {
     // Device finish-time policy is fail-closed: missing/erroring Metal never
     // falls into O(N^2) CPU matching and turns a short finalize into minutes.
+    // [P1-RC7-RETRY] transient rc=7 gets two backoff retries first.
     if (aether_gpu_match_gemm_pairs == nullptr) return false;
-    match_rc = aether_gpu_match_gemm_pairs(
-        a.descriptors.data(), a.n_keypoints, b.descriptors.data(),
+    match_rc = GpuMatchGemmPairsRetry(
+        s, a.descriptors.data(), a.n_keypoints, b.descriptors.data(),
         b.n_keypoints, kSpatialMatchRatio, pair_buf.data(), cap, &num_matches);
     if (match_rc != 0) return false;
   } else {
@@ -2551,7 +2732,22 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
         s->options.match_max_ratio > 0 ? s->options.match_max_ratio : 0.7;
     const colmap::TwoViewGeometryOptions tvg_options;  // colmap defaults
     std::vector<uint32_t> pair_buf;
+    size_t done = 0;
     for (const auto& [j, f] : todo) {
+      // [P1-ENRICH-BUDGET] Same time gate as VerifySpatialPair: stop STARTING
+      // new re-match attempts once the budget is exhausted; the remaining
+      // (least-valuable — todo is gap-ascending) pairs are counted and left
+      // for a future finalize retry. No-op unless a budget is armed.
+      if (EnrichBudgetExhausted(s)) {
+        const int64_t remaining = static_cast<int64_t>(todo.size() - done);
+        s->stat_enrich_budget_stopped += remaining;
+        LOG(WARNING) << "[aether_sfm] finalize re-match stopped by the "
+                        "enrichment time budget: "
+                     << remaining << " of " << todo.size()
+                     << " candidate pairs left unattempted";
+        break;
+      }
+      ++done;
       // Evict cache entries that fell out of the sliding window (memory
       // bound for resume-path loads; borrowed live entries are cheap).
       for (auto it = cache.begin(); it != cache.end();) {
@@ -2565,11 +2761,13 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
       pair_buf.resize(static_cast<size_t>(cap) * 2);
       int num_matches = 0;
       ++s->stat_finalize_rematch_attempted;
+      // [P1-RC7-RETRY] rc=7 gets two backoff retries (cap46: 93/336 finalize
+      // re-match pairs failed rc=7 on the still-hot GPU and were lost).
       const int mrc =
           gpu_avail
-              ? aether_gpu_match_gemm_pairs(fa->desc, fa->n, fb->desc, fb->n,
-                                            ratio, pair_buf.data(), cap,
-                                            &num_matches)
+              ? GpuMatchGemmPairsRetry(s, fa->desc, fa->n, fb->desc, fb->n,
+                                       ratio, pair_buf.data(), cap,
+                                       &num_matches)
               : aether_sift_match_pairs(fa->desc, fa->n, fb->desc, fb->n,
                                         ratio, pair_buf.data(), cap,
                                         &num_matches);
@@ -2928,7 +3126,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    char buf[2048];
+    char buf[3072];
     const int n = std::snprintf(
         buf, sizeof(buf),
         "{\"t\":%lld,\"live_reuse\":%d,"
@@ -2940,6 +3138,13 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"rematch_attempted\":%lld,\"rematch_written\":%lld,"
         "\"rematch_inliers\":%lld,\"rematch_failed\":%lld,"
         "\"rematch_budget\":%d,"
+        // [P1 2026-07-11] finalize-speedup package attribution: idle repay /
+        // rc=7 retry / enrichment time-budget truncation.
+        "\"repay_calls\":%lld,\"repay_attempted\":%lld,"
+        "\"repay_written\":%lld,\"repay_inliers\":%lld,"
+        "\"repay_failed\":%lld,\"repay_skipped_thermal\":%lld,"
+        "\"gpu_retry_attempts\":%lld,\"gpu_retry_recovered\":%lld,"
+        "\"enrich_budget_mode\":%d,\"enrich_budget_stopped\":%lld,"
         // [KNIFE-A 2026-07-11] 2-view upgrade attribution (all zero when the
         // three env opt-ins are unset).
         "\"grow_refit_attempted\":%lld,\"grow_refit_accepted\":%lld,"
@@ -2967,6 +3172,16 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_finalize_rematch_inliers),
         static_cast<long long>(s->stat_finalize_rematch_failed),
         kFinalizeRematchMaxPairs,
+        static_cast<long long>(s->stat_repay_calls),
+        static_cast<long long>(s->stat_repay_attempted),
+        static_cast<long long>(s->stat_repay_written),
+        static_cast<long long>(s->stat_repay_inliers),
+        static_cast<long long>(s->stat_repay_failed),
+        static_cast<long long>(s->stat_repay_skipped_thermal),
+        static_cast<long long>(s->stat_gpu_retry_attempts),
+        static_cast<long long>(s->stat_gpu_retry_recovered),
+        static_cast<int>(EnrichBudgetModeOf()),
+        static_cast<long long>(s->stat_enrich_budget_stopped),
         static_cast<long long>(s->stat_td_grow_refit_attempted),
         static_cast<long long>(s->stat_td_grow_refit_accepted),
         static_cast<long long>(s->stat_td_grow_refit_saved),
@@ -3104,14 +3319,28 @@ void RefineGlobalBA(aether_sfm_session* s,
       // seconds runs ~0 stage-1 rounds (stage 2 then IS the serial baseline),
       // a heavy revisit capture fills the whole window with useful rounds.
       std::atomic<bool> enrich_done{false};
+      // [P1-ENRICH-BUDGET] Arm the time gate for this run: AUTO arms only
+      // when a stage-1 window exists (cache_pre); FIXED always. Armed runs
+      // pay the most valuable debt first (starved-frame re-match before the
+      // spatial pass); unarmed runs keep the legacy order bit-identically.
+      const bool budget_armed = EnrichBudgetArmed(cache_pre != nullptr);
+      s->enrich_stage1_done.store(false, std::memory_order_relaxed);
+      s->enrich_start_ms = 0.0;
       const double t_enrich0 = NowMs();
-      std::thread enrich([s, &enrich_ms, &enrich_done, t_enrich0] {
+      std::thread enrich([s, &enrich_ms, &enrich_done, t_enrich0,
+                          budget_armed] {
 #if defined(__APPLE__)
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
 #endif
+        s->enrich_start_ms = NowMs();
         try {
-          AddSpatialRevisitMatches(s);
-          FinalizeRematchStarvedFrames(s);
+          if (budget_armed) {
+            FinalizeRematchStarvedFrames(s);
+            AddSpatialRevisitMatches(s);
+          } else {
+            AddSpatialRevisitMatches(s);
+            FinalizeRematchStarvedFrames(s);
+          }
         } catch (const std::exception& e) {
           LOG(WARNING) << "[aether_sfm] finalize db enrichment aborted: "
                        << e.what();
@@ -3200,6 +3429,11 @@ void RefineGlobalBA(aether_sfm_session* s,
                           "stage 2 runs the full refinement alone";
         }
         stage1_ms = NowMs() - t_s1;
+        // [P1-ENRICH-BUDGET] AUTO-mode window signal: stage 1 is over, so any
+        // further enrichment wall time is pure critical path. The enrichment
+        // thread stops STARTING new matcher attempts once it sees this (past
+        // the healthy-capture floor); its in-flight pair still completes.
+        s->enrich_stage1_done.store(true, std::memory_order_relaxed);
         cache_pre.reset();  // free the snapshot before stage 2 loads its own
 #if defined(__APPLE__)
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
@@ -3612,15 +3846,19 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       int mrc = 1;
       bool used_gpu = false;
       if (gpu_match_avail) {
-        mrc = aether_gpu_match_gemm_pairs(
-            prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
-            rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
+        // [P1-RC7-RETRY] transient rc=7 gets two backoff retries in-line
+        // (worst case +~150 ms on a dead pair, bounded) before the pair
+        // fails closed into the repay/finalize debt.
+        mrc = GpuMatchGemmPairsRetry(
+            s, prev.descriptors.data(), prev.n_keypoints,
+            rec.descriptors.data(), rec.n_keypoints, ratio, pair_buf.data(),
+            cap, &num_matches);
         if (mrc != 0) {
           // [MATCH-FAIL TELEMETRY 2026-07-11] Same fail-closed skip as before
           // (no CPU fallback on device — a Metal failure used to stall the
           // queue for minutes), but no longer SILENT: rc-bucketed counters +
           // segment warning make a thermal matcher collapse visible, and the
-          // finalize re-match pass repairs the db afterwards.
+          // idle-repay + finalize re-match passes repair the db afterwards.
           NoteGpuMatchFailure(s, mrc, j, frame_id);
           continue;
         }
@@ -3631,7 +3869,12 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
             prev.descriptors.data(), prev.n_keypoints, rec.descriptors.data(),
             rec.n_keypoints, ratio, pair_buf.data(), cap, &num_matches);
       }
-      if (mrc != 0 || num_matches <= 0) continue;
+      if (mrc != 0) continue;
+      // [P1-LIVE-REPAY] A successfully MATCHED pair (even an empty one) is
+      // resolved — the idle repay scan never re-touches it. Failed pairs are
+      // deliberately not inserted: they are the debt repay comes back for.
+      s->live_pairs_done.insert(FramePairKey(frame_id, j));
+      if (num_matches <= 0) continue;
       if (used_gpu) gpu_matches += num_matches; else cpu_matches += num_matches;
 
       colmap::FeatureMatches matches(num_matches);
@@ -3646,6 +3889,23 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
                                           rec.points, std::move(matches),
                                           tvg_options);
       s->db->WriteTwoViewGeometry(prev.image_id, image_id, two_view_geometry);
+      // [P1-LIVE-REPAY] Per-frame valid-window-pair counters, mirroring the
+      // FinalizeRematchStarvedFrames win_valid rule (gap <= production K,
+      // TVG inliers >= gate) so the idle repay pass can detect starvation
+      // without a db scan.
+      {
+        if (static_cast<int>(s->live_win_valid.size()) <= frame_id) {
+          s->live_win_valid.resize(frame_id + 1, 0);
+        }
+        const int window_k =
+            s->options.k_neighbors > 0 ? s->options.k_neighbors : 12;
+        if (frame_id - j <= window_k &&
+            static_cast<int>(two_view_geometry.inlier_matches.size()) >=
+                kRematchValidInlierGate) {
+          ++s->live_win_valid[j];
+          ++s->live_win_valid[frame_id];
+        }
+      }
 
       // ── Incremental track growth into the live Reconstruction ──
       // Consult the RECON's Point2D->Point3D links (the single source of truth)
@@ -3985,8 +4245,17 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
   try {
     RebuildFrameRecordsForResume(s);  // no-op unless frames empty (resume)
-    AddSpatialRevisitMatches(s);
-    FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
+    // [P1-ENRICH-BUDGET] Serial path: only a FIXED budget can truncate here
+    // (AUTO needs a stage-1 window); armed runs pay the re-match debt first.
+    s->enrich_stage1_done.store(false, std::memory_order_relaxed);
+    s->enrich_start_ms = NowMs();
+    if (EnrichBudgetArmed(/*stage1_planned=*/false)) {
+      FinalizeRematchStarvedFrames(s);
+      AddSpatialRevisitMatches(s);
+    } else {
+      AddSpatialRevisitMatches(s);
+      FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
+    }
     if (s->db) s->db->Close();  // flush sqlite before the pipeline re-opens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> recon;
@@ -4100,8 +4369,17 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
 
     // ── Resume / degenerate path: serial enrichment + db-driven full re-run
     // (unchanged semantics). ──
-    AddSpatialRevisitMatches(s);
-    FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
+    // [P1-ENRICH-BUDGET] Serial path: FIXED budget only (see aether_sfm_
+    // finalize); armed runs pay the re-match debt first.
+    s->enrich_stage1_done.store(false, std::memory_order_relaxed);
+    s->enrich_start_ms = NowMs();
+    if (EnrichBudgetArmed(/*stage1_planned=*/false)) {
+      FinalizeRematchStarvedFrames(s);
+      AddSpatialRevisitMatches(s);
+    } else {
+      AddSpatialRevisitMatches(s);
+      FinalizeRematchStarvedFrames(s);  // repair thermal GPU-match gaps
+    }
     if (s->db) s->db->Close();  // release sqlite before the pipeline reopens it
     std::shared_ptr<colmap::ReconstructionManager> manager;
     std::shared_ptr<const colmap::Reconstruction> local;
@@ -4742,6 +5020,163 @@ void aether_sfm_set_thermal_state(aether_sfm_session_t* s, int state) {
 void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
                                        int64_t* throttled_frames) {
   if (throttled_frames) *throttled_frames = s ? s->stat_thermal_throttled_frames : 0;
+}
+
+// [P1-LIVE-REPAY 2026-07-11] Capture-idle debt repayment. The worker calls
+// this from the SAME thread as add_frame whenever its queue has slack (offer
+// interval > processing time); the pass re-matches up to max_pairs missing
+// temporal-window pairs of currently-starved frames through the SAME matcher
+// route add_frame used, and persists them with the exact WriteMatches →
+// EstimateTwoViewGeometry → WriteTwoViewGeometry sequence — i.e. it prepays
+// the debt FinalizeRematchStarvedFrames would otherwise pay at ~410 ms/pair
+// on a hot finish-time GPU (cap46: 336 pairs → 137.9 s enrichment). A healthy
+// capture-time GPU pair costs ~16 ms, so repaying during idle windows is an
+// order of magnitude cheaper than repaying at finalize.
+//
+// Rules:
+//   - thermal serious/critical (state >= 2) → refuses outright (never adds
+//     GPU load to the exact condition that caused the debt);
+//   - starved = the live win_valid mirror of the finalize rule (< 4 valid
+//     window pairs, or fed_throttled), candidates = missing window pairs
+//     (gap <= K, either side starved; gap <= 2 chain holes always),
+//     gap-ascending — identical topology to the finalize re-match;
+//   - each pair is attempted AT MOST once by repay (failed pairs are left
+//     for the finalize pass, which re-attempts anything still missing);
+//   - db-only: the pass never touches the live preview reconstruction, so
+//     the delivered model is identical whether a pair was repaid live or at
+//     finalize (same descriptors, same matcher, same write sequence).
+// Returns pairs written this call (0 = nothing to do / refused), -1 on bad
+// args. Counters via aether_sfm_repair_stats.
+int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
+  if (!s || !s->db) return -1;
+  if (max_pairs <= 0 || s->frames.size() < 3 || s->camera_id == 0) return 0;
+  if (s->thermal_state.load(std::memory_order_relaxed) >= 2) {
+    ++s->stat_repay_skipped_thermal;
+    return 0;
+  }
+  const bool gpu_avail =
+      s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
+  // Fail-closed parity with the finalize pass: GPU requested but absent →
+  // never degrade into CPU brute force.
+  if (s->options.use_gpu_match && !gpu_avail) return 0;
+  ++s->stat_repay_calls;
+  int written = 0;
+  try {
+    const int num_frames = static_cast<int>(s->frames.size());
+    const int K = s->options.k_neighbors > 0 ? s->options.k_neighbors : 12;
+    const auto starved = [&](int i) {
+      const int valid = i < static_cast<int>(s->live_win_valid.size())
+                            ? s->live_win_valid[i]
+                            : 0;
+      return s->frames[i].n_keypoints > 0 &&
+             (valid < kRematchMinValidWindowPairs ||
+              s->frames[i].fed_throttled);
+    };
+    const double ratio =
+        s->options.match_max_ratio > 0 ? s->options.match_max_ratio : 0.7;
+    const colmap::TwoViewGeometryOptions tvg_options;  // colmap defaults
+    std::vector<uint32_t> pair_buf;
+    int attempted = 0;
+    for (int gap = 1; gap <= K && attempted < max_pairs; ++gap) {
+      for (int f = gap; f < num_frames && attempted < max_pairs; ++f) {
+        const int j = f - gap;
+        if (gap > kRematchNearGap && !starved(f) && !starved(j)) continue;
+        const FrameRecord& fj = s->frames[j];
+        const FrameRecord& ff = s->frames[f];
+        if (fj.n_keypoints <= 0 || ff.n_keypoints <= 0) continue;
+        if (fj.descriptors.empty() || ff.descriptors.empty()) continue;
+        const uint64_t key = FramePairKey(f, j);
+        if (s->live_pairs_done.count(key)) continue;
+        if (s->db->ExistsMatches(fj.image_id, ff.image_id)) {
+          s->live_pairs_done.insert(key);
+          continue;
+        }
+        // Mid-call thermal check: a state push can arrive between pairs.
+        if (s->thermal_state.load(std::memory_order_relaxed) >= 2) {
+          ++s->stat_repay_skipped_thermal;
+          return written;
+        }
+        ++attempted;
+        ++s->stat_repay_attempted;
+        const int cap =
+            fj.n_keypoints < ff.n_keypoints ? fj.n_keypoints : ff.n_keypoints;
+        pair_buf.resize(static_cast<size_t>(cap) * 2);
+        int num_matches = 0;
+        const int mrc =
+            gpu_avail
+                ? GpuMatchGemmPairsRetry(s, fj.descriptors.data(),
+                                         fj.n_keypoints, ff.descriptors.data(),
+                                         ff.n_keypoints, ratio,
+                                         pair_buf.data(), cap, &num_matches)
+                : aether_sift_match_pairs(fj.descriptors.data(),
+                                          fj.n_keypoints,
+                                          ff.descriptors.data(),
+                                          ff.n_keypoints, ratio,
+                                          pair_buf.data(), cap, &num_matches);
+        // One repay attempt per pair, success or failure: memoizing failed
+        // pairs too keeps idle scans from hammering a struggling GPU; the
+        // finalize re-match (which checks the db, not this memo) remains the
+        // safety net for anything still missing.
+        s->live_pairs_done.insert(key);
+        if (mrc != 0) {
+          ++s->stat_repay_failed;
+          continue;
+        }
+        if (num_matches <= 0) continue;  // legitimate empty pair — resolved
+        colmap::FeatureMatches matches(num_matches);
+        for (int m = 0; m < num_matches; ++m) {
+          matches[m].point2D_idx1 = pair_buf[2 * m];
+          matches[m].point2D_idx2 = pair_buf[2 * m + 1];
+        }
+        s->db->WriteMatches(fj.image_id, ff.image_id, matches);
+        const colmap::TwoViewGeometry geometry =
+            colmap::EstimateTwoViewGeometry(s->camera, fj.points, s->camera,
+                                            ff.points, std::move(matches),
+                                            tvg_options);
+        s->db->WriteTwoViewGeometry(fj.image_id, ff.image_id, geometry);
+        ++written;
+        ++s->stat_repay_written;
+        s->stat_repay_inliers +=
+            static_cast<int64_t>(geometry.inlier_matches.size());
+        if (static_cast<int>(geometry.inlier_matches.size()) >=
+            kRematchValidInlierGate) {
+          if (static_cast<int>(s->live_win_valid.size()) <= f) {
+            s->live_win_valid.resize(f + 1, 0);
+          }
+          ++s->live_win_valid[j];
+          ++s->live_win_valid[f];
+        }
+      }
+    }
+    return written;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[aether_sfm] live repay aborted: " << e.what();
+    return written;
+  }
+}
+
+// [P1 2026-07-11] Finalize-speedup package counters: idle repay, rc=7 retry,
+// enrichment time-budget truncation. Same threading contract as
+// aether_sfm_stream_stats. All out-params nullable.
+void aether_sfm_repair_stats(aether_sfm_session_t* s, int64_t* repay_calls,
+                             int64_t* repay_attempted, int64_t* repay_written,
+                             int64_t* repay_inliers, int64_t* repay_failed,
+                             int64_t* repay_skipped_thermal,
+                             int64_t* gpu_retry_attempts,
+                             int64_t* gpu_retry_recovered,
+                             int64_t* enrich_budget_stopped) {
+  if (!s) return;
+  if (repay_calls) *repay_calls = s->stat_repay_calls;
+  if (repay_attempted) *repay_attempted = s->stat_repay_attempted;
+  if (repay_written) *repay_written = s->stat_repay_written;
+  if (repay_inliers) *repay_inliers = s->stat_repay_inliers;
+  if (repay_failed) *repay_failed = s->stat_repay_failed;
+  if (repay_skipped_thermal)
+    *repay_skipped_thermal = s->stat_repay_skipped_thermal;
+  if (gpu_retry_attempts) *gpu_retry_attempts = s->stat_gpu_retry_attempts;
+  if (gpu_retry_recovered) *gpu_retry_recovered = s->stat_gpu_retry_recovered;
+  if (enrich_budget_stopped)
+    *enrich_budget_stopped = s->stat_enrich_budget_stopped;
 }
 
 // Finalize-output quality snapshot: the aether_sfm_live_diag fields computed

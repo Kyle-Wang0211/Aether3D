@@ -361,6 +361,38 @@ void aether_sfm_set_thermal_state(aether_sfm_session_t* s, int state);
 void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
                                        int64_t* throttled_frames);
 
+// [P1-LIVE-REPAY 2026-07-11] Capture-idle debt repayment: re-match up to
+// max_pairs missing temporal-window pairs of currently starved frames (GPU
+// matcher failures / thermal-throttled frames) through the same matcher route
+// and db-write sequence as add_frame — prepaying the debt the finalize
+// starved-frame re-match would otherwise pay on a hot finish-time GPU (cap46:
+// 336 pairs at ~410 ms → 137.9 s enrichment; a healthy capture-time GPU pair
+// costs ~16 ms). Call from the SAME worker thread as add_frame, only when the
+// frame queue has slack (offer interval > processing time). Refuses outright
+// at thermal serious/critical (never adds GPU load to the condition that
+// caused the debt). Each missing pair is attempted at most once per session;
+// the finalize re-match remains the safety net for anything still missing.
+// db-only (the live preview recon is untouched), so the delivered model is
+// identical whether a pair was repaid live or at finalize. Returns pairs
+// written this call (0 = nothing to do / refused), -1 on bad args.
+int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs);
+
+// [P1 2026-07-11] Finalize-speedup package counters: idle repay (see
+// aether_sfm_live_repay), rc=7 backoff-retry (gpu_retry_attempts = extra
+// matcher invocations, gpu_retry_recovered = pairs saved by a retry;
+// AETHER_GPU_MATCH_RETRY=0 disables), and the finalize enrichment time
+// budget (enrich_budget_stopped = fresh match attempts skipped after the
+// budget was exhausted; AETHER_ENRICH_TIME_BUDGET_MS unset = auto/stage-1
+// window, >0 = fixed ms, <=0 = off). Same threading contract as
+// aether_sfm_stream_stats. All out-params nullable.
+void aether_sfm_repair_stats(aether_sfm_session_t* s, int64_t* repay_calls,
+                             int64_t* repay_attempted, int64_t* repay_written,
+                             int64_t* repay_inliers, int64_t* repay_failed,
+                             int64_t* repay_skipped_thermal,
+                             int64_t* gpu_retry_attempts,
+                             int64_t* gpu_retry_recovered,
+                             int64_t* enrich_budget_stopped);
+
 // Finalize-output quality snapshot: the live_diag quality fields computed over
 // the CURRENT finalize reconstruction (LOCAL or REFINED — whichever the
 // getters serve; snapshotted under the recon mutex, safe alongside the async
