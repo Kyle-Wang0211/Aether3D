@@ -144,7 +144,8 @@ namespace colmap {
 void AetherLastBaSolveInfo(std::string* solver_used,
                            std::string* sparse_backend,
                            int* mixed,
-                           int* threads);
+                           int* threads,
+                           std::string* dense_backend);
 }  // namespace colmap
 
 namespace {
@@ -3596,10 +3597,10 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         std::filesystem::path(s->db_path).parent_path();
     const std::filesystem::path tmp = dir / "finalize_segments.json.tmp";
     const std::filesystem::path dst = dir / "finalize_segments.json";
-    std::string solver_used, sparse_backend;
+    std::string solver_used, sparse_backend, dense_backend;
     int mixed = 0, threads = 0;
     colmap::AetherLastBaSolveInfo(&solver_used, &sparse_backend, &mixed,
-                                  &threads);
+                                  &threads, &dense_backend);
     const int64_t epoch_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -3647,6 +3648,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"frag_post_n\":%lld,\"frag_post_2view\":%lld,"
         "\"frag_post_lt3\":%lld,\"frag_post_p50_deg\":%.3f,"
         "\"solver_used\":\"%s\",\"sparse_backend\":\"%s\","
+        "\"dense_backend\":\"%s\","
         "\"mixed\":%d,\"threads\":%d}\n",
         static_cast<long long>(epoch_ms), live_reuse ? 1 : 0,
         static_cast<long long>(cache_pre_ms),
@@ -3707,7 +3709,8 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_frag_post_2view),
         static_cast<long long>(s->stat_frag_post_lt3),
         s->frag_theta_p50_post_deg,
-        solver_used.c_str(), sparse_backend.c_str(), mixed, threads);
+        solver_used.c_str(), sparse_backend.c_str(), dense_backend.c_str(),
+        mixed, threads);
     if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return;
     FILE* f = std::fopen(tmp.string().c_str(), "w");
     if (!f) return;

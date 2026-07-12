@@ -66,6 +66,7 @@ std::mutex& AetherLastSolveMutex() {
 }
 std::string g_aether_last_solver_used;     // e.g. "SPARSE_SCHUR"
 std::string g_aether_last_sparse_backend;  // e.g. "EIGEN_SPARSE"
+std::string g_aether_last_dense_backend;   // e.g. "LAPACK" (Accelerate) / "EIGEN"
 int g_aether_last_mixed = 0;
 int g_aether_last_threads = 0;
 }  // namespace
@@ -73,12 +74,14 @@ int g_aether_last_threads = 0;
 void AetherLastBaSolveInfo(std::string* solver_used,
                            std::string* sparse_backend,
                            int* mixed,
-                           int* threads) {
+                           int* threads,
+                           std::string* dense_backend) {
   std::lock_guard<std::mutex> lk(AetherLastSolveMutex());
   if (solver_used) *solver_used = g_aether_last_solver_used;
   if (sparse_backend) *sparse_backend = g_aether_last_sparse_backend;
   if (mixed) *mixed = g_aether_last_mixed;
   if (threads) *threads = g_aether_last_threads;
+  if (dense_backend) *dense_backend = g_aether_last_dense_backend;
 }
 
 namespace {
@@ -776,6 +779,10 @@ ceres::Solver::Summary SolveWithGpuFallback(
             << ceres::LinearSolverTypeToString(ceres_summary.linear_solver_type_used)
             << " sparse_backend=" << ceres::SparseLinearAlgebraLibraryTypeToString(
                    ceres_summary.sparse_linear_algebra_library_type)
+            // [AETHER LAPACK 2026-07-12] dense backend (EIGEN vs LAPACK/
+            // Accelerate) — device A/B for the AETHER_DENSE_LAPACK switch.
+            << " dense_backend=" << ceres::DenseLinearAlgebraLibraryTypeToString(
+                   ceres_summary.dense_linear_algebra_library_type)
             // [AETHER BA-MIXED/THREADS 2026-07-11] A/B verification fields.
             << " mixed=" << (ceres_summary.mixed_precision_solves_used ? 1 : 0)
             << " threads=" << ceres_summary.num_threads_used;
@@ -790,6 +797,9 @@ ceres::Solver::Summary SolveWithGpuFallback(
     g_aether_last_sparse_backend =
         ceres::SparseLinearAlgebraLibraryTypeToString(
             ceres_summary.sparse_linear_algebra_library_type);
+    g_aether_last_dense_backend =
+        ceres::DenseLinearAlgebraLibraryTypeToString(
+            ceres_summary.dense_linear_algebra_library_type);
     g_aether_last_mixed = ceres_summary.mixed_precision_solves_used ? 1 : 0;
     g_aether_last_threads = ceres_summary.num_threads_used;
   }

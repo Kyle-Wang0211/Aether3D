@@ -1,0 +1,45 @@
+name: SfmLapackBench
+options:
+  bundleIdPrefix: com.kyle
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  SfmLapackBench:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      # production Metal GEMM matcher (read-only reference into pocketworld,
+      # same precedent as the host p1_driver): provides the strong
+      # aether_gpu_match_gemm_pairs symbol so enrich runs on GPU like prod.
+      - path: /Users/kaidongwang/Developer/pocketworld/vendor/aether_ffi/src/pwsfm_gpu_match.mm
+      - path: Resources
+        buildPhase: resources
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 26AH7V448L
+        PRODUCT_BUNDLE_IDENTIFIER: com.kyle.SfmLapackBench
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging.h
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        CLANG_CXX_LIBRARY: "libc++"
+        CLANG_ENABLE_OBJC_ARC: YES
+        ENABLE_BITCODE: NO
+        HEADER_SEARCH_PATHS:
+          - /Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/include
+        OTHER_LDFLAGS:
+          - -ObjC
+          - -force_load
+          - /Users/kaidongwang/Developer/Aether3D-cross/aether_cpp/third_party/glomap_vendor/build-ios/libglomap_core.a
+          - /Users/kaidongwang/Developer/Aether3D-cross/dist/libs/ios-arm64/sfm/libceres.a
+          - /Users/kaidongwang/Developer/Aether3D-cross/dist/libs/ios-arm64/sfm/libglog.a
+          - -lsqlite3
+          - -lz
+          - -lc++
+          - -llzma
+          # GPU DSP-SIFT extract hook stays a weak null (no Dawn here):
+          - "-Wl,-U,_aether_dsp_sift_extract_gpu"
+    dependencies:
+      - sdk: Accelerate.framework
+      - sdk: Metal.framework
