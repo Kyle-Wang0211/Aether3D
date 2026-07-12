@@ -429,6 +429,17 @@ struct aether_sfm_session {
   int64_t stat_spatial_quadratic_attempted = 0;// exponential-time fallback work
   int64_t stat_spatial_quadratic_written = 0; // fallback pairs committed to db
   int64_t stat_spatial_budget_skipped = 0;    // fair scheduler work omitted at cap
+  // [GUIDED-TEMPORAL 2026-07-12] Epipolar-guided re-match on the LIVE temporal
+  // add_frame path (AETHER_GUIDED_TEMPORAL=1; DEFAULT OFF → bit-identical when
+  // unset). Reuses the shipped spatial-enrichment guided chain: raw Lowe match →
+  // colmap-default TVG (E/F seed) → guided re-match inside the epipolar band at
+  // the relaxed ratio (0.8) → fresh TVG re-verify, adopted ONLY when it STRICTLY
+  // dominates the raw pair's inlier count (so every downstream ghost/tri-angle
+  // gate and min_num_matches=15 stay in force). Weak-texture lever only; useless
+  // on view-dependent reflections (the appearance is wrong, epipolar can't fix).
+  int64_t stat_guided_temporal_attempted = 0;      // guided matcher calls completed
+  int64_t stat_guided_temporal_upgraded = 0;       // pairs where guided replaced raw
+  int64_t stat_guided_temporal_extra_inliers = 0;  // Σ(guided − raw) TVG inliers on upgrade
   int64_t stat_temporal_detail_pairs = 0;     // K-neighbor TVGs revisited post-BA
   int64_t stat_temporal_detail_matches = 0;   // temporal TVG inliers inspected
   int64_t stat_temporal_detail_created = 0;   // new final-pose detail points
@@ -1016,6 +1027,23 @@ bool EnrichTargetedEnabled() {
   return cached;
 }
 
+// [GUIDED-TEMPORAL 2026-07-12] AETHER_GUIDED_TEMPORAL=1 opts the LIVE temporal
+// add_frame matching into the epipolar-guided re-match chain already shipped on
+// the spatial-enrichment path (RunGuidedMatch). DEFAULT OFF: an unset
+// environment skips the guided branch entirely and is bit-identical to the
+// shipped binary. The lever targets Lambertian weak/repetitive texture, where
+// the plain 0.7 Lowe ratio kills geometrically-correct matches (2nd-NN ≈
+// 1st-NN); the E/F epipolar band disambiguates them. It does NOT help
+// view-dependent reflections (appearance itself is wrong) and never relaxes a
+// downstream gate — see the call site in AddFrameFeaturesImpl.
+bool GuidedTemporalEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("AETHER_GUIDED_TEMPORAL");
+    return e && e[0] == '1';
+  }();
+  return cached;
+}
+
 // [P2-FRAG-MERGE 2026-07-11] Finalize-tail duplicate-fragment merge pass
 // (see MergeFragmentTracks). Default OFF: an unset environment is
 // bit-identical to the shipped binary.
@@ -1306,11 +1334,17 @@ bool PrepareGuidedGeometry(const aether_sfm_session* s,
   return false;
 }
 
-bool RunGuidedSpatialMatch(aether_sfm_session* s,
-                           const FrameRecord& a,
-                           const FrameRecord& b,
-                           const colmap::TwoViewGeometry& geometry,
-                           colmap::FeatureMatches* guided_matches) {
+// Geometry-guided re-match core. Shared by the spatial-enrichment verify chain
+// (VerifySpatialPair) and the live temporal add_frame path
+// (AddFrameFeaturesImpl, AETHER_GUIDED_TEMPORAL=1). Pure w.r.t. session state
+// except for the rc=7 retry counters inside GpuMatchGuidedRetry — the
+// guided-pair/inlier telemetry is booked by each caller so spatial and temporal
+// totals stay separable.
+bool RunGuidedMatch(aether_sfm_session* s,
+                    const FrameRecord& a,
+                    const FrameRecord& b,
+                    const colmap::TwoViewGeometry& geometry,
+                    colmap::FeatureMatches* guided_matches) {
   if (!s || !guided_matches || !s->options.use_gpu_match ||
       aether_gpu_match_gemm_pairs_guided == nullptr) {
     return false;
@@ -1340,8 +1374,6 @@ bool RunGuidedSpatialMatch(aether_sfm_session* s,
       pair_buf.data(), cap, &num_matches);
   if (rc != 0) return false;
 
-  ++s->stat_spatial_guided_pairs;
-  s->stat_spatial_guided_inliers += num_matches;
   guided_matches->resize(num_matches);
   for (int m = 0; m < num_matches; ++m) {
     (*guided_matches)[m].point2D_idx1 = pair_buf[2 * m];
@@ -1463,7 +1495,11 @@ bool VerifySpatialPair(aether_sfm_session* s,
   // over the guided candidate set with the global mapper's strict gate before
   // any correspondence reaches sqlite.
   colmap::FeatureMatches guided_matches;
-  if (!RunGuidedSpatialMatch(s, a, b, geometry, &guided_matches)) return false;
+  if (!RunGuidedMatch(s, a, b, geometry, &guided_matches)) return false;
+  // [GUIDED-TEMPORAL 2026-07-12] Stat bookkeeping moved out of RunGuidedMatch;
+  // the spatial path books exactly the same guided-pair/inlier totals as before.
+  ++s->stat_spatial_guided_pairs;
+  s->stat_spatial_guided_inliers += static_cast<int64_t>(guided_matches.size());
   colmap::TwoViewGeometryOptions final_tvg_options;
   final_tvg_options.ransac_options.max_error = kSpatialFinalMaxErrorPixels;
   final_tvg_options.min_num_inliers = kSpatialFinalInliers;
@@ -3622,7 +3658,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    char buf[3072];
+    char buf[3264];
     const int n = std::snprintf(
         buf, sizeof(buf),
         "{\"t\":%lld,\"live_reuse\":%d,"
@@ -3664,6 +3700,11 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"frag_pre_p50_deg\":%.3f,"
         "\"frag_post_n\":%lld,\"frag_post_2view\":%lld,"
         "\"frag_post_lt3\":%lld,\"frag_post_p50_deg\":%.3f,"
+        // [GUIDED-TEMPORAL 2026-07-12] live guided-temporal attribution
+        // (all zero unless AETHER_GUIDED_TEMPORAL=1).
+        "\"guided_temporal_attempted\":%lld,"
+        "\"guided_temporal_upgraded\":%lld,"
+        "\"guided_temporal_extra_inliers\":%lld,"
         "\"solver_used\":\"%s\",\"sparse_backend\":\"%s\","
         "\"dense_backend\":\"%s\","
         "\"mixed\":%d,\"threads\":%d}\n",
@@ -3726,6 +3767,9 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_frag_post_2view),
         static_cast<long long>(s->stat_frag_post_lt3),
         s->frag_theta_p50_post_deg,
+        static_cast<long long>(s->stat_guided_temporal_attempted),
+        static_cast<long long>(s->stat_guided_temporal_upgraded),
+        static_cast<long long>(s->stat_guided_temporal_extra_inliers),
         solver_used.c_str(), sparse_backend.c_str(), dense_backend.c_str(),
         mixed, threads);
     if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return;
@@ -4679,12 +4723,57 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
         matches[m].point2D_idx1 = pair_buf[2 * m];
         matches[m].point2D_idx2 = pair_buf[2 * m + 1];
       }
-      s->db->WriteMatches(prev.image_id, image_id, matches);
 
-      colmap::TwoViewGeometry two_view_geometry =
-          colmap::EstimateTwoViewGeometry(s->camera, prev.points, s->camera,
-                                          rec.points, std::move(matches),
-                                          tvg_options);
+      colmap::TwoViewGeometry two_view_geometry;
+      // [GUIDED-TEMPORAL 2026-07-12] Weak-texture recall lever, DEFAULT OFF.
+      // These frames carry ARKit poses (rec.has_pose / prev.has_pose set above),
+      // so the pair has an epipolar prior; but rather than derive E from the
+      // (drift-prone) ARKit poses, we reuse the exact chain the spatial-
+      // enrichment path already ships and verifies: estimate the seed geometry
+      // from the raw cross-checked matches, then re-match INSIDE that E/F band
+      // at the relaxed ratio (0.8, vs the temporal 0.7). Epipolar
+      // disambiguation rescues the repetitive/low-texture correspondences the
+      // plain Lowe ratio judges to death (2nd-NN ≈ 1st-NN).
+      // RED LINE: guided candidates are NOT trusted. They pass a fresh TVG
+      // RANSAC and are adopted ONLY when their inlier count STRICTLY exceeds the
+      // raw pair's, so nothing downstream is relaxed — the same TVG geometry,
+      // tri-angle (2.0°), reproj, ghost L1/L2, and finalize min_num_matches=15
+      // gates run unchanged, and view-dependent reflection matches (appearance
+      // wrong, epipolar can't fix) still fall exactly as before.
+      if (GuidedTemporalEnabled() && gpu_match_avail &&
+          aether_gpu_match_gemm_pairs_guided != nullptr) {
+        two_view_geometry = colmap::EstimateTwoViewGeometry(
+            s->camera, prev.points, s->camera, rec.points,
+            colmap::FeatureMatches(matches), tvg_options);
+        colmap::FeatureMatches guided;
+        if (RunGuidedMatch(s, prev, rec, two_view_geometry, &guided) &&
+            !guided.empty()) {
+          ++s->stat_guided_temporal_attempted;
+          colmap::TwoViewGeometry guided_geometry =
+              colmap::EstimateTwoViewGeometry(s->camera, prev.points, s->camera,
+                                              rec.points,
+                                              colmap::FeatureMatches(guided),
+                                              tvg_options);
+          if (guided_geometry.inlier_matches.size() >
+              two_view_geometry.inlier_matches.size()) {
+            ++s->stat_guided_temporal_upgraded;
+            s->stat_guided_temporal_extra_inliers +=
+                static_cast<int64_t>(guided_geometry.inlier_matches.size()) -
+                static_cast<int64_t>(two_view_geometry.inlier_matches.size());
+            matches = std::move(guided);
+            num_matches = static_cast<int>(matches.size());
+            two_view_geometry = std::move(guided_geometry);
+          }
+        }
+        s->db->WriteMatches(prev.image_id, image_id, matches);
+      } else {
+        // Default path: bit-identical to the shipped binary — write the raw
+        // cross-checked matches, then estimate the geometry consuming them.
+        s->db->WriteMatches(prev.image_id, image_id, matches);
+        two_view_geometry = colmap::EstimateTwoViewGeometry(
+            s->camera, prev.points, s->camera, rec.points, std::move(matches),
+            tvg_options);
+      }
       s->db->WriteTwoViewGeometry(prev.image_id, image_id, two_view_geometry);
       // [P1-LIVE-REPAY] Per-frame valid-window-pair counters, mirroring the
       // FinalizeRematchStarvedFrames win_valid rule (gap <= production K,
@@ -5835,19 +5924,21 @@ void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
 //
 // Rules:
 //   - thermal critical (state >= 3) → refuses outright;
-//   - thermal serious (state == 2) → SMALL conditional repayment only:
-//     [P1-REPAY-THERMAL2 2026-07-11] the old ">= 2 refuses outright" rule
-//     never repaid anything in practice — on cap47 the device sat at
-//     thermal=2 from min 2 of a 6.5-min capture (采集常态), so all 140 repay
-//     offers were refused and the whole debt hit the finalize re-match at
-//     ~410 ms/pair on a hot GPU. serious+idle with a HEALTHY matcher is
-//     exactly the cheap window; serious+struggling GPU is the freeze
-//     precondition (rc=7 forensic). Gate: allowed only when the last
-//     kRepayThermal2CleanN GPU pairs all succeeded (gpu_pairs_since_rc7,
-//     rc=7 resets), budget clamped to kRepayThermal2MaxPairs per call, and
-//     ANY matcher failure aborts the pass on the spot. Kill switch:
-//     AETHER_REPAY_THERMAL2_CLEAN_N=0 restores the old full refusal; N>0
-//     overrides the clean-history length (default 16);
+//   - thermal serious (state == 2) → conditional repayment:
+//     [P1-REPAY-THERMAL2 2026-07-11 · PHASE-A 2026-07-12] the old ">= 2
+//     refuses outright" rule never repaid anything in practice — on cap47 the
+//     device sat at thermal=2 from min 2 of a 6.5-min capture (采集常态), so
+//     all 140 repay offers were refused and the whole debt hit the finalize
+//     re-match at ~410 ms/pair on a hot GPU. serious+idle with a HEALTHY
+//     matcher is exactly the cheap window; serious+struggling GPU is the
+//     freeze precondition (rc=7 forensic). Gate: allowed when the last
+//     kRepayThermal2CleanN(=4) GPU pairs all succeeded (gpu_pairs_since_rc7,
+//     rc=7 resets — i.e. recent no rc=7), budget clamped to
+//     kRepayThermal2MaxPairs(=8) per call, and ANY matcher failure aborts the
+//     pass on the spot (heat self-throttles the yield; failure is safe —
+//     healthy takes the full budget, struggling degrades to the old
+//     finalize-debt path). Kill switch: AETHER_REPAY_THERMAL2_CLEAN_N=0
+//     restores the old full refusal; N>0 overrides the clean-history length;
 //   - starved = the live win_valid mirror of the finalize rule (< 4 valid
 //     window pairs, or fed_throttled), candidates = missing window pairs
 //     (gap <= K, either side starved; gap <= 2 chain holes always),
@@ -5859,18 +5950,27 @@ void aether_sfm_thermal_throttle_stats(aether_sfm_session_t* s,
 //     finalize (same descriptors, same matcher, same write sequence).
 // Returns pairs written this call (0 = nothing to do / refused), -1 on bad
 // args. Counters via aether_sfm_repair_stats.
-// [P1-REPAY-THERMAL2] thermal=2 conditional-repay knobs. MaxPairs is the
-// per-call budget clamp at serious (small on purpose: one idle offer repays
-// at most 2 pairs, ~30 ms healthy GPU); CleanN is the required healthy-GPU
-// run since the last rc=7 (0 = thermal=2 refuses outright, the old rule).
-constexpr int kRepayThermal2MaxPairs = 2;
+// [P1-REPAY-THERMAL2] thermal=2 conditional-repay knobs.
+// [PHASE-A 2026-07-12] AGGRESSIVE-REPAY re-tuning (即时出云战役 Phase A):
+// the original 2-pair / 16-clean gate almost never fired — cap47 sat at
+// thermal=2 (采集常态) from min 2 of a 6.5-min capture, so the debt (112 s of
+// finalize re-match at ~410 ms/pair on a hot GPU) was never prepaid. serious +
+// a HEALTHY matcher (recent no rc=7) IS the cheap idle window; the freeze
+// precondition is serious + a STRUGGLING GPU (rc=7 forensic), which the
+// per-pair rc=7 reset + first-failure abort still catch. So Phase A widens the
+// per-call clamp 2→8 (~130 ms healthy GPU, still << the 2 s single-call red
+// line) and shortens the required clean run 16→4 (recent-no-rc=7 rather than a
+// long streak). MaxPairs is the per-call budget clamp at serious; CleanN is
+// the required healthy-GPU run since the last rc=7 (0 = thermal=2 refuses
+// outright, the old rule; env AETHER_REPAY_THERMAL2_CLEAN_N overrides).
+constexpr int kRepayThermal2MaxPairs = 8;
 int RepayThermal2CleanN() {
   static const int cached = [] {
     if (const char* e = std::getenv("AETHER_REPAY_THERMAL2_CLEAN_N")) {
       const int v = std::atoi(e);
       if (v >= 0) return v;
     }
-    return 16;  // conservative default: ≥16 consecutive healthy GPU pairs
+    return 4;  // recent-no-rc=7: ≥4 consecutive healthy GPU pairs since rc=7
   }();
   return cached;
 }
