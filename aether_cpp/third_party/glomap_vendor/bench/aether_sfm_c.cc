@@ -58,6 +58,7 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -74,6 +75,13 @@
 // [GHOST-MASK 2026-07-12] Per-point ghost-layer display-mask pass (header-only,
 // self-contained; parity-gated against the Python Phase0 reference).
 #include "aether_ghost_mask.h"
+// [L1-PLAN/ARBITRATE 2026-07-12] Ghost-layer L1 CasDiffMVS arbitration:
+// budgeted "按面积挑" keyframe plan (written at finalize tail alongside the
+// mask when AETHER_GHOST_MASK=1) + the file-driven 1-bit arbitration ABI
+// (aether_sfm_arbitrate) consuming the per-ref depth bins the platform
+// runner writes. Header-only, shared verbatim with the Mac E2E harness.
+#include "aether_l1_arbitrate.h"
+#include "aether_l1_plan.h"
 
 // On-device DSP-SIFT extractor + CPU matcher (dsp_sift_c.cc, same archive set).
 extern "C" int aether_dsp_sift_extract(const uint8_t* gray, int width,
@@ -3751,6 +3759,146 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
 //  - coordinates are float32-cast first (the delivered-PLY quantization) so
 //    the flags match what PLY-based tooling recomputes bit-for-bit.
 //  - best-effort: failures are logged and swallowed; never blocks finalize.
+// [L1-PLAN 2026-07-12] Alongside the mask sidecar, write the CasDiffMVS L1
+// arbitration inputs into the run_dir: arbitration_plan.json (Swift runner /
+// Mac harness), arbitration_plan.bin (C++ arbitration twin) and
+// arbitration_points.bin (per in-region point sd/local_off). "按面积挑" ref
+// scheduling: budgeted greedy set-cover over the band15-marked cells (env
+// AETHER_L1_BUDGET_MS / 960ms-per-ref), sources via covis_select, dv from the
+// ref's own observed sparse depths — see aether_l1_plan.h. Best-effort like
+// the mask itself: failures are logged and swallowed.
+void WriteL1PlanSidecars(aether_sfm_session* s,
+                         const colmap::Reconstruction& recon,
+                         const std::vector<double>& cloud_xyz,
+                         const std::vector<uint8_t>& flags,
+                         const aether_ghost::GhostMaskStats& st,
+                         const aether_ghost::GhostMaskIntermediates& inter) {
+  const double t0 = NowMs();
+  const std::filesystem::path dir =
+      std::filesystem::path(s->db_path).parent_path();
+  // frameId -> saved color JPEG (Dart facade sidecar, one JSON line per fed
+  // frame). Hand-rolled field scan — the file is produced by our own
+  // _persistFedMeta with plain container paths (no escapes beyond \/).
+  std::unordered_map<int, std::string> jpeg_of;
+  {
+    std::ifstream jf(dir / "sfm_fed_frames.jsonl");
+    std::string line;
+    while (std::getline(jf, line)) {
+      const size_t fpos = line.find("\"frameId\":");
+      const size_t jpos = line.find("\"jpegPath\":\"");
+      if (fpos == std::string::npos || jpos == std::string::npos) continue;
+      const int fid = std::atoi(line.c_str() + fpos + 10);
+      std::string path;
+      for (size_t i = jpos + 12; i < line.size() && line[i] != '"'; ++i) {
+        if (line[i] == '\\' && i + 1 < line.size()) ++i;  // \/ or \" escapes
+        path.push_back(line[i]);
+      }
+      if (fid >= 0 && !path.empty()) jpeg_of[fid] = std::move(path);
+    }
+  }
+  if (jpeg_of.empty()) {
+    LOG(WARNING) << "[aether_sfm] l1_plan: sfm_fed_frames.jsonl missing/empty "
+                    "— no JPEG mapping, plan skipped";
+    return;
+  }
+  // registered frames -> L1Frame (pose, model-res K, jpeg), ordered by
+  // frame_id for determinism.
+  std::vector<aether_l1::L1Frame> frames;
+  std::unordered_map<colmap::image_t, int> frame_of_image;
+  {
+    std::vector<const colmap::Image*> imgs;
+    for (const auto& [iid, image] : recon.Images()) {
+      if (image.HasPose()) imgs.push_back(&image);
+    }
+    std::sort(imgs.begin(), imgs.end(),
+              [](const colmap::Image* a, const colmap::Image* b) {
+                return a->ImageId() < b->ImageId();
+              });
+    for (const colmap::Image* image : imgs) {
+      int fid = -1;
+      if (std::sscanf(image->Name().c_str(), "frame_%d.jpg", &fid) != 1) {
+        continue;
+      }
+      aether_l1::L1Frame fr;
+      fr.frame_id = fid;
+      const auto jit = jpeg_of.find(fid);
+      if (jit != jpeg_of.end()) fr.jpeg = jit->second;
+      const Eigen::Matrix3x4d m = image->CamFromWorld().ToMatrix();
+      for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 4; ++c) fr.w2c[r * 4 + c] = m(r, c);
+      fr.w2c[15] = 1.0;
+      const colmap::Camera& cam = *image->CameraPtr();
+      const double sx = static_cast<double>(aether_l1::kProcW) /
+                        static_cast<double>(cam.width);
+      const double sy = static_cast<double>(aether_l1::kProcH) /
+                        static_cast<double>(cam.height);
+      fr.k[0] = cam.FocalLengthX() * sx;
+      fr.k[1] = cam.FocalLengthY() * sy;
+      fr.k[2] = cam.PrincipalPointX() * sx;
+      fr.k[3] = cam.PrincipalPointY() * sy;
+      frame_of_image[image->ImageId()] = static_cast<int>(frames.size());
+      frames.push_back(std::move(fr));
+    }
+  }
+  // per-frame observed point rows + the full-precision track points, in the
+  // SAME Points3D iteration order the flags were computed from.
+  std::vector<double> pts;
+  pts.reserve(cloud_xyz.size());
+  {
+    int32_t row = 0;
+    for (const auto& [pid, pt] : recon.Points3D()) {
+      pts.push_back(pt.xyz.x());
+      pts.push_back(pt.xyz.y());
+      pts.push_back(pt.xyz.z());
+      for (const auto& el : pt.track.Elements()) {
+        const auto it = frame_of_image.find(el.image_id);
+        if (it != frame_of_image.end())
+          frames[static_cast<size_t>(it->second)].obs.push_back(row);
+      }
+      ++row;
+    }
+  }
+  int budget_ms = aether_l1::kDefaultBudgetMs;
+  if (const char* b = std::getenv("AETHER_L1_BUDGET_MS")) {
+    const int v = std::atoi(b);
+    if (v > 0) budget_ms = v;
+  }
+  aether_l1::L1Plan plan;
+  if (!aether_l1::BuildL1Plan(cloud_xyz.data(), flags.data(),
+                              cloud_xyz.size() / 3, st.plane_n, st.plane_d,
+                              pts.data(), pts.size() / 3, frames, budget_ms,
+                              &plan)) {
+    LOG(WARNING) << "[aether_sfm] l1_plan: BuildL1Plan failed";
+    return;
+  }
+  if (plan.refs.empty()) {
+    // No marked cells / no eligible refs: leave no stale plan behind.
+    std::error_code ec;
+    std::filesystem::remove(dir / "arbitration_plan.json", ec);
+    std::filesystem::remove(dir / "arbitration_plan.bin", ec);
+    std::filesystem::remove(dir / "arbitration_points.bin", ec);
+    LOG(WARNING) << "[aether_sfm] l1_plan: no refs (marked_cells="
+                 << plan.n_marked_cells << ") — plan not written";
+    return;
+  }
+  const bool ok =
+      aether_l1::WriteL1PlanJson((dir / "arbitration_plan.json").string(),
+                                 plan, frames) &&
+      aether_l1::WriteL1PlanBin((dir / "arbitration_plan.bin").string(), plan,
+                                frames) &&
+      aether_l1::WriteL1PointsSidecar(
+          (dir / "arbitration_points.bin").string(), cloud_xyz.data(),
+          flags.data(), cloud_xyz.size() / 3, inter.sd, inter.local_off);
+  LOG(WARNING) << "[aether_sfm] l1_plan: refs=" << plan.refs.size() << "/"
+               << plan.budget_refs << " marked_cells=" << plan.n_marked_cells
+               << " cov2=" << plan.n_cells_cov2
+               << " cov1=" << plan.n_cells_cov1
+               << " cov0=" << plan.n_cells_cov0
+               << " dropped_srcs=" << plan.n_refs_dropped_srcs
+               << " write=" << (ok ? "ok" : "FAILED") << " ("
+               << static_cast<int>(NowMs() - t0) << "ms)";
+}
+
 void MaybeWriteGhostMask(aether_sfm_session* s,
                          const colmap::Reconstruction& recon) {
   const char* e = std::getenv("AETHER_GHOST_MASK");
@@ -3767,8 +3915,9 @@ void MaybeWriteGhostMask(aether_sfm_session* s,
     }
     std::vector<uint8_t> flags;
     aether_ghost::GhostMaskStats st;
+    aether_ghost::GhostMaskIntermediates inter;
     if (!aether_ghost::ComputeGhostMask(xyz.data(), xyz.size() / 3, &flags,
-                                        &st)) {
+                                        &st, &inter)) {
       LOG(WARNING) << "[aether_sfm] ghost_mask: degenerate cloud ("
                    << xyz.size() / 3 << " pts) — no sidecar";
       return;
@@ -3831,6 +3980,9 @@ void MaybeWriteGhostMask(aether_sfm_session* s,
                  << " bim_cells=" << st.n_bim_cells << "/"
                  << st.n_floor_cells << " (" << static_cast<int>(NowMs() - t0)
                  << "ms)";
+    // [L1-PLAN 2026-07-12] CasDiffMVS arbitration inputs (same env gate; the
+    // enclosing try swallows any failure so finalize is never blocked).
+    WriteL1PlanSidecars(s, recon, xyz, flags, st, inter);
   } catch (const std::exception& ex) {
     LOG(WARNING) << "[aether_sfm] ghost_mask failed (swallowed): "
                  << ex.what();
@@ -5876,6 +6028,61 @@ void aether_sfm_repair_stats(aether_sfm_session_t* s, int64_t* repay_calls,
   if (gpu_retry_recovered) *gpu_retry_recovered = s->stat_gpu_retry_recovered;
   if (enrich_budget_stopped)
     *enrich_budget_stopped = s->stat_enrich_budget_stopped;
+}
+
+// [L1-ARBITRATE 2026-07-12] Ghost-layer L1 CasDiffMVS 1-bit arbitration —
+// fully FILE-driven over the session's run_dir: consumes the finalize-tail
+// sidecars (arbitration_plan.bin + arbitration_points.bin + ghost_mask.bin,
+// written when AETHER_GHOST_MASK=1) plus the per-ref depth bins the platform
+// CoreML runner wrote (l1_depth_<frameId>.bin), applies the calibrated
+// terminal rules (height-domain per-view votes, 3x3-patch median reads,
+// SUP>=2/SEE=0 hysteresis, mirror defense: below-floor evidence never
+// rescues, abstain -> visible), and rewrites ghost_mask.bin with the
+// kFlagL1Rescued / kFlagL1Confirmed bits + a ghost_arbitration.json stats
+// sidecar. The session is only the run_dir carrier — no reconstruction state
+// is touched, so this is safe on any thread once the runner finished.
+// Returns NOT_REGISTERED when the inputs are absent (plan not written /
+// runner never ran) — the caller treats that as a no-op, never an error.
+aether_sfm_result_t aether_sfm_arbitrate(aether_sfm_session_t* s,
+                                         char* out_json, int out_cap) {
+  if (out_json && out_cap > 0) out_json[0] = '\0';
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  try {
+    const double t0 = NowMs();
+    const std::string dir =
+        std::filesystem::path(s->db_path).parent_path().string();
+    aether_l1::ArbStats st;
+    std::string err;
+    if (!aether_l1::RunArbitration(dir, &st, &err)) {
+      LOG(WARNING) << "[aether_sfm] l1_arbitrate: " << err;
+      const bool absent = err.find("missing") != std::string::npos;
+      return absent ? AETHER_SFM_ERR_NOT_REGISTERED : AETHER_SFM_ERR_INTERNAL;
+    }
+    st.pass_ms = NowMs() - t0;
+    LOG(WARNING) << "[aether_sfm] l1_arbitrate: refs=" << st.n_refs_used << "/"
+                 << st.n_refs_planned << " band=" << st.n_band
+                 << " rescue=" << st.n_rescue << " confirm=" << st.n_confirm
+                 << " abstain=" << st.n_abstain
+                 << " degraded=" << (st.degraded ? 1 : 0) << " ("
+                 << static_cast<int>(st.pass_ms) << "ms)";
+    if (out_json && out_cap > 0) {
+      std::snprintf(
+          out_json, static_cast<size_t>(out_cap),
+          "{\"refs_planned\":%d,\"refs_used\":%d,\"n_band\":%d,"
+          "\"rescue\":%d,\"confirm\":%d,\"abstain\":%d,"
+          "\"delta_mm\":%.3f,\"delta_ray_mm\":%.3f,\"degraded\":%s,"
+          "\"pass_ms\":%d}",
+          st.n_refs_planned, st.n_refs_used, st.n_band, st.n_rescue,
+          st.n_confirm, st.n_abstain, st.delta_mm, st.delta_ray_mm,
+          st.degraded ? "true" : "false", static_cast<int>(st.pass_ms));
+    }
+    return AETHER_SFM_OK;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[aether_sfm] l1_arbitrate failed: " << e.what();
+    return AETHER_SFM_ERR_INTERNAL;
+  } catch (...) {
+    return AETHER_SFM_ERR_INTERNAL;
+  }
 }
 
 // Finalize-output quality snapshot: the aether_sfm_live_diag fields computed

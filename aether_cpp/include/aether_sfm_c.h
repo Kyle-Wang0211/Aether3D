@@ -402,6 +402,24 @@ void aether_sfm_final_diag(aether_sfm_session_t* s, double* mean_reproj_px,
                            int64_t* n_points, int64_t* n_track3plus,
                            int64_t* n_obs);
 
+// [L1-ARBITRATE 2026-07-12] Ghost-layer L1 CasDiffMVS 1-bit arbitration over
+// the session's run_dir files: consumes the AETHER_GHOST_MASK=1 finalize-tail
+// sidecars (arbitration_plan.bin / arbitration_points.bin / ghost_mask.bin)
+// plus the per-ref depth bins written by the platform CoreML runner
+// (l1_depth_<frameId>.bin, contract in arbitration_plan.json), applies the
+// Mac-calibrated terminal rules (height-domain per-view votes + 3x3-patch
+// median + SUP>=2/SEE=0 hysteresis + mirror defense: below-floor evidence
+// never rescues; abstain -> visible, 误隐=0 policy) and rewrites
+// ghost_mask.bin with the rescued/confirmed bits (5/6) + a
+// ghost_arbitration.json stats sidecar. File-driven only — no reconstruction
+// state is read, safe on any thread after the runner finished. Returns OK on
+// success (out_json gets a stats summary), NOT_REGISTERED when the inputs are
+// absent (mask/plan never written or runner never ran — treat as a no-op),
+// INTERNAL on real failures. Call AFTER finalize REFINED and after the
+// platform runner wrote the depth bins.
+aether_sfm_result_t aether_sfm_arbitrate(aether_sfm_session_t* s,
+                                         char* out_json, int out_cap);
+
 // [AETHER BA-MIXED A/B 2026-07-11] Debug/bench-only: write the current
 // authoritative reconstruction (refined after REFINED, else live/local) as a
 // COLMAP binary model (cameras.bin/images.bin/points3D.bin) into dir, so host

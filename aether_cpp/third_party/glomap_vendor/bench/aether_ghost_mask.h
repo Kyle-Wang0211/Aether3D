@@ -71,6 +71,21 @@ enum GhostFlagBits : uint8_t {
   kFlagCellGhost = 1u << 2,  // bimodal-cell ghost-mode member
   kFlagInClean = 1u << 3,    // cell has no overhead structure
   kFlagBand10 = 1u << 4,     // Phase0 D@1.0cm band (reference only)
+  // [L1-ARBITRATE 2026-07-12] written by aether_l1_arbitrate.h (NOT by the
+  // ComputeGhostMask pass): the CasDiffMVS 1-bit arbitration verdict over the
+  // band15 hide-candidates. Neither bit set on a band15 point = ABSTAIN
+  // (fail-open -> visible, calibrated 误隐=0 policy).
+  kFlagL1Rescued = 1u << 5,    // dense evidence pins it to real geometry
+  kFlagL1Confirmed = 1u << 6,  // rays actively convict it (hide)
+};
+
+// [L1-ARBITRATE 2026-07-12] Optional per-point intermediates of the pass —
+// exactly the values the pass already computes; exposing them lets the L1
+// plan/arbitration sidecars reuse the same signed distances / local anchors
+// without re-deriving them (zero arithmetic added to the parity-gated path).
+struct GhostMaskIntermediates {
+  std::vector<double> sd;         // signed distance to the fitted floor plane
+  std::vector<double> local_off;  // per-cell local floor anchor (0 if none)
 };
 
 struct GhostMaskStats {
@@ -388,7 +403,8 @@ inline void FitFloorPlane(const double* xyz, size_t n, double nrm[3],
 // any PLY-based tooling. flags: resized to n, one GhostFlagBits byte each.
 inline bool ComputeGhostMask(const double* xyz, size_t n,
                              std::vector<uint8_t>* flags,
-                             GhostMaskStats* stats) {
+                             GhostMaskStats* stats,
+                             GhostMaskIntermediates* inter = nullptr) {
   AETHER_GHOST_NO_CONTRACT
   if (!flags || n < 100) return false;  // degenerate cloud: no mask
   flags->assign(n, 0);
@@ -501,6 +517,10 @@ inline bool ComputeGhostMask(const double* xyz, size_t n,
     stats->plane_n[1] = nv[1];
     stats->plane_n[2] = nv[2];
     stats->plane_d = d;
+  }
+  if (inter) {
+    inter->sd = std::move(sd);
+    inter->local_off = std::move(local_off);
   }
   return true;
 }

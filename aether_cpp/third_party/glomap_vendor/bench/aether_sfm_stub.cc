@@ -163,6 +163,12 @@ aether_sfm_result_t aether_sfm_debug_dump_model(aether_sfm_session_t* s,
   return AETHER_SFM_ERR_UNSUPPORTED;
 }
 
+aether_sfm_result_t aether_sfm_arbitrate(aether_sfm_session_t* s,
+                                         char* out_json, int out_cap) {
+  (void)s;
+  return Unsupported(out_json, out_cap);
+}
+
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   (void)s;
