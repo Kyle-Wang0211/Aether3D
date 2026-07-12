@@ -572,10 +572,53 @@ void GlobalPositioner::ParameterizeVariables(
   // Schur complement, Eigen SimplicialLDLT handles it and beats ITERATIVE. tracks==0 has
   // no Schur complement (direct normal eqs) so it stays DENSE_NORMAL_CHOLESKY.
   if (tracks.size() > 0) {
-    int aether_dense_max = 200;
+    // [AETHER 2026-07-12] GP Schur structure observability: unlike BA (points
+    // eliminated, reduced system = cameras), GP's elimination group 0 holds the
+    // per-observation SCALES only — points + camera positions all stay in the
+    // reduced system. Log the ACTUAL reduced dimension before routing.
+    size_t num_point_blocks = 0;
+    for (auto& [track_id, track] : tracks)
+      if (problem_->HasParameterBlock(track.xyz.data())) num_point_blocks++;
+    size_t num_frame_blocks = 0;
+    for (auto& [frame_id, frame] : frames) {
+      if (!frame.HasPose()) continue;
+      if (problem_->HasParameterBlock(
+              frame.RigFromWorld().translation().data()))
+        num_frame_blocks++;
+    }
+    const size_t reduced_dim = 3 * (num_point_blocks + num_frame_blocks);
+    LOG(INFO) << "[AETHER GP] schur structure: eliminated scale blocks="
+              << scales_.size() << ", reduced system points="
+              << num_point_blocks << " frames=" << num_frame_blocks
+              << " dim=" << reduced_dim << " (DENSE_SCHUR reduced matrix = "
+              << (double)reduced_dim * (double)reduced_dim * 8.0 /
+                     (1024.0 * 1024.0 * 1024.0)
+              << " GB)";
+    // [AETHER 2026-07-12 GP-OOM ROOT-CAUSE FIX] Route DENSE_SCHUR on the ACTUAL
+    // reduced-system dimension, NOT num_images. DENSE_SCHUR materialises an
+    // explicit reduced (Schur-complement) matrix over every parameter block NOT
+    // in elimination group 0. In GP, group 0 = per-observation SCALES only, so
+    // the reduced system is 3*(points + frames) = reduced_dim, and the dense
+    // matrix is reduced_dim^2*8 bytes. db_50: 87849^2*8 = 57.5 GB -> macOS
+    // SIGKILLs the VM allocation (exit 137). The old `num_images <= 200` key was
+    // copied from BA (bundle_adjustment.cc), where points ARE the eliminated
+    // e-block and the reduced system genuinely = cameras = num_images; that key
+    // is invalid for GP (points stay in the reduced system). Only image counts
+    // >200 escaped before, by luck of already falling through to the non-dense
+    // branch. Dense is safe/fast only for trivially tiny GP (few points); real
+    // GP has thousands of points, so this branch essentially never fires — which
+    // is correct, DENSE_SCHUR was never appropriate for GP's structure.
+    // Default ceiling 4096^2*8 = 128 MB. AETHER_GP_DENSE_MAXDIM overrides.
+    size_t gp_dense_maxdim = 4096;
+    if (const char* dm = std::getenv("AETHER_GP_DENSE_MAXDIM"))
+      gp_dense_maxdim = strtoul(dm, nullptr, 10);
+    // Back-compat/debug: AETHER_DENSE_MAX historically forced dense by image
+    // count. Honour it ONLY as an explicit force-override (spike/A-B), never as
+    // the default path — set it and you own the 57 GB.
+    bool force_dense = false;
     if (const char* dm = std::getenv("AETHER_DENSE_MAX"))
-      aether_dense_max = atoi(dm);  // [AETHER LAPACK spike] threshold knob
-    if (num_images <= aether_dense_max) {
+      force_dense = (num_images <= atoi(dm));
+    if (reduced_dim <= gp_dense_maxdim || force_dense) {
       options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
       // [AETHER 2026-07-12] value-parsed to match the colmap router's tier
       // routing contract (=1 force LAPACK, =0 force EIGEN): "set means LAPACK"
@@ -586,27 +629,39 @@ void GlobalPositioner::ParameterizeVariables(
               ceres::LAPACK;
       }
     } else {
-      // [AETHER] GP device-OOM salvage: ITERATIVE_SCHUR (CG, NO factorization/fill-in)
-      // for the >200 global-positioning solve. SPARSE_SCHUR+EIGEN_SPARSE here OOM'd on
-      // device (jetsam during "Solving the global positioner problem"; the Eigen LDLT
-      // fill-in on the GP Schur blew past the 4.1GB limit). CG is low-memory. (BA stays
-      // SPARSE+EIGEN — its problem is smaller/sparser and fit at 3.07GB for COLMAP.)
-      options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
-      options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
-      // [SPSE VERDICT 2026-07-05: REJECTED — 3.2x SLOWER (82min vs 25min
-      // clean-host dense-414) + ARKit-position gate fail. Single-core
-      // pathology confirmed in clean conditions; PoBA paper numbers do not
-      // transfer to this problem structure. Debug opt-in only.]
-      // [AETHER SPSE spike 2026-07-04] Schur power-series-expansion
-      // preconditioner (Ceres 2.2, PoBA lineage): attacks CG iteration count
-      // on the ITERATIVE path — orthogonal to the rejected explicit-SC axis
-      // (no materialized factorization). Same objective, same convergence
-      // criteria. AETHER_SPSE=1 → preconditioner; =2 → + SPSE initialization.
-      if (const char* e = std::getenv("AETHER_SPSE")) {
-        options_.solver_options.preconditioner_type =
-            ceres::SCHUR_POWER_SERIES_EXPANSION;
-        if (e[0] == '2')
-          options_.solver_options.use_spse_initialization = true;
+      // [AETHER 2026-07-12 DEFAULT] SPARSE_SCHUR + EIGEN_SPARSE — the upstream
+      // GLOMAP GP solver family (upstream uses SPARSE_SCHUR), a DIRECT sparse
+      // factorization: deterministic, exact, and — unlike DENSE_SCHUR — it never
+      // materialises the reduced_dim×reduced_dim dense matrix, so no 57 GB OOM.
+      // This REPLACES the former ITERATIVE_SCHUR default, which existed ONLY as a
+      // device-jetsam salvage (the 4.1 GB iOS limit). glomap-src is now HOST-BENCH
+      // ONLY (iOS production does not build GLOMAP), so that constraint is void and
+      // ITERATIVE's cost is real: its parallel-CG is non-deterministic and on the
+      // weakly-triangulated db.db/396 it METASTABLY COLLAPSED to 3 registered images
+      // on one run while a sibling run kept all 396 — same solver, same problem
+      // (bit-identical GP initial cost), pure run-to-run coin-flip. SPARSE+EIGEN was
+      // validated healthy on that exact db (2026-06-25 b17820ea: db.db/396 reproj
+      // 0.959–0.961, peak 3.77 GB). EIGEN_SPARSE (not Accelerate) also keeps the
+      // path iOS-safe if ever reused. ITERATIVE stays available via AETHER_GP_ITERATIVE.
+      options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+      options_.solver_options.sparse_linear_algebra_library_type =
+          ceres::EIGEN_SPARSE;
+      // [AETHER opt-in] device-parity / low-memory salvage: the old CG path.
+      // AETHER_GP_ITERATIVE=1 → ITERATIVE_SCHUR + SCHUR_JACOBI (low RSS, but
+      // non-deterministic + collapse-prone on fragile captures — debug/device-A-B only).
+      if (std::getenv("AETHER_GP_ITERATIVE")) {
+        options_.solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+        options_.solver_options.preconditioner_type = ceres::SCHUR_JACOBI;
+        // [SPSE VERDICT 2026-07-05: REJECTED — 3.2x SLOWER (82min vs 25min
+        // clean-host dense-414) + ARKit-position gate fail. Debug opt-in only.]
+        // Schur power-series-expansion preconditioner (Ceres 2.2, PoBA lineage).
+        // AETHER_SPSE=1 → preconditioner; =2 → + SPSE initialization.
+        if (const char* e = std::getenv("AETHER_SPSE")) {
+          options_.solver_options.preconditioner_type =
+              ceres::SCHUR_POWER_SERIES_EXPANSION;
+          if (e[0] == '2')
+            options_.solver_options.use_spse_initialization = true;
+        }
       }
     }
   } else {
