@@ -397,6 +397,17 @@ struct aether_sfm_session {
   int ba_window = 12;    // W: most-recent frames refined per pass (K=12 validated)
   int ba_every_n = 1;    // run the windowed BA every Nth frame (raise under thermal)
   int ba_max_iters = 5;  // bounded ceres iters/frame for the ~2s budget
+  // ── [INCREMENTAL-GLOBAL-BA 2026-07-13] Rolling capture-time global BA ────────
+  // DEFAULT OFF (AETHER_INCREMENTAL_GLOBAL_BA=1). Every N registered frames the
+  // worker runs a bounded, observation-capped, pose-only global BA over live_recon
+  // (MaybeIncrementalGlobalRefine) so accumulated ARKit-pose drift is corrected AS
+  // IT GROWS — a sliding window at a time — instead of in one 74s finalize solve.
+  // When any incremental refine has fired, the finalize global solve COLLAPSES its
+  // round budget (see RefineGlobalBA). Written+read only on the capture-worker
+  // isolate that owns live_recon, so no lock (mirrors aether_sfm_global_refine).
+  size_t last_global_refine_reg = 0;       // reg_order.size() at the last refine
+  bool incremental_global_ba_ran = false;  // any incremental refine fired this run
+  int64_t stat_incremental_refines = 0;    // # incremental refines executed
   // Cumulative streaming-quality telemetry (whole capture) — surfaced by
   // aether_sfm_stream_stats so the worker can log which floater filter did what.
   int64_t stat_tvg_inlier_pairs = 0;  // grow/create pairs taken from TVG inliers
@@ -1115,6 +1126,53 @@ int Stage1RoundsCap() {
 }
 double Stage1FtolOverride() {
   static const double cached = EnvGateDouble("AETHER_STAGE1_FTOL", 0.0);
+  return cached;
+}
+
+// [INCREMENTAL-GLOBAL-BA 2026-07-13] Rolling capture-time global BA over
+// live_recon (DEFAULT OFF). See the session fields + MaybeIncrementalGlobalRefine
+// + the finalize collapse in RefineGlobalBA. All four knobs are env-gated so the
+// cap51 host A/B can sweep cadence/window/finalize-rounds without a rebuild.
+//   AETHER_INCREMENTAL_GLOBAL_BA=1        enable (default OFF → zero ship impact)
+//   AETHER_INCREMENTAL_GLOBAL_BA_EVERY_N  refine cadence, registered frames (25)
+//   AETHER_INCREMENTAL_GLOBAL_BA_WINDOW   free-pose sliding-window size (40)
+//   AETHER_INCREMENTAL_FINALIZE_ROUNDS    finalize global-BA round cap once the
+//                                         rolling refine has run (2 = "1-2 轮收尾")
+bool IncrementalGlobalBaEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("AETHER_INCREMENTAL_GLOBAL_BA");
+    return e && e[0] == '1';
+  }();
+  return cached;
+}
+int IncrementalGlobalBaEveryN() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_INCREMENTAL_GLOBAL_BA_EVERY_N")) {
+      const int v = std::atoi(e);
+      if (v > 0) return v;
+    }
+    return 25;  // ~one bounded refine per 25 registered frames
+  }();
+  return cached;
+}
+int IncrementalGlobalBaWindow() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_INCREMENTAL_GLOBAL_BA_WINDOW")) {
+      const int v = std::atoi(e);
+      if (v > 0) return v;
+    }
+    return 40;  // most-recent 40 frames get FREE poses; older = fixed anchors
+  }();
+  return cached;
+}
+int IncrementalFinalizeRounds() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("AETHER_INCREMENTAL_FINALIZE_ROUNDS")) {
+      const int v = std::atoi(e);
+      if (v > 0) return v;
+    }
+    return 2;  // finalize global BA rounds once the rolling refine pre-converged
+  }();
   return cached;
 }
 
@@ -4086,6 +4144,26 @@ void RefineGlobalBA(aether_sfm_session* s,
     } catch (...) {
     }
     auto popts = MakePhase2Options(s);
+    // [INCREMENTAL-GLOBAL-BA 2026-07-13] If the rolling capture-time global BA
+    // ran this session, live_recon's poses are already near the global optimum, so
+    // the finalize global solve COLLAPSES: cap the round budget (default 2 — the
+    // "1-2 轮收尾"). Both stage 1 and stage 2 still run CompleteAndMergeTracks +
+    // Retriangulate every round, so the ≥1-track-completion requirement holds and
+    // the finalize free-gauge solve still closes revisit pairs that only appear in
+    // the enrichment (which the capture-time sliding window could not — see
+    // MaybeIncrementalGlobalRefine's quality note). The converge-stop usually
+    // breaks after round 1 anyway; this cap is the belt-and-suspenders lever the
+    // cap51 A/B sweeps (AETHER_INCREMENTAL_FINALIZE_ROUNDS). Default OFF is
+    // preserved: incremental_global_ba_ran is only set when the env-gated trigger
+    // actually fired, so shipped captures are byte-for-byte unchanged.
+    if (s->incremental_global_ba_ran) {
+      const int cap = std::max(1, IncrementalFinalizeRounds());
+      const int before = popts->ba_global_max_refinements;
+      popts->ba_global_max_refinements = std::min(before, cap);
+      LOG(WARNING) << "[aether_sfm] finalize collapse: incremental global BA ran ("
+                   << s->stat_incremental_refines << " refines) → global-BA rounds "
+                   << before << " → " << popts->ba_global_max_refinements;
+    }
     std::shared_ptr<colmap::Reconstruction> refined;
     double enrich_ms = 0.0, cache_pre_ms = 0.0, stage1_ms = 0.0;
     int stage1_rounds = 0;
@@ -4453,6 +4531,126 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
     return AETHER_SFM_OK;
   } catch (const std::exception&) {
     return AETHER_SFM_ERR_DB;
+  }
+}
+
+// [INCREMENTAL-GLOBAL-BA 2026-07-13] Rolling capture-time global BA over
+// live_recon. DEFAULT OFF (AETHER_INCREMENTAL_GLOBAL_BA=1). Called from the tail
+// of AddFrameFeaturesImpl on the capture-worker isolate — the SAME thread that
+// owns live_recon — so it takes no lock (mirrors aether_sfm_global_refine's
+// threading contract). Fires only every IncrementalGlobalBaEveryN() registered
+// frames; a single call must stay well under the ~2s per-frame SLA or it stalls
+// the next frame and drops the capture frame-rate (the device A/B measures this).
+//
+// LIGHT CONFIG (deliberately weaker than the finalize solve): ONE pose-correcting
+// global BA pass — no structure-only stage 2 (that is left to finalize) — CAUCHY,
+// iter 10, observation-capped to the longest (revisit-spanning) tracks so cost is
+// DECOUPLED from total point count. Focal/pp fixed (trust the ARKit-seeded shared
+// camera), exactly like aether_sfm_global_refine stage 1.
+//
+// LOCAL-GLOBAL HYBRID (the bounded-cost trick): only frames registered in the
+// most-recent IncrementalGlobalBaWindow() get FREE poses; every older frame is
+// added as a SetConstantRigFromWorldPose ANCHOR. Fixed anchors pin the gauge (no
+// FixGauge needed) AND — because a revisit-spanning long track links a fresh free
+// frame to an OLD fixed frame — the solve pulls the fresh pose onto the already-
+// corrected anchor, collapsing the accumulating double-wall drift a window at a
+// time. Free-pose count ≈ window and points are obs-capped, so cost stays bounded
+// regardless of N (frozen anchors add residuals but no parameters).
+//
+// ⚠️ QUALITY CONSEQUENCE — WHY THIS MUST BE HOST-VALIDATED BEFORE DEFAULT-ON:
+//  (1) Freezing old poses makes this an EXPANDING SLIDING-WINDOW BA, not a full
+//      free-gauge global solve. Drift baked into an anchor before it was frozen is
+//      not re-optimized here; the design bet (standard incremental SLAM) is that
+//      correcting drift while it is still local keeps cumulative live_recon ≈ the
+//      one-shot finalize global solve. Unproven until the cap51 A/B.
+//  (2) The double-wall only closes for tracks that EXIST during capture (temporal
+//      + live-spatial matches). Revisit pairs that materialize only in the finalize
+//      enrichment (AddSpatialRevisitMatches) never existed here, so finalize's
+//      free-gauge solve + track completion remain REQUIRED (see RefineGlobalBA).
+// THERMAL-GATED (safe-fail): thermal>=3 (critical) skips entirely to give the
+// camera/GPU the device; thermal>=2 (serious) doubles the effective cadence. A
+// cold device does the full cadence; a hot device degrades toward current behavior
+// and never crashes (every failure is caught → the windowed cloud is untouched).
+static void MaybeIncrementalGlobalRefine(aether_sfm_session* s) {
+  if (!IncrementalGlobalBaEnabled()) return;
+  if (!s || !s->live_recon_ready || !s->live_recon) return;
+  const int thermal_now = s->thermal_state.load(std::memory_order_relaxed);
+  if (thermal_now >= 3) return;  // critical: hand the device to camera/GPU
+  const size_t n_reg = s->reg_order.size();
+  if (n_reg < 3) return;
+  const size_t every = static_cast<size_t>(IncrementalGlobalBaEveryN()) *
+                       (thermal_now >= 2 ? 2 : 1);  // serious → half the cadence
+  if (n_reg < s->last_global_refine_reg + every) return;
+
+  const double t0 = NowMs();
+  try {
+    // ---- Free-pose sliding window: recent frames free, older frames frozen ----
+    const size_t window = static_cast<size_t>(IncrementalGlobalBaWindow());
+    const size_t free_from = n_reg > window ? n_reg - window : 0;
+    colmap::BundleAdjustmentConfig cfg;
+    size_t n_frozen = 0;
+    for (size_t i = 0; i < n_reg; ++i) {
+      const colmap::image_t img = s->reg_order[i];
+      cfg.AddImage(img);
+      if (i < free_from) {
+        // Frozen anchor: its observations of the variable points still constrain
+        // the free poses, but its own world pose does not move.
+        cfg.SetConstantRigFromWorldPose(s->live_recon->Image(img).FrameId());
+        ++n_frozen;
+      }
+    }
+    if (free_from == 0)  // whole capture inside one window → pin the gauge
+      cfg.FixGauge(colmap::BundleAdjustmentGauge::THREE_POINTS);
+
+    // Observation cap: rank tracks longest-first (longest = revisit-spanning) and
+    // add as variable points until the budget is hit — same bound as
+    // aether_sfm_global_refine, so cost is decoupled from total point count.
+    const size_t kMaxObs =
+        std::min<size_t>(400000, std::max<size_t>(80000, n_reg * 120));
+    std::vector<std::pair<int, colmap::point3D_t>> ranked;
+    ranked.reserve(s->live_recon->NumPoints3D());
+    for (const auto& [pid, pt] : s->live_recon->Points3D())
+      ranked.emplace_back(static_cast<int>(pt.track.Length()), pid);
+    std::sort(ranked.begin(), ranked.end(),
+              std::greater<std::pair<int, colmap::point3D_t>>());
+    size_t obs_budget = 0;
+    for (const auto& [len, pid] : ranked) {
+      if (obs_budget >= kMaxObs) break;
+      cfg.AddVariablePoint(pid);
+      obs_budget += static_cast<size_t>(len);
+    }
+
+    colmap::BundleAdjustmentOptions opt;
+    opt.refine_rig_from_world = true;    // non-anchor poses redistribute drift
+    opt.refine_points3D = true;
+    opt.refine_focal_length = false;     // trust the ARKit focal (one shared cam)
+    opt.refine_principal_point = false;
+    opt.print_summary = false;
+    opt.ceres->loss_function_type =
+        colmap::CeresBundleAdjustmentOptions::LossFunctionType::CAUCHY;
+    opt.ceres->loss_function_scale = 1.0;
+    opt.ceres->solver_options.max_num_iterations = 10;  // light (vs 25 finalize)
+    // Leave core headroom for the camera / GPU matcher / UI mid-capture; the exact
+    // thread count is a device-A/B tuning knob (A16 → 4, host M3 Pro → 6).
+    opt.ceres->solver_options.num_threads = FinalizeBaThreads();
+    colmap::CreateDefaultBundleAdjuster(opt, cfg, *s->live_recon)->Solve();
+
+    s->last_global_refine_reg = n_reg;
+    s->incremental_global_ba_ran = true;
+    ++s->stat_incremental_refines;
+    LOG(WARNING) << "[aether_sfm] incremental global BA #"
+                 << s->stat_incremental_refines << " reg=" << n_reg
+                 << " free=" << (n_reg - n_frozen) << " frozen=" << n_frozen
+                 << " varpts_obs<=" << kMaxObs << " thermal=" << thermal_now
+                 << " took=" << static_cast<int64_t>(NowMs() - t0) << "ms";
+    // NOTE: no preview re-publish here — the unconditional preview snapshot right
+    // after the caller's windowed-BA block already reads this refined live_recon.
+  } catch (const std::exception& e) {
+    // Safe-fail: keep the windowed cloud; advance the counter so a persistent
+    // failure does not retry (and stall) every subsequent frame.
+    s->last_global_refine_reg = n_reg;
+    LOG(WARNING) << "[aether_sfm] incremental global BA skipped (" << e.what()
+                 << ") — windowed cloud kept";
   }
 }
 
@@ -5028,6 +5226,12 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
         // A degenerate window / filter error must not kill capture — carry on.
       }
     }
+
+    // [INCREMENTAL-GLOBAL-BA 2026-07-13] Rolling capture-time global BA over
+    // live_recon (DEFAULT OFF; AETHER_INCREMENTAL_GLOBAL_BA=1). No-op unless the
+    // env switch is on and the cadence/thermal gates pass; mutates live_recon in
+    // place, so the unconditional preview snapshot just below reflects it.
+    MaybeIncrementalGlobalRefine(s);
 
     // Publish the BA-refined live cloud into preview_points (served unchanged by
     // the getter). Short lock; the getter never blocks on the BA itself.
