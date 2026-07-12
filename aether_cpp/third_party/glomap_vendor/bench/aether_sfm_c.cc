@@ -3895,6 +3895,7 @@ void WriteL1PlanSidecars(aether_sfm_session* s,
                << " cov1=" << plan.n_cells_cov1
                << " cov0=" << plan.n_cells_cov0
                << " dropped_srcs=" << plan.n_refs_dropped_srcs
+               << " missing_jpeg=" << plan.n_frames_missing_jpeg
                << " write=" << (ok ? "ok" : "FAILED") << " ("
                << static_cast<int>(NowMs() - t0) << "ms)";
 }

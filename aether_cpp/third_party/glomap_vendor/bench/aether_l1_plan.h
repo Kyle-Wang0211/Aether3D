@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -91,6 +92,7 @@ struct L1Plan {
   int n_cells_cov1 = 0;   // partially covered (will abstain on vote_min)
   int n_cells_cov0 = 0;   // uncovered -> abstain (= visible)
   int n_refs_dropped_srcs = 0;  // eligible refs dropped for lacking 4 srcs
+  int n_frames_missing_jpeg = 0;  // [L1-ROBUST] fed-path validation drops
   double plane_n[3] = {0, 0, 0};
   double plane_d = 0;
 };
@@ -288,10 +290,24 @@ inline bool BuildL1Plan(const double* cloud_xyz, const uint8_t* flags,
   }
 
   // 2. view pool (any frame usable as ref or src) + sorted-unique obs.
+  // [L1-ROBUST 2026-07-12] Plan-time JPEG-path validation. A re-shot capture
+  // slot overwrites the file under a NEW tap-suffix, so the frame's fed jsonl
+  // path (recorded at feed time) can dangle. A dangling path fed to the Swift
+  // runner aborted the WHOLE chain (cap48: cell_85_slot_9_tap-484 dead → 1/11
+  // refs → 100% abstain). Here we drop any frame whose JPEG no longer exists
+  // from the view pool entirely: it can never be picked as ref or src, so the
+  // plan carries only live paths. Marked cells that thereby lose all covers
+  // fall to cov0 and abstain downstream (fail-open == visible; the calibrated
+  // policy). Counted separately from n_refs_dropped_srcs.
   std::vector<int> pool;
   std::vector<std::vector<int32_t>> obs_sorted(frames.size());
   for (size_t f = 0; f < frames.size(); ++f) {
     if (frames[f].jpeg.empty()) continue;
+    std::error_code fs_ec;
+    if (!std::filesystem::exists(frames[f].jpeg, fs_ec) || fs_ec) {
+      ++out->n_frames_missing_jpeg;
+      continue;
+    }
     obs_sorted[f] = frames[f].obs;
     std::sort(obs_sorted[f].begin(), obs_sorted[f].end());
     obs_sorted[f].erase(
@@ -477,9 +493,10 @@ inline bool WriteL1PlanJson(const std::string& path, const L1Plan& plan,
   std::snprintf(buf, sizeof(buf),
                 ",\"n_marked_cells\":%d,\"n_cells_cov2\":%d,"
                 "\"n_cells_cov1\":%d,\"n_cells_cov0\":%d,"
-                "\"n_refs_dropped_srcs\":%d,",
+                "\"n_refs_dropped_srcs\":%d,\"n_frames_missing_jpeg\":%d,",
                 plan.n_marked_cells, plan.n_cells_cov2, plan.n_cells_cov1,
-                plan.n_cells_cov0, plan.n_refs_dropped_srcs);
+                plan.n_cells_cov0, plan.n_refs_dropped_srcs,
+                plan.n_frames_missing_jpeg);
   j += buf;
   j += "\"refs\":[";
   static const double kStageF[4] = {0.125, 0.25, 0.5, 1.0};
