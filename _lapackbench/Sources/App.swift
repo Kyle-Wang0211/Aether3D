@@ -13,6 +13,17 @@ struct SfmLapackBenchApp: App {
 
 func docs() -> String { NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0] }
 
+func physFootprintMB() -> Double {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) { p in
+        p.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { ip in
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), ip, &count)
+        }
+    }
+    return kr == KERN_SUCCESS ? Double(info.phys_footprint) / 1048576.0 : -1
+}
+
 func thermalStr() -> String {
     switch ProcessInfo.processInfo.thermalState {
     case .nominal: return "nominal"
@@ -69,15 +80,17 @@ func runBattery(_ ui: @escaping (String) -> Void) {
         // Both arms force DENSE_SCHUR at every size so the ONLY difference is
         // the dense backend (EIGEN vs LAPACK/Accelerate).
         setenv("AETHER_EXTRA_DENSE", "1", 1)
-        // Alternating, >=2 rounds per arm, LAPACK first in pair 2 to cancel drift.
-        let rounds: [(String, Bool)] = [("E1", false), ("L1", true), ("L2", true), ("E2", false)]
+        // Pair 2 relaunch (pair 1 = E1,L1 ran in a previous launch; the 4-round
+        // single-process battery died at round 3, suspected jetsam). Fresh
+        // process runs L2,E2 — position-counterbalanced vs pair 1.
+        let rounds: [(String, Bool)] = [("L2", true), ("E2", false)]
         L.line("device battery start rounds=\(rounds.map { $0.0 }.joined(separator: ","))")
         for (name, lapack) in rounds {
             // Thermal control: wait until state <= fair (max 5 min).
             var waited = 0
             while true {
                 let t = thermalStr()
-                if t == "nominal" || t == "fair" || waited >= 300 { L.line("round \(name) thermal_pre=\(t) waited=\(waited)s"); break }
+                if t == "nominal" || t == "fair" || waited >= 300 { L.line("round \(name) thermal_pre=\(t) waited=\(waited)s footprint=\(String(format: "%.0f", physFootprintMB()))MB"); break }
                 Thread.sleep(forTimeInterval: 15); waited += 15
             }
             if lapack { setenv("AETHER_DENSE_LAPACK", "1", 1) } else { unsetenv("AETHER_DENSE_LAPACK") }
