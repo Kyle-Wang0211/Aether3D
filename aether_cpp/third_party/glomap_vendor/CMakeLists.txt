@@ -208,6 +208,16 @@ if(BUILD_BENCH)
     "-lsqlite3"
     ${ACCELERATE_FW})
 
+  # ─── [GHOST-MASK 2026-07-12] parity gate for aether_ghost_mask.h ───
+  # ghost_mask_parity_exe runs the ghost-layer display-mask pass (D band @1.5cm
+  # + per-cell bimodal detector) over a device sparse PLY and dumps the flag
+  # bytes; the gate is `cmp`-identical vs the Python Phase0 reference
+  # (scratchpad/ghost_l1/gen_ref_flags.py). Header-only pass, zero deps.
+  # -ffp-contract=off: the pass mirrors NumPy non-fused arithmetic bit-for-bit.
+  add_executable(ghost_mask_parity_exe bench/ghost_mask_parity.cc)
+  set_target_properties(ghost_mask_parity_exe PROPERTIES CXX_STANDARD 17)
+  target_compile_options(ghost_mask_parity_exe PRIVATE -w -ffp-contract=off)
+
   # parameterized incremental-SfM bench (HOST ceres 2.2.0 + glog) — per-frame
   # registration cost curve + reproj for the <=2s@frame-300 SLA lever sweeps.
   # BA option fields via argv -> run many configs in parallel on a read-only db.

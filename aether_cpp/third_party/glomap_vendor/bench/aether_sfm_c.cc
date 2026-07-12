@@ -71,6 +71,10 @@
 #include <utility>
 #include <vector>
 
+// [GHOST-MASK 2026-07-12] Per-point ghost-layer display-mask pass (header-only,
+// self-contained; parity-gated against the Python Phase0 reference).
+#include "aether_ghost_mask.h"
+
 // On-device DSP-SIFT extractor + CPU matcher (dsp_sift_c.cc, same archive set).
 extern "C" int aether_dsp_sift_extract(const uint8_t* gray, int width,
                                        int height, int max_features,
@@ -3501,6 +3505,10 @@ aether_sfm_result_t RunIncremental(
 // old chain never hit this only because its phase 1 silently dropped such
 // frames. Cost: fallback duplicates the old full re-run — paid ONLY on an
 // exception that previously ended the whole finalize in ERROR.
+// [GHOST-MASK 2026-07-12] defined after WriteFinalizeSegments below.
+void MaybeWriteGhostMask(aether_sfm_session* s,
+                         const colmap::Reconstruction& recon);
+
 void RefineFallbackFullRerun(aether_sfm_session* s, const char* why) {
   LOG(WARNING) << "[aether_sfm] refine failed (" << why
                << ") — falling back to db-driven full re-run";
@@ -3519,6 +3527,7 @@ void RefineFallbackFullRerun(aether_sfm_session* s, const char* why) {
     RestoreTemporalDetail(s, refined.get());
     UpgradeLowParallaxTracks(s, refined.get());  // env-gated no-op by default
     MergeFragmentTracks(s, refined.get());       // env-gated no-op by default
+    MaybeWriteGhostMask(s, *refined);            // env-gated no-op by default
     {
       std::lock_guard<std::mutex> lk(s->recon_mutex);
       s->recon_manager = manager;
@@ -3725,6 +3734,108 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
     if (ec) std::remove(tmp.string().c_str());
   } catch (...) {
     // Telemetry only — never take the finalize down.
+  }
+}
+
+// [GHOST-MASK 2026-07-12] Env-gated (AETHER_GHOST_MASK=1, default OFF) ghost
+// layer display-mask sidecar. Runs the aether_ghost_mask.h pass (Phase0
+// D band @1.5cm + per-cell bimodal detector, parity-gated bit-identical to the
+// Python reference on the cap46/47 device clouds) over the finalize model and
+// writes per-point flag bytes to <db_dir>/ghost_mask.bin plus a stats JSON to
+// <db_dir>/ghost_mask.json. DISPLAY-ONLY metadata for the selection-view
+// render gate (L2) and the L1 CasDiffMVS arbitration: NO point is deleted or
+// moved, the delivered PLY/db stay byte-identical (全量交付铁律).
+//  - flag order == Points3D() iteration order == aether_sfm_get_points /
+//    get_points_tracked enumeration (the map is not mutated after REFINED, so
+//    a later getter sees the same order; the Dart PLY writer preserves it).
+//  - coordinates are float32-cast first (the delivered-PLY quantization) so
+//    the flags match what PLY-based tooling recomputes bit-for-bit.
+//  - best-effort: failures are logged and swallowed; never blocks finalize.
+void MaybeWriteGhostMask(aether_sfm_session* s,
+                         const colmap::Reconstruction& recon) {
+  const char* e = std::getenv("AETHER_GHOST_MASK");
+  if (!e || e[0] != '1') return;
+  try {
+    const double t0 = NowMs();
+    const auto& pts = recon.Points3D();
+    std::vector<double> xyz;
+    xyz.reserve(pts.size() * 3);
+    for (const auto& [pid, pt] : pts) {
+      xyz.push_back(static_cast<double>(static_cast<float>(pt.xyz.x())));
+      xyz.push_back(static_cast<double>(static_cast<float>(pt.xyz.y())));
+      xyz.push_back(static_cast<double>(static_cast<float>(pt.xyz.z())));
+    }
+    std::vector<uint8_t> flags;
+    aether_ghost::GhostMaskStats st;
+    if (!aether_ghost::ComputeGhostMask(xyz.data(), xyz.size() / 3, &flags,
+                                        &st)) {
+      LOG(WARNING) << "[aether_sfm] ghost_mask: degenerate cloud ("
+                   << xyz.size() / 3 << " pts) — no sidecar";
+      return;
+    }
+    const std::filesystem::path dir =
+        std::filesystem::path(s->db_path).parent_path();
+    {
+      const std::filesystem::path tmp = dir / "ghost_mask.bin.tmp";
+      FILE* f = std::fopen(tmp.string().c_str(), "wb");
+      if (!f) return;
+      const size_t w = std::fwrite(flags.data(), 1, flags.size(), f);
+      std::fclose(f);
+      if (w != flags.size()) {
+        std::remove(tmp.string().c_str());
+        return;
+      }
+      std::error_code ec;
+      std::filesystem::rename(tmp, dir / "ghost_mask.bin", ec);
+      if (ec) {
+        std::remove(tmp.string().c_str());
+        return;
+      }
+    }
+    char buf[768];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "{\"version\":1,\"n_points\":%lld,\"n_region\":%lld,"
+        "\"n_band15\":%lld,\"n_band10\":%lld,\"n_cell_ghost\":%lld,"
+        "\"n_clean\":%lld,\"n_bim_cells\":%lld,\"n_floor_cells\":%lld,"
+        "\"plane_n\":[%.17g,%.17g,%.17g],\"plane_d\":%.17g,"
+        "\"pass_ms\":%lld,"
+        "\"bits\":\"0:in_region,1:band15,2:cell_ghost,3:in_clean,"
+        "4:band10\",\"order\":\"points3d_iteration==get_points\"}\n",
+        static_cast<long long>(st.n_points),
+        static_cast<long long>(st.n_region),
+        static_cast<long long>(st.n_band15),
+        static_cast<long long>(st.n_band10),
+        static_cast<long long>(st.n_cell_ghost),
+        static_cast<long long>(st.n_clean),
+        static_cast<long long>(st.n_bim_cells),
+        static_cast<long long>(st.n_floor_cells), st.plane_n[0], st.plane_n[1],
+        st.plane_n[2], st.plane_d, static_cast<long long>(NowMs() - t0));
+    if (n > 0 && n < static_cast<int>(sizeof(buf))) {
+      const std::filesystem::path tmp = dir / "ghost_mask.json.tmp";
+      FILE* f = std::fopen(tmp.string().c_str(), "w");
+      if (f) {
+        const size_t w = std::fwrite(buf, 1, static_cast<size_t>(n), f);
+        std::fclose(f);
+        std::error_code ec;
+        if (w == static_cast<size_t>(n)) {
+          std::filesystem::rename(tmp, dir / "ghost_mask.json", ec);
+        }
+        if (w != static_cast<size_t>(n) || ec)
+          std::remove(tmp.string().c_str());
+      }
+    }
+    LOG(WARNING) << "[aether_sfm] ghost_mask: n=" << st.n_points
+                 << " region=" << st.n_region << " band15=" << st.n_band15
+                 << " cell_ghost=" << st.n_cell_ghost
+                 << " bim_cells=" << st.n_bim_cells << "/"
+                 << st.n_floor_cells << " (" << static_cast<int>(NowMs() - t0)
+                 << "ms)";
+  } catch (const std::exception& ex) {
+    LOG(WARNING) << "[aether_sfm] ghost_mask failed (swallowed): "
+                 << ex.what();
+  } catch (...) {
+    LOG(WARNING) << "[aether_sfm] ghost_mask failed (swallowed)";
   }
 }
 
@@ -3997,6 +4108,10 @@ void RefineGlobalBA(aether_sfm_session* s,
     // [P2-FRAG-MERGE 2026-07-11] Finalize-tail duplicate-fragment merge
     // (env-gated no-op by default; sets s->frag_ms + stat_frag_*).
     MergeFragmentTracks(s, refined.get());
+    // [GHOST-MASK 2026-07-12] Display-mask sidecar over the delivered model
+    // (env-gated no-op by default; runs AFTER every pass that can move/merge
+    // points so the flags describe exactly what the getters will serve).
+    MaybeWriteGhostMask(s, *refined);
     LOG(WARNING) << "[aether_sfm] finalize worker: cache_pre="
                  << static_cast<int64_t>(cache_pre_ms)
                  << "ms enrich=" << static_cast<int64_t>(enrich_ms)
@@ -4799,6 +4914,9 @@ aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
     if (!recon || recon->NumRegImages() == 0) {
       return AETHER_SFM_ERR_NOT_REGISTERED;
     }
+    // [GHOST-MASK 2026-07-12] Sidecar for the sync/bench path too (env-gated
+    // no-op by default) so host replays exercise the same pass.
+    MaybeWriteGhostMask(s, *recon);
     return AETHER_SFM_OK;
   } catch (const std::exception&) {
     return AETHER_SFM_ERR_INTERNAL;
