@@ -377,6 +377,33 @@ extern "C" int glomap_bench_write(const char* db_path, const char* out_dir,
     double reproj_glomap = -1.0;
     try { reproj_glomap = recon->ComputeMeanReprojectionError(); } catch (...) {}
 
+    // [AETHER LAPACK-TIER SCAN 2026-07-12] Dump the PRE-extra-BA model so the
+    // standalone ba_replay_bench can re-run ONLY the finalize CAUCHY BA
+    // back-to-back (EIGEN/LAPACK alternation, same process, heat-controlled)
+    // from an identical starting state, without paying the full GLOMAP chain
+    // per timing round. AETHER_PREBA_DIR=<dir> writes the model;
+    // AETHER_PREBA_ONLY=1 additionally skips the extra BA + final write (model
+    // generation for the scan does not need them).
+    if (const char* preba_dir = std::getenv("AETHER_PREBA_DIR")) {
+      const char* preba_wrote = "yes";
+      try {
+        colmap::CreateDirIfNotExists(std::string(preba_dir), /*recursive=*/true);
+        recon->Write(preba_dir);
+      } catch (const std::exception&) { preba_wrote = "throw"; }
+      fprintf(stderr, "[AETHER] preba model write=%s dir=%s\n", preba_wrote,
+              preba_dir);
+      fflush(stderr);
+      if (std::getenv("AETHER_PREBA_ONLY")) {
+        std::snprintf(out_json, out_cap,
+                      "{\"solve_ms\":%.1f,\"n_registered\":%zu,"
+                      "\"n_tracks\":%zu,\"recon_pts\":%zu,\"recon_imgs\":%zu,"
+                      "\"reproj_glomap\":%.4f,\"preba_wrote\":\"%s\"}",
+                      t_solve_ms, n_reg, n_tracks_final, recon_pts, recon_imgs,
+                      reproj_glomap, preba_wrote);
+        return 0;
+      }
+    }
+
     // ── extra COLMAP global BA — replicates BundleAdjustmentController::Run() with
     // the low-level estimator API (colmap CLI defaults = default-constructed
     // BundleAdjustmentOptions, exactly what host `colmap bundle_adjuster` uses). ──

@@ -93,7 +93,10 @@ func runBattery(_ ui: @escaping (String) -> Void) {
                 if t == "nominal" || t == "fair" || waited >= 300 { L.line("round \(name) thermal_pre=\(t) waited=\(waited)s footprint=\(String(format: "%.0f", physFootprintMB()))MB"); break }
                 Thread.sleep(forTimeInterval: 15); waited += 15
             }
-            if lapack { setenv("AETHER_DENSE_LAPACK", "1", 1) } else { unsetenv("AETHER_DENSE_LAPACK") }
+            // [2026-07-12 tier routing] E arm now sets =0 explicitly (force
+            // EIGEN): with the num_images tier routing in the colmap router,
+            // an UNSET env means "route by size" — no longer a forced-E arm.
+            setenv("AETHER_DENSE_LAPACK", lapack ? "1" : "0", 1)
 
             let dbPath = docs() + "/r\(name).db"
             try? FileManager.default.removeItem(atPath: dbPath)

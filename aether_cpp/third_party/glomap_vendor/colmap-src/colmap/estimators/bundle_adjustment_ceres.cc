@@ -69,6 +69,28 @@ std::string g_aether_last_sparse_backend;  // e.g. "EIGEN_SPARSE"
 std::string g_aether_last_dense_backend;   // e.g. "LAPACK" (Accelerate) / "EIGEN"
 int g_aether_last_mixed = 0;
 int g_aether_last_threads = 0;
+
+// [AETHER DENSE-BACKEND TIER ROUTING 2026-07-12] Default num_images threshold
+// at/above which DENSE_SCHUR routes its dense Cholesky to LAPACK (Accelerate)
+// instead of Eigen LLT. Host inflection scan (2026-07-12, M-series host,
+// finalize CAUCHY BA replayed on the same pre-BA model, E/L alternated 2+2
+// rounds per tier, same process, quiet machine):
+//   n_img : 50      121     150     200     250     300     396
+//   gain  : -1.9%*  -1.3%*  -4.0%   -5.3%   -5.0%   -5.4%   -8.1%   (*=noise)
+//   real GLOMAP models: 299 imgs -11.0%, 414 imgs -16.5%
+// Quality: final_cost/reproj identical E vs L at every tier. Inflection = 150
+// (first tier with all-round E/L separation); threshold = 150 + 20% margin,
+// rounded to tens = 180. Overridable at runtime via
+// AETHER_DENSE_LAPACK_MIN_IMAGES; AETHER_DENSE_LAPACK=0/1 force-overrides.
+// ⚠️ The 07-05 "-65%" memory anchor did NOT reproduce as a dense-E vs dense-L
+// comparison — it almost certainly measured LAPACK dense against a different
+// (sparse/deeper-converged) baseline. Host large-scene dense E->L gain is
+// -8..-16.5%.
+// ⚠️ On-device (A16) large-scene gain is INFERRED from the same-library/
+// same-mechanism argument (Accelerate on both), not yet measured on a real
+// large capture — host cap47 (121 imgs) showed no gain, which is exactly why
+// small scenes stay on Eigen.
+constexpr int kAetherDenseLapackMinImagesDefault = 180;
 }  // namespace
 
 void AetherLastBaSolveInfo(std::string* solver_used,
@@ -298,13 +320,12 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
 
   // [AETHER LAPACK spike 2026-07-05] env override wins over ALL routing below
   // (the vendored routing ignores caller options by design; this hook lets a
-  // bench/device A/B force DENSE_SCHUR at any size + the Accelerate LAPACK
-  // dense backend — a DIFFERENT entry point from the crashing
-  // ACCELERATE_SPARSE).
+  // bench/device A/B force DENSE_SCHUR at any size). The dense BACKEND choice
+  // (Eigen LLT vs Accelerate LAPACK) moved to the tier-routing block below,
+  // which applies to EVERY route that lands on DENSE_SCHUR (this hook AND the
+  // auto-selected production finalize path).
   if (std::getenv("AETHER_EXTRA_DENSE")) {
     custom_solver_options.linear_solver_type = ceres::DENSE_SCHUR;
-    if (std::getenv("AETHER_DENSE_LAPACK"))
-      custom_solver_options.dense_linear_algebra_library_type = ceres::LAPACK;
   } else if (std::getenv("AETHER_EXTRA_SS")) {
     // [AETHER gold-fingerprint probe] SPARSE_SCHUR + SuiteSparse/CHOLMOD —
     // the June gold finalize ran inside the pycolmap wheel whose ceres links
@@ -330,6 +351,49 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
       // optimum (no quality change). Matters for the full-scene (>200 img) ITERATIVE path
       // that CAUCHY forces on iOS (Accelerate can't do SPARSE on robust-reweighted eqns).
       custom_solver_options.preconditioner_type = ceres::CLUSTER_JACOBI;
+    }
+  }
+
+  // [AETHER DENSE-BACKEND TIER ROUTING 2026-07-12 — user-signed] Whenever the
+  // routed solver is DENSE_SCHUR (production finalize: threshold 1000 in
+  // incremental_pipeline.cc; bench: AETHER_EXTRA_DENSE), pick the dense
+  // Cholesky backend by problem size:
+  //   small scenes  -> EIGEN  (Eigen LLT: zero dispatch overhead; host scan
+  //                            shows Accelerate has NO gain at <=200 imgs)
+  //   large scenes  -> LAPACK (Apple Accelerate dpotrf/dpotrs, AMX-backed;
+  //                            host 07-05 anchor: ~400 cams extra BA -65%)
+  // Threshold = host inflection scan + 20% safety margin, rounded to tens —
+  // see AETHER_DENSE_LAPACK_MIN_IMAGES default below. Env contract:
+  //   AETHER_DENSE_LAPACK=1          force LAPACK (any size)
+  //   AETHER_DENSE_LAPACK=0          force EIGEN  (any size)
+  //   AETHER_DENSE_LAPACK_MIN_IMAGES override the auto threshold
+  // Builds whose ceres lacks LAPACK (CERES_NO_LAPACK, e.g. Android/HarmonyOS)
+  // stay on EIGEN — availability-guarded, never a hard failure. The
+  // "[AETHER] solver_used=" log + finalize_segments dense_backend field report
+  // whatever ceres ACTUALLY used (read back from the solve summary), so any
+  // routing here stays observable end to end.
+  if (custom_solver_options.linear_solver_type == ceres::DENSE_SCHUR &&
+      custom_solver_options.dense_linear_algebra_library_type ==
+          ceres::EIGEN) {
+    bool want_lapack = false;
+    if (const char* force = std::getenv("AETHER_DENSE_LAPACK")) {
+      want_lapack = std::atoi(force) != 0;
+    } else {
+      int min_images = kAetherDenseLapackMinImagesDefault;
+      if (const char* t = std::getenv("AETHER_DENSE_LAPACK_MIN_IMAGES"))
+        min_images = std::atoi(t);
+      want_lapack = min_images > 0 && num_images >= min_images;
+    }
+    if (want_lapack) {
+      if (ceres::IsDenseLinearAlgebraLibraryTypeAvailable(ceres::LAPACK)) {
+        custom_solver_options.dense_linear_algebra_library_type =
+            ceres::LAPACK;
+      } else {
+        LOG_FIRST_N(WARNING, 1)
+            << "[AETHER] dense tier routing wants LAPACK (num_images="
+            << num_images << ") but this ceres build has no LAPACK support; "
+               "staying on EIGEN.";
+      }
     }
   }
 

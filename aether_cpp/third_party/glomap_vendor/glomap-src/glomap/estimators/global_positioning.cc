@@ -577,9 +577,14 @@ void GlobalPositioner::ParameterizeVariables(
       aether_dense_max = atoi(dm);  // [AETHER LAPACK spike] threshold knob
     if (num_images <= aether_dense_max) {
       options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
-      if (std::getenv("AETHER_DENSE_LAPACK"))
-        options_.solver_options.dense_linear_algebra_library_type =
-            ceres::LAPACK;
+      // [AETHER 2026-07-12] value-parsed to match the colmap router's tier
+      // routing contract (=1 force LAPACK, =0 force EIGEN): "set means LAPACK"
+      // would silently flip =0 into LAPACK here — one env, one semantics.
+      if (const char* f = std::getenv("AETHER_DENSE_LAPACK")) {
+        if (atoi(f) != 0)
+          options_.solver_options.dense_linear_algebra_library_type =
+              ceres::LAPACK;
+      }
     } else {
       // [AETHER] GP device-OOM salvage: ITERATIVE_SCHUR (CG, NO factorization/fill-in)
       // for the >200 global-positioning solve. SPARSE_SCHUR+EIGEN_SPARSE here OOM'd on

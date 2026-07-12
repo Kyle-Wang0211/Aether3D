@@ -120,8 +120,14 @@ bool BundleAdjuster::Solve(std::unordered_map<rig_t, Rig>& rigs,
     aether_dense_max = atoi(dm);  // [AETHER LAPACK spike] threshold sweep knob
   if (num_images <= aether_dense_max) {
     options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
-    if (std::getenv("AETHER_DENSE_LAPACK"))
-      options_.solver_options.dense_linear_algebra_library_type = ceres::LAPACK;
+    // [AETHER 2026-07-12] value-parsed to match the colmap router's tier
+    // routing contract (=1 force LAPACK, =0 force EIGEN) — one env, one
+    // semantics; "set means LAPACK" would silently flip =0 into LAPACK.
+    if (const char* f = std::getenv("AETHER_DENSE_LAPACK")) {
+      if (atoi(f) != 0)
+        options_.solver_options.dense_linear_algebra_library_type =
+            ceres::LAPACK;
+    }
   } else if (std::getenv("AETHER_BA_ITER")) {
     // Former certified default (ITERATIVE_SCHUR+SCHUR_JACOBI), kept as an
     // env fallback after the 2026-07-05 retrial flipped the default to

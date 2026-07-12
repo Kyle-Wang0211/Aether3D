@@ -661,4 +661,23 @@ if(AETHER_HOST_GLOMAP_BENCH)
     /opt/homebrew/lib/libglog.dylib
     sqlite3)
   target_compile_options(glomap_bench_full_exe PRIVATE -w)
+
+  # [AETHER LAPACK-TIER SCAN 2026-07-12] finalize-BA-only replay harness: loads
+  # the pre-extra-BA model dumped by glomap_bench (AETHER_PREBA_DIR) and
+  # re-runs the CAUCHY finalize BA back-to-back with E/L/D dense-backend
+  # alternation in one process (heat-controlled timing). Host-only.
+  add_executable(ba_replay_bench_exe ${V}/bench/ba_replay_bench.cc)
+  target_compile_definitions(ba_replay_bench_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0)
+  target_include_directories(ba_replay_bench_exe BEFORE PRIVATE
+    ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+    /opt/homebrew/include /opt/homebrew/include/eigen3)
+  target_link_libraries(ba_replay_bench_exe
+    glomap_full
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    sqlite3)
+  target_compile_options(ba_replay_bench_exe PRIVATE -w)
 endif()
