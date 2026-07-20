@@ -118,6 +118,36 @@ aether_sfm_result_t aether_sfm_add_frame_features(aether_sfm_session_t* s,
                                                   const double pose_t[3],
                                                   int* out_frame_id);
 
+// Remove one captured frame and ALL of its contribution to the reconstruction.
+// Called when the user deletes a photo: "照片删了,数据也必须删了"(用户签决
+// 2026-07-20)—— the deleted photo must not influence the delivered cloud.
+//
+// Every step is a stock COLMAP operation; this entry point is a forwarding
+// shell with no algorithm of its own:
+//   1. colmap::ObservationManager::DeRegisterFrame(frame_id) — drops every
+//      observation of the frame, deletes 3D points whose track falls below two
+//      elements (DeleteObservation's documented behaviour), maintains the
+//      correspondence-graph visibility counters, then de-registers the frame.
+//      Frames here are trivial rigs (frame_id == image_id, see add_frame).
+//   2. Database::DeleteMatches / DeleteTwoViewGeometry / DeleteInlierMatches
+//      for every pair touching this image — the row stays but is left isolated,
+//      so ANY db-driven rebuild (resume / full-rerun fallback) can no longer
+//      register it. COLMAP has no single-image delete; isolation is the
+//      supported equivalent and needs no raw SQL.
+//
+// ⚠️ Surviving points keep the coordinates they were triangulated at (with the
+// deleted frame participating). Fully erasing its influence requires the
+// caller to re-triangulate + BA afterwards — that is what COLMAP itself does
+// after FilterFrames, and the user signed off on the resulting小幅点云位移
+// ("拍了虚的/有人经过的照片,产生的不良点云本来就该被纠正").
+//
+// out_json (optional) gets
+// {removed_obs, deleted_points, cleared_pairs, n_registered, n_points3d}.
+// Returns AETHER_SFM_OK even when the frame was never registered (no-op).
+aether_sfm_result_t aether_sfm_remove_frame(aether_sfm_session_t* s,
+                                            int frame_id,
+                                            char* out_json, int out_cap);
+
 // Run colmap::IncrementalPipeline over the accumulated db (native incremental
 // triangulation + re-triangulation + local/global BA). out_json (optional)
 // gets {solve_ms,n_registered,n_points3d,reproj_px}.

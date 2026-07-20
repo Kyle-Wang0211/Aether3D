@@ -5330,6 +5330,91 @@ aether_sfm_result_t aether_sfm_add_frame_features(
                               out_frame_id);
 }
 
+// [REMOVE-FRAME 2026-07-20] 用户删照片 → 撤回该帧的全部重建贡献。
+// 用户签决:"照片删了,那数据也必须删了"(拍虚/有人经过的照片产生的不良点云
+// 本来就该被纠正)。三步全部是 COLMAP 现成操作,本函数只做转发,零算法。
+aether_sfm_result_t aether_sfm_remove_frame(aether_sfm_session_t* s,
+                                            int frame_id, char* out_json,
+                                            int out_cap) {
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  try {
+    // frame_id 是 add_frame 返回的序号 = s->frames 下标。
+    if (frame_id < 0 || frame_id >= static_cast<int>(s->frames.size())) {
+      return AETHER_SFM_ERR_INVALID_ARG;
+    }
+    const colmap::image_t image_id = s->frames[frame_id].image_id;
+    if (image_id == 0) return AETHER_SFM_ERR_INVALID_ARG;
+
+    size_t removed_obs = 0, deleted_points = 0, cleared_pairs = 0;
+
+    // ① 重建侧:ObservationManager::DeRegisterFrame 一次做完撤观测 + 删孤儿点
+    //    (track 只剩 2 元时整点删除,见 observation_manager.h 的文档)+ 维护
+    //    correspondence-graph 可见计数 + 取消注册。图以 trivial rig 加入,
+    //    frame_id == image_id(见 AddImageWithTrivialFrame 处注释)。
+    if (s->live_recon && s->live_recon_ready) {
+      const size_t pts_before = s->live_recon->NumPoints3D();
+      const colmap::frame_t fid = static_cast<colmap::frame_t>(image_id);
+      if (s->live_recon->ExistsFrame(fid) &&
+          s->live_recon->Frame(fid).HasPose()) {
+        if (s->live_recon->ExistsImage(image_id)) {
+          removed_obs = s->live_recon->Image(image_id).NumPoints3D();
+        }
+        colmap::ObservationManager obs_mgr(*s->live_recon);
+        obs_mgr.DeRegisterFrame(fid);
+      }
+      const size_t pts_after = s->live_recon->NumPoints3D();
+      deleted_points = pts_before > pts_after ? pts_before - pts_after : 0;
+      // reg_order 是窗口 BA 的输入,必须同步剔除,否则窗口会引用已注销帧。
+      s->reg_order.erase(
+          std::remove(s->reg_order.begin(), s->reg_order.end(), image_id),
+          s->reg_order.end());
+    }
+
+    // ② db 侧:COLMAP 没有"删单张图"接口(只有 ClearImages 清空全部),
+    //    官方支持的等价做法是把它孤立 —— 删掉所有涉及它的配对,任何 db 驱动
+    //    的重建(断点续跑 / refine 失败的 full-rerun 兜底)都无法再注册它。
+    //    图行留着但完全惰性;不写任何裸 SQL。
+    if (s->db) {
+      for (const auto& other : s->frames) {
+        if (other.image_id == 0 || other.image_id == image_id) continue;
+        const colmap::image_t a = image_id, b = other.image_id;
+        // ExistsMatches 有,但没有对应的 ExistsTwoViewGeometry 查询接口;
+        // DeleteTwoViewGeometry 是 SQL DELETE,对不存在的行本就是空操作,
+        // 无条件调用即可。cleared_pairs 只统计确实存在过的原始匹配对。
+        if (s->db->ExistsMatches(a, b)) {
+          s->db->DeleteMatches(a, b);
+          ++cleared_pairs;
+        }
+        s->db->DeleteTwoViewGeometry(a, b);
+      }
+    }
+
+    // ③ 标记该帧已撤回,后续 add_frame 的候选选择不得再选它。
+    s->frames[frame_id].image_id = 0;
+    s->frames[frame_id].descriptors.clear();
+    s->frames[frame_id].descriptors.shrink_to_fit();
+    s->frames[frame_id].points.clear();
+    s->frames[frame_id].points.shrink_to_fit();
+    s->frames[frame_id].n_keypoints = 0;
+
+    if (out_json && out_cap > 0) {
+      std::snprintf(
+          out_json, static_cast<size_t>(out_cap),
+          "{\"removed_obs\":%zu,\"deleted_points\":%zu,\"cleared_pairs\":%zu,"
+          "\"n_registered\":%zu,\"n_points3d\":%zu}",
+          removed_obs, deleted_points, cleared_pairs,
+          s->live_recon ? s->live_recon->NumRegImages() : 0,
+          s->live_recon ? s->live_recon->NumPoints3D() : 0);
+    }
+    return AETHER_SFM_OK;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[aether_sfm] remove_frame failed: " << e.what();
+    return AETHER_SFM_ERR_INTERNAL;
+  } catch (...) {
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
 aether_sfm_result_t aether_sfm_finalize(aether_sfm_session_t* s, char* out_json,
                                         int out_cap) {
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
