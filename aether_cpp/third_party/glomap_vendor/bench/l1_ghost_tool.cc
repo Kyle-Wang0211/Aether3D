@@ -231,11 +231,10 @@ int RunPlan(int argc, char** argv) {
       "{\"n_cloud\":%zu,\"n_band15\":%" PRId64
       ",\"n_marked_cells\":%d,\"budget_refs\":%d,\"refs\":%zu,"
       "\"cov2\":%d,\"cov1\":%d,\"cov0\":%d,\"dropped_srcs\":%d,"
-      "\"missing_jpeg\":%d,\"write_ok\":%d}\n",
+      "\"write_ok\":%d}\n",
       n_cloud, st.n_band15, plan.n_marked_cells, plan.budget_refs,
       plan.refs.size(), plan.n_cells_cov2, plan.n_cells_cov1,
-      plan.n_cells_cov0, plan.n_refs_dropped_srcs, plan.n_frames_missing_jpeg,
-      ok ? 1 : 0);
+      plan.n_cells_cov0, plan.n_refs_dropped_srcs, ok ? 1 : 0);
   return ok ? 0 : 1;
 }
 

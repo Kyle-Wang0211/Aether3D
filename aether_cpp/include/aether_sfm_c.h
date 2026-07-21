@@ -57,6 +57,11 @@ typedef enum aether_sfm_result {
   AETHER_SFM_ERR_NOT_REGISTERED = 5,
   AETHER_SFM_ERR_INTERNAL = 6,
   AETHER_SFM_ERR_UNSUPPORTED = 7,  // returned by the simulator stub TU
+  // [REMOVE-FRAME 2026-07-21] The call cannot run while the finalize worker
+  // owns the session state. Distinct from INVALID_ARG on purpose: the caller
+  // must be able to tell "you asked for something impossible" from "ask again
+  // later". aether_sfm_remove_frame is the only producer today.
+  AETHER_SFM_ERR_BUSY = 8,
 } aether_sfm_result_t;
 
 typedef struct aether_sfm_session aether_sfm_session_t;  // opaque

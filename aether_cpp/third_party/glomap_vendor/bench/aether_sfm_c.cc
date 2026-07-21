@@ -191,6 +191,22 @@ struct FrameRecord {
   // (cooler device, no 2 s/frame budget) — delivered quality is unchanged by
   // construction, only capture-time pacing differs.
   bool fed_throttled = false;
+  // [REMOVE-FRAME 2026-07-21] The user deleted this photo; the slot is retired
+  // for good. The slot itself is KEPT (never erased/compacted) because
+  // s->frames is addressed by vector index everywhere — the temporal gap
+  // arithmetic in RestoreTemporalDetail (`s->frames[right - gap]`) and
+  // FinalizeRematchStarvedFrames (`std::abs(a->second - b->second) > K`) reads
+  // index difference AS the gap, and FrameRecord::frame_id is write-only
+  // (assigned in RebuildFrameRecordsForResume + add_frame, never read back).
+  // Compacting would silently make the deleted frame's two neighbours gap=1.
+  //
+  // MUST stay orthogonal to the starvation signal (fed_throttled / low
+  // n_keypoints / zero pairs): FinalizeRematchStarvedFrames exists to RESCUE
+  // thermally starved frames (cap43: 37/118 unregistered without it). If
+  // "removed" were inferred from looking starved, either real starved frames
+  // stop being rescued (quality regression) or removed frames get re-matched
+  // back to life (the bug this field fixes).
+  bool removed = false;
 };
 
 struct PointIdPair {
@@ -1461,6 +1477,7 @@ bool VerifySpatialPair(aether_sfm_session* s,
   VerifiedSpatialPair& result = it->second;
   const FrameRecord& a = s->frames[earlier];
   const FrameRecord& b = s->frames[later];
+  if (a.removed || b.removed) return false;  // [REMOVE-FRAME]
   if (a.n_keypoints <= 0 || b.n_keypoints <= 0) return false;
 
   if (s->db->ExistsMatches(a.image_id, b.image_id)) {
@@ -1653,14 +1670,16 @@ std::vector<SpatialRevisitCandidate> BuildSpatialAnchors(
 
   for (int i = 0; i < static_cast<int>(s->frames.size()); ++i) {
     const FrameRecord& current = s->frames[i];
-    if (!current.has_pose) continue;
+    // [REMOVE-FRAME] 死槽不得进候选池:SelectDiverseAnchors 只发 3 个名额,
+    // 且 min_separation 会连带封杀邻近的真候选。
+    if (current.removed || !current.has_pose) continue;
     const Eigen::Vector3d center = current.cam_from_world.TgtOriginInSrc();
     const Eigen::Vector3d forward = CameraForwardWorld(current.cam_from_world);
     std::vector<SpatialRevisitCandidate> primary;
     std::vector<SpatialRevisitCandidate> fallback;
     for (int j = 0; j + temporal_k < i; ++j) {
       const FrameRecord& previous = s->frames[j];
-      if (!previous.has_pose) continue;
+      if (previous.removed || !previous.has_pose) continue;
       const double distance =
           (center - previous.cam_from_world.TgtOriginInSrc()).norm();
       if (distance > kFallbackDistanceMeters) continue;
@@ -1857,6 +1876,7 @@ std::shared_ptr<const EnrichTargetHint> BuildEnrichTargetHint(
   std::unordered_map<colmap::image_t, int> idx_of;
   idx_of.reserve(s.frames.size());
   for (int i = 0; i < static_cast<int>(s.frames.size()); ++i) {
+    if (s.frames[i].removed) continue;  // [REMOVE-FRAME] 死槽不进反查表
     idx_of[s.frames[i].image_id] = i;
   }
   hint->by_frame.assign(s.frames.size(), {});
@@ -1911,6 +1931,8 @@ int ScoreEnrichPair(const aether_sfm_session& s, const EnrichTargetHint& hint,
   const auto count_dir = [&](int obs_f, int new_f) {
     if (obs_f < 0 || obs_f >= static_cast<int>(hint.by_frame.size())) return 0;
     const FrameRecord& nf = s.frames[new_f];
+    // [REMOVE-FRAME] 显式短路,不依赖 has_pose 被清后的零值语义。
+    if (nf.removed) return 0;
     const Eigen::Vector3d cn = nf.cam_from_world.TgtOriginInSrc();
     int n = 0;
     for (const int32_t tid : hint.by_frame[obs_f]) {
@@ -1988,8 +2010,10 @@ void AddSpatialRevisitMatches(aether_sfm_session* s) {
     const int num_frames = static_cast<int>(s->frames.size());
     for (int i = 0; i < num_frames; ++i) {
       const FrameRecord& frame_i = s->frames[i];
+      if (frame_i.removed) continue;  // [REMOVE-FRAME]
       for (int j = 0; j + temporal_k < i; ++j) {
         const FrameRecord& frame_j = s->frames[j];
+        if (frame_j.removed) continue;  // [REMOVE-FRAME]
         SpatialRevisitCandidate candidate;
         candidate.i = i;
         candidate.j = j;
@@ -3097,9 +3121,54 @@ void MergeFragmentTracks(aether_sfm_session* s,
 //     pairs a previous finalize committed are consumed by RunIncremental from
 //     two_view_geometries regardless of s->frames.
 // Live sessions (frames non-empty) are untouched — strict no-op.
+// ── [REMOVE-FRAME 2026-07-21] Removed-frame tombstone sidecar ───────────────
+// One decimal image_id per line, next to the session db ("<db_path>.removed").
+//
+// Why a sidecar and NOT the db: COLMAP exposes no per-image delete (only the
+// pairwise Delete{Matches,TwoViewGeometry,InlierMatches} and whole-table
+// Clear*), so the images/keypoints/descriptors rows always survive a removal.
+// The two db-side markers that looked plausible both detonate in phase 2,
+// which loads every db image (`load_all_images = true`) into a Reconstruction
+// that STILL holds the image (Reconstruction::DeRegisterFrame strips pose and
+// observations but never erases from images_):
+//   - renaming via Database::UpdateImage → reconstruction.cc:339
+//     THROW_CHECK_EQ(existing_image.Name(), image.Name())
+//   - blanking keypoints via UpdateKeypoints → reconstruction.cc:343
+//     THROW_CHECK_EQ(image.NumPoints2D(), existing_image.NumPoints2D())
+// Either throw drops finalize into RefineFallbackFullRerun (112-154 s, and
+// cap43 split into two models) on EVERY capture that deleted a photo.
+// The sidecar leaves the db byte-identical, and is reversible: undoing a
+// deletion is one line removed, with the descriptors still intact.
+std::string RemovedSidecarPath(const aether_sfm_session* s) {
+  return s->db_path + ".removed";
+}
+
+std::unordered_set<colmap::image_t> ReadRemovedIds(const aether_sfm_session* s) {
+  std::unordered_set<colmap::image_t> ids;
+  std::ifstream in(RemovedSidecarPath(s));
+  if (!in) return ids;  // absent = nothing ever removed (the common case)
+  long long v = 0;
+  while (in >> v) {
+    if (v > 0) ids.insert(static_cast<colmap::image_t>(v));
+  }
+  return ids;
+}
+
+// Appends one tombstone. Returns false if it could not be persisted — the
+// caller MUST fail the removal in that case, because a removal the sidecar
+// did not record is a removal that resurrects on the next resume.
+bool AppendRemovedId(const aether_sfm_session* s, colmap::image_t image_id) {
+  std::ofstream out(RemovedSidecarPath(s), std::ios::app);
+  if (!out) return false;
+  out << image_id << "\n";
+  out.flush();
+  return static_cast<bool>(out);
+}
+
 void RebuildFrameRecordsForResume(aether_sfm_session* s) {
   if (!s || !s->db || !s->frames.empty()) return;
   try {
+    const std::unordered_set<colmap::image_t> removed_ids = ReadRemovedIds(s);
     std::vector<colmap::Image> images = s->db->ReadAllImages();
     if (images.empty()) return;
     std::sort(images.begin(), images.end(),
@@ -3120,8 +3189,25 @@ void RebuildFrameRecordsForResume(aether_sfm_session* s) {
       } else {
         rec.frame_id = static_cast<int>(image.ImageId()) - 1;
       }
-      rec.n_keypoints =
-          static_cast<int>(s->db->NumKeypointsForImage(image.ImageId()));
+      if (removed_ids.count(image.ImageId())) {
+        // [REMOVE-FRAME 2026-07-21] THE fix for resurrection-on-resume. The
+        // db rows are still here (nothing can delete them), so without this
+        // the record comes back fully armed: n_keypoints refilled from the db
+        // while remove_frame deleted every pair, which reads to
+        // FinalizeRematchStarvedFrames as maximally starved — it reloads the
+        // descriptors and re-matches the deleted photo back into the model.
+        // Leaving n_keypoints at 0 reuses the existing empty-feature guards
+        // (SelectStreamCandidates, VerifySpatialPair, the re-match todo loop)
+        // with no change at those sites.
+        // NOTE the push_back below still runs: the slot must survive to keep
+        // index == frame_id. See FrameRecord::removed.
+        rec.removed = true;
+        rec.n_keypoints = 0;
+        rec.has_pose = false;
+      } else {
+        rec.n_keypoints =
+            static_cast<int>(s->db->NumKeypointsForImage(image.ImageId()));
+      }
       frames.push_back(std::move(rec));
     }
     if (s->camera_id == 0) {
@@ -3207,7 +3293,12 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
 
     std::unordered_map<colmap::image_t, int> idx_of;
     idx_of.reserve(s->frames.size());
-    for (int i = 0; i < num_frames; ++i) idx_of[s->frames[i].image_id] = i;
+    // [REMOVE-FRAME] 死槽不进反查表:它的 pair 已被删光,留在表里只会让
+    // win_valid 统计与下面的饥饿判定把它当成"最需要抢救的帧"。
+    for (int i = 0; i < num_frames; ++i) {
+      if (s->frames[i].removed) continue;
+      idx_of[s->frames[i].image_id] = i;
+    }
 
     // 1) Per-frame valid-pair count inside the temporal K-window, from the
     //    TVG table (counts capture-time pairs AND anything the spatial
@@ -3232,7 +3323,10 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
       // above the valid-pair gate (6 healthy pairs > 4) yet still miss half
       // their temporal window. Re-matching restores the full K topology at
       // finish time, which is what keeps the throttle delivery-lossless.
-      if (s->frames[i].n_keypoints > 0 &&
+      // [REMOVE-FRAME 2026-07-21] `removed` 必须与饥饿判据正交。被删帧的
+      // win_valid 恒为 0 = 看起来最饥饿,正是它会被"抢救"回来的原因;而热降频
+      // 帧真的需要被抢救。两者只能靠独立字段区分,不能靠"看起来多饿"。
+      if (!s->frames[i].removed && s->frames[i].n_keypoints > 0 &&
           (win_valid[i] < kRematchMinValidWindowPairs ||
            s->frames[i].fed_throttled)) {
         starved[i] = 1;
@@ -3251,6 +3345,9 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
       for (int f = gap; f < num_frames; ++f) {
         const int j = f - gap;
         if (gap > kRematchNearGap && !starved[f] && !starved[j]) continue;
+        // [REMOVE-FRAME] 第二道:n_keypoints 在 live 与 resume 两条路上都已归
+        // 零,这里的 removed 是显式冗余,防止将来有人改动置零逻辑时静默复活。
+        if (s->frames[j].removed || s->frames[f].removed) continue;
         if (s->frames[j].n_keypoints <= 0 || s->frames[f].n_keypoints <= 0) {
           continue;
         }
@@ -3997,7 +4094,6 @@ void WriteL1PlanSidecars(aether_sfm_session* s,
                << " cov1=" << plan.n_cells_cov1
                << " cov0=" << plan.n_cells_cov0
                << " dropped_srcs=" << plan.n_refs_dropped_srcs
-               << " missing_jpeg=" << plan.n_frames_missing_jpeg
                << " write=" << (ok ? "ok" : "FAILED") << " ("
                << static_cast<int>(NowMs() - t0) << "ms)";
 }
@@ -4442,6 +4538,7 @@ const char* aether_sfm_result_str(aether_sfm_result_t code) {
     case AETHER_SFM_ERR_NOT_REGISTERED: return "AETHER_SFM_ERR_NOT_REGISTERED";
     case AETHER_SFM_ERR_INTERNAL: return "AETHER_SFM_ERR_INTERNAL";
     case AETHER_SFM_ERR_UNSUPPORTED: return "AETHER_SFM_ERR_UNSUPPORTED";
+    case AETHER_SFM_ERR_BUSY: return "AETHER_SFM_ERR_BUSY";
   }
   return "AETHER_SFM_ERR_UNKNOWN";
 }
@@ -5342,8 +5439,35 @@ aether_sfm_result_t aether_sfm_remove_frame(aether_sfm_session_t* s,
     if (frame_id < 0 || frame_id >= static_cast<int>(s->frames.size())) {
       return AETHER_SFM_ERR_INVALID_ARG;
     }
+    if (s->frames[frame_id].removed) return AETHER_SFM_ERR_INVALID_ARG;
     const colmap::image_t image_id = s->frames[frame_id].image_id;
     if (image_id == 0) return AETHER_SFM_ERR_INVALID_ARG;
+
+    // [REMOVE-FRAME 2026-07-21] Refuse while the finalize worker owns the
+    // session. A lock would NOT be enough: the enrichment pass lends raw
+    // pointers into this very record across matcher calls
+    // (`feat.desc = fr.descriptors.data(); feat.pts = &fr.points;`) and the
+    // slot cleanup below frees those buffers — the borrow outlives any
+    // critical section, so a short lock just hides a use-after-free. The db
+    // handle is likewise single-threaded by contract (database.h: "not
+    // thread-safe and must not be accessed concurrently") while the worker is
+    // writing pairs, and after finalize the db is Close()d and never
+    // reopened. Refusing is the only honest answer; the UI gates deletion on
+    // the same state, so this is defence in depth, not the primary guard.
+    if (s->finalize_status.load() != 0 || s->refine_thread.joinable()) {
+      return AETHER_SFM_ERR_BUSY;
+    }
+
+    // Persist the tombstone FIRST. If it cannot be written the removal is
+    // abandoned whole: a removal the sidecar did not record is one that comes
+    // back on the next resume, which is precisely the bug being fixed. Better
+    // a loud failure the caller can retry than a deletion that silently undoes
+    // itself later.
+    if (!AppendRemovedId(s, image_id)) {
+      LOG(WARNING) << "[aether_sfm] remove_frame: tombstone write failed for "
+                   << RemovedSidecarPath(s) << " — removal abandoned";
+      return AETHER_SFM_ERR_DB;
+    }
 
     size_t removed_obs = 0, deleted_points = 0, cleared_pairs = 0;
 
@@ -5376,11 +5500,17 @@ aether_sfm_result_t aether_sfm_remove_frame(aether_sfm_session_t* s,
     //    图行留着但完全惰性;不写任何裸 SQL。
     if (s->db) {
       for (const auto& other : s->frames) {
-        if (other.image_id == 0 || other.image_id == image_id) continue;
+        if (other.removed || other.image_id == 0 ||
+            other.image_id == image_id) {
+          continue;
+        }
         const colmap::image_t a = image_id, b = other.image_id;
-        // ExistsMatches 有,但没有对应的 ExistsTwoViewGeometry 查询接口;
-        // DeleteTwoViewGeometry 是 SQL DELETE,对不存在的行本就是空操作,
-        // 无条件调用即可。cleared_pairs 只统计确实存在过的原始匹配对。
+        // DeleteTwoViewGeometry 是 SQL DELETE,对不存在的行本就是空操作,无条
+        // 件调用即可。cleared_pairs 只统计确实存在过的原始匹配对。
+        // 这两张表就是全部:DeleteInlierMatches 并非第三张表,它读同一行
+        // two_view_geometries、清 inlier_matches 字段再写回(database_sqlite.cc
+        // :1566),而 `inlier_matches` 只是迁移前的旧表名(:2047 ALTER ... RENAME
+        // TO two_view_geometries)。行删掉之后再调它是纯空操作。
         if (s->db->ExistsMatches(a, b)) {
           s->db->DeleteMatches(a, b);
           ++cleared_pairs;
@@ -5390,7 +5520,15 @@ aether_sfm_result_t aether_sfm_remove_frame(aether_sfm_session_t* s,
     }
 
     // ③ 标记该帧已撤回,后续 add_frame 的候选选择不得再选它。
-    s->frames[frame_id].image_id = 0;
+    //    image_id 保留真值(不再置 0):FinalizeRematchStarvedFrames 与
+    //    BuildEnrichTargetHint 都建 `idx_of[frames[i].image_id] = i` 反查表,
+    //    多帧删除时全部塌到 key 0 会互相覆盖。今天无害(image_id 是
+    //    AUTOINCREMENT,0 永远不会被查),但那是颗雷。
+    //    has_pose 必须清:BuildSpatialAnchors 只看 has_pose,死槽会带着 stale
+    //    cam_from_world 进候选池,占掉 SelectDiverseAnchors 仅有的 3 个名额,
+    //    还会被 min_separation 顺带封杀 ±K/3 内的真候选。
+    s->frames[frame_id].removed = true;
+    s->frames[frame_id].has_pose = false;
     s->frames[frame_id].descriptors.clear();
     s->frames[frame_id].descriptors.shrink_to_fit();
     s->frames[frame_id].points.clear();
