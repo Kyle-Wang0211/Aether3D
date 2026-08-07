@@ -29,6 +29,7 @@
 #include "pair_selection_v2.h"
 #include "visual_loop_index_v1.h"
 #define AETHER_PRECLAMP_INSTR_ENV_OFFICIAL 1
+#include "official_isolated_floater.h"
 #include "official_mirror_ghost.h"
 #include "official_preclamp_instr_v1.h"
 
@@ -717,6 +718,7 @@ struct aether_sfm_session {
   double upgrade_ms = 0.0;
   // ③ targeted enrichment (OFFICIAL_AETHER_ENRICH_TARGETED=1):
   int stat_mirror_ghost_logged = -1;  // [MIRROR-GHOST V1] 日志去重(每变化记一次)
+  int stat_isolated_floater_logged = -1;  // [ISOLATED-FLOATER] 日志去重(同上)
   int64_t stat_enrich_targeted_tracks = 0;  // hint size (low-parallax tracks)
   int64_t stat_enrich_targeted_scored = 0;  // top-up pairs with score > 0
   // Snapshot for the ③ top-up ordering (see EnrichTargetHint). Written by the
@@ -784,6 +786,25 @@ struct aether_sfm_session {
   std::deque<std::pair<int, int>> prepay_due;
   int64_t stat_prepay_attempted = 0;  // matcher invocations by prepay
   int64_t stat_prepay_written = 0;    // pairs persisted to the db
+  // [PROBE-GATE 2026-08-07] 512-row probe pre-scoring of live match
+  // candidates (08-03 recon: probe512 AUC 0.9527 predicting TVG survival;
+  // working point probe512<3 skips 42.6% of pairs at 1.75% inlier-weighted
+  // geometry loss). DEFAULT OFF — OFFICIAL_AETHER_PROBE_GATE_MIN=0 keeps the
+  // shipped behavior bit-identical; N>0 arms the gate at that score
+  // threshold. Same worker-thread ownership as add_frame.
+  int64_t stat_probe_attempted = 0;  // probe matcher invocations
+  int64_t stat_probe_skipped = 0;    // candidates skipped (score < threshold)
+  int64_t stat_probe_passed = 0;     // candidates that went on to full match
+  int64_t stat_probe_fail_open = 0;  // probe rc!=0 → gate bypassed fail-open
+  double stat_probe_ms = 0.0;        // wall spent inside probe matches
+  // [IDLE-PREPAY 2026-08-07] Capture-idle starved-window repay at the
+  // production official endpoint (see aether_sfm_live_repay). ticks = calls
+  // that actually entered the starved-window pass from the idle channel.
+  int64_t stat_idle_prepay_ticks = 0;
+  // Steady-clock ms of the last completed add_frame; the idle-prepay leg only
+  // fires when the worker has been frame-idle longer than
+  // OFFICIAL_AETHER_IDLE_PREPAY_IDLE_MS. Worker-thread only.
+  double last_add_frame_done_ms = 0.0;
   // [AETHER-T1 2026-07-26] finalize_split attribution (pure observation).
   double t1_stage1_ba_ms = 0.0;
   double t1_stage1_merge_ms = 0.0;
@@ -1835,6 +1856,34 @@ int GpuMatchRetryLimit() {
   return cached;
 }
 
+// [PROBE-GATE 2026-08-07] Probe pre-scoring threshold (08-03 recon,
+// _host_experiments/probe-gate-recon-20260803): a 512-row even-stride
+// subsample of the NEW frame's descriptors matched against the candidate's
+// full descriptor set predicts whether the full pair survives TVG with
+// AUC 0.9527 (corr 0.9862 with the full match count). Working point from the
+// inlier-WEIGHTED cost ledger: probe512 < 3 → skip 42.6% of pairs at 1.75%
+// weighted-inlier loss (inside the quality-lane "obs >= 0.98x" gate).
+// Semantics here are deliberately deterministic and cross-platform: even
+// integer stride over the row index (not the recon's sampling), same
+// matcher entry (mutual cross-check included), same Lowe ratio as the full
+// pair. DEFAULT OFF (0): unset/0 reproduces the shipped candidate loop
+// byte-for-byte. N>0 arms the gate: candidates whose probe score < N never
+// enter the full GEMM/TVG/db path (they stay eligible for the idle-repay and
+// finalize re-match passes, which is the same fail-open debt route a GPU
+// matcher failure already takes). Skipped pairs are counted per frame
+// (probe_gate jsonl) and per capture (finalize segments json).
+int ProbeGateMin() {
+  static const int cached = [] {
+    if (const char* e = std::getenv("OFFICIAL_AETHER_PROBE_GATE_MIN")) {
+      const int v = std::atoi(e);
+      if (v >= 0) return v;
+    }
+    return 0;  // DEFAULT OFF — host A/B only until the on-device verdict
+  }();
+  return cached;
+}
+constexpr int kProbeGateRows = 512;  // recon-fixed probe height
+
 int GpuMatchGemmPairsRetry(aether_sfm_session* s, int frame1,
                            const uint8_t* d1, int n1, int frame2,
                            const uint8_t* d2, int n2, double max_ratio,
@@ -2074,6 +2123,40 @@ bool TriIgnoreTwoViewTracks() {
     return !(e && e[0] == '0');
   }();
   return cached;
+}
+
+// [BIRTH-GATE-AB 2026-08-07] OFFICIAL_AETHER_BIRTH_MIN_TRI_ANGLE — host A/B
+// 专用"出生门"旋钮:一个 env(度)同时覆盖两处
+//   ① 点出生:triangulation.min_angle(官方 IncrementalTriangulator 的
+//      CREATION 视差角门,上游默认 1.5°;finalize phase1/phase2 已被
+//      OFFICIAL_AETHER_TRI_MIN_ANGLE(_P2) 抬到 2.0°,而流式 TriangulateImage
+//      的 official_options 构造点一直吃上游默认 1.5°);
+//   ② BA 后过滤:mapper.filter_min_tri_angle(FilterPoints/FilterAllPoints3D
+//      的存留视差角门,上游默认 1.5°,本文件此前从未改过)。
+// 教条依据=鬼层终审"根治只在 stage-1":交付层 3° 视差角过滤
+// (DeliverMinTriAngleDeg)是事后删,本实验把同一把刀前移到出生/BA 存留时。
+// 风险=低视差场景注册/增长变脆(MP-SfM 论文警告),故仅 host A/B。
+// DEFAULT UNSET(或 <=0)⇒ 两处全部保持现值,逐字节复现出货行为。
+double BirthMinTriAngleDeg() {
+  static const double cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_BIRTH_MIN_TRI_ANGLE");
+    if (e && e[0]) {
+      const double d = std::atof(e);
+      if (d > 0.0) return d;
+    }
+    return 0.0;  // unset ⇒ 不覆盖
+  }();
+  return cached;
+}
+// [BIRTH-GATE-AB 2026-08-07] 统一施加点:本文件每个
+// colmap::IncrementalPipelineOptions 构造点在配置完成后调用一次。env 未设时
+// 严格 no-op(单变量纪律)。
+void ApplyBirthGateAB(colmap::IncrementalPipelineOptions* o) {
+  const double b = BirthMinTriAngleDeg();
+  if (b > 0.0) {
+    o->triangulation.min_angle = b;        // ① 出生门
+    o->mapper.filter_min_tri_angle = b;    // ② BA 后 filter 门
+  }
 }
 
 // [A1B-V5 2026-07-27] Two controlled-comparison knobs for the async
@@ -4694,6 +4777,7 @@ bool RebuildFrameRecordsForResume(aether_sfm_session* s) {
     options.min_num_matches = 15;
     options.load_all_images = true;
     options.triangulation.ignore_two_view_tracks = TriIgnoreTwoViewTracks();
+    ApplyBirthGateAB(&options);  // [BIRTH-GATE-AB 2026-08-07]
     colmap::IncrementalMapper mapper(cache);
     mapper.BeginReconstruction(restored);
     for (const colmap::image_t image_id : image_ids) {
@@ -5678,6 +5762,8 @@ aether_sfm_result_t RunIncremental(
     // min_angle for the init pair only).
     pipeline_opts->triangulation.min_angle =
         TriMinAngleDeg("OFFICIAL_AETHER_TRI_MIN_ANGLE");
+    // [BIRTH-GATE-AB 2026-08-07] env 设置时覆盖上面的出生门 + filter 门。
+    ApplyBirthGateAB(pipeline_opts.get());
     // [AETHER] NOTE: ignore_redundant_points3D + freeze-intrinsics were tried (RAM
     // 2.36->1.45GB, 4x faster) but cost reproj 0.955->0.9952 (~4%) -> REVERTED per the
     // zero-quality-loss requirement. Full intrinsic refinement + all points stay.
@@ -5767,6 +5853,8 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   // Triangulation() too — keep phase 2 from re-admitting the <2° tail that
   // phase 1 now refuses to create.
   popts->triangulation.min_angle = TriMinAngleDeg("OFFICIAL_AETHER_TRI_MIN_ANGLE_P2");
+  // [BIRTH-GATE-AB 2026-08-07] env 设置时覆盖上面的出生门 + filter 门。
+  ApplyBirthGateAB(popts.get());
   // ⛔ [TRI-TRANSITIVITY 2026-08-05 已撤回] 这里曾设 triangulation.max_transitivity,
   // **在 finalize 路径上完全无效**,host A/B 两臂逐位相同(n_points/track3plus/
   // n_obs/reproj 全等)。根因:finalize 的 IterativeGlobalRefinement 只跑
@@ -5818,7 +5906,7 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    char buf[3264];
+    char buf[3520];  // [PROBE-GATE/IDLE-PREPAY 2026-08-07] +6 fields headroom
     const int n = std::snprintf(
         buf, sizeof(buf),
         "{\"t\":%lld,\"live_reuse\":%d,"
@@ -5835,6 +5923,12 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"repay_calls\":%lld,\"repay_attempted\":%lld,"
         "\"repay_written\":%lld,\"repay_inliers\":%lld,"
         "\"repay_failed\":%lld,\"repay_skipped_thermal\":%lld,"
+        // [IDLE-PREPAY 2026-08-07] idle-channel starved-window repay ticks.
+        "\"idle_prepay_ticks\":%lld,"
+        // [PROBE-GATE 2026-08-07] live probe pre-scoring attribution (all
+        // zero unless OFFICIAL_AETHER_PROBE_GATE_MIN > 0).
+        "\"probe_attempted\":%lld,\"probe_skipped\":%lld,"
+        "\"probe_passed\":%lld,\"probe_fail_open\":%lld,\"probe_ms\":%lld,"
         "\"gpu_retry_attempts\":%lld,\"gpu_retry_recovered\":%lld,"
         "\"enrich_budget_mode\":%d,\"enrich_budget_stopped\":%lld,"
         // [KNIFE-A 2026-07-11] 2-view upgrade attribution (all zero when the
@@ -5887,6 +5981,12 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_repay_inliers),
         static_cast<long long>(s->stat_repay_failed),
         static_cast<long long>(s->stat_repay_skipped_thermal),
+        static_cast<long long>(s->stat_idle_prepay_ticks),
+        static_cast<long long>(s->stat_probe_attempted),
+        static_cast<long long>(s->stat_probe_skipped),
+        static_cast<long long>(s->stat_probe_passed),
+        static_cast<long long>(s->stat_probe_fail_open),
+        static_cast<long long>(s->stat_probe_ms),
         static_cast<long long>(s->stat_gpu_retry_attempts),
         static_cast<long long>(s->stat_gpu_retry_recovered),
         static_cast<int>(EnrichBudgetModeOf()),
@@ -7304,11 +7404,76 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     constexpr bool kMergeRequireDisjointImages = false;
     const bool gpu_match_avail =
         s->options.use_gpu_match && (aether_gpu_match_gemm_pairs != nullptr);
+    // [PROBE-GATE 2026-08-07] Build the NEW frame's even-stride 512-row
+    // descriptor subset ONCE per add_frame (64 KB memcpy) — reused against
+    // every candidate below. Only armed when the gate is on AND the frame
+    // actually has more rows than the probe (otherwise probe == full match
+    // and the gate could only add cost).
+    const int probe_gate_min = ProbeGateMin();
+    std::vector<uint8_t> probe_desc_buf;
+    std::vector<uint32_t> probe_pair_buf;
+    int probe_rows = 0;
+    if (probe_gate_min > 0 && rec.n_keypoints > kProbeGateRows) {
+      probe_rows = kProbeGateRows;
+      const int probe_step = rec.n_keypoints / probe_rows;  // >= 1
+      probe_desc_buf.resize(static_cast<size_t>(probe_rows) * 128);
+      for (int r = 0; r < probe_rows; ++r) {
+        std::memcpy(probe_desc_buf.data() + static_cast<size_t>(r) * 128,
+                    rec.descriptors.data() +
+                        static_cast<size_t>(r) * probe_step * 128,
+                    128);
+      }
+      probe_pair_buf.resize(static_cast<size_t>(probe_rows) * 2);
+    }
+    int frame_probe_attempted = 0, frame_probe_skipped = 0;
+    double frame_probe_ms = 0.0;
     std::unordered_set<PointIdPair, PointIdPairHash> merge_trials;
     for (const int j : candidates) {
       const FrameRecord& prev = s->frames[j];
       ++n_cand;
       s->gpu_watchdog.InProgress();  // [GPU-HANG-B1] match 调用前打点
+      // [PROBE-GATE 2026-08-07] Cheap 512×n probe first: score = mutual
+      // cross-checked match count of the subset at the production ratio. A
+      // score below the threshold predicts (AUC 0.95) the full pair would die
+      // in TVG anyway → skip the full GEMM + TVG + db write. Fail-open on any
+      // probe error: the pair proceeds exactly as without the gate. Skipped
+      // pairs are NOT marked live_pairs_done, so idle repay / finalize
+      // re-match can still recover any misprediction.
+      if (probe_rows > 0 && prev.n_keypoints > 0 &&
+          !prev.descriptors.empty()) {
+        const double t_p0 = NowMs();
+        int probe_matches = 0;
+        // No rc=7 backoff for the probe (a hot-GPU transient must not add
+        // 150 ms to a gate whose whole point is saving time) and no
+        // descriptor-residency route (the resident matrix is the FULL frame,
+        // not this subset) — hence the direct entry, not
+        // GpuMatchGemmPairsRetry.
+        const int prc =
+            gpu_match_avail
+                ? aether_gpu_match_gemm_pairs(
+                      probe_desc_buf.data(), probe_rows,
+                      prev.descriptors.data(), prev.n_keypoints, ratio,
+                      probe_pair_buf.data(), probe_rows, &probe_matches)
+                : aether_sift_match_pairs(
+                      probe_desc_buf.data(), probe_rows,
+                      prev.descriptors.data(), prev.n_keypoints, ratio,
+                      probe_pair_buf.data(), probe_rows, &probe_matches);
+        const double probe_ms = NowMs() - t_p0;
+        frame_probe_ms += probe_ms;
+        s->stat_probe_ms += probe_ms;
+        ++s->stat_probe_attempted;
+        ++frame_probe_attempted;
+        if (prc == 0) {
+          if (probe_matches < probe_gate_min) {
+            ++s->stat_probe_skipped;
+            ++frame_probe_skipped;
+            continue;  // predicted-dead pair: full match skipped
+          }
+          ++s->stat_probe_passed;
+        } else {
+          ++s->stat_probe_fail_open;  // probe unavailable → gate inert
+        }
+      }
       // Cross-checked matches are unique per left index → min(n1,n2) bounds.
       const int cap = prev.n_keypoints < rec.n_keypoints ? prev.n_keypoints
                                                          : rec.n_keypoints;
@@ -7714,6 +7879,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
         if (const int f = LiveLocalBaMtFloorOverride(); f >= 0) {
           official_options.ba_min_num_residuals_for_cpu_multi_threading = f;
         }
+        ApplyBirthGateAB(&official_options);  // [BIRTH-GATE-AB 2026-08-07]
 
         colmap::IncrementalMapper mapper(cache);
         mapper.BeginReconstruction(s->live_recon);
@@ -7905,7 +8071,24 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       }
       AppendMatchFailJsonl(s, fline);
     }
+    // [PROBE-GATE 2026-08-07] One compact per-frame gate record, emitted only
+    // when the gate is armed so the default-off sidecar stays byte-identical.
+    if (probe_gate_min > 0) {
+      char pline[224];
+      std::snprintf(pline, sizeof(pline),
+                    "{\"t\":%lld,\"type\":\"probe_gate\",\"fid\":%d,"
+                    "\"min\":%d,\"att\":%d,\"skip\":%d,\"probe_ms\":%.1f,"
+                    "\"cum_att\":%lld,\"cum_skip\":%lld}",
+                    static_cast<long long>(EpochMs()), frame_id,
+                    probe_gate_min, frame_probe_attempted, frame_probe_skipped,
+                    frame_probe_ms,
+                    static_cast<long long>(s->stat_probe_attempted),
+                    static_cast<long long>(s->stat_probe_skipped));
+      AppendMatchFailJsonl(s, pline);
+    }
     AppendGpuTimestampFrameRecord(s, frame_id);
+    // [IDLE-PREPAY 2026-08-07] frame-idle clock for the idle-prepay leg.
+    s->last_add_frame_done_ms = NowMs();
     s->last_n_cand = n_cand;
     s->last_gpu_matches = gpu_matches;
     s->last_cpu_matches = cpu_matches;
@@ -8518,6 +8701,91 @@ std::unordered_set<colmap::point3D_t> MirrorGhostKillSet(
   return killed;
 }
 
+// [ISOLATED-FLOATER 2026-08-07 用户签决装机] 孤立浮点过滤(最强安全版),算法
+// 单一事实源在 official_isolated_floater.h(host parity 工具与产品共用同一份
+// 头)。与镜像鬼点并列的第二把交付层刀:同样只跑在视差角幸存者上,两把刀的
+// kill 集取并,在 get_points / get_points_tracked 两个入口同口径生效。
+// 开关:OFFICIAL_AETHER_ISOLATED_FLOATER=0 关闭。
+bool IsolatedFloaterEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_ISOLATED_FLOATER");
+    return !(e && e[0] == '0');
+  }();
+  return cached;
+}
+
+// 视差角幸存者集合上算判浮 point_id 集。每个点还要一条"平均视线":遍历
+// track 的 image_id → recon.Image(id).ProjectionCenter() → 单位化 (C − X)
+// 求均值再单位化。无有效观测 ⇒ 零向量,该点 cos 记 0(fail-safe:算不出
+// 方向就不按方向删)。注意这里**不做** DeliverPointPassesTriAngle 的 32 观测
+// 截断 —— 那个截断只是视差角判据的早退优化,平均视线要用全部观测。
+std::unordered_set<colmap::point3D_t> IsolatedFloaterKillSet(
+    aether_sfm_session* s, const colmap::Reconstruction& recon, bool filter_on,
+    double min_cos) {
+  std::unordered_set<colmap::point3D_t> killed;
+  if (!IsolatedFloaterEnabled()) return killed;
+  const auto& pts = recon.Points3D();
+  std::vector<aether_isolated_floater::P3> mp, vd;
+  std::vector<colmap::point3D_t> ids;
+  mp.reserve(pts.size());
+  vd.reserve(pts.size());
+  ids.reserve(pts.size());
+  for (const auto& [pid, point] : pts) {
+    if (filter_on && !DeliverPointPassesTriAngle(recon, point, min_cos)) {
+      continue;
+    }
+    Eigen::Vector3d acc = Eigen::Vector3d::Zero();
+    for (const auto& el : point.track.Elements()) {
+      if (!recon.ExistsImage(el.image_id)) continue;
+      const auto& image = recon.Image(el.image_id);
+      if (!image.HasPose()) continue;
+      const Eigen::Vector3d v = image.ProjectionCenter() - point.xyz;
+      const double nrm = v.norm();
+      if (!(nrm > 0.0)) continue;
+      acc += v / nrm;
+    }
+    const double an = acc.norm();
+    aether_isolated_floater::P3 dir{0.0f, 0.0f, 0.0f};
+    if (an > 0.0) {
+      dir = {static_cast<float>(acc.x() / an), static_cast<float>(acc.y() / an),
+             static_cast<float>(acc.z() / an)};
+    }
+    mp.push_back({static_cast<float>(point.xyz.x()),
+                  static_cast<float>(point.xyz.y()),
+                  static_cast<float>(point.xyz.z())});
+    vd.push_back(dir);
+    ids.push_back(pid);
+  }
+  const auto res = aether_isolated_floater::Detect(mp, vd);
+  for (const uint32_t i : res.kill) killed.insert(ids[i]);
+  const int nk = static_cast<int>(killed.size());
+  if (s && nk != s->stat_isolated_floater_logged) {
+    s->stat_isolated_floater_logged = nk;
+    char line[256];
+    std::snprintf(line, sizeof(line),
+                  "{\"t\":%lld,\"type\":\"isolated_floater_summary\","
+                  "\"eps\":%.6f,\"main\":%d,\"clusters\":%d,"
+                  "\"killed_clusters\":%d,\"killed\":%d}",
+                  static_cast<long long>(NowMs()), res.eps, res.main_size,
+                  res.clusters, res.killed_clusters, nk);
+    AppendMatchFailJsonl(s, line);
+  }
+  return killed;
+}
+
+// 两把交付层刀的 kill 集取并(get_points / get_points_tracked 共用,保证
+// 两个入口 count-only 与全量四处完全同口径)。
+std::unordered_set<colmap::point3D_t> DeliverKillSet(
+    aether_sfm_session* s, const colmap::Reconstruction& recon, bool filter_on,
+    double min_cos, int* out_mg, int* out_if) {
+  auto kill = MirrorGhostKillSet(s, recon, filter_on, min_cos);
+  if (out_mg) *out_mg = static_cast<int>(kill.size());
+  const auto fl = IsolatedFloaterKillSet(s, recon, filter_on, min_cos);
+  if (out_if) *out_if = static_cast<int>(fl.size());
+  kill.insert(fl.begin(), fl.end());
+  return kill;
+}
+
 aether_sfm_result_t aether_sfm_get_points(aether_sfm_session_t* s,
                                           aether_sfm_point_t** out_points,
                                           int* out_count) {
@@ -8534,7 +8802,8 @@ aether_sfm_result_t aether_sfm_get_points(aether_sfm_session_t* s,
   const double thr_deg = DeliverMinTriAngleDeg();
   const bool filter_on = thr_deg > 0.0;
   const double min_cos = std::cos(thr_deg * M_PI / 180.0);
-  const auto mg_kill = MirrorGhostKillSet(s, *recon, filter_on, min_cos);
+  int n_mg = 0, n_if = 0;
+  const auto mg_kill = DeliverKillSet(s, *recon, filter_on, min_cos, &n_mg, &n_if);
 
   int n = 0;
   for (const auto& [point_id, point] : pts) {
@@ -8567,7 +8836,8 @@ aether_sfm_result_t aether_sfm_get_points(aether_sfm_session_t* s,
   if (filter_on || !mg_kill.empty()) {
     LOG(WARNING) << "[aether_sfm] deliver-filter(get_points): kept " << n
                  << "/" << pts.size() << " (min_tri_angle=" << thr_deg
-                 << "deg, mirror_ghost=" << mg_kill.size() << ")";
+                 << "deg, mirror_ghost=" << n_mg << ", isolated_floater=" << n_if
+                 << ", killed_union=" << mg_kill.size() << ")";
   }
   *out_points = arr;
   return AETHER_SFM_OK;
@@ -8597,7 +8867,8 @@ aether_sfm_result_t aether_sfm_get_points_tracked(
   const double thr_deg = DeliverMinTriAngleDeg();
   const bool filter_on = thr_deg > 0.0;
   const double min_cos = std::cos(thr_deg * M_PI / 180.0);
-  const auto mg_kill = MirrorGhostKillSet(s, *recon, filter_on, min_cos);
+  int n_mg = 0, n_if = 0;
+  const auto mg_kill = DeliverKillSet(s, *recon, filter_on, min_cos, &n_mg, &n_if);
 
   int n = 0;
   int64_t total_obs = 0;
@@ -8656,7 +8927,8 @@ aether_sfm_result_t aether_sfm_get_points_tracked(
   if (filter_on || !mg_kill.empty()) {
     LOG(WARNING) << "[aether_sfm] deliver-filter(get_points_tracked): kept "
                  << n << "/" << pts.size() << " (min_tri_angle=" << thr_deg
-                 << "deg, mirror_ghost=" << mg_kill.size() << ")";
+                 << "deg, mirror_ghost=" << n_mg << ", isolated_floater=" << n_if
+                 << ", killed_union=" << mg_kill.size() << ")";
   }
   *out_points = arr;
   *out_count = n;
@@ -8889,6 +9161,7 @@ bool AdoptAsyncPreviewRefinement(aether_sfm_session* s,
   official_options.triangulation.ignore_two_view_tracks =
       TriIgnoreTwoViewTracks();
   official_options.load_all_images = true;
+  ApplyBirthGateAB(&official_options);  // [BIRTH-GATE-AB 2026-08-07]
   colmap::IncrementalMapper mapper(cache);
   mapper.BeginReconstruction(s->live_recon);
   for (const colmap::image_t image_id : replayed) {
@@ -9061,6 +9334,7 @@ aether_sfm_result_t AsyncPreviewBaTick(aether_sfm_session_t* s) {
           official_options.ba_refine_extra_params = false;
           official_options.mapper.ba_local_num_images = 6;
           official_options.mapper.ba_global_ignore_redundant_points3D = true;
+          ApplyBirthGateAB(&official_options);  // [BIRTH-GATE-AB 2026-08-07]
           auto ba_opts = official_options.GlobalBundleAdjustment();
           if (ba_opts.ceres) {
             ba_opts.ceres->solver_options.num_threads = AsyncPreviewBaThreads();
@@ -9158,6 +9432,7 @@ aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
     // behind >=10 registered frames (kMinNumRegFramesForFastBA), and this
     // solve only runs from 20 frames up, so the gate is always satisfied.
     official_options.mapper.ba_global_ignore_redundant_points3D = true;
+    ApplyBirthGateAB(&official_options);  // [BIRTH-GATE-AB 2026-08-07]
 
     colmap::IncrementalMapper mapper(cache);
     mapper.BeginReconstruction(s->live_recon);
@@ -9643,17 +9918,54 @@ static int PrepayQuadraticTick(aether_sfm_session* s, int max_pairs) {
   return attempted;
 }
 
-int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
-  if (!s || !s->db) return -1;
-  if (max_pairs <= 0) return 0;
-  // [QUAD-PREPAY 2026-07-26, signed] At the official endpoint the idle
-  // channel performs the OFFICIAL quadratic-overlap prepay (pair generation
-  // + matching + colmap-default TVG, db-only — the same official-semantics
-  // classification that un-gated the quadratic and re-match passes). The
-  // self-route starved-window repay below stays gated exactly as before.
-  if (kProductionOfficialEndpointOnly) {
-    return PrepayQuadraticTick(s, max_pairs);
-  }
+// [IDLE-PREPAY 2026-08-07] Root cause of stat_repay_calls == 0 in every
+// production capture: aether_sfm_live_repay (the only caller of the
+// starved-window repay below) short-circuits at the production official
+// endpoint into PrepayQuadraticTick and RETURNS — the starved-window pass
+// became unreachable by construction when [QUAD-PREPAY 2026-07-26] claimed
+// the idle channel. The quadratic debt is small (gaps 16/32/… only) and
+// drains in a few ticks, after which every remaining idle window was thrown
+// away while the starved-frame debt still hit FinalizeRematchStarvedFrames at
+// ~410 ms/pair on a hot finish-time GPU. Fix: once the quadratic tick reports
+// nothing due, spend the same (facade-verified: spool empty + nothing in
+// flight) idle window on the starved-window repay — but only when the worker
+// has ALSO been frame-idle for a while and the device is cool:
+//   - OFFICIAL_AETHER_IDLE_PREPAY=0 kills the leg (default ON);
+//   - frame-idle gate: NowMs() - last_add_frame_done_ms >
+//     OFFICIAL_AETHER_IDLE_PREPAY_IDLE_MS (default 2000 ms) — a queue that is
+//     momentarily empty between shutter frames does NOT count as idle, so the
+//     leg cannot add tail latency to a keyframe cadence that is keeping up;
+//   - thermal serious+ never prepays from this leg (counted via the existing
+//     stat_repay_skipped_thermal) — stricter than the legacy conditional
+//     clean-history rule, because idle prepay is pure opportunism;
+//   - per-call budget clamped to kRepayThermal2MaxPairs (= 8) pairs.
+// Sessions that never fed a frame (resume-from-db) keep
+// last_add_frame_done_ms == 0 and are refused outright — and the resume
+// bench never drives the repay channel at all, so resume output is unchanged
+// by construction.
+static bool IdlePrepayEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_IDLE_PREPAY");
+    return !(e && e[0] == '0');
+  }();
+  return cached;
+}
+static double IdlePrepayIdleMs() {
+  static const double cached = [] {
+    if (const char* e = std::getenv("OFFICIAL_AETHER_IDLE_PREPAY_IDLE_MS")) {
+      const double v = std::atof(e);
+      if (v >= 0.0) return v;
+    }
+    return 2000.0;
+  }();
+  return cached;
+}
+
+// [IDLE-PREPAY 2026-08-07] The pre-existing starved-window repay body,
+// extracted verbatim from aether_sfm_live_repay so both the legacy endpoint
+// and the new idle-prepay leg share one implementation. Thermal rules,
+// counters, and per-pair semantics are unchanged.
+static int LiveRepayStarvedWindowTick(aether_sfm_session_t* s, int max_pairs) {
   if (s->frames.size() < 3 || s->camera_id == 0) return 0;
   const int thermal_entry =
       s->thermal_state.load(std::memory_order_relaxed);
@@ -9782,6 +10094,52 @@ int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
     LOG(WARNING) << "[aether_sfm] live repay aborted: " << e.what();
     return written;
   }
+}
+
+int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
+  if (!s || !s->db) return -1;
+  if (max_pairs <= 0) return 0;
+  // [QUAD-PREPAY 2026-07-26, signed] At the official endpoint the idle
+  // channel performs the OFFICIAL quadratic-overlap prepay (pair generation
+  // + matching + colmap-default TVG, db-only — the same official-semantics
+  // classification that un-gated the quadratic and re-match passes) first.
+  if (kProductionOfficialEndpointOnly) {
+    const int consumed = PrepayQuadraticTick(s, max_pairs);
+    if (consumed > 0) return consumed;
+    // [IDLE-PREPAY 2026-08-07] Quadratic debt clear → same idle window pays
+    // the starved-window debt (rationale + gates: block comment above
+    // IdlePrepayEnabled). Default ON; OFFICIAL_AETHER_IDLE_PREPAY=0 kills.
+    if (!IdlePrepayEnabled()) return 0;
+    if (s->last_add_frame_done_ms <= 0.0 ||
+        NowMs() - s->last_add_frame_done_ms < IdlePrepayIdleMs()) {
+      return 0;  // not frame-idle (or never fed) — never touch the matcher
+    }
+    if (s->thermal_state.load(std::memory_order_relaxed) >= 2) {
+      ++s->stat_repay_skipped_thermal;  // serious+: idle leg never prepays
+      return 0;
+    }
+    ++s->stat_idle_prepay_ticks;
+    const int64_t attempted_before = s->stat_repay_attempted;
+    const int64_t written_before = s->stat_repay_written;
+    const int n =
+        LiveRepayStarvedWindowTick(s, std::min(max_pairs,
+                                               kRepayThermal2MaxPairs));
+    if (s->stat_repay_attempted != attempted_before) {
+      char line[224];
+      std::snprintf(
+          line, sizeof(line),
+          "{\"t\":%lld,\"type\":\"idle_prepay\",\"tick\":%lld,"
+          "\"attempted\":%lld,\"written\":%lld,\"cum_written\":%lld}",
+          static_cast<long long>(EpochMs()),
+          static_cast<long long>(s->stat_idle_prepay_ticks),
+          static_cast<long long>(s->stat_repay_attempted - attempted_before),
+          static_cast<long long>(s->stat_repay_written - written_before),
+          static_cast<long long>(s->stat_repay_written));
+      AppendMatchFailJsonl(s, line);
+    }
+    return n;
+  }
+  return LiveRepayStarvedWindowTick(s, max_pairs);
 }
 
 // [P1 2026-07-11] Finalize-speedup package counters: idle repay, rc=7 retry,
