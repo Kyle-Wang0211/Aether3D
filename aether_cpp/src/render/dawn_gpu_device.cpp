@@ -50,6 +50,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>  // [GPU-HANG-A2] getenv/atoll for wait-timeout overrides
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -95,8 +96,47 @@ inline void warn_once(std::atomic<bool>& fired, const char* who, const char* msg
 // futures. Our GPUDevice abstract API is synchronous. We bridge by setting
 // callback mode = WaitAnyOnly + writing the result to a stack variable
 // via userdata, then wgpuInstanceWaitAny blocks until the callback fires.
-// UINT64_MAX timeout = wait forever (acceptable for setup-time blocking;
-// MapAsync runtime use is on the rare-path readback only).
+//
+// ─── [GPU-HANG-A2 2026-08-06] 有限 GPU 等待超时(Chromium watchdog 蓝本)──
+// 出处:Chromium GPU watchdog(gpu/ipc/service/gpu_watchdog_thread.cc)对
+// GPU 进展等待永远用有限超时(Mac 档 ~25s),超时即判失活并走恢复路径,
+// 绝不无限等待。此前这里全部是 UINT64_MAX = 等到天荒地老 — GPU 挂死时
+// 渲染线程随之永久卡死(黑屏的另一半)。现改为:
+//   init(RequestAdapter/RequestDevice) — 10s;超时走既有 nullptr 失败路径
+//     (create_dawn_gpu_device 返回 nullptr,Dart 侧 splash 定时器兜底)。
+//   运行期(readback/wait_idle/wait_until_completed/copy_buffer)— 20s;
+//     超时按各自函数既有失败语义返回(返回 {}/false 或仅记日志)。
+// 等待走 Dawn TimedWaitAny(iOS/安卓/鸿蒙同一机制、Metal/Vulkan 同一语义),
+// 纯 Dawn C API + 标准库,零平台专属代码。
+// env 覆盖(毫秒,>0 生效,进程内一次性缓存):
+//   OFFICIAL_AETHER_RENDER_GPU_INIT_WAIT_MS — init 等待
+//   OFFICIAL_AETHER_RENDER_GPU_WAIT_MS      — 运行期等待
+constexpr std::uint64_t kInitWaitNsDefault    = 10000000000ull;  // 10s
+constexpr std::uint64_t kRuntimeWaitNsDefault = 20000000000ull;  // 20s
+
+inline std::uint64_t env_wait_ns_or(const char* key,
+                                    std::uint64_t fallback_ns) {
+    const char* e = std::getenv(key);
+    if (e != nullptr) {
+        const long long ms = std::atoll(e);
+        if (ms > 0) {
+            return static_cast<std::uint64_t>(ms) * 1000000ull;
+        }
+    }
+    return fallback_ns;
+}
+
+inline std::uint64_t render_init_wait_ns() {
+    static const std::uint64_t v = env_wait_ns_or(
+        "OFFICIAL_AETHER_RENDER_GPU_INIT_WAIT_MS", kInitWaitNsDefault);
+    return v;
+}
+
+inline std::uint64_t render_runtime_wait_ns() {
+    static const std::uint64_t v = env_wait_ns_or(
+        "OFFICIAL_AETHER_RENDER_GPU_WAIT_MS", kRuntimeWaitNsDefault);
+    return v;
+}
 
 struct AdapterCallbackData {
     WGPUAdapter adapter{nullptr};
@@ -383,7 +423,9 @@ public:
         WGPUFutureWaitInfo adapter_wait{};
         adapter_wait.future = adapter_future;
         adapter_wait.completed = false;
-        WGPUWaitStatus ws = wgpuInstanceWaitAny(wgpu_instance_, 1, &adapter_wait, UINT64_MAX);
+        // [GPU-HANG-A2] 有限超时;超时经既有 return false → nullptr 路径。
+        WGPUWaitStatus ws = wgpuInstanceWaitAny(
+            wgpu_instance_, 1, &adapter_wait, render_init_wait_ns());
         if (ws != WGPUWaitStatus_Success || !adapter_cb.success) {
             dawn_log("create_dawn_gpu_device: adapter WaitAny status=%d", ws);
             return false;
@@ -457,8 +499,9 @@ public:
             WGPUFutureWaitInfo wait{};
             wait.future = fut;
             wait.completed = false;
-            WGPUWaitStatus wstatus =
-                wgpuInstanceWaitAny(wgpu_instance_, 1, &wait, UINT64_MAX);
+            // [GPU-HANG-A2] 有限超时;超时经既有 false → nullptr 路径。
+            WGPUWaitStatus wstatus = wgpuInstanceWaitAny(
+                wgpu_instance_, 1, &wait, render_init_wait_ns());
             if (wstatus != WGPUWaitStatus_Success || !device_cb.success) {
                 return false;
             }
@@ -1086,8 +1129,9 @@ public:
         q_info.userdata1 = &q_state;
         WGPUFuture q_fut = wgpuQueueOnSubmittedWorkDone(wgpu_queue_, q_info);
         WGPUFutureWaitInfo q_wait{q_fut, false};
-        WGPUWaitStatus q_ws =
-            wgpuInstanceWaitAny(wgpu_instance_, 1, &q_wait, UINT64_MAX);
+        // [GPU-HANG-A2] 有限超时;超时经既有 return {} 失败路径。
+        WGPUWaitStatus q_ws = wgpuInstanceWaitAny(
+            wgpu_instance_, 1, &q_wait, render_runtime_wait_ns());
         if (q_ws != WGPUWaitStatus_Success || !q_state.done) {
             dawn_log("readback_texture: copy WaitAny status=%d done=%d",
                      q_ws, q_state.done);
@@ -1512,8 +1556,9 @@ public:
         WGPUFutureWaitInfo wait{};
         wait.future = fut;
         wait.completed = false;
-        WGPUWaitStatus ws =
-            wgpuInstanceWaitAny(wgpu_instance_, 1, &wait, UINT64_MAX);
+        // [GPU-HANG-A2] 有限超时;超时仅记日志(wait_idle 既有语义:void)。
+        WGPUWaitStatus ws = wgpuInstanceWaitAny(
+            wgpu_instance_, 1, &wait, render_runtime_wait_ns());
         if (ws != WGPUWaitStatus_Success || !cb_state.done) {
             dawn_log("wait_idle: WaitAny status=%d done=%d", ws, cb_state.done);
         }
@@ -2088,8 +2133,10 @@ public:
         WGPUFutureWaitInfo wait{};
         wait.future = fut;
         wait.completed = false;
+        // [GPU-HANG-A2] 有限超时;超时仅记日志(既有语义:void)。
         WGPUWaitStatus ws = wgpuInstanceWaitAny(device_.wgpu_instance(),
-                                                 1, &wait, UINT64_MAX);
+                                                 1, &wait,
+                                                 render_runtime_wait_ns());
         if (ws != WGPUWaitStatus_Success || !cb_state.done) {
             dawn_log("DawnCommandBuffer::wait_until_completed: WaitAny "
                      "status=%d done=%d", ws, cb_state.done);
@@ -2237,6 +2284,8 @@ void register_baked_wgsl_into_device(GPUDevice& device) noexcept {
                          prefix_sum_scan_sums_wgsl, "main");
     register_wgsl_source(device, "prefix_sum_add_scanned_sums",
                          prefix_sum_add_scanned_sums_wgsl, "main");
+    // [DETOX 2026-08-07 用户签决"摘三装机"] plane-sweep 判死残留摘除
+    // (known_plane_patch_normalize 注册已移除; wgsl 源移入 shaders/wgsl_attic_planesweep/)
 
     // splat_render has two entry points; register under split names.
     register_wgsl_source(device, "splat_render_vs",
@@ -2287,7 +2336,9 @@ bool dawn_copy_buffer_to_buffer(GPUDevice& device,
     info.userdata1 = &state;
     WGPUFuture fut = wgpuQueueOnSubmittedWorkDone(wq, info);
     WGPUFutureWaitInfo wait{fut, false};
-    WGPUWaitStatus ws = wgpuInstanceWaitAny(wi, 1, &wait, UINT64_MAX);
+    // [GPU-HANG-A2] 有限超时;超时经既有 return false 失败路径。
+    WGPUWaitStatus ws = wgpuInstanceWaitAny(wi, 1, &wait,
+                                            render_runtime_wait_ns());
     if (ws != WGPUWaitStatus_Success || !state.done) {
         dawn_log("dawn_copy_buffer_to_buffer: WaitAny status=%d done=%d",
                  ws, state.done);

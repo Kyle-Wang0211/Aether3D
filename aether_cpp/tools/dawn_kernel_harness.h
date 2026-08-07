@@ -55,6 +55,19 @@ public:
     // device() and queue() are valid.
     bool init();
 
+    // 取出并清除"自上次调用以来是否发生过 Dawn 设备级错误(校验/OOM/
+    // internal)"。
+    //
+    // [P0 崩溃修复 2026-07-27] 未捕获错误回调过去直接 std::abort() ——
+    // 对离线 harness 合理,但这份 harness 已被链进出货二进制,于是采集时
+    // 任何一次 Dawn 校验失败都会杀掉用户的 App(真机:全黑帧 → 0 特征 →
+    // 零尺寸 buffer → CreateBindGroup 校验失败 → 闪退)。现在错误被记录,
+    // 调用方**必须**在消费 GPU 结果前查这里,失败就走自己的回退路径。
+    //
+    // 状态是进程内全局的(回调不能带捕获,拿不到 this;而一个进程只有一个
+    // Dawn device,所以与 per-instance 等价)。线程安全。
+    static bool take_device_error(std::string* msg = nullptr);
+
     // Upload `size` bytes from `data` to a new buffer. `usage` must include
     // CopyDst (for the upload itself); typical usage = Storage|CopyDst.
     // Synchronous from caller's POV (queue.WriteBuffer doesn't block but
@@ -196,6 +209,12 @@ public:
         uint32_t w, uint32_t h,
         uint32_t bytes_per_pixel);
 
+    // [GPU-HANG-A1 2026-08-06] False once any GPU wait timed out / failed
+    // (Chromium watchdog 有限超时机制:Dawn TimedWaitAny 超时 → 设备判失活,
+    // 不再无限等待)。不健康后所有操作入口立即短路失败;上层(dsp_sift_gpu_c.cc
+    // acquire_gpu_harness)据此遗弃并重建 harness。
+    bool healthy() const { return device_healthy_; }
+
     // True if the device was created with the ShaderF16 feature (the WGSL
     // `enable f16;` extension is usable). Apple Silicon / A16 advertise it;
     // some Adreno do not (and have an f16-crash history) → the f16 descriptor
@@ -208,7 +227,100 @@ public:
     const wgpu::Device&   device()   const { return device_; }
     const wgpu::Queue&    queue()    const { return queue_; }
 
+    // ─── [GPU-TS 2026-07-29] True GPU-side pass timing (timestamp-query) ───
+    //
+    // WHY: every existing per-stage number in this pipeline (the 9-element
+    // `ex[]` split written into frame_split telemetry) is a HOST wall clock
+    // around a submit+WaitAny. That interval bundles four different things —
+    // host-side loops, buffer uploads, the blocking readback, and the GPU work
+    // itself — and the optimisations currently on the table target the
+    // non-GPU parts. Ranking them on host wall clock is therefore circular.
+    // GPU timestamps split the GPU part out so the rest can be attributed by
+    // subtraction.
+    //
+    // Enabled only when the adapter advertises TimestampQuery AND the env
+    // AETHER_GPU_TIMESTAMPS=1 is set: with the env unset the feature is not
+    // requested, no query set exists, no pass descriptor is attached, and the
+    // encoded command stream is identical to before. Diagnostics must never
+    // change what ships.
+    //
+    // Resolution happens ONCE per frame in gpu_ts_resolve() rather than per
+    // dispatch — a per-dispatch resolve would add exactly the kind of
+    // round-trip we are trying to measure.
+    bool gpu_ts_enabled() const { return ts_enabled_; }
+    uint32_t gpu_ts_status() const { return ts_status_; }
+    uint32_t gpu_ts_capability() const { return ts_capability_; }
+    // Keep adapter advertisement, device-request attempt, device grant, and
+    // final query-resource enablement distinct. A device may grant the feature
+    // and still fail later query-set/readback allocation.
+    bool gpu_ts_feature_request_to_device() const {
+        return ts_feature_request_to_device_;
+    }
+    bool gpu_ts_feature_granted() const { return ts_feature_granted_; }
+    // Start a new frame: rewind the slot cursor. Cheap; no GPU work.
+    void gpu_ts_reset();
+    // Number of passes recorded so far — call at a stage boundary to remember
+    // which passes belong to which stage, then attribute after resolve.
+    uint32_t gpu_ts_pass_count() const { return ts_next_ / 2; }
+    // Resolve + read back every recorded pass. out_ns[i] = GPU nanoseconds for
+    // pass i (end-of-pass minus beginning-of-pass timestamp). Returns false if
+    // timestamps are off or nothing was recorded.
+    bool gpu_ts_resolve(std::vector<uint64_t>* out_ns);
+    // Apply the extractor-owned cumulative nine-stage pass boundaries to the
+    // pending raw ticks and atomically publish one valid frame snapshot. This
+    // performs no GPU work and must be called only after gpu_ts_resolve().
+    bool gpu_ts_finalize_frame(const uint32_t* cumulative_pass_counts,
+                               uint32_t stage_count);
+    // The production C ABI serializes extraction under one harness mutex, then
+    // returns to a session-specific caller. Seal the exact frame while that
+    // mutex is still held so a later extraction cannot replace the evidence
+    // before the caller consumes it.
+    static void gpu_ts_clear_caller_thread_frame();
+    bool gpu_ts_stash_frame_for_caller_thread();
+
+    // ─── [HOST-BD 2026-07-29] Where the non-GPU time actually goes ───
+    //
+    // GPU timestamps proved the compute kernels are only ~21% of extract wall
+    // time on host; the other ~79% is host-side. This splits that remainder
+    // into the four things the harness itself does, so the extractor's own
+    // loops can be obtained by subtraction:
+    //     stage_host_ms - stage_gpu_ms - (upload+encode+wait+map in that stage)
+    //   = the extractor's own CPU work in that stage.
+    // Without this split, "host overhead" is one opaque number and any fix
+    // aimed at it is a guess.
+    //
+    // Same env gate as the GPU timestamps (AETHER_GPU_TIMESTAMPS=1): unset
+    // means not a single extra clock read on the shipped path.
+    struct HostBreakdown {
+        double upload_ms = 0;       // CreateBuffer + WriteBuffer
+        double encode_ms = 0;       // bind-group build + command encoding
+        double submit_wait_ms = 0;  // Submit + OnSubmittedWorkDone WaitAny
+        double map_ms = 0;          // MapAsync wait + copy out + Unmap
+        // ⚠️ Pipeline creation on a load_compute() CACHE MISS: WGSL → MSL →
+        // Metal pipeline. This is ONE-TIME per kernel for a persistent harness
+        // (production holds a singleton — see the "每帧新建 harness = 2s 税"
+        // regression), but a bench that constructs a fresh harness and extracts
+        // a single frame charges ALL of it to that frame. Without this counter
+        // the compile time hides inside the per-stage residual and reads as
+        // "the extractor's own host loops are huge", which would send the next
+        // optimisation at entirely the wrong code.
+        double create_ms = 0;
+        uint32_t n_upload = 0;
+        uint32_t n_dispatch = 0;
+        uint32_t n_readback = 0;
+        uint32_t n_create = 0;      // cache MISSES only
+    };
+    const HostBreakdown& host_breakdown() const { return hb_; }
+    void host_breakdown_reset() { hb_ = HostBreakdown{}; }
+
 private:
+    // Attach timestamp writes to the next compute pass, if enabled and a slot
+    // pair is free. Returns the descriptor to pass to BeginComputePass (or
+    // nullptr for the untouched default path).
+    const wgpu::ComputePassDescriptor* ts_pass_desc(
+        wgpu::ComputePassDescriptor* storage,
+        wgpu::PassTimestampWrites* writes);
+
     wgpu::Instance instance_;
     wgpu::Adapter adapter_;
     wgpu::Device device_;
@@ -228,6 +340,36 @@ private:
     std::unordered_map<std::string, wgpu::ComputePipeline> pipeline_cache_;
 
     bool has_f16_ = false;  // ShaderF16 was granted at device creation
+    bool init_called_ = false;
+    // [GPU-HANG-A1 2026-08-06] Sticky device-health flag; see healthy().
+    bool device_healthy_ = true;
+
+    // [GPU-TS] 512 pass slots = 1024 timestamps. One extract frame encodes far
+    // fewer (pyramid blur chain ~80 + detect per octave + sup/aff/ori/desc);
+    // overflow silently stops recording rather than failing the frame, so a
+    // pathological input degrades the diagnostic instead of the capture.
+    static constexpr uint32_t kTsCapacity = 1024;
+    bool ts_requested_ = false;
+    bool ts_feature_request_to_device_ = false;
+    bool ts_feature_granted_ = false;
+    bool ts_enabled_ = false;
+    uint32_t ts_drop_count_ = 0;
+    uint32_t ts_capability_ = 0;
+    uint32_t ts_status_ = 0;
+    uint32_t ts_reason_code_ = 0;
+    uint32_t ts_next_ = 0;
+    uint32_t ts_resolve_attempt_count_ = 0;
+    uint64_t ts_probe_instance_id_ = 0;
+    uint64_t ts_extraction_ordinal_ = 0;
+    bool ts_pending_ready_ = false;
+    uint64_t ts_pending_probe_instance_id_ = 0;
+    uint64_t ts_pending_extraction_ordinal_ = 0;
+    uint32_t ts_pending_resolve_attempt_count_ = 0;
+    std::vector<uint64_t> ts_pending_ticks_;
+    wgpu::QuerySet ts_qset_;
+    wgpu::Buffer ts_resolve_;    // QueryResolve | CopySrc
+    wgpu::Buffer ts_readback_;   // MapRead | CopyDst
+    HostBreakdown hb_;           // [HOST-BD] accumulated while ts_enabled_
 };
 
 }  // namespace tools

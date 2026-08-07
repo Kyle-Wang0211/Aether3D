@@ -54,6 +54,10 @@ extern const char sort_prep_depth_wgsl[];
 extern const char prefix_sum_scan_wgsl[];
 extern const char prefix_sum_scan_sums_wgsl[];
 extern const char prefix_sum_add_scanned_sums_wgsl[];
+// [DETOX 2026-08-07 用户签决"摘三装机"] plane-sweep 判死残留摘除:
+// known_plane_patch_normalize / detector_free_depth_sweep /
+// detector_free_depth_refine 三个 extern 已删, wgsl 源移入
+// shaders/wgsl_attic_planesweep/。
 
 // GPU DSP-SIFT extraction chain (sift_extract_dawn.cc / libpwsfm_gpu_extract.a).
 // This header is manually maintained per its own note; these externs live on

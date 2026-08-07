@@ -5,8 +5,10 @@
 // contract (xy order, 128-d, UBC reorder, RootSIFT round(512v)). It runs the
 // full GPU pipeline (SiftExtractDawn), applies the 8192 clamp by (octave,scale)
 // descending + the CPU finishing (L1RootNormalize → round(512) u8 →
-// VLFeat→UBC), and on ANY GPU failure (init / overflow / NaN) falls back to the
-// CPU _threaded path so the caller is unaware.
+// VLFeat→UBC). Legacy policy keeps transparent CPU fallback on GPU failure.
+// An explicit deterministic selector request never substitutes legacy output:
+// GPU failure returns kCanonicalGpuUnavailable (numeric C ABI status 2) with
+// out_count cleared.
 //
 // This is a SEPARATE translation unit from dsp_sift_c.cc: it pulls in Dawn
 // (webgpu_cpp.h, C++20, RAII/exceptions) which must not mix with the colmap C
@@ -21,11 +23,20 @@
 #include <cstdlib>  // getenv
 #include <cstring>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <vector>
 
 #include "dawn_kernel_harness.h"
 #include "sift_extract_dawn.h"
+#if defined(AETHER_FEATURE_SELECTION_ENV_OFFICIAL)
+#define AETHER_PRECLAMP_INSTR_ENV_OFFICIAL 1
+#elif defined(AETHER_FEATURE_SELECTION_ENV_SELFTEST)
+#define AETHER_PRECLAMP_INSTR_ENV_SELFTEST 1
+#else
+#error "preclamp instr: feature-selection environment namespace is absent"
+#endif
+#include "official_preclamp_instr_v1.h"
 
 extern "C" {
 
@@ -34,10 +45,22 @@ int aether_dsp_sift_extract_threaded(const uint8_t* gray, int width, int height,
                                      int max_features, int num_threads,
                                      float* out_xy, uint8_t* out_desc,
                                      int out_cap, int* out_count);
+// [SCALE-PERSIST 2026-08-06] _v2 CPU fallback sibling (dsp_sift_c.cc): same
+// contract plus optional out_scales/out_orientations (either may be NULL).
+int aether_dsp_sift_extract_threaded_v2(const uint8_t* gray, int width,
+                                        int height, int max_features,
+                                        int num_threads, float* out_xy,
+                                        uint8_t* out_desc, float* out_scales,
+                                        float* out_orientations, int out_cap,
+                                        int* out_count);
+void aether_sed_clear_last_stages();
+void aether_sed_last_stages_gpu(double* out, int cap);
 
 }  // extern "C"
 
 namespace {
+
+constexpr int kCanonicalGpuUnavailable = 2;
 
 // ─── Persistent GPU harness ───
 // This entry point used to build a fresh DawnKernelHarness on every call, so
@@ -51,11 +74,31 @@ namespace {
 std::mutex g_gpu_harness_mu;
 aether::tools::DawnKernelHarness* g_gpu_harness = nullptr;
 bool g_gpu_harness_init_failed = false;
+// [GPU-HANG-A1 2026-08-06] 挂死自愈重建计数(Chromium 降级阶梯:重建有上限)。
+int g_gpu_harness_rebuilds = 0;
+#if defined(AETHER_PRECLAMP_INSTR_TEST_HOOKS)
+thread_local bool g_force_next_gpu_fallback_for_test = false;
+#endif
 
 // Ready harness (init'd once) or nullptr if Dawn init has failed.
 // Caller must hold g_gpu_harness_mu.
 aether::tools::DawnKernelHarness* acquire_gpu_harness() {
     if (g_gpu_harness_init_failed) return nullptr;
+    // [GPU-HANG-A1 2026-08-06] 挂死自愈:GPU 等待超时后 harness 被标记不健康
+    // (所有操作已短路),遗弃旧实例并走下方既有重建逻辑。**故意不 delete**:
+    // Dawn 的 Device/Queue 析构含 wait-idle 语义,对已挂死的设备 delete 会
+    // 二次挂死;按 Chromium 的遗弃模式(docs/gpu/device_facilities.md ——
+    // 失活设备只标记弃用,交进程退出回收)接受一次性内存泄漏。重建有上限
+    // (Chromium 降级阶梯):超过 2 次即粘死 init_failed,后续走现有 CPU
+    // fallback。
+    if (g_gpu_harness != nullptr && !g_gpu_harness->healthy()) {
+        g_gpu_harness = nullptr;  // 遗弃,不 delete(见上)
+        ++g_gpu_harness_rebuilds;
+        if (g_gpu_harness_rebuilds > 2) {
+            g_gpu_harness_init_failed = true;
+            return nullptr;
+        }
+    }
     if (g_gpu_harness == nullptr) {
         auto* h = new aether::tools::DawnKernelHarness();
         if (!h->init()) {
@@ -98,20 +141,62 @@ void finish_descriptor(const float* raw128, uint8_t* out128) {
 
 extern "C" {
 
-// GPU DSP-SIFT. Signature identical to aether_dsp_sift_extract_threaded.
-// num_threads is ignored (kept for ABI compatibility). Returns 0 on success.
-int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
-                                int max_features, int num_threads, float* out_xy,
-                                uint8_t* out_desc, int out_cap, int* out_count) {
+#if defined(AETHER_PRECLAMP_INSTR_TEST_HOOKS)
+__attribute__((visibility("hidden"))) void
+aether_preclamp_instr_force_next_gpu_fallback_for_test() {
+    g_force_next_gpu_fallback_for_test = true;
+}
+#endif
+
+// GPU DSP-SIFT. Signature identical to aether_dsp_sift_extract_threaded_v2.
+// num_threads is ignored (kept for ABI compatibility). Returns 0 on success,
+// 2 when an explicitly requested canonical GPU result is unavailable, and a
+// different nonzero status for invalid input/other hard failure.
+//
+// [SCALE-PERSIST 2026-08-06] _v2: identical contract plus two OPTIONAL
+// per-keypoint outputs (either may be NULL — NULL reproduces the v1 behaviour
+// exactly; the v1 symbol below is a thin wrapper passing NULL, so there is
+// exactly one extraction logic). Values come from the orchestrator's Result
+// (kp_scale/kp_orientation: COLMAP ComputeScale/ComputeOrientation formulas
+// over the oriented kp record's affine ellipse — see sift_extract_dawn.cc).
+// The CPU fallback delegates to _threaded_v2, which fills them from the
+// official colmap keypoint structs — the two routes report the same quantity.
+int aether_dsp_sift_extract_gpu_v2(const uint8_t* gray, int width, int height,
+                                   int max_features, int num_threads,
+                                   float* out_xy, uint8_t* out_desc,
+                                   float* out_scales, float* out_orientations,
+                                   int out_cap, int* out_count) {
+    aether_preclamp_instr_v1::ClearPendingAtGpuEntry();
+    aether::tools::DawnKernelHarness::gpu_ts_clear_caller_thread_frame();
+    aether_sed_clear_last_stages();
     if (out_count) *out_count = 0;
     (void)num_threads;
     if (gray == nullptr || width <= 0 || height <= 0 || out_cap <= 0) return 1;
 
+    const auto selection_policy =
+        aether::tools::SiftExtractDawn::feature_selection_policy();
+    const bool deterministic_selection_requested =
+        selection_policy.policy !=
+        aether::sfm::FeatureSelectionPolicyV1::kLegacyColmapGroup;
+
     auto fallback = [&]() -> int {
-        return aether_dsp_sift_extract_threaded(gray, width, height,
-                                                max_features, num_threads, out_xy,
-                                                out_desc, out_cap, out_count);
+        aether_preclamp_instr_v1::DiscardPending(
+            aether_preclamp_instr_v1::PendingDiscardReason::
+                kGpuFailureOrFallback);
+        aether::tools::DawnKernelHarness::gpu_ts_clear_caller_thread_frame();
+        aether_sed_clear_last_stages();
+        if (deterministic_selection_requested) return kCanonicalGpuUnavailable;
+        return aether_dsp_sift_extract_threaded_v2(
+            gray, width, height, max_features, num_threads, out_xy, out_desc,
+            out_scales, out_orientations, out_cap, out_count);
     };
+
+#if defined(AETHER_PRECLAMP_INSTR_TEST_HOOKS)
+    if (g_force_next_gpu_fallback_for_test) {
+        g_force_next_gpu_fallback_for_test = false;
+        return fallback();
+    }
+#endif
 
     try {
         // Serialize GPU use + reuse the persistent, pipeline-cached harness.
@@ -133,8 +218,32 @@ int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
             return fallback();
         }
         if (res.count == 0) {
+            aether_preclamp_instr_v1::DiscardPending(
+                aether_preclamp_instr_v1::PendingDiscardReason::kZeroCandidate);
             if (out_count) *out_count = 0;
+            harness.gpu_ts_stash_frame_for_caller_thread();
             return 0;
+        }
+        const bool deterministic_selection =
+            res.selection_policy !=
+            aether::sfm::FeatureSelectionPolicyV1::kLegacyColmapGroup;
+        if (deterministic_selection_requested != deterministic_selection ||
+            selection_policy.policy != res.selection_policy) {
+            return fallback();
+        }
+        if (deterministic_selection) {
+            aether_preclamp_instr_v1::DiscardPending(
+                aether_preclamp_instr_v1::PendingDiscardReason::
+                    kCanonicalRoute);
+            if (res.stable_ids.size() !=
+                static_cast<size_t>(res.count)) {
+                return fallback();
+            }
+            for (size_t rank = 0; rank < res.stable_ids.size(); ++rank) {
+                if (res.stable_ids[rank] != rank) {
+                    return fallback();
+                }
+            }
         }
 
         const int max_num =
@@ -146,12 +255,18 @@ int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
         // keypoint starts a new (octave,scale) group.
         const int K = res.count;
         std::vector<int> idx(K);
-        for (int i = 0; i < K; ++i) idx[i] = i;
-        std::sort(idx.begin(), idx.end(), [&](int a, int b) {
-            if (res.octave[a] != res.octave[b])
-                return res.octave[a] > res.octave[b];
-            return res.scale[a] > res.scale[b];
-        });
+        if (deterministic_selection) {
+            // The shared selector already emitted the total canonical order.
+            // Keep row rank unchanged: it is the per-frame Stable ID.
+            std::iota(idx.begin(), idx.end(), 0);
+        } else {
+            for (int i = 0; i < K; ++i) idx[i] = i;
+            std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+                if (res.octave[a] != res.octave[b])
+                    return res.octave[a] > res.octave[b];
+                return res.scale[a] > res.scale[b];
+            });
+        }
 
         // Emit up to out_cap keypoints, applying the colmap clamp rule.
         const int kMaxOctaveResolution = 1000;
@@ -163,6 +278,10 @@ int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
                 out_xy[2 * emitted] = res.xy[2 * i] + 0.5f;       // +0.5 half-pixel
                 out_xy[2 * emitted + 1] = res.xy[2 * i + 1] + 0.5f;
             }
+            // [SCALE-PERSIST 2026-08-06] the scale/orientation are properties
+            // of the SAME record row i, emitted in the SAME clamp order as xy.
+            if (out_scales) out_scales[emitted] = res.kp_scale[i];
+            if (out_orientations) out_orientations[emitted] = res.kp_orientation[i];
             if (out_desc) {
                 finish_descriptor(res.raw_desc.data() +
                                       static_cast<size_t>(i) * 128,
@@ -175,6 +294,24 @@ int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
             prev_os = os;
         }
         if (out_count) *out_count = emitted;
+        if (!deterministic_selection_requested && !deterministic_selection) {
+            double gpu_stage_ms[9] = {0.0};
+            aether_sed_last_stages_gpu(gpu_stage_ms, 9);
+            double gpu_ms = 0.0;
+            bool valid_gpu_ms = true;
+            for (double stage_ms : gpu_stage_ms) {
+                valid_gpu_ms = valid_gpu_ms && std::isfinite(stage_ms) &&
+                               stage_ms >= 0.0;
+                gpu_ms += stage_ms;
+            }
+            valid_gpu_ms = valid_gpu_ms && gpu_ms > 0.0;
+            (void)aether_preclamp_instr_v1::SealAcceptedLegacyGpuResult(
+                static_cast<uint32_t>(res.count),
+                valid_gpu_ms
+                    ? aether_preclamp_instr_v1::FieldStatus::kValid
+                    : aether_preclamp_instr_v1::FieldStatus::kUnavailable,
+                valid_gpu_ms ? static_cast<float>(gpu_ms) : 0.0f);
+        }
         // Per-frame detection telemetry (peak_threshold-tuning A/B): raw = #DoG
         // keypoints detected BEFORE the 8192 (octave,scale) clamp — the direct
         // signal a lower peak_threshold moves; kept = #emitted after the clamp.
@@ -184,15 +321,32 @@ int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
             const std::string path =
                 std::string(home) + "/Documents/gpu_sift_feat.log";
             if (FILE* lf = std::fopen(path.c_str(), "a")) {
-                std::fprintf(lf, "feat_raw=%d kept=%d %dx%d\n", K, emitted,
-                             width, height);
+                std::fprintf(
+                    lf,
+                    "feat_raw=%d kept=%d %dx%d selector_policy=%u "
+                    "selector_reason=%u\n",
+                    K, emitted, width, height,
+                    static_cast<uint32_t>(res.selection_policy),
+                    static_cast<uint32_t>(res.selection_policy_reason));
                 std::fclose(lf);
             }
         }
+        harness.gpu_ts_stash_frame_for_caller_thread();
         return 0;
     } catch (...) {
         return fallback();
     }
+}
+
+// v1 ABI kept verbatim (ABI is add-only): thin wrapper over _v2 with the new
+// outputs disabled — same logic, bit-identical output.
+int aether_dsp_sift_extract_gpu(const uint8_t* gray, int width, int height,
+                                int max_features, int num_threads, float* out_xy,
+                                uint8_t* out_desc, int out_cap, int* out_count) {
+    return aether_dsp_sift_extract_gpu_v2(
+        gray, width, height, max_features, num_threads, out_xy, out_desc,
+        /*out_scales=*/nullptr, /*out_orientations=*/nullptr, out_cap,
+        out_count);
 }
 
 }  // extern "C"
