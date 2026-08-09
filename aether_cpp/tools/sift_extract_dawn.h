@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "aether/sfm/canonical_feature_selector_v1.h"
 #include "dawn_kernel_harness.h"
 #include "sift_pyramid_dawn.h"
 
@@ -41,14 +42,35 @@ public:
         std::vector<float> xy;          // 2*K (x,y interleaved, frame coords)
         std::vector<int> octave;        // K (for the 8192 clamp sort)
         std::vector<int> scale;         // K (sublevel s, for the clamp sort)
+        // [SCALE-PERSIST 2026-08-06] K continuous detection scales /
+        // orientations derived from the oriented kp record's affine ellipse
+        // (a11,a12,a21,a22) with COLMAP's own FeatureKeypoint::ComputeScale()
+        // / ComputeOrientation() formulas (colmap/feature/types.cc) — the same
+        // quantities the CPU covariant extractor reports.
+        std::vector<float> kp_scale;        // K (pixels)
+        std::vector<float> kp_orientation;  // K (radians)
         std::vector<float> raw_desc;    // K*128 (the kDspNumScales-scale DSP mean, VLFeat bin order)
+        std::vector<uint64_t> stable_ids;  // canonical row ranks; empty in legacy mode
+        aether::sfm::FeatureSelectionPolicyV1 selection_policy =
+            aether::sfm::FeatureSelectionPolicyV1::kLegacyColmapGroup;
+        aether::sfm::FeatureSelectionPolicyReasonV1 selection_policy_reason =
+            aether::sfm::FeatureSelectionPolicyReasonV1::kAbsent;
         int count = 0;
     };
 
+    // Reads the one compile-time-selected official or self-test environment
+    // namespace. The C ABI uses this same decision before choosing whether a
+    // legacy CPU fallback is semantically valid.
+    static aether::sfm::FeatureSelectionPolicyDecisionV1
+    feature_selection_policy();
+
     // Extract from a grayscale image (row-major, width*height bytes). Returns
-    // false on any GPU failure / capacity overflow / NaN (caller falls back to
-    // CPU). `harness` must be init()'d. peak/edge thresholds + DSP params are the
-    // production defaults (colmap/feature/sift.h).
+    // false on any GPU failure / capacity overflow / NaN. The C ABI preserves
+    // transparent CPU fallback only for legacy policy; an explicit canonical
+    // policy converts false to canonical-unavailable status 2 rather than
+    // returning legacy output under a canonical label. `harness` must be
+    // init()'d. peak/edge thresholds + DSP params are the production defaults
+    // (colmap/feature/sift.h).
     //
     // `max_features` applies the COLMAP (octave desc, scale desc) clamp to the
     // 1→K-expanded oriented keypoint set BEFORE the descriptor stage (sift.cc:
@@ -98,8 +120,17 @@ public:
 
 private:
     static constexpr uint32_t kKpStride = 8u;
-    static constexpr uint32_t kDetectCap = 48000u;   // pre-suppression detect cap
-    static constexpr uint32_t kOrientCap = 65536u;   // 1→K oriented cap
+    // [DETECT-CAP 2026-08-10] 48000→131072:酒店高频纹理场景(未命名(2)/(4))
+    // 原始 DoG 检测数爆 48k 上限 → 整帧确定性失败 → 欠账 → 补算 GPU 重试
+    // 同图必再爆 → 100% 掉 CPU(39s/帧)。上限是缓冲容量非算法语义:同图
+    // 低于旧上限的帧结果逐位不变;曾失败的帧现在完整成功(严格变好)。
+    // 成本:检测缓冲 1.5MB→4MB(每帧多 ~1ms 上传);shader 有越界钳,
+    // 回读按实际 n_detect 走,与上限无关。
+    static constexpr uint32_t kDetectCap = 131072u;  // pre-suppression detect cap
+    // [DETECT-CAP 2026-08-10 连环] 检测上限 48k→128k 后,高频纹理场景的
+    // 朝向候选顶爆 65536(host 用失败照实测 80,904)。同族一起抬:
+    // 65536→196608(3×,给 1→K 多朝向留量;缓冲 ~2MB→6MB)。
+    static constexpr uint32_t kOrientCap = 196608u;  // 1→K oriented cap
 };
 
 }  // namespace tools

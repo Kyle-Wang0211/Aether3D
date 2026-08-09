@@ -94,7 +94,10 @@ aether::tools::DawnKernelHarness* acquire_gpu_harness() {
     if (g_gpu_harness != nullptr && !g_gpu_harness->healthy()) {
         g_gpu_harness = nullptr;  // 遗弃,不 delete(见上)
         ++g_gpu_harness_rebuilds;
-        if (g_gpu_harness_rebuilds > 2) {
+        // [EXTRACT-SELFHEAL 2026-08-10] 上限 2→6:设备错误类瞬断(未命名(2)
+        // 一场就 4 次)现在也走遗弃重建,旧上限几次就永久粘死 CPU。6 次仍是
+        // Chromium 降级阶梯语义,只是给瞬断留出余量。
+        if (g_gpu_harness_rebuilds > 6) {
             g_gpu_harness_init_failed = true;
             return nullptr;
         }
@@ -186,6 +189,40 @@ int aether_dsp_sift_extract_gpu_v2(const uint8_t* gray, int width, int height,
         aether::tools::DawnKernelHarness::gpu_ts_clear_caller_thread_frame();
         aether_sed_clear_last_stages();
         if (deterministic_selection_requested) return kCanonicalGpuUnavailable;
+        // [OOM-FALLBACK-GATE 2026-08-09] "transparent CPU fallback" 在拍摄期
+        // 是颗雷:GPU 失败(热态 20s TimedWaitAny 超时)后在 12MP 原图上跑
+        // CPU DSP-SIFT —— 热瘫的 CPU 要几十秒且分配 GB 级金字塔/工作区。
+        // 实测定罪(cap_1786237277896041 fid=33,2026-08-09):worker 卡在
+        // add_frame 35s+,footprint 1.97GB→3.16GB,jetsam vm-pageshortage
+        // 全 app 阵亡,整机挤兑。政策:大图(>4MP)默认不再 CPU 兜底,返回
+        // status 2 → add_frame 走既有 AETHER_SFM_ERR_EXTRACT 丢帧路径,拍摄
+        // 继续 —— 宁丢一帧不死全场。小图(host 工具/低分辨率档)保留原兜底。
+        // env OFFICIAL_AETHER_EXTRACT_CPU_FALLBACK:=1 恒开(旧行为)/=0 恒关/
+        // 未设=按面积(≤4MP 允许)。C 层默认,跨端。
+        {
+            // ⚠️ 不做 static 缓存,失败路径每次现读 —— [EXTRACT-DEBT REPAY]
+            // facade 在拍完等待期 setenv=1 临时放开兜底重喂欠账帧,靠的就是
+            // 这里的即时生效。失败路径极冷,getenv 成本可忽略。
+            const int fallback_mode = [] {
+                const char* e =
+                    std::getenv("OFFICIAL_AETHER_EXTRACT_CPU_FALLBACK");
+                if (e && e[0] == '1' && e[1] == '\0') return 1;
+                if (e && e[0] == '0' && e[1] == '\0') return 0;
+                return 2;  // auto: gate by image area
+            }();
+            const long long px =
+                static_cast<long long>(width) * static_cast<long long>(height);
+            const bool allowed =
+                fallback_mode == 1 || (fallback_mode == 2 && px <= 4000000ll);
+            if (!allowed) {
+                std::fprintf(stderr,
+                             "[DspSiftGpu] GPU extract failed; CPU fallback "
+                             "blocked for %dx%d (OOM guard, status 2 -> "
+                             "frame drop)\n",
+                             width, height);
+                return kCanonicalGpuUnavailable;
+            }
+        }
         return aether_dsp_sift_extract_threaded_v2(
             gray, width, height, max_features, num_threads, out_xy, out_desc,
             out_scales, out_orientations, out_cap, out_count);
@@ -202,6 +239,11 @@ int aether_dsp_sift_extract_gpu_v2(const uint8_t* gray, int width, int height,
         // Serialize GPU use + reuse the persistent, pipeline-cached harness.
         // The lock spans the whole GPU extract: one device, one frame at a time.
         std::lock_guard<std::mutex> gpu_lock(g_gpu_harness_mu);
+        // [EXTRACT-SELFHEAL 2026-08-10] 设备错误类失败(dawn_error/回读短缺)
+        // 此前不标失活 ⇒ 坏实例被 100% 复用:未命名(2) 补算期 GPU 重试 4/4
+        // 连败全掉 CPU(39s/帧,用户多等 2 分钟)。现改:第一次失败 →
+        // mark_unhealthy 遗弃 → acquire 重建 → 同帧重试一次 → 再败才 CPU。
+        for (int attempt = 0; attempt < 2; ++attempt) {
         aether::tools::DawnKernelHarness* harness_ptr = acquire_gpu_harness();
         if (harness_ptr == nullptr) return fallback();
         aether::tools::DawnKernelHarness& harness = *harness_ptr;
@@ -215,6 +257,10 @@ int aether_dsp_sift_extract_gpu_v2(const uint8_t* gray, int width, int height,
         // (+0.5 half-pixel + finishing), already in (octave desc, scale desc)
         // order from the orchestrator's clamp sort, so it stays COLMAP-faithful.
         if (!extractor.extract(harness, gray, width, height, max_num0, &res)) {
+            if (attempt == 0) {
+                harness.mark_unhealthy();  // 遗弃,下轮 acquire 重建
+                continue;
+            }
             return fallback();
         }
         if (res.count == 0) {
@@ -333,7 +379,12 @@ int aether_dsp_sift_extract_gpu_v2(const uint8_t* gray, int width, int height,
         }
         harness.gpu_ts_stash_frame_for_caller_thread();
         return 0;
+        }  // for (attempt) — [EXTRACT-SELFHEAL] 重试环
+        return fallback();  // 不可达(环内必 return/continue),保编译器
     } catch (...) {
+        // [EXTRACT-SELFHEAL] 异常类失败(如回读守卫)同样标失活,下一次
+        // 调用 acquire 走遗弃重建,不再复用坏实例。
+        if (g_gpu_harness != nullptr) g_gpu_harness->mark_unhealthy();
         return fallback();
     }
 }

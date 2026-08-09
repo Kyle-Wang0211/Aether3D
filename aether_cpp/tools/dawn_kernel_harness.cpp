@@ -29,6 +29,19 @@ namespace tools {
 
 namespace {
 
+// ─── [GPU-TS-DIAG 2026-08-08] 临时隔离插桩(env 门控,默认完全关闭)───
+// 目的:在改任何判定逻辑之前,先拿到"到底是 monotonic 失败还是 size 不匹配、
+// 哪个 pass 索引触发、begin/end 原始值是多少"的证据。
+// 门控 env:OFFICIAL_AETHER_GPU_TS_DIAG=1(2026-08-09 批次12 改前缀:official 框架自路由键政策)。未设置时 gpu_ts_diag_enabled() 返回 false,
+// 所有打印分支不进入,生产路径逐字节不变。
+bool gpu_ts_diag_enabled() {
+    static const bool kOn = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_GPU_TS_DIAG");
+        return v != nullptr && v[0] == '1' && v[1] == '\0';
+    }();
+    return kOn;
+}
+
 // StringView printer (Dawn callbacks return wgpu::StringView, not const char*).
 std::ostream& operator<<(std::ostream& os, const wgpu::StringView& s) {
     if (s.data == nullptr) {
@@ -422,11 +435,13 @@ bool finalize_frame_v1(AetherGpuTimestampFrameV1* frame,
                pair >= cumulative_pass_counts[stage]) {
             ++stage;
         }
+        // [GPU-TS-ZEROLEN 2026-08-08] end == begin 合法(GPU 计时量子 >> 短 pass
+        // 时长),按 0 ns 计入本 stage;只有 end < begin 才是真的时钟倒挂。
         if (stage >= stage_count ||
-            complete.raw_pairs[pair].end_tick <=
+            complete.raw_pairs[pair].end_tick <
                 complete.raw_pairs[pair].begin_tick) {
             return reject(AETHER_GPU_TIMESTAMP_REASON_NONMONOTONIC_PAIR_V1,
-                          "timestamp pair is zero or nonmonotonic");
+                          "timestamp pair is nonmonotonic");
         }
         complete.raw_pairs[pair].stage_index = stage;
         const uint64_t ticks = complete.raw_pairs[pair].end_tick -
@@ -1134,6 +1149,13 @@ bool DawnKernelHarness::gpu_ts_resolve(std::vector<uint64_t>* out_ns) {
             frame.drop_count = drops;
             std::strncpy(frame.reason, reason, sizeof(frame.reason) - 1);
             frame.reason[sizeof(frame.reason) - 1] = '\0';
+            if (gpu_ts_diag_enabled()) {  // [GPU-TS-DIAG] 默认关
+                std::cerr << "[GPU-TS-DIAG] resolve FAILED reason_code="
+                          << reason_code << " reason=\"" << reason
+                          << "\" drops=" << drops
+                          << " ts_next=" << ts_next_
+                          << " ts_drop_count=" << ts_drop_count_ << "\n";
+            }
             gpu_timestamp_internal::publish_frame_v1(frame);
         };
 
@@ -1263,13 +1285,53 @@ bool DawnKernelHarness::gpu_ts_resolve(std::vector<uint64_t>* out_ns) {
 
     bool monotonic = true;
     out_ns->reserve(n / 2);
+    // [GPU-TS-DIAG] env 门控计数,默认不进入任何打印分支。
+    const bool diag = gpu_ts_diag_enabled();
+    uint32_t diag_zero = 0;      // end == begin
+    uint32_t diag_inverted = 0;  // end <  begin
+    uint32_t diag_both_zero = 0; // begin == end == 0(readback 根本没写)
+    uint32_t diag_printed = 0;
+    // [GPU-TS-ZEROLEN 2026-08-08] 零长 pass(end == begin)是**合法**的:
+    // 实测 host(Apple Silicon / Dawn-Metal)的 GPU 时间戳量化步长是 65536 ns,
+    // 任何短于一个量子的 compute pass 的 begin/end 必然落在同一 tick。
+    // 旧逻辑把 end <= begin 一律判为"非单调"并 clear 掉**整帧**证据,于是
+    // 78 个 pass 里只要有 1 个短 pass,9 段 GPU 分解就全灭 —— 这正是
+    // [SED-SPLIT] 从不打印、g_aether_sed_stage_gpu_ms[] 恒零的根因。
+    // 现在只有真正倒挂(end < begin,时钟回卷/脏读)才判整帧无效;零长记 0 ns。
     for (uint32_t i = 0; i + 1 < n; i += 2) {
         const uint64_t begin = ts[i];
         const uint64_t end = ts[i + 1];
-        if (end <= begin) {
+        if (end < begin) {
             monotonic = false;
+            if (diag) {
+                ++diag_inverted;
+                if (begin == 0 && end == 0) ++diag_both_zero;
+                if (diag_printed < 24) {
+                    std::cerr << "[GPU-TS-DIAG] bad pair idx=" << (i / 2)
+                              << " qidx=" << i << "/" << (i + 1)
+                              << " begin=" << begin << " end=" << end
+                              << " delta=" << (int64_t)(end - begin) << "\n";
+                    ++diag_printed;
+                }
+            }
         } else {
+            if (diag && end == begin) ++diag_zero;  // 合法零长,仅计数
             out_ns->push_back(end - begin);
+        }
+    }
+    if (diag) {
+        std::cerr << "[GPU-TS-DIAG] resolve n_queries=" << n
+                  << " pairs=" << (n / 2)
+                  << " good=" << out_ns->size()
+                  << " zero_len=" << diag_zero
+                  << " inverted=" << diag_inverted
+                  << " both_zero=" << diag_both_zero
+                  << " ts_drop_count=" << ts_drop_count_
+                  << " monotonic=" << (monotonic ? 1 : 0) << "\n";
+        // 首尾几对的原始值,用来分辨"整块 readback 全零"与"个别 pass 同刻"。
+        const uint32_t show = n < 8u ? n : 8u;
+        for (uint32_t i = 0; i < show; ++i) {
+            std::cerr << "[GPU-TS-DIAG] raw[" << i << "]=" << ts[i] << "\n";
         }
     }
     ts_pending_ticks_.assign(ts, ts + n);
@@ -1310,6 +1372,11 @@ bool DawnKernelHarness::gpu_ts_finalize_frame(
         ts_pending_ticks_.size() >
             AETHER_GPU_TIMESTAMP_RAW_PAIR_CAPACITY_V1 * 2u ||
         (ts_pending_ticks_.size() & 1u) != 0) {
+        if (gpu_ts_diag_enabled()) {  // [GPU-TS-DIAG] 默认关
+            std::cerr << "[GPU-TS-DIAG] finalize early-out pending_ready="
+                      << (ts_pending_ready_ ? 1 : 0)
+                      << " ticks=" << ts_pending_ticks_.size() << "\n";
+        }
         return false;
     }
     AetherGpuTimestampFrameV1 frame{};
@@ -1339,6 +1406,17 @@ bool DawnKernelHarness::gpu_ts_finalize_frame(
         cumulative_pass_counts, stage_count);
     const bool published =
         gpu_timestamp_internal::publish_frame_v1(frame);
+    if (gpu_ts_diag_enabled()) {  // [GPU-TS-DIAG] 默认关
+        std::cerr << "[GPU-TS-DIAG] finalize valid=" << (valid ? 1 : 0)
+                  << " published=" << (published ? 1 : 0)
+                  << " reason_code=" << frame.reason_code
+                  << " reason=\"" << frame.reason << "\" bounds=";
+        for (uint32_t s = 0; s < stage_count; ++s) {
+            std::cerr << cumulative_pass_counts[s]
+                      << (s + 1 == stage_count ? "" : ",");
+        }
+        std::cerr << "\n";
+    }
     return valid && published;
 }
 

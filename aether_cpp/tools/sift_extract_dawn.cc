@@ -2,6 +2,15 @@
 // Copyright (c) 2024-2026 Aether3D. All rights reserved.
 
 #include "sift_extract_dawn.h"
+#include "feature_selection_environment_v1.h"
+#if defined(AETHER_FEATURE_SELECTION_ENV_OFFICIAL)
+#define AETHER_PRECLAMP_INSTR_ENV_OFFICIAL 1
+#elif defined(AETHER_FEATURE_SELECTION_ENV_SELFTEST)
+#define AETHER_PRECLAMP_INSTR_ENV_SELFTEST 1
+#else
+#error "preclamp instr: feature-selection environment namespace is absent"
+#endif
+#include "../official_pipeline/src/official_preclamp_instr_v1.h"
 
 #include <algorithm>
 #include <chrono>
@@ -10,8 +19,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <iostream>
+#include <numeric>
+#include <span>
 #include <string>
+#include <utility>
 
 #ifdef AETHER_WGSL_DIR
 #include <fstream>
@@ -20,6 +33,19 @@
 #include "aether/shaders/wgsl_sources.h"
 #include <string_view>
 #endif
+
+// [EXTRACT-SELFHEAL 2026-08-10] 提取失败原因(线程本地,extract() 进入时清
+// 空)。此前失败原因只进 stderr(真机上丢失)= 观测盲区:未命名(2) 4 帧
+// GPU 瞬断 + 补算 4/4 掉 CPU,无从定罪。core 在 errExtract 时把它落逐帧账。
+// 定义在文件最早处:read_u32 等匿名空间助手也要set。
+static thread_local char g_aether_sed_fail_reason[192] = {0};
+extern "C" const char* aether_sed_last_fail_reason() {
+    return g_aether_sed_fail_reason;
+}
+static void sed_set_fail_reason(const char* what) {
+    std::snprintf(g_aether_sed_fail_reason, sizeof(g_aether_sed_fail_reason),
+                  "%s", what);
+}
 
 namespace aether {
 namespace tools {
@@ -67,6 +93,18 @@ std::vector<uint32_t> read_u32(DawnKernelHarness& h, const wgpu::Buffer& b,
     wgpu::Buffer st = h.alloc_staging_for_readback(bytes);
     h.copy_to_staging(b, st, bytes);
     std::vector<uint8_t> raw = h.readback(st, bytes);
+    // [READBACK-GUARD 2026-08-09] readback() 在 GPU 等待超时/设备失活/map
+    // 失败三条路径上都返回空 vector —— 旧代码不检查直接 memcpy 空指针,
+    // 真机 SIGSEGV 实锤(2026-08-09 18:19 Runner.ips:read_u32→memmove
+    // KERN_INVALID_ADDRESS at 0x0;GPU_WAIT_MS=1 复现,热态真超时同路径)。
+    // 抛异常 → dsp_sift_gpu_c.cc 的 catch(...) → fallback(OOM 闸把关)→
+    // errExtract → 帧记欠账拍完补算 —— 崩溃变成"晚一点",一帧不丢。
+    if (raw.size() < bytes) {
+        sed_set_fail_reason("readback_short_or_timeout");
+        throw std::runtime_error(
+            "[SiftExtractDawn] GPU readback short/failed (timeout or device "
+            "loss) — aborting this frame's extraction");
+    }
     std::vector<uint32_t> out(n);
     std::memcpy(out.data(), raw.data(), bytes);
     return out;
@@ -74,25 +112,141 @@ std::vector<uint32_t> read_u32(DawnKernelHarness& h, const wgpu::Buffer& b,
 
 }  // namespace
 
+aether::sfm::FeatureSelectionPolicyDecisionV1
+SiftExtractDawn::feature_selection_policy() {
+    return aether::sfm::ParseFeatureSelectionPolicyV1(std::getenv(
+        detail::kFeatureSelectionPolicyEnvironmentV1));
+}
+
+// [AETHER-T-EXTRACT 2026-07-27] Per-stage duration stash (9 mark() stages in
+// extract() order: pyramid, pack, detect, suppress+rb, affine+rb, orient,
+// clamp, descriptor, desc-rb). The stash is caller-thread-owned: the GPU ABI
+// serializes Dawn work, but the official session reads after that mutex is
+// released, so a process-global array would race with the next session.
+static constexpr int kAetherSedStageCount = 9;
+static thread_local double g_aether_sed_stage_ms[kAetherSedStageCount] = {0};
+
+extern "C" void aether_sed_last_stages(double* out, int cap) {
+    if (out == nullptr || cap <= 0) return;
+    const int n = cap < kAetherSedStageCount ? cap : kAetherSedStageCount;
+    for (int i = 0; i < n; ++i) out[i] = g_aether_sed_stage_ms[i];
+}
+
+// [GPU-TS 2026-07-29] The GPU-side twin of the stash above.
+//
+// g_aether_sed_stage_ms is HOST wall clock: each entry brackets host loops,
+// buffer uploads, the blocking readback AND the GPU work in one number. Three
+// separate optimisation candidates (constant-mask precompute, (o,s) pruning,
+// deleting the CPU round-trips) all target the NON-GPU part of that bundle, so
+// ranking them on the host number is circular. This array carries the GPU-only
+// share of the same nine stages, summed from per-pass timestamp deltas; the
+// difference (host − gpu) is the host/transfer/sync overhead per stage.
+//
+// Zero unless AETHER_GPU_TIMESTAMPS=1 — with the env unset no query set exists,
+// no pass descriptor is attached, and the command stream is unchanged.
+static thread_local double
+    g_aether_sed_stage_gpu_ms[kAetherSedStageCount] = {0};
+
+extern "C" void aether_sed_last_stages_gpu(double* out, int cap) {
+    if (out == nullptr || cap <= 0) return;
+    const int n = cap < kAetherSedStageCount ? cap : kAetherSedStageCount;
+    for (int i = 0; i < n; ++i) out[i] = g_aether_sed_stage_gpu_ms[i];
+}
+
+extern "C" void aether_sed_clear_last_stages() {
+    for (int i = 0; i < kAetherSedStageCount; ++i) {
+        g_aether_sed_stage_ms[i] = 0.0;
+        g_aether_sed_stage_gpu_ms[i] = 0.0;
+    }
+}
+
+
 bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                               int width, int height, int max_features,
                               Result* out) {
-    if (gray == nullptr || width < 2 || height < 2 || out == nullptr) {
-        return false;
-    }
+    if (out == nullptr) return false;
+    out->xy.clear();
+    out->octave.clear();
+    out->scale.clear();
+    out->kp_scale.clear();
+    out->kp_orientation.clear();
+    out->raw_desc.clear();
+    out->stable_ids.clear();
+    out->count = 0;
+    const aether::sfm::FeatureSelectionPolicyDecisionV1 selection_decision =
+        feature_selection_policy();
+    out->selection_policy = selection_decision.policy;
+    out->selection_policy_reason = selection_decision.reason;
+    if (gray == nullptr || width < 2 || height < 2) return false;
+    const bool canonical_selection =
+        selection_decision.policy ==
+        aether::sfm::FeatureSelectionPolicyV1::kCanonicalExact8192;
+    const bool coverage_selection =
+        selection_decision.policy ==
+        aether::sfm::FeatureSelectionPolicyV1::kCoverageExact8192;
 
-    // Per-stage timing (env SED_TIMING). Each mark() prints ms since the prev
-    // mark — to attribute the per-frame cost across pyramid / detect / suppress /
-    // affine / orient / descriptor / readback, and isolate the host-repack
-    // round-trips (the GPU-side-compaction optimization target).
+    // [P0 崩溃修复 2026-07-27] Dawn 的设备级错误(校验/OOM/internal)现在
+    // 只记录不 abort(见 DawnKernelHarness::take_device_error 的注释),所以
+    // **消费 GPU 结果之前必须显式查一次** —— 漏查就等于拿脏数据静默往下走,
+    // 那才是真正最坏的失败模式。先清掉上一帧可能残留的状态。
+    DawnKernelHarness::take_device_error(nullptr);
+    g_aether_sed_fail_reason[0] = '\0';  // [EXTRACT-SELFHEAL] 每次进入清空
+    const auto dawn_failed = [](const char* where) {
+        std::string err;
+        if (!DawnKernelHarness::take_device_error(&err)) {
+            return false;
+        }
+        std::cerr << "[SiftExtractDawn] Dawn device error at " << where << ": "
+                  << err << " (fallback)\n";
+        sed_set_fail_reason(
+            (std::string("dawn_error@") + where + ": " + err).c_str());
+        return true;
+    };
+
+    // Per-stage host timing is diagnostic-only. SED_TIMING prints it, while a
+    // requested/enabled TimestampQuery run records it beside GPU durations.
+    // With both gates off, mark() returns before reading a clock: the default
+    // product path remains observationally inert.
     const bool timing = std::getenv("SED_TIMING") != nullptr;
-    auto t_prev = std::chrono::high_resolution_clock::now();
+    const bool observe_timing = timing || harness.gpu_ts_enabled();
+    aether_sed_clear_last_stages();
+    int sed_idx = 0;
+    // [GPU-TS] Record which compute passes fall inside each stage. Resolving
+    // per stage would add a readback per stage — exactly the round-trip under
+    // investigation — so only the pass-index boundaries are captured here and
+    // the single resolve happens after the last mark().
+    harness.gpu_ts_reset();
+    harness.host_breakdown_reset();               // [HOST-BD]
+    uint32_t ts_bounds[kAetherSedStageCount] = {0};
+    // [HOST-BD] Per-stage harness cost, so the extractor's OWN host loops fall
+    // out as: host_ms - gpu_ms - (upload+encode+wait+map). That residual is the
+    // only part no existing counter can see, and it is where the compaction
+    // loops / ellipse repacking / host sorts live.
+    double hb_stage[kAetherSedStageCount][5] = {{0}};  // upload, encode, wait, map, create
+    auto hb_snap = harness.host_breakdown();
+    std::chrono::high_resolution_clock::time_point t_prev{};
+    if (observe_timing) {
+        t_prev = std::chrono::high_resolution_clock::now();
+    }
     auto mark = [&](const char* label) {
-        if (!timing) return;
+        if (!observe_timing) return;
         auto now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(now - t_prev).count();
-        std::printf("  [SED] %-22s %.1f ms\n", label, ms);
-        std::fflush(stdout);
+        if (sed_idx < kAetherSedStageCount) {
+            ts_bounds[sed_idx] = harness.gpu_ts_pass_count();  // [GPU-TS]
+            const auto& h = harness.host_breakdown();          // [HOST-BD]
+            hb_stage[sed_idx][0] = h.upload_ms - hb_snap.upload_ms;
+            hb_stage[sed_idx][1] = h.encode_ms - hb_snap.encode_ms;
+            hb_stage[sed_idx][2] = h.submit_wait_ms - hb_snap.submit_wait_ms;
+            hb_stage[sed_idx][3] = h.map_ms - hb_snap.map_ms;
+            hb_stage[sed_idx][4] = h.create_ms - hb_snap.create_ms;
+            hb_snap = h;
+            g_aether_sed_stage_ms[sed_idx++] = ms;
+        }
+        if (timing) {
+            std::printf("  [SED] %-22s %.1f ms\n", label, ms);
+            std::fflush(stdout);
+        }
         t_prev = now;
     };
 
@@ -100,6 +254,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     SiftPyramidDawn pyr;
     if (!pyr.build(harness, gray, width, height)) {
         std::cerr << "[SiftExtractDawn] pyramid build failed\n";
+        sed_set_fail_reason("pyramid_build_failed");
         return false;
     }
     mark("pyramid build");
@@ -157,10 +312,35 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     harness.end_batch();
     uint32_t n_detect = read_u32(harness, det_counter, 1)[0];
     mark("detect (all oct)");
+    // 顺序要紧:先判 Dawn 错误,再判 0 特征 —— 否则金字塔/检测阶段的校验
+    // 失败会被误读成"这帧就是没有特征"的合法空结果。
+    if (dawn_failed("pyramid/detect")) {
+        return false;
+    }
     if (n_detect > kDetectCap) {
         std::cerr << "[SiftExtractDawn] detect overflow " << n_detect << " > "
                   << kDetectCap << " (fallback)\n";
+        char why[96];
+        std::snprintf(why, sizeof(why), "detect_overflow n=%u cap=%u",
+                      n_detect, kDetectCap);
+        sed_set_fail_reason(why);
         return false;
+    }
+    // [P0 崩溃修复 2026-07-27] 全黑 / 完全无纹理的帧(手机扣在桌面上拍)
+    // 检测数为 0。若继续往下走,Stage B++ 会 upload 一个 **0 字节** 的
+    // keep_buf(keep_init 是空 vector),而 WebGPU 不允许把零尺寸 storage
+    // buffer 绑进 bind group → Dawn 判校验失败 → on_uncaptured_error →
+    // 进程 abort,整个 App 闪退。真机三份崩溃报告(14:57:00/07/27)签名
+    // 完全一致,栈顶就是 CreateBindGroup。
+    //
+    // 这里提前收工,语义与下面 n_kept == 0 那条守卫**完全一致**:
+    // 0 个特征是合法的空结果,不是失败,所以 return true 而不是走 CPU 回退
+    // (CPU 在同一帧上同样会得到 0 个特征,重算一遍纯属浪费)。
+    if (n_detect == 0) {
+        out->count = 0;
+        aether_preclamp_instr_v1::DiscardPending(
+            aether_preclamp_instr_v1::PendingDiscardReason::kZeroCandidate);
+        return true;
     }
 
     // ════════════════ Stage B++: non-extrema suppression ════════════════
@@ -196,9 +376,14 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         const uint32_t* r = det_recs.data() + static_cast<size_t>(i) * kKpStride;
         for (uint32_t w = 0; w < kKpStride; ++w) aff_in.push_back(r[w]);
     }
-    const uint32_t n_kept = static_cast<uint32_t>(aff_in.size() / kKpStride);
+    uint32_t n_kept = static_cast<uint32_t>(aff_in.size() / kKpStride);
+    if (dawn_failed("suppress")) {
+        return false;
+    }
     if (n_kept == 0) {
         out->count = 0;
+        aether_preclamp_instr_v1::DiscardPending(
+            aether_preclamp_instr_v1::PendingDiscardReason::kZeroCandidate);
         return true;
     }
 
@@ -224,12 +409,19 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
         wgpu::ComputePipeline pipe_aff =
             harness.load_compute(load_wgsl("sift_affine_shape.wgsl"));
+        // [2D-DISPATCH 2026-08-10] WebGPU 单维派发上限 65535;n_kept 超限
+        // (128k 检测上限后实测 80,904)按 (x<=65535, y=层数) 拆分,shader 里
+        // kp = y*65535+x 重组;n<=65535 时 y=1 逐位同旧。
         harness.dispatch(pipe_aff, {packed, meta_buf, aff_in_buf, ell_buf, p_buf},
-                         n_kept, 1u, 1u);
+                         std::min(n_kept, 65535u), (n_kept + 65534u) / 65535u,
+                         1u);
     }
     std::vector<uint32_t> ell_raw =
         read_u32(harness, ell_buf, static_cast<size_t>(n_kept) * 5);
     mark("affine+readback");
+    if (dawn_failed("affine")) {
+        return false;
+    }
 
     // Repack: merge the affine ellipse (a11,a12,a21,a22) into the kp record at
     // slots [2..5], preserving x,y (slots 0,1) and o,s (slots 5,6 of the detect
@@ -262,6 +454,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     }
     if (nan_seen) {
         std::cerr << "[SiftExtractDawn] NaN affine ellipse (fallback)\n";
+        sed_set_fail_reason("nan_affine");
         return false;
     }
 
@@ -277,9 +470,13 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         ori_out_init.data(), ori_out_init.size() * sizeof(uint32_t),
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
     std::vector<float> dbg_init(static_cast<size_t>(kOrientCap) * 2, 0.0f);
+    wgpu::BufferUsage dbg_usage = wgpu::BufferUsage::Storage;
+    if (canonical_selection || coverage_selection) {
+        dbg_usage |= wgpu::BufferUsage::CopySrc;
+    }
     wgpu::Buffer dbg_buf =
         harness.upload(dbg_init.data(), dbg_init.size() * sizeof(float),
-                       wgpu::BufferUsage::Storage);
+                       dbg_usage);
     {
         struct OriParams {
             uint32_t count;
@@ -294,13 +491,18 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
         wgpu::ComputePipeline pipe_ori =
             harness.load_compute(load_wgsl("sift_orientation.wgsl"));
+        // [2D-DISPATCH 2026-08-10] 同 affine:二维拆分过 65535 上限。
         harness.dispatch(pipe_ori,
                          {packed, meta_buf, ori_in_buf, ori_out_buf, ori_counter,
                           dbg_buf, p_buf},
-                         n_kept, 1u, 1u);
+                         std::min(n_kept, 65535u), (n_kept + 65534u) / 65535u,
+                         1u);
     }
     uint32_t n_oriented = read_u32(harness, ori_counter, 1)[0];
     mark("orient (1->K)");
+    if (dawn_failed("orientation")) {
+        return false;
+    }
     if (std::getenv("SED_DEBUG")) {
         std::cerr << "[SiftExtractDawn] n_detect=" << n_detect
                   << " n_kept(suppress)=" << n_kept
@@ -309,7 +511,24 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     if (n_oriented > kOrientCap) {
         std::cerr << "[SiftExtractDawn] orient overflow " << n_oriented << " > "
                   << kOrientCap << " (fallback)\n";
+        char why[96];
+        std::snprintf(why, sizeof(why), "orient_overflow n=%u cap=%u",
+                      n_oriented, kOrientCap);
+        sed_set_fail_reason(why);
         return false;
+    }
+    if (n_oriented == 0) {
+        aether_preclamp_instr_v1::DiscardPending(
+            aether_preclamp_instr_v1::PendingDiscardReason::kZeroCandidate);
+        return true;
+    }
+    aether_preclamp_instr_v1::BeginLegacyClamp(n_oriented);
+    // Preserve the frozen legacy clamp block below byte-for-byte. Canonical
+    // mode bypasses it by temporarily disabling its existing max_features
+    // condition, then applies the shared exact selector after the frozen mark.
+    const int requested_max_features = max_features;
+    if (canonical_selection) {
+        max_features = 0;
     }
 
     // ════════════════ COLMAP clamp BEFORE descriptor (sift.cc:403-444) ════════
@@ -360,6 +579,247 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         ori_all.assign(clamped.begin(), clamped.end());
     }
     mark("clamp (pre-desc)");
+    // [Q5A-AUDIT 2026-08-08] env 门控纯观测(默认关,不改任何缓冲/结果)。
+    // 量化 (o,s) 预剪枝的**可证明上界**:COLMAP clamp 按 (octave desc,
+    // scale desc) 排序,且只在 **组边界** 处停(sift.cc:430-439,见上面的
+    // 循环:os != prev_os && kept >= max 才 break)⇒ 幸存集永远是若干个
+    // **完整**的 (o,s) 组。因此任何 (o,s) 严格小于幸存最小组的候选点,其
+    // 全部 1→K 定向产物都必然排在幸存组之后、必被裁掉 —— 对这些候选跑
+    // affine/orient 是 100% 白工,砍掉它们对输出的影响恰好为零。
+    // 这里只统计"能砍多少",不实际砍。
+    static const bool q5a_audit = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_Q5A_AUDIT");
+        return v != nullptr && v[0] == '1' && v[1] == '\0';
+    }();
+    if (q5a_audit) {
+        constexpr long long kOsRes = 1000;
+        long long os_min = 0;
+        bool have_min = false;
+        for (uint32_t i = 0; i < n_desc; ++i) {
+            int o, s;
+            std::memcpy(&o, &ori_all[static_cast<size_t>(i) * kKpStride + 6], 4);
+            std::memcpy(&s, &ori_all[static_cast<size_t>(i) * kKpStride + 7], 4);
+            const long long os = static_cast<long long>(o) * kOsRes + s;
+            if (!have_min || os < os_min) { os_min = os; have_min = true; }
+        }
+        uint32_t prunable = 0;
+        for (uint32_t i = 0; i < n_kept; ++i) {
+            int o, s;
+            std::memcpy(&o, &aff_in[static_cast<size_t>(i) * kKpStride + 5], 4);
+            std::memcpy(&s, &aff_in[static_cast<size_t>(i) * kKpStride + 6], 4);
+            const long long os = static_cast<long long>(o) * kOsRes + s;
+            if (have_min && os < os_min) ++prunable;
+        }
+        // 07-29 设计书自己给的**保守 k=1 下界**规则(它才是可在 affine 之前
+        // 落地的那个,因为它只用 det 阶段就已知的 (o,s) 直方图):
+        // 按 (o,s) 降序累加候选数 c_i(每点至少 1 个方向),取第一个使
+        // 累计 >= max_features 的组 M;真实 break 组 m <= M,故严格细于 M
+        // 的组在任何 k∈[1,4] 下都必被丢弃 —— 这是设计书宣称"逐字节不变"
+        // 的那部分。下面同时报出它,与上面的"事后最优"上界对照。
+        std::vector<std::pair<long long, uint32_t>> hist;
+        for (uint32_t i = 0; i < n_kept; ++i) {
+            int o, s;
+            std::memcpy(&o, &aff_in[static_cast<size_t>(i) * kKpStride + 5], 4);
+            std::memcpy(&s, &aff_in[static_cast<size_t>(i) * kKpStride + 6], 4);
+            const long long os = static_cast<long long>(o) * kOsRes + s;
+            bool found = false;
+            for (auto& e : hist) {
+                if (e.first == os) { ++e.second; found = true; break; }
+            }
+            if (!found) hist.emplace_back(os, 1u);
+        }
+        std::sort(hist.begin(), hist.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        // ⚠️ 关键的 off-by-one:clamp 的 break 条件是"进入**新组的第一条**记录
+        // 且 kept >= max",所以它保留的是「完整的 1..m 组」**外加 m+1 组的
+        // 第一条记录」。因此可安全剪掉的是严格细于 **m+1** 组的部分,不是
+        // 严格细于 m 组。少算这一格会砍掉一个真实幸存点(实测正是如此)。
+        long long os_safe = LLONG_MIN;
+        unsigned long long cum = 0;
+        for (size_t j = 0; j < hist.size(); ++j) {
+            cum += hist[j].second;
+            if (max_features > 0 &&
+                cum >= static_cast<unsigned long long>(max_features)) {
+                if (j + 1 < hist.size()) os_safe = hist[j + 1].first;
+                break;
+            }
+        }
+        uint32_t prunable_safe = 0;
+        if (os_safe != LLONG_MIN) {
+            for (const auto& e : hist) {
+                if (e.first < os_safe) prunable_safe += e.second;
+            }
+        }
+        // 逐组对照:候选数 c_i(定向前)vs 定向产物数 o_i。设计书的证明
+        // 假设 k∈[1,4](每个候选点至少产出 1 个方向)⇒ o_i >= c_i。
+        // 若实测出现 o_i < c_i,说明 k 可以为 0,那条"保守下界"就不成立。
+        std::vector<uint32_t> ori_full = read_u32(
+            harness, ori_out_buf, static_cast<size_t>(n_oriented) * kKpStride);
+        std::vector<std::pair<long long, uint32_t>> ohist;
+        for (uint32_t i = 0; i < n_oriented; ++i) {
+            int o, s;
+            std::memcpy(&o, &ori_full[static_cast<size_t>(i) * kKpStride + 6], 4);
+            std::memcpy(&s, &ori_full[static_cast<size_t>(i) * kKpStride + 7], 4);
+            const long long os = static_cast<long long>(o) * kOsRes + s;
+            bool found = false;
+            for (auto& e : ohist) {
+                if (e.first == os) { ++e.second; found = true; break; }
+            }
+            if (!found) ohist.emplace_back(os, 1u);
+        }
+        unsigned long long cc = 0, co = 0;
+        int shown = 0, shrink_groups = 0;
+        for (const auto& e : hist) {
+            uint32_t oi = 0;
+            for (const auto& g : ohist) {
+                if (g.first == e.first) { oi = g.second; break; }
+            }
+            cc += e.second;
+            co += oi;
+            if (oi < e.second) ++shrink_groups;
+            if (shown < 12) {
+                std::fprintf(stderr,
+                             "[Q5A-GROUP] os=%-6lld cand=%-6u ori=%-6u "
+                             "cum_cand=%-7llu cum_ori=%-7llu %s\n",
+                             e.first, e.second, oi, cc, co,
+                             oi < e.second ? "<-- ori<cand (k=0 存在)" : "");
+                ++shown;
+            }
+        }
+        // 证明真正需要的条件不是逐组 o_i >= c_i,而是**每个前缀**
+        // cum_ori >= cum_cand。前缀一旦破,保守阈值就可能过粗、砍掉真幸存点。
+        unsigned long long pc = 0, po = 0;
+        int prefix_violations = 0;
+        for (const auto& e : hist) {
+            uint32_t oi = 0;
+            for (const auto& g : ohist) {
+                if (g.first == e.first) { oi = g.second; break; }
+            }
+            pc += e.second;
+            po += oi;
+            if (po < pc) ++prefix_violations;
+        }
+        std::fprintf(stderr,
+                     "[Q5A-AUDIT] groups_with_ori_lt_cand=%d/%zu "
+                     "prefix_violations=%d\n",
+                     shrink_groups, hist.size(), prefix_violations);
+        std::fprintf(stderr,
+                     "[Q5A-AUDIT] n_detect=%u n_kept=%u n_oriented=%u "
+                     "n_desc=%u max_feat=%d groups=%zu | posthoc_os_min=%lld "
+                     "prunable_max=%u (%.2f%%) | conservative_os=%lld "
+                     "prunable_safe=%u (%.2f%%)\n",
+                     n_detect, n_kept, n_oriented, n_desc, max_features,
+                     hist.size(), os_min, prunable,
+                     n_kept ? 100.0 * prunable / n_kept : 0.0, os_safe,
+                     prunable_safe,
+                     n_kept ? 100.0 * prunable_safe / n_kept : 0.0);
+    }
+    aether_preclamp_instr_v1::UpdateLegacyClampResult(n_desc);
+    max_features = requested_max_features;
+
+    if (canonical_selection || coverage_selection) {
+        const std::vector<uint32_t> full_orientation_sidecar =
+            read_u32(harness, dbg_buf,
+                     static_cast<size_t>(n_oriented) * 2);
+        std::vector<uint32_t> coverage_orientation_sidecar;
+        std::span<const uint32_t> orientation_sidecar =
+            full_orientation_sidecar;
+        if (coverage_selection) {
+            const std::vector<uint32_t> full_oriented_rows =
+                read_u32(harness, ori_out_buf,
+                         static_cast<size_t>(n_oriented) * kKpStride);
+            const auto sidecar_gather_status =
+                aether::sfm::GatherSelectedSidecarByRowsV1(
+                    full_oriented_rows, ori_all, full_orientation_sidecar,
+                    &coverage_orientation_sidecar);
+            if (sidecar_gather_status !=
+                aether::sfm::SelectedSidecarGatherStatusV1::kOk) {
+                std::cerr << "[SiftExtractDawn] coverage sidecar gather failed status="
+                          << static_cast<uint32_t>(sidecar_gather_status)
+                          << " (fallback)\n";
+                return false;
+            }
+            orientation_sidecar = coverage_orientation_sidecar;
+        }
+        std::vector<aether::sfm::CanonicalFeatureCandidateV1> candidates;
+        const auto build_status =
+            aether::sfm::BuildCanonicalCandidatesFromSidecarV1(
+                ori_all, orientation_sidecar, aff_in, &candidates);
+        if (build_status !=
+            aether::sfm::CanonicalCandidateBuildStatusV1::kOk) {
+            std::cerr << "[SiftExtractDawn] canonical sidecar invalid status="
+                      << static_cast<uint32_t>(build_status)
+                      << " (fallback)\n";
+            return false;
+        }
+
+        aether::sfm::CanonicalFeatureSelectionV1 selection;
+        const uint32_t canonical_cap =
+            requested_max_features > 0
+                ? static_cast<uint32_t>(requested_max_features)
+                : static_cast<uint32_t>(candidates.size());
+        const auto select_status = coverage_selection
+            ? aether::sfm::SelectCoverageFeaturesV1(
+                  candidates, canonical_cap, static_cast<uint32_t>(width),
+                  static_cast<uint32_t>(height), &selection)
+            : aether::sfm::SelectCanonicalFeaturesV1(
+                  candidates, canonical_cap, &selection);
+        if (select_status !=
+            aether::sfm::CanonicalFeatureSelectionStatusV1::kOk) {
+            std::cerr << "[SiftExtractDawn] feature selector failed status="
+                      << static_cast<uint32_t>(select_status)
+                      << " (fallback)\n";
+            return false;
+        }
+
+        std::vector<uint32_t> canonical_rows;
+        const auto gather_status = aether::sfm::GatherCanonicalRowsV1(
+            ori_all, kKpStride, selection.input_indices, &canonical_rows);
+        if (gather_status !=
+            aether::sfm::CanonicalRowGatherStatusV1::kOk) {
+            std::cerr << "[SiftExtractDawn] canonical row gather failed status="
+                      << static_cast<uint32_t>(gather_status)
+                      << " (fallback)\n";
+            return false;
+        }
+        n_desc = static_cast<uint32_t>(selection.input_indices.size());
+        out->stable_ids = std::move(selection.stable_ids);
+        ori_all = std::move(canonical_rows);
+        if (n_desc > 0) {
+            desc_in_buf = harness.upload(
+                ori_all.data(), ori_all.size() * sizeof(uint32_t),
+                wgpu::BufferUsage::Storage);
+        }
+
+        // The frozen legacy mark precedes this deterministic readback/select
+        // block so its source SHA remains an exact oracle. Fold the extra host
+        // and transfer cost back into the same clamp accounting bucket, then
+        // reset t_prev so the descriptor stage does not double-count it.
+        if (observe_timing) {
+            const auto now = std::chrono::high_resolution_clock::now();
+            g_aether_sed_stage_ms[6] +=
+                std::chrono::duration<double, std::milli>(now - t_prev)
+                    .count();
+            const auto& h = harness.host_breakdown();
+            hb_stage[6][0] += h.upload_ms - hb_snap.upload_ms;
+            hb_stage[6][1] += h.encode_ms - hb_snap.encode_ms;
+            hb_stage[6][2] += h.submit_wait_ms - hb_snap.submit_wait_ms;
+            hb_stage[6][3] += h.map_ms - hb_snap.map_ms;
+            hb_stage[6][4] += h.create_ms - hb_snap.create_ms;
+            hb_snap = h;
+            t_prev = now;
+        }
+        if (n_desc == 0) {
+            out->xy.clear();
+            out->octave.clear();
+            out->scale.clear();
+            out->kp_scale.clear();
+            out->kp_orientation.clear();
+            out->raw_desc.clear();
+            out->count = 0;
+            return true;
+        }
+    }
 
     // ════════════════ Stage E: DSP descriptor (on the clamped set) ════════════
     const uint32_t n_oriented_full = n_oriented;
@@ -427,8 +887,14 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                 harness.upload(&MP, sizeof(MP), wgpu::BufferUsage::Uniform);
             wgpu::ComputePipeline pipe_mean =
                 harness.load_compute(load_wgsl("sift_dsp_mean.wgsl"));
-            harness.dispatch(pipe_mean, {scale_desc, rd_buf, mp_buf},
-                             (n_oriented * 128u + 63u) / 64u, 1u, 1u);
+            {
+                // [2D-DISPATCH 2026-08-10] groups=2n 可超 65535(n_oriented
+                // 40,452 实测 X=80,904 爆限)。
+                const uint32_t mg = (n_oriented * 128u + 63u) / 64u;
+                harness.dispatch(pipe_mean, {scale_desc, rd_buf, mp_buf},
+                                 std::min(mg, 65535u),
+                                 (mg + 65534u) / 65535u, 1u);
+            }
         } else {
             // serial (one workgroup per kp, 10 scales looped). PRODUCTION
             // DEFAULT = f16 descriptor variant WHEN the device advertises
@@ -446,9 +912,11 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                 : "sift_dsp_descriptor.wgsl";
             wgpu::ComputePipeline pipe_desc =
                 harness.load_compute(load_wgsl(desc_shader));
+            // [2D-DISPATCH 2026-08-10] n_oriented 可超 65535,二维拆分。
             harness.dispatch(pipe_desc,
                              {packed, meta_buf, desc_in_buf, rd_buf, p_buf},
-                             n_oriented, 1u, 1u);
+                             std::min(n_oriented, 65535u),
+                             (n_oriented + 65534u) / 65535u, 1u);
         }
     }
     mark("descriptor");
@@ -469,6 +937,8 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     out->xy.resize(static_cast<size_t>(n_oriented) * 2);
     out->octave.resize(n_oriented);
     out->scale.resize(n_oriented);
+    out->kp_scale.resize(n_oriented);
+    out->kp_orientation.resize(n_oriented);
     out->raw_desc.resize(static_cast<size_t>(n_oriented) * 128);
     std::memcpy(out->raw_desc.data(), rd_raw.data(), rbytes);
     bool desc_nan = false;
@@ -479,6 +949,20 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         std::memcpy(&y, &r[1], 4);
         out->xy[2 * i] = x;
         out->xy[2 * i + 1] = y;
+        // [SCALE-PERSIST 2026-08-06] oriented kp record slots [2..5] hold the
+        // rotated affine ellipse (a11,a12,a21,a22) — see sift_orientation.wgsl
+        // OUT_STRIDE layout. Reduce with COLMAP's official formulas
+        // (FeatureKeypoint::ComputeScale/ComputeScaleX/ComputeScaleY/
+        // ComputeOrientation, colmap/feature/types.cc:137-151), verbatim.
+        float a11, a12, a21, a22;
+        std::memcpy(&a11, &r[2], 4);
+        std::memcpy(&a12, &r[3], 4);
+        std::memcpy(&a21, &r[4], 4);
+        std::memcpy(&a22, &r[5], 4);
+        const float scale_x = std::sqrt(a11 * a11 + a21 * a21);
+        const float scale_y = std::sqrt(a12 * a12 + a22 * a22);
+        out->kp_scale[i] = (scale_x + scale_y) / 2.0f;
+        out->kp_orientation[i] = std::atan2(a21, a11);
         int o, s;
         std::memcpy(&o, &r[6], 4);
         std::memcpy(&s, &r[7], 4);
@@ -495,7 +979,86 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     }
     if (desc_nan) {
         std::cerr << "[SiftExtractDawn] NaN descriptor (fallback)\n";
+        sed_set_fail_reason("nan_descriptor");
         return false;
+    }
+    // 最后一道:定向/描述子阶段若出过 Dawn 错误,上面读回的就是脏数据,
+    // 宁可让调用方走 CPU 回退,也不能把它当成功交出去。
+    if (dawn_failed("orient/descriptor")) {
+        return false;
+    }
+
+    // [GPU-TS 2026-07-29] Publish evidence only after every check that can
+    // reject the GPU result. If NaN/device validation forces the C ABI to fall
+    // back to CPU, no valid GPU-success frame may survive that attempt.
+    // [GPU-TS-DIAG 2026-08-08] env 门控隔离插桩,默认完全关闭。
+    static const bool ts_diag = [] {  // 每进程一次 getenv,默认 false
+        const char* v = std::getenv("OFFICIAL_AETHER_GPU_TS_DIAG");
+        return v != nullptr && v[0] == '1' && v[1] == '\0';
+    }();
+    if (ts_diag) {
+        std::fprintf(stderr,
+                     "[GPU-TS-DIAG] sed gpu_ts_enabled=%d pass_count=%u "
+                     "bounds=%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                     harness.gpu_ts_enabled() ? 1 : 0,
+                     harness.gpu_ts_pass_count(), ts_bounds[0], ts_bounds[1],
+                     ts_bounds[2], ts_bounds[3], ts_bounds[4], ts_bounds[5],
+                     ts_bounds[6], ts_bounds[7], ts_bounds[8]);
+    }
+    if (harness.gpu_ts_enabled()) {
+        std::vector<uint64_t> pass_ns;
+        const bool ts_resolved = harness.gpu_ts_resolve(&pass_ns);
+        const bool ts_final =
+            ts_resolved &&
+            harness.gpu_ts_finalize_frame(ts_bounds, kAetherSedStageCount);
+        if (ts_diag) {
+            std::fprintf(stderr,
+                         "[GPU-TS-DIAG] sed resolve=%d finalize=%d "
+                         "pass_ns=%zu\n",
+                         ts_resolved ? 1 : 0, ts_final ? 1 : 0, pass_ns.size());
+        }
+        if (ts_final) {
+            uint32_t lo = 0;
+            for (int s = 0; s < kAetherSedStageCount; ++s) {
+                const uint32_t hi =
+                    ts_bounds[s] < pass_ns.size()
+                        ? ts_bounds[s]
+                        : static_cast<uint32_t>(pass_ns.size());
+                double ns = 0.0;
+                for (uint32_t p = lo; p < hi; ++p) ns += double(pass_ns[p]);
+                g_aether_sed_stage_gpu_ms[s] = ns / 1.0e6;
+                lo = hi;
+            }
+            if (timing) {
+                static const char* kStage[kAetherSedStageCount] = {
+                    "pyramid", "pack", "detect", "suppress", "affine",
+                    "orient",  "clamp", "descriptor", "desc-rb"};
+                const auto& H = harness.host_breakdown();
+                std::printf(
+                    "  [SED-SPLIT] passes=%zu dispatches=%u uploads=%u "
+                    "readbacks=%u pipeline_compiles=%u (%.1f ms)\n",
+                    pass_ns.size(), H.n_dispatch, H.n_upload, H.n_readback,
+                    H.n_create, H.create_ms);
+                std::printf("  %-12s %8s %8s %8s %8s %8s %8s %8s %10s\n",
+                            "stage", "host", "gpu", "compile", "upload",
+                            "encode", "wait", "map", "own-loop");
+                for (int s = 0; s < kAetherSedStageCount; ++s) {
+                    const double host = g_aether_sed_stage_ms[s];
+                    const double gpu = g_aether_sed_stage_gpu_ms[s];
+                    // `wait` already contains the GPU time it was waiting on,
+                    // so it must not be double-counted against the residual.
+                    const double harness_cpu = hb_stage[s][0] + hb_stage[s][1] +
+                                               hb_stage[s][2] + hb_stage[s][3] +
+                                               hb_stage[s][4];
+                    std::printf(
+                        "  %-12s %8.1f %8.1f %8.1f %8.1f %8.1f %8.1f %8.1f %10.1f\n",
+                        kStage[s], host, gpu, hb_stage[s][4], hb_stage[s][0],
+                        hb_stage[s][1], hb_stage[s][2], hb_stage[s][3],
+                        host - harness_cpu);
+                }
+                std::fflush(stdout);
+            }
+        }
     }
     return true;
 }

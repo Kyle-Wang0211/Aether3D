@@ -215,6 +215,12 @@ public:
     // acquire_gpu_harness)据此遗弃并重建 harness。
     bool healthy() const { return device_healthy_; }
 
+    // [EXTRACT-SELFHEAL 2026-08-10] 上层在"设备级错误导致提取失败"后强制
+    // 遗弃本实例(acquire_gpu_harness 见 unhealthy 即重建)。与超时判失活
+    // 走同一条遗弃-重建路;设备错误类失败此前不标记 ⇒ 补算期 GPU 重试
+    // 100% 复用坏实例连败掉 CPU(2026-08-09 未命名(2) 4/4 实锤)。
+    void mark_unhealthy() { device_healthy_ = false; }
+
     // True if the device was created with the ShaderF16 feature (the WGSL
     // `enable f16;` extension is usable). Apple Silicon / A16 advertise it;
     // some Adreno do not (and have an f16-crash history) → the f16 descriptor

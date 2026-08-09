@@ -172,7 +172,8 @@ fn pick_level(d1in:f32,d2in:f32)->LevelPick{
 @compute @workgroup_size(64,1,1)
 fn main(@builtin(workgroup_id) wid:vec3<u32>,
         @builtin(local_invocation_id) lid:vec3<u32>){
-  let kp=wid.x; let lane=lid.x;
+  // [2D-DISPATCH 2026-08-10] 过 65535 单维上限:kp = y*65535+x。
+  let kp=wid.y*65535u+wid.x; let lane=lid.x;
   if(kp>=P.count){return;}
   let base=kp*KP_STRIDE;
   let fx=bitcast<f32>(kp_in[base+0u]);

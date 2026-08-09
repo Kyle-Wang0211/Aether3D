@@ -191,7 +191,10 @@ fn build_taps(sigma : f32, dst : ptr<workgroup, array<f32,16>>) -> u32 {
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(workgroup_id) wid : vec3<u32>,
         @builtin(local_invocation_id) lid : vec3<u32>) {
-  let kp = wid.x;
+  // [2D-DISPATCH 2026-08-10] n_kept 可超 WebGPU 单维派发上限 65535
+  // (128k 检测上限后高频纹理实测 80,904)——host 侧按 (min(n,65535),
+  //  ceil(n/65535)) 派发,这里重组线性索引;n<=65535 时 y 恒 0,逐位同旧。
+  let kp = wid.y * 65535u + wid.x;
   let lane = lid.x;
   if (kp >= P.count) { return; }
 

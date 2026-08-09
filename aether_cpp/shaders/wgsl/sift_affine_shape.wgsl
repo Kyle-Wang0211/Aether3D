@@ -212,7 +212,8 @@ fn pick_level(d1 : f32, d2 : f32) -> LevelPick {
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(workgroup_id) wid : vec3<u32>,
         @builtin(local_invocation_id) lid : vec3<u32>) {
-  let kp : u32 = wid.x;
+  // [2D-DISPATCH 2026-08-10] 同 sift_orientation:二维派发线性索引重组。
+  let kp : u32 = wid.y * 65535u + wid.x;
   let lane : u32 = lid.x;
   if (kp >= P.count) { return; }
 

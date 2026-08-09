@@ -18,8 +18,10 @@ struct Params { count : u32 };
 @group(0) @binding(2) var<uniform>             P          : Params;
 
 @compute @workgroup_size(64,1,1)
-fn main(@builtin(global_invocation_id) gid:vec3<u32>){
-  let idx = gid.x;                 // kp*128 + bin
+fn main(@builtin(workgroup_id) wid:vec3<u32>,
+        @builtin(local_invocation_id) lid:vec3<u32>){
+  // [2D-DISPATCH 2026-08-10] 过 65535 单维上限:线性 idx 由二维工作组重组。
+  let idx = (wid.y*65535u + wid.x)*64u + lid.x;   // kp*128 + bin
   if (idx >= P.count * 128u) { return; }
   let kp  = idx / 128u;
   let bin = idx % 128u;
