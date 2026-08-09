@@ -793,8 +793,36 @@ TwoViewGeometry EstimateCalibratedTwoViewGeometry(
 
   // Estimate planar or panoramic model.
 
+  // [AETHER TVG-H-FLOOR 2026-08-10 实验臂 OFFICIAL_AETHER_TVG_H_FLOOR=1,
+  // 默认关=逐位同上游] H 在本管线只参与三处判定(退化门/H_E 平面比/掩码
+  // 竞争),而 RANSAC 迭代数 ∝ 1/内点率⁴ —— H 拟合越差烧得越多,恰恰在
+  // 它最没用的配对上最贵(force_H 占 TVG 86-90%)。改法:用 E 的内点率给
+  // H 的 min_inlier_ratio 设地板(RANSAC 自适应迭代的下界假设,ransac.h:
+  // 167-175 原生语义):真单应好到能过 max_H_inlier_ratio×E 的改判线时,
+  // 其内点率必高于地板 ⇒ 同置信度照样找到(地板带 0.7 安全系数);够不着
+  // 改判线的 H 不再为无关紧要的精确度烧满迭代。E 失败/E 内点过少时地板
+  // 不抬(退化门语义原样)。无损义务:host 逐对三门(config/掩码/交付
+  // PLY 逐字节)全过才准默认开;geometry.H 矩阵在非平面对上可能不同
+  // (只落 db,不进任何云)。
+  auto H_ransac_options = ransac_options;
+  {
+    static const bool tvg_h_floor_enabled = [] {
+      const char* e = std::getenv("OFFICIAL_AETHER_TVG_H_FLOOR");
+      return e != nullptr && e[0] == '1';
+    }();
+    if (tvg_h_floor_enabled && E_report.success &&
+        E_report.support.num_inliers >= min_num_inliers &&
+        !matches.empty()) {
+      const double e_ratio =
+          static_cast<double>(E_report.support.num_inliers) /
+          static_cast<double>(matches.size());
+      const double h_floor = 0.7 * options.max_H_inlier_ratio * e_ratio;
+      H_ransac_options.min_inlier_ratio =
+          std::max(H_ransac_options.min_inlier_ratio, h_floor);
+    }
+  }
   LORANSAC<HomographyMatrixEstimator, HomographyMatrixEstimator> H_ransac(
-      ransac_options);
+      H_ransac_options);
   const auto H_report =
       H_ransac.Estimate(matched_img_points1, matched_img_points2);
   geometry.H = H_report.model;
