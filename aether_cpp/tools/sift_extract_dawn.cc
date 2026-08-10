@@ -387,6 +387,95 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         return true;
     }
 
+    // ════════ [PRECLAMP-PRUNE 2026-08-10] (o,s) 组前置剪枝 ════════
+    // 依据 = 下方 [Q5A-AUDIT 2026-08-08] 的证明:COLMAP clamp 按 (octave
+    // desc, scale desc) 排序且只在组边界停 ⇒ 幸存集恒为「完整粗组前缀 +
+    // 断点组首条」。把候选按 (o,s) 降序累加,取首个 cum>=max_features 的组
+    // j*,保留 G0..G_{j*+1}(off-by-one:断点组首条可落在 j*+1 组),更细
+    // 的组在 k>=1(每候选至少 1 个定向)时全部必被裁 —— 对它们跑
+    // affine/orient 是 100% 白工。真机 12MP 实测可剪 31-56%。
+    // ⚠️ k=0(候选定向产出为空)会破坏该下界(12MP 实测 6 帧有 3 帧
+    // prefix_violations>0),所以剪枝不是无条件的:定向后校验「粗于最细
+    // 保留组的定向产物数 >= max_features」,不满足则用全量候选重跑
+    // affine+orient(fail-safe:推迟不丢)。输出集合与不剪枝时逐点相同;
+    // 唯一既有的 run-to-run 变数(atomic 追加序对断点组首条的影响)不变。
+    std::vector<uint32_t> aff_in_full;
+    uint32_t n_kept_full = n_kept;
+    long long prune_validate_os = LLONG_MIN;  // hist[j*] 的 os 键(校验阈)
+    bool did_prune = false;
+    {
+        static const bool prune_on = [] {  // kill switch,默认开
+            const char* v = std::getenv("OFFICIAL_AETHER_PRECLAMP_PRUNE");
+            return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+        }();
+        if (prune_on && !canonical_selection && !coverage_selection &&
+            max_features > 0 && n_kept > static_cast<uint32_t>(max_features)) {
+            constexpr long long kOsRes = 1000;
+            std::vector<std::pair<long long, uint32_t>> hist;
+            for (uint32_t i = 0; i < n_kept; ++i) {
+                int o, s;
+                std::memcpy(&o, &aff_in[static_cast<size_t>(i) * kKpStride + 5], 4);
+                std::memcpy(&s, &aff_in[static_cast<size_t>(i) * kKpStride + 6], 4);
+                const long long os = static_cast<long long>(o) * kOsRes + s;
+                bool found = false;
+                for (auto& e : hist) {
+                    if (e.first == os) { ++e.second; found = true; break; }
+                }
+                if (!found) hist.emplace_back(os, 1u);
+            }
+            std::sort(hist.begin(), hist.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+            long long guard_os = LLONG_MIN;  // 最细保留组 G_{j*+1} 的 os 键
+            unsigned long long cum = 0;
+            for (size_t j = 0; j < hist.size(); ++j) {
+                cum += hist[j].second;
+                if (cum >= static_cast<unsigned long long>(max_features)) {
+                    if (j + 1 < hist.size()) {
+                        prune_validate_os = hist[j].first;
+                        guard_os = hist[j + 1].first;
+                    }
+                    break;
+                }
+            }
+            if (guard_os != LLONG_MIN) {
+                std::vector<uint32_t> pruned;
+                pruned.reserve(aff_in.size());
+                for (uint32_t i = 0; i < n_kept; ++i) {
+                    int o, s;
+                    std::memcpy(&o, &aff_in[static_cast<size_t>(i) * kKpStride + 5], 4);
+                    std::memcpy(&s, &aff_in[static_cast<size_t>(i) * kKpStride + 6], 4);
+                    const long long os = static_cast<long long>(o) * kOsRes + s;
+                    if (os >= guard_os) {
+                        const uint32_t* r =
+                            aff_in.data() + static_cast<size_t>(i) * kKpStride;
+                        for (uint32_t w = 0; w < kKpStride; ++w) pruned.push_back(r[w]);
+                    }
+                }
+                const uint32_t n_pruned =
+                    static_cast<uint32_t>(pruned.size() / kKpStride);
+                if (n_pruned < n_kept) {
+                    aff_in_full.swap(aff_in);  // 全量备份(fail-safe 重跑用)
+                    aff_in.swap(pruned);
+                    n_kept = n_pruned;
+                    did_prune = true;
+                } else {
+                    prune_validate_os = LLONG_MIN;
+                }
+            } else {
+                prune_validate_os = LLONG_MIN;
+            }
+        }
+    }
+
+    // [PRECLAMP-PRUNE] 剪枝失准时(k=0 过多)整段重跑 affine+orient,故
+    // stage C/D 包进 attempt 环;重跑不再 mark()(sed_idx 顺序推进,重复
+    // mark 会串桶),其成本落进 clamp 桶 —— 稀有路径,可观测不失真。
+    wgpu::Buffer ori_out_buf, ori_counter, dbg_buf;
+    uint32_t n_oriented = 0;
+    std::vector<uint32_t> ori_all;
+    for (int prune_attempt = 0;; ++prune_attempt) {
+    const bool prune_first_attempt = (prune_attempt == 0);
+
     // ════════════════ Stage C: affine shape ════════════════
     wgpu::Buffer aff_in_buf =
         harness.upload(aff_in.data(), aff_in.size() * sizeof(uint32_t),
@@ -418,7 +507,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     }
     std::vector<uint32_t> ell_raw =
         read_u32(harness, ell_buf, static_cast<size_t>(n_kept) * 5);
-    mark("affine+readback");
+    if (prune_first_attempt) mark("affine+readback");
     if (dawn_failed("affine")) {
         return false;
     }
@@ -462,11 +551,11 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     wgpu::Buffer ori_in_buf =
         harness.upload(ori_in.data(), ori_in.size() * sizeof(uint32_t),
                        wgpu::BufferUsage::Storage);
-    wgpu::Buffer ori_counter = harness.upload(
+    ori_counter = harness.upload(
         &zero, 4, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
     std::vector<uint32_t> ori_out_init(static_cast<size_t>(kOrientCap) * kKpStride,
                                        0u);
-    wgpu::Buffer ori_out_buf = harness.upload(
+    ori_out_buf = harness.upload(
         ori_out_init.data(), ori_out_init.size() * sizeof(uint32_t),
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
     std::vector<float> dbg_init(static_cast<size_t>(kOrientCap) * 2, 0.0f);
@@ -474,7 +563,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     if (canonical_selection || coverage_selection) {
         dbg_usage |= wgpu::BufferUsage::CopySrc;
     }
-    wgpu::Buffer dbg_buf =
+    dbg_buf =
         harness.upload(dbg_init.data(), dbg_init.size() * sizeof(float),
                        dbg_usage);
     {
@@ -498,8 +587,8 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                          std::min(n_kept, 65535u), (n_kept + 65534u) / 65535u,
                          1u);
     }
-    uint32_t n_oriented = read_u32(harness, ori_counter, 1)[0];
-    mark("orient (1->K)");
+    n_oriented = read_u32(harness, ori_counter, 1)[0];
+    if (prune_first_attempt) mark("orient (1->K)");
     if (dawn_failed("orientation")) {
         return false;
     }
@@ -518,10 +607,45 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         return false;
     }
     if (n_oriented == 0) {
+        if (did_prune) {
+            // [PRECLAMP-PRUNE] 剪枝集定向产出为空(病态 k=0)——不许据此
+            // 判空帧,全量重跑后再定夺。
+            std::cerr << "[PRECLAMP-PRUNE] pruned set yielded 0 orientations "
+                         "— rerunning full set\n";
+            aff_in.swap(aff_in_full);
+            n_kept = n_kept_full;
+            did_prune = false;
+            continue;
+        }
         aether_preclamp_instr_v1::DiscardPending(
             aether_preclamp_instr_v1::PendingDiscardReason::kZeroCandidate);
         return true;
     }
+    ori_all = read_u32(
+        harness, ori_out_buf, static_cast<size_t>(n_oriented) * kKpStride);
+    if (!did_prune || prune_validate_os == LLONG_MIN) break;
+    {
+        // [PRECLAMP-PRUNE] 校验:粗于最细保留组(即 G0..G_{j*})的定向产物
+        // 数 >= max_features ⇒ 真实断点 m <= j*,幸存集 ⊆ 保留组 ⇒ 与全量
+        // 跑逐点相同。不满足(k=0 太多)则全量重跑 —— 只多花一次,不丢。
+        constexpr long long kOsResV = 1000;
+        unsigned long long coarse_ori = 0;
+        for (uint32_t i = 0; i < n_oriented; ++i) {
+            int o, s;
+            std::memcpy(&o, &ori_all[static_cast<size_t>(i) * kKpStride + 6], 4);
+            std::memcpy(&s, &ori_all[static_cast<size_t>(i) * kKpStride + 7], 4);
+            if (static_cast<long long>(o) * kOsResV + s >= prune_validate_os)
+                ++coarse_ori;
+        }
+        if (coarse_ori >= static_cast<unsigned long long>(max_features)) break;
+        std::cerr << "[PRECLAMP-PRUNE] validation failed coarse_ori="
+                  << coarse_ori << " < max_features=" << max_features
+                  << " — rerunning full set\n";
+        aff_in.swap(aff_in_full);
+        n_kept = n_kept_full;
+        did_prune = false;
+    }
+    }  // for (prune_attempt)
     aether_preclamp_instr_v1::BeginLegacyClamp(n_oriented);
     // Preserve the frozen legacy clamp block below byte-for-byte. Canonical
     // mode bypasses it by temporarily disabling its existing max_features
@@ -538,8 +662,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     // the dominant cost shrinks from ~21000-27000 to ~max_features keypoints. The
     // surviving descriptors are bit-identical (deterministic per-keypoint); the
     // set is exactly COLMAP's. Repack the survivors into a dense buffer.
-    std::vector<uint32_t> ori_all = read_u32(
-        harness, ori_out_buf, static_cast<size_t>(n_oriented) * kKpStride);
+    // [PRECLAMP-PRUNE] ori_all 已在 attempt 环内读回(校验需要),此处直接用。
     uint32_t n_desc = n_oriented;
     wgpu::Buffer desc_in_buf = ori_out_buf;
     if (max_features > 0 && n_oriented > static_cast<uint32_t>(max_features)) {
