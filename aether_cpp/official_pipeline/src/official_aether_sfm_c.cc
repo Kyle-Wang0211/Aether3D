@@ -25,6 +25,7 @@
 #include "arkit_pose_store_v1.h"
 #include "mandatory_arkit_gravity_v1.h"
 #include "mandatory_gravity_tvg_v1.h"
+#include "live_cloud_diagnostics_v1.h"
 #include "pair_policy_v2_c.h"
 #include "pair_selection_v2.h"
 #include "visual_loop_index_v1.h"
@@ -177,6 +178,19 @@ extern "C" int aether_sift_match_pairs(const uint8_t* desc1, int n1,
 // nullptr and add_frame stays on the CPU matcher. Selected via
 // options.use_gpu_match; any non-zero return skips that pair on device. Host
 // benches without the weak symbol still use the CPU matcher.
+extern "C" __attribute__((weak)) void aether_gpu_match_set_capture_active(int);
+extern "C" __attribute__((weak)) void aether_gpu_match_set_preview_fps30(int);
+// [SPRINT-FIX + YIELD-FPS-LINK 2026-08-10] 见 aether_sfm_c.h 同名声明注释。
+extern "C" void aether_sfm_match_set_capture_active(int active) {
+  if (aether_gpu_match_set_capture_active != nullptr) {
+    aether_gpu_match_set_capture_active(active);
+  }
+}
+extern "C" void aether_sfm_match_set_preview_fps30(int on) {
+  if (aether_gpu_match_set_preview_fps30 != nullptr) {
+    aether_gpu_match_set_preview_fps30(on);
+  }
+}
 extern "C" __attribute__((weak)) int aether_gpu_match_gemm_pairs(
     const uint8_t* desc1, int n1, const uint8_t* desc2, int n2,
     double max_ratio, uint32_t* out_pairs, int max_pairs,
@@ -7786,10 +7800,14 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
     // ("代码态被当成真机态" — cap3/cap4 both needed after-the-fact forensics
     // to notice). One line per session pins which binary produced the run.
     {
-      char bline[160];
+      char bline[384];
       std::snprintf(bline, sizeof(bline),
                     "{\"t\":%lld,\"type\":\"build_stamp\","
-                    "\"built\":\"%s %s\"}",
+                    "\"built\":\"%s %s\","
+                    "\"diag_contract\":\"PW_LIVE_CLOUD_DIAG_V1_20260810\","
+                    "\"native_diag_build_id\":"
+                    "\"PW_LIVE_CLOUD_DIAG_NATIVE_V1_20260810_AETHER_50fe48c_INPUT_452ec853\","
+                    "\"observation_only\":true}",
                     static_cast<long long>(EpochMs()), __DATE__, __TIME__);
       AppendMatchFailJsonl(s, bline);
     }
@@ -9098,6 +9116,55 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     }
 
     s->frames.push_back(std::move(rec));
+    // [LIVE-CLOUD-DIAG V1] Compare the published live model's optimized
+    // camera centers against each frame's immutable ARKit seed. Read-only:
+    // this summary is never fed back to BA, point creation, or display.
+    if (s->live_recon) {
+      std::vector<std::array<double, 3>> center_deltas;
+      center_deltas.reserve(s->frames.size());
+      int latest_compared_fid = -1;
+      for (const FrameRecord& frame : s->frames) {
+        if (!frame.has_pose || frame.image_id == 0 ||
+            !s->live_recon->ExistsImage(frame.image_id)) {
+          continue;
+        }
+        const colmap::Image& image = s->live_recon->Image(frame.image_id);
+        if (!image.HasPose()) continue;
+        const Eigen::Vector3d prior_center =
+            frame.cam_from_world.TgtOriginInSrc();
+        const Eigen::Vector3d optimized_center =
+            image.CamFromWorld().TgtOriginInSrc();
+        const Eigen::Vector3d delta = optimized_center - prior_center;
+        if (!delta.allFinite()) continue;
+        center_deltas.push_back({delta.x(), delta.y(), delta.z()});
+        latest_compared_fid = frame.frame_id;
+      }
+      const aether::sfm::LiveCloudBaDeltaSummaryV1 diag =
+          aether::sfm::SummarizeLiveCloudBaDeltasV1(center_deltas);
+      if (diag.valid) {
+        char dline[1024];
+        std::snprintf(
+            dline, sizeof(dline),
+            "{\"t\":%lld,\"type\":\"ba_arkit_center_delta_v1\","
+            "\"contract\":\"PW_LIVE_CLOUD_DIAG_V1_20260810\","
+            "\"stage\":\"post_live_update\",\"fid\":%d,\"n\":%zu,"
+            "\"median_dx_m\":%.9g,\"median_dy_m\":%.9g,"
+            "\"median_dz_m\":%.9g,\"coherent_median_m\":%.9g,"
+            "\"p50_m\":%.9g,\"p90_m\":%.9g,\"max_m\":%.9g,"
+            "\"latest_fid\":%d,\"latest_dx_m\":%.9g,"
+            "\"latest_dy_m\":%.9g,\"latest_dz_m\":%.9g,"
+            "\"latest_m\":%.9g,\"residual_rms_m\":%.9g,"
+            "\"observation_only\":true}",
+            static_cast<long long>(EpochMs()), frame_id, diag.count,
+            diag.median_delta_m[0], diag.median_delta_m[1],
+            diag.median_delta_m[2], diag.coherent_median_norm_m,
+            diag.p50_norm_m, diag.p90_norm_m, diag.max_norm_m,
+            latest_compared_fid, diag.latest_delta_m[0],
+            diag.latest_delta_m[1], diag.latest_delta_m[2],
+            diag.latest_norm_m, diag.residual_rms_m);
+        AppendMatchFailJsonl(s, dline);
+      }
+    }
     // The real record now owns this ordinal; the guard must not add a
     // placeholder for it.
     ordinal_guard.committed = true;

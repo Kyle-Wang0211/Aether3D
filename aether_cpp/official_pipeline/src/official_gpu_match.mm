@@ -100,6 +100,7 @@
 #include <string.h>
 #include <unordered_map>
 #include <unistd.h>
+#include <vector>  // [PROBE-BATCH 2026-08-08] per-candidate offset tables
 
 #if __has_include("aether/sfm/descriptor_residency_policy_v1.h")
 #include "aether/sfm/descriptor_residency_policy_v1.h"
@@ -447,12 +448,64 @@ kernel void pw_match_gemm(device const half*  A          [[buffer(0)]],
 // a gap between chunks (duty-cycle) so the camera pipeline always has GPU
 // headroom. Row blocks are independent in the kernel, so the match set is
 // bit-identical for any chunking (host-verified by parity diff).
+// [INTERLEAVED-AB 2026-08-08,用户签"做这个交替 A/B"] 同一场采集里每 N 帧翻一次
+// 旋钮,让 A/B 两臂交替经历**完全相同**的场景、温度曲线、走位和手抖。
+//
+// 为什么必须这样:真机手持拍摄不可复现。今天用"两场对比"得出的 chunk=16
+// −5.2%,同一批数据里**我没碰过的提取**却抖了 +18% —— 噪声地板比效应大三倍,
+// 那个结论站不住。交替之后,相邻区块构成配对样本,几十个配对自带置信区间。
+//
+// 相位由 C 核每帧写入(帧号 / 周期 的奇偶),匹配器按相位选值 —— 与
+// gCaptureActive 同一模式。只适用于**无状态**旋钮(块大小/占空比/重叠):
+// 有状态的(tail-cache 要预热、probe-gate 要累积欠账)中途翻会污染两臂,禁用。
+static std::atomic<int> gAbPhase{-1};      // -1 = 未启用交替;0/1 = 两臂
+extern "C" void aether_match_set_ab_phase(int phase) {
+  gAbPhase.store(phase, std::memory_order_relaxed);
+}
+// 交替时的 B 臂取值,env 给:未设则该旋钮不参与交替。
+static double AbAltValue(const char* key) {
+  const char* e = getenv(key);
+  return e ? atof(e) : -1.0;
+}
+
+
+// [CHUNK 6→16 2026-08-08,真机 A/B 实测定案] 热态块目标由 6ms 提到 16ms
+// (= 与凉态相同)。
+//   为什么原来是 6:注释自陈"每块一次 CPU↔GPU 同步往返(host 实测 ~19%)",
+//   于是热态用小块以便更频繁地把 GPU 让给相机。
+//   真机实测推翻了它的代价模型:每块往返开销 7.2ms > 每块干的活 6ms,
+//   即 6ms 块是净亏。改 16ms 后 块/帧 109.7→38.1(−65%)。
+//   ⚠️ 但收益不是来自"省下往返":实测"其余段"(墙钟−GPU−休眠)几乎没变
+//   (795→792ms),每块开销等比例涨到 20.8ms ⇒ 那一段与块数无关,
+//   多半是在排队等 GPU(相机占着),排队总长取决于总工作量。
+//   真实收益来自 GPU 真实时间 −14.7%(大块摊薄了每次 kernel 启动的固定成本):
+//   归一化到单个候选对,serious 帧 匹配墙钟 106.6→101.0ms = −5.2%,
+//   rc 非 ok 0 帧,相机全程不卡(用户确认)。
+//   基线 cap_1786188979451083 / 候选 cap_1786190298952732。
+// [YIELD-FPS-LINK] 取景 30fps 档旗(setter 见 gCaptureActive 旁,Swift 直连)。
+static std::atomic<int> gPreviewFps30{0};
 static double ChunkTargetMs(void) {
   static double v = -1.0;
   if (v < 0.0) {
     const char* e = getenv("OFFICIAL_AETHER_MATCH_CHUNK_TARGET_MS");
-    v = e ? atof(e) : 6.0;
+    v = e ? atof(e) : 16.0;
     if (v < 0.0) v = 0.0;
+  }
+  // [INTERLEAVED-AB] 相位 1 且设了 _ALT 时用 B 臂值。
+  if (gAbPhase.load(std::memory_order_relaxed) == 1) {
+    static const double alt =
+        AbAltValue("OFFICIAL_AETHER_MATCH_CHUNK_TARGET_MS_ALT");
+    if (alt >= 0.0) return alt;
+  }
+  // [YIELD-FPS-LINK] 取景 30fps 档:热块放大(默认 24ms,env _FPS30 覆盖)。
+  if (gPreviewFps30.load(std::memory_order_relaxed) == 1) {
+    static double v30 = -1.0;
+    if (v30 < 0.0) {
+      const char* e30 = getenv("OFFICIAL_AETHER_MATCH_CHUNK_TARGET_MS_FPS30");
+      v30 = e30 ? atof(e30) : 24.0;
+      if (v30 < 0.0) v30 = 0.0;
+    }
+    return v30 > v ? v30 : v;
   }
   return v;
 }
@@ -485,6 +538,17 @@ static std::atomic<int> gCaptureActive{1};
 extern "C" void aether_gpu_match_set_capture_active(int active) {
   gCaptureActive.store(active ? 1 : 0, std::memory_order_relaxed);
 }
+// ── [YIELD-FPS-LINK 2026-08-10 用户签] 让路参数与取景帧率档联动 ──────────
+// 让路(占空隙+热态小块)是给 60fps 相机让 GPU 设计的(45号冻结保命参数)。
+// 批次24 热自适应上线后:热态取景已降 30fps,相机 GPU 需求减半,让路却仍按
+// 60fps 的量在让 —— serious 帧的 864ms 睡眠+等待正是帧税大头。联动规则:
+// 取景 30fps 档时 gap 减半(12→6,env _FPS30 可调)、热块放大(16→24ms)。
+// 纯调度不减工作量=同活更快;第一红线仍是相机健康(rc=7/冻结)。
+// Swift 在 setPreviewFps 成功路径经 @_silgen_name 直连翻此旗(与
+// gCaptureActive 同一模式)。旗本体声明在 ChunkTargetMs 前(联动读点)。
+extern "C" void aether_gpu_match_set_preview_fps30(int on) {
+  gPreviewFps30.store(on ? 1 : 0, std::memory_order_relaxed);
+}
 // [SPRINT-RACE 2026-07-26, signed] Read side for the Dart worker: the
 // finish_pending message travels the same FIFO as frame events, so a finish
 // tapped while a frame event is mid-flight cannot flip the Dart flag in time
@@ -511,6 +575,15 @@ static bool ThermalHot(void) {
 // Extra idle gap between chunks as % of the last chunk's GPU time.
 // serious default 100 (≈50% duty), critical default 300 (≈25% duty).
 // Sprint mode (capture inactive) always returns 0 — nothing to yield to.
+// [MATCH-DUTY-SPLIT 2026-08-08] 把匹配墙钟拆成三份,直接回答"热态变慢里
+// 政策占多少、物理占多少":GPU 真实执行时间(命令缓冲的 GPUStartTime/
+// GPUEndTime,Metal 直接给)、我们主动 usleep 让路的时间、以及其余
+// (提交/等待/回读)。此前只能按参数推算 1.49×,现在可以实测。
+// 纯观测,extern "C" 供 C 核逐帧读取并清零。
+extern "C" double aether_match_gpu_ms = 0.0;
+extern "C" double aether_match_sleep_ms = 0.0;
+extern "C" int aether_match_chunks = 0;
+
 static double ThermalGapPct(void) {
   if (gCaptureActive.load(std::memory_order_relaxed) == 0) return 0.0;
   if (@available(iOS 11.0, macOS 10.10.3, *)) {
@@ -522,6 +595,16 @@ static double ThermalGapPct(void) {
         const char* e = getenv("OFFICIAL_AETHER_MATCH_GAP_SERIOUS_PCT");
         v = e ? atof(e) : 100.0;
         if (v < 0.0) v = 0.0;
+      }
+      // [YIELD-FPS-LINK] 取景 30fps 档:让路减半(env _FPS30 覆盖)。
+      if (gPreviewFps30.load(std::memory_order_relaxed) == 1) {
+        static double v30 = -1.0;
+        if (v30 < 0.0) {
+          const char* e30 =
+              getenv("OFFICIAL_AETHER_MATCH_GAP_SERIOUS_PCT_FPS30");
+          v30 = e30 ? atof(e30) : -1.0;
+        }
+        return v30 >= 0.0 ? v30 : v * 0.5;
       }
       return v;
     }
@@ -727,6 +810,8 @@ static int matchPairsImpl(const uint8_t* dA, int nA, const float* xyA,
           const int wrc = WaitCmdWithTimeout(cmd, CmdWaitTimeoutMs());
           if (wrc != 0) return wrc;
           const double gpuMs = (cmd.GPUEndTime - cmd.GPUStartTime) * 1000.0;
+          if (gpuMs > 0.0 && gpuMs < 10000.0) aether_match_gpu_ms += gpuMs;
+          ++aether_match_chunks;
           if (gpuMs > 0.0 && gpuMs < 10000.0) {
             const double u = gpuMs / ((double)groups * ((double)nDb / 1024.0));
             const double prev = gMsPerTgKCol.load();
@@ -738,6 +823,7 @@ static int matchPairsImpl(const uint8_t* dA, int nA, const float* xyA,
             // downclock) cannot stall the matcher for seconds.
             double gapMs = gpuMs * gapPct / 100.0;
             if (gapMs > 250.0) gapMs = 250.0;
+            aether_match_sleep_ms += gapMs;
             usleep((useconds_t)(gapMs * 1000.0));
           }
           tg0 += groups;
@@ -1573,6 +1659,8 @@ static int matchPairsImplV2(const uint8_t* dA, int nA, const float* xyA,
         const int wrc = WaitCmdWithTimeout(cmd, CmdWaitTimeoutMs());
         if (wrc != 0) return wrc;
         const double gpuMs = (cmd.GPUEndTime - cmd.GPUStartTime) * 1000.0;
+        if (gpuMs > 0.0 && gpuMs < 10000.0) aether_match_gpu_ms += gpuMs;
+        ++aether_match_chunks;
         if (gpuMs > 0.0 && gpuMs < 10000.0) {
           const double u = gpuMs / ((double)groups * ((double)numBU / 1024.0));
           const double prev = gMsPerTgKColV2.load();
@@ -1582,6 +1670,7 @@ static int matchPairsImplV2(const uint8_t* dA, int nA, const float* xyA,
         if (gapPct > 0.0 && gpuMs > 0.0) {
           double gapMs = gpuMs * gapPct / 100.0;
           if (gapMs > 250.0) gapMs = 250.0;
+          aether_match_sleep_ms += gapMs;
           usleep((useconds_t)(gapMs * 1000.0));
         }
         tg0 += groups;
@@ -1713,6 +1802,281 @@ extern "C" int aether_gpu_match_descriptor_residency_stats(
     if (outputs[i]) *outputs[i] = values[i];
   }
   return found == gDescriptorResidencySessions.end() ? 0 : 1;
+}
+
+// ── [PROBE-BATCH 2026-08-08] Batched probe scoring for the live probe-gate ─
+// Replication of Changchang Wu, "Towards Linear-time Incremental Structure
+// from Motion" (ICCV 2013) §3 "Preemptive Feature Matching": match a small
+// descriptor subset of the new image against every candidate FIRST and skip
+// candidates whose subset match count falls below a threshold (Wu: top-100
+// scale features, t_h = 4; ours: the caller-built 512-row subset and the
+// 08-03-calibrated threshold — see official_aether_sfm_c.cc [PROBE-GATE]).
+// The probe is a REAL small match — the SAME fused GEMM kernel, Lowe ratio,
+// absolute-distance gate and mutual B→A cross-check as the full pair — not a
+// new approximation.
+//
+// Why a batch entry: the per-pair probe paid one command-buffer round trip
+// per candidate (08-07 host A/B: 3.7 ms/probe ≈ 40% of a 9.3 ms full pair →
+// net +10.6% wall despite skipping 25.5% of pairs). Here the K candidates'
+// probes are ENCODED TOGETHER: one probe-descriptor upload, one concatenated
+// candidate buffer, per-candidate fused+merge encoders grouped into as few
+// command buffers as the KNIFE-C thermal chunk budget allows (cool host: one
+// or two submissions for K=12..16), one bounded wait per submission.
+//
+// Semantics: out_counts[c] is the EXACT mutual cross-checked match count
+// aether_gpu_match_gemm_pairs(dA, nA, dBs[c], nBs[c], max_ratio, ...) would
+// report on the v2 path — candidates are scored INDEPENDENTLY (each gets its
+// own fused dispatch + merge over its own buffer regions; only the GPU
+// submission is shared, so cross-candidate best/second mixing is impossible
+// by construction). Buffers are hazard-tracked, so candidates in one command
+// buffer serialize on the GPU — the win is the removed CPU↔GPU round trips,
+// not intra-batch parallelism.
+// rc: 0 = every candidate scored; 1 = bad args; 2 = v2 path unavailable
+// (caller falls back to per-pair probes / fail-open); 5/6 = alloc failure;
+// 7/8 = GPU command failure (whole remaining batch aborted — the caller
+// fails OPEN: unscored pairs proceed to the full match unfiltered).
+static id<MTLBuffer> gPbA, gPbB, gPbOutAB, gPbOutBA;
+static id<MTLBuffer> gPbColBest, gPbColSecond, gPbColIdx;
+static NSUInteger gPbACap, gPbBCap, gPbOutACap, gPbOutBCap, gPbColCap;
+
+static int probeBatchImplV2(const uint8_t* dA, int nA,
+                            const uint8_t* const* dBs, const int* nBs,
+                            int n_cands, double max_ratio, int* out_counts) {
+  @autoreleasepool {
+    if (!dA || !dBs || !nBs || !out_counts || nA <= 0 || n_cands <= 0) {
+      return 1;
+    }
+    for (int c = 0; c < n_cands; ++c) {
+      if (!dBs[c] || nBs[c] <= 0) return 1;
+      out_counts[c] = 0;
+    }
+    if (!MatchV2Enabled()) return 2;
+    if (!ensureMetalV2()) return 2;
+    const bool packed = !MatchV2ForceHalf();
+    id<MTLComputePipelineState> fused = v2FusedPipeline(packed, 0u);
+    if (!fused) return 2;
+    const int D = 128;
+    const NSUInteger elem = packed ? 1 : sizeof(__fp16);
+    const NSUInteger nApad = (((NSUInteger)nA + 127) / 128) * 128;
+    const NSUInteger numBlocksA = nApad / 128;
+    // Per-candidate offsets into the concatenated buffers. Every region size
+    // is a multiple of 2 KB (nBpad multiple of 128), so all setBuffer offsets
+    // satisfy Metal's alignment requirements.
+    std::vector<NSUInteger> nBpadv((size_t)n_cands);
+    std::vector<NSUInteger> bOff((size_t)n_cands), outBAOff((size_t)n_cands),
+        colOff((size_t)n_cands);
+    NSUInteger bTotal = 0, outBATotal = 0, colTotal = 0;
+    for (int c = 0; c < n_cands; ++c) {
+      const NSUInteger nBpad = (((NSUInteger)nBs[c] + 127) / 128) * 128;
+      nBpadv[(size_t)c] = nBpad;
+      bOff[(size_t)c] = bTotal;
+      outBAOff[(size_t)c] = outBATotal;
+      colOff[(size_t)c] = colTotal;
+      bTotal += nBpad * D * elem;
+      outBATotal += nBpad * sizeof(int);
+      colTotal += numBlocksA * nBpad * sizeof(float);
+    }
+    id<MTLBuffer> aBuf = v2PoolBuf(&gPbA, &gPbACap, nApad * D * elem,
+                                   MTLResourceStorageModeShared);
+    id<MTLBuffer> bBuf = v2PoolBuf(&gPbB, &gPbBCap, bTotal,
+                                   MTLResourceStorageModeShared);
+    if (!aBuf || !bBuf) return 5;
+    if (packed) {
+      memcpy(aBuf.contents, dA, (size_t)nA * D);
+      memset((uint8_t*)aBuf.contents + (size_t)nA * D, 0,
+             (size_t)(nApad - (NSUInteger)nA) * D);
+      for (int c = 0; c < n_cands; ++c) {
+        uint8_t* dst = (uint8_t*)bBuf.contents + bOff[(size_t)c];
+        memcpy(dst, dBs[c], (size_t)nBs[c] * D);
+        memset(dst + (size_t)nBs[c] * D, 0,
+               (size_t)(nBpadv[(size_t)c] - (NSUInteger)nBs[c]) * D);
+      }
+    } else {
+      __fp16* af = (__fp16*)aBuf.contents;
+      for (NSUInteger i = 0; i < (NSUInteger)nA * D; ++i) af[i] = (__fp16)dA[i];
+      for (NSUInteger i = (NSUInteger)nA * D; i < nApad * D; ++i) af[i] = 0;
+      for (int c = 0; c < n_cands; ++c) {
+        __fp16* bf = (__fp16*)((uint8_t*)bBuf.contents + bOff[(size_t)c]);
+        for (NSUInteger i = 0; i < (NSUInteger)nBs[c] * D; ++i) {
+          bf[i] = (__fp16)dBs[c][i];
+        }
+        for (NSUInteger i = (NSUInteger)nBs[c] * D;
+             i < nBpadv[(size_t)c] * D; ++i) {
+          bf[i] = 0;
+        }
+      }
+    }
+    id<MTLBuffer> outAB =
+        v2PoolBuf(&gPbOutAB, &gPbOutACap,
+                  (NSUInteger)n_cands * nApad * sizeof(int),
+                  MTLResourceStorageModeShared);
+    id<MTLBuffer> outBA = v2PoolBuf(&gPbOutBA, &gPbOutBCap, outBATotal,
+                                    MTLResourceStorageModeShared);
+    if (!outAB || !outBA) return 6;
+    if (gPbColCap < colTotal) {
+      gPbColBest = [gV2Dev newBufferWithLength:colTotal
+                                       options:MTLResourceStorageModePrivate];
+      gPbColSecond = [gV2Dev newBufferWithLength:colTotal
+                                         options:MTLResourceStorageModePrivate];
+      gPbColIdx = [gV2Dev newBufferWithLength:colTotal
+                                      options:MTLResourceStorageModePrivate];
+      gPbColCap = (gPbColBest && gPbColSecond && gPbColIdx) ? colTotal : 0;
+      if (gPbColCap == 0) return 6;
+    }
+    float maxRatio = (float)max_ratio;
+    if (maxRatio <= 0.0f) maxRatio = 0.8f;
+    float maxDistance = 0.7f;  // colmap SiftMatchingOptions::max_distance
+    const float maxResidual = 0.0f;
+    const uint32_t guideMode = 0u;
+    const uint32_t rowBase = 0u;
+    const uint32_t numAU = (uint32_t)nA;
+
+    auto encFusedCand = [&](id<MTLComputeCommandEncoder> enc, int c) {
+      const uint32_t numBU = (uint32_t)nBs[c];
+      const uint32_t colStride = (uint32_t)nBpadv[(size_t)c];
+      [enc setComputePipelineState:fused];
+      [enc setBuffer:aBuf offset:0 atIndex:0];
+      [enc setBuffer:bBuf offset:bOff[(size_t)c] atIndex:1];
+      [enc setBuffer:outAB offset:(NSUInteger)c * nApad * sizeof(int)
+              atIndex:2];
+      [enc setBytes:&numAU length:4 atIndex:3];
+      [enc setBytes:&numBU length:4 atIndex:4];
+      [enc setBytes:&maxRatio length:4 atIndex:5];
+      [enc setBytes:&maxDistance length:4 atIndex:6];
+      [enc setBytes:&rowBase length:4 atIndex:7];
+      [enc setBuffer:gPbColBest offset:colOff[(size_t)c] atIndex:8];
+      [enc setBuffer:gPbColSecond offset:colOff[(size_t)c] atIndex:9];
+      [enc setBuffer:gPbColIdx offset:colOff[(size_t)c] atIndex:10];
+      [enc setBytes:&colStride length:4 atIndex:11];
+      [enc setBuffer:aBuf offset:0 atIndex:12];  // packed alias (untyped)
+      [enc setBuffer:bBuf offset:bOff[(size_t)c] atIndex:13];
+      [enc setBuffer:gV2Dummy offset:0 atIndex:14];
+      [enc setBuffer:gV2Dummy offset:0 atIndex:15];
+      [enc setBuffer:gV2Dummy offset:0 atIndex:16];
+      [enc setBuffer:gV2Dummy offset:0 atIndex:17];
+      [enc setBytes:&maxResidual length:4 atIndex:18];
+      [enc dispatchThreadgroups:MTLSizeMake(numBlocksA, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
+    };
+    auto encMergeCand = [&](id<MTLComputeCommandEncoder> enc, int c) {
+      const uint32_t numBU = (uint32_t)nBs[c];
+      const uint32_t colStride = (uint32_t)nBpadv[(size_t)c];
+      const uint32_t numBlocksU = (uint32_t)numBlocksA;
+      [enc setComputePipelineState:gV2Merge];
+      [enc setBuffer:gPbColBest offset:colOff[(size_t)c] atIndex:0];
+      [enc setBuffer:gPbColSecond offset:colOff[(size_t)c] atIndex:1];
+      [enc setBuffer:gPbColIdx offset:colOff[(size_t)c] atIndex:2];
+      [enc setBuffer:outBA offset:outBAOff[(size_t)c] atIndex:3];
+      [enc setBytes:&numBU length:4 atIndex:4];
+      [enc setBytes:&colStride length:4 atIndex:5];
+      [enc setBytes:&numBlocksU length:4 atIndex:6];
+      [enc setBytes:&maxRatio length:4 atIndex:7];
+      [enc setBytes:&maxDistance length:4 atIndex:8];
+      [enc setBytes:&guideMode length:4 atIndex:9];
+      [enc dispatchThreadgroups:MTLSizeMake(((NSUInteger)nBs[c] + 255) / 256,
+                                            1, 1)
+          threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    };
+    // Encode a group of candidates into ONE command buffer as two CONCURRENT
+    // compute encoders: encoder 1 carries every candidate's fused dispatch,
+    // encoder 2 every candidate's column merge. Concurrency is the second
+    // half of the batch win: a 512-row probe dispatch is only numBlocksA(=4)
+    // threadgroups — serial encoders leave most of the GPU idle (measured
+    // 2.8 ms/probe amortized on M3 Pro, barely better than the per-pair
+    // form's 3.2 ms), while K concurrent fused dispatches fill it like one
+    // full pair does. Safety: fused dispatches write DISJOINT regions
+    // (per-candidate offsets) of outAB and the column-partial buffers, so
+    // MTLDispatchTypeConcurrent races nothing; the encoder boundary is the
+    // fused→merge barrier (tracked resources hazard-sync across encoders).
+    auto runGroup = [&](int c_begin, int c_end, double groupUnits) -> int {
+      id<MTLCommandBuffer> cmd = [gV2Queue commandBuffer];
+      id<MTLComputeCommandEncoder> enc1 = [cmd
+          computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+      for (int c = c_begin; c < c_end; ++c) encFusedCand(enc1, c);
+      [enc1 endEncoding];
+      id<MTLComputeCommandEncoder> enc2 = [cmd
+          computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+      for (int c = c_begin; c < c_end; ++c) encMergeCand(enc2, c);
+      [enc2 endEncoding];
+      const int wrc = WaitCmdWithTimeout(cmd, CmdWaitTimeoutMs());
+      if (wrc != 0) return wrc;
+      const double gpuMs = (cmd.GPUEndTime - cmd.GPUStartTime) * 1000.0;
+      if (gpuMs > 0.0 && gpuMs < 10000.0) aether_match_gpu_ms += gpuMs;
+      ++aether_match_chunks;
+      // NOTE: no gMsPerTgKColV2 update from the probe batch — concurrent
+      // 4-threadgroup dispatches have a completely different ms/unit than
+      // the serial 64-threadgroup full-pair chunks the EMA calibrates, and
+      // poisoning the shared model would mis-size the main matcher's chunks.
+      (void)groupUnits;
+      const double gapPct = ThermalGapPct();
+      if (gapPct > 0.0 && gpuMs > 0.0) {
+        double gapMs = gpuMs * gapPct / 100.0;
+        if (gapMs > 250.0) gapMs = 250.0;
+        aether_match_sleep_ms += gapMs;
+        usleep((useconds_t)(gapMs * 1000.0));
+      }
+      return 0;
+    };
+    // Group candidates by the same self-calibrating cost model and thermal
+    // targets as the main matcher's KNIFE-C chunking, so a hot capture keeps
+    // its camera-GPU headroom (small groups + duty-cycle gaps) while a cool
+    // host submits the whole batch once.
+    // OFFICIAL_AETHER_MATCH_CHUNK_TARGET_MS=0 (legacy monolithic) also means
+    // one submission here.
+    const double chunkTargetMs = ChunkTargetMs();
+    double estCap = 0.0;  // unit budget per command buffer (0 = unlimited)
+    if (chunkTargetMs > 0.0) {
+      const double target = ThermalHot() ? chunkTargetMs : ChunkTargetCoolMs();
+      const double unit = gMsPerTgKColV2.load();
+      estCap = unit > 0.0 ? target / unit : 0.0;  // 0 = uncalibrated
+    }
+    int group_begin = 0;
+    double groupUnits = 0.0;
+    for (int c = 0; c < n_cands; ++c) {
+      const double candUnits =
+          (double)numBlocksA * ((double)nBs[c] / 1024.0);
+      if (c > group_begin && estCap > 0.0 && groupUnits + candUnits > estCap) {
+        const int wrc = runGroup(group_begin, c, groupUnits);
+        if (wrc != 0) return wrc;
+        group_begin = c;
+        groupUnits = 0.0;
+      }
+      groupUnits += candUnits;
+    }
+    if (group_begin < n_cands) {
+      const int wrc = runGroup(group_begin, n_cands, groupUnits);
+      if (wrc != 0) return wrc;
+    }
+
+    // Per-candidate mutual cross-check (identical loop to the pair entries),
+    // counting only — the gate needs the score, not the index list.
+    for (int c = 0; c < n_cands; ++c) {
+      const int* mAB =
+          (const int*)((const uint8_t*)outAB.contents +
+                       (NSUInteger)c * nApad * sizeof(int));
+      const int* mBA = (const int*)((const uint8_t*)outBA.contents +
+                                    outBAOff[(size_t)c]);
+      const int nB = nBs[c];
+      int n_out = 0;
+      for (int i = 0; i < nA; ++i) {
+        const int j = mAB[i];
+        if (j >= 0 && j < nB && mBA[j] == i) ++n_out;
+      }
+      out_counts[c] = n_out;
+    }
+    return 0;
+  }
+}
+
+// Batched probe entry (see probeBatchImplV2 header comment). Weakly imported
+// by the streaming core like the other matcher symbols.
+extern "C" int aether_gpu_match_probe_batch(const uint8_t* dA, int nA,
+                                            const uint8_t* const* dBs,
+                                            const int* nBs, int n_cands,
+                                            double max_ratio,
+                                            int* out_counts) {
+  std::lock_guard<std::mutex> lk(gMatchCallLock);
+  return probeBatchImplV2(dA, nA, dBs, nBs, n_cands, max_ratio, out_counts);
 }
 
 // COLMAP-style geometry-guided matcher. xy arrays contain two floats per

@@ -57,11 +57,6 @@ typedef enum aether_sfm_result {
   AETHER_SFM_ERR_NOT_REGISTERED = 5,
   AETHER_SFM_ERR_INTERNAL = 6,
   AETHER_SFM_ERR_UNSUPPORTED = 7,  // returned by the simulator stub TU
-  // [REMOVE-FRAME 2026-07-21] The call cannot run while the finalize worker
-  // owns the session state. Distinct from INVALID_ARG on purpose: the caller
-  // must be able to tell "you asked for something impossible" from "ask again
-  // later". aether_sfm_remove_frame is the only producer today.
-  AETHER_SFM_ERR_BUSY = 8,
 } aether_sfm_result_t;
 
 typedef struct aether_sfm_session aether_sfm_session_t;  // opaque
@@ -70,7 +65,7 @@ typedef struct aether_sfm_options {
   int max_features;     // 2048 (validated config)
   int image_width;      // intrinsics reference width
   int image_height;
-  float match_max_ratio;  // 0.7 default (Lowe ratio for the matcher)
+  float match_max_ratio;  // 0.8 product default (Lowe ratio for the matcher)
   int use_gpu_match;      // 1 = aether_gpu_match (Metal), 0 = CPU aether_sift_match
   int k_neighbors;        // K match candidates per frame (production 12).
                           // [SPATIAL-FIRST 2026-07-11] selected spatial-first:
@@ -101,25 +96,14 @@ aether_sfm_result_t aether_sfm_add_frame(aether_sfm_session_t* s,
                                          int width, int height,
                                          float fx, float fy,
                                          float cx, float cy,
-                                         // Required finite ARKit world->camera
-                                         // pose from a `.gravity` AR session.
+                                         // MANDATORY on the production ARKit
+                                         // route: NULL, non-finite or
+                                         // zero-norm input is rejected before
+                                         // any db write. It is not permission
+                                         // to create an unposed frame.
                                          const double pose_qwxyz[4],
                                          const double pose_t[3],
                                          int* out_frame_id);
-
-
-// [EXTRACT-PREFETCH 2026-08-08] Frame-level extract/match pipelining (PTAM/
-// ORB-SLAM front/back-end split; COLMAP's own extractor JobQueue shape, one
-// level up). Non-blocking: copies `gray`, hands it to the session's dedicated
-// extraction thread, returns immediately. The next aether_sfm_add_frame whose
-// image content matches adopts the finished features byte-for-byte instead of
-// extracting inline. Gated by OFFICIAL_AETHER_EXTRACT_PREFETCH=1; when unset
-// this is a no-op and add_frame is bit-identical to the pre-change path.
-// Returns 0 = enqueued, 1 = disabled/invalid args, 2 = busy (depth-1 queue
-// still holds the previous request — caller just skips prefetch this frame).
-int aether_sfm_prefetch_frame(aether_sfm_session_t* s,
-                              const unsigned char* gray, int width,
-                              int height);
 
 // Feature-injection sibling of aether_sfm_add_frame: skips extraction and
 // feeds precomputed keypoints (xy pairs, extractor's +0.5 half-pixel
@@ -405,6 +389,24 @@ void aether_sfm_match_fail_stats(aether_sfm_session_t* s,
 // finalize backfill; see aether_sfm_c.cc). Opt-in: AETHER_LIVE_CAND_K_HOT=6.
 // Pushing the thermal state itself is always safe/no-op when disabled.
 void aether_sfm_set_thermal_state(aether_sfm_session_t* s, int state);
+
+// [SPRINT-FIX + YIELD-FPS-LINK 2026-08-10] 匹配器调度旗的框架内正路。
+// 既有 Swift @_silgen_name / Dart process-lookup 在 TWOLEVEL 下解析到 Runner
+// 里力载的旧栈同名副本 —— 框架内匹配器的 gCaptureActive 自 07-26 起从未被
+// 翻过(拍完等待一直给已停相机白让路)。这两个入口编进框架,内部绑定必中。
+// 纯调度,匹配集合逐位不变。
+void aether_sfm_match_set_capture_active(int active);
+void aether_sfm_match_set_preview_fps30(int on);
+
+// [EXTRACT-PREFETCH 2026-08-08] Frame-level extract/match pipelining. Non-
+// blocking: copies `gray`, hands it to the session's dedicated extraction
+// thread, returns immediately; the next add_frame whose image content matches
+// adopts the finished features byte-for-byte. Gated by
+// OFFICIAL_AETHER_EXTRACT_PREFETCH=1; unset == no-op / bit-identical.
+// Returns 0 = enqueued, 1 = disabled/invalid args, 2 = busy (depth-1 queue).
+int aether_sfm_prefetch_frame(aether_sfm_session_t* s,
+                              const unsigned char* gray, int width,
+                              int height);
 
 // [THERMAL-THROTTLE 2026-07-11] Telemetry: frames fed with the reduced live K
 // this capture (0 = throttle never engaged). Same threading contract as
