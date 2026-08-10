@@ -71,6 +71,7 @@ extern const char sift_dog_detect_wgsl[];
 extern const char sift_nonextrema_suppress_wgsl[];
 extern const char sift_affine_shape_wgsl[];
 extern const char sift_orientation_wgsl[];
+extern const char sift_orientation_atomic_wgsl[];
 extern const char sift_dsp_descriptor_wgsl[];
 extern const char sift_dsp_descriptor_f16_wgsl[];
 extern const char sift_dsp_descriptor_f16_atomic_wgsl[];

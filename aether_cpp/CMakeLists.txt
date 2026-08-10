@@ -484,6 +484,7 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
         ${AETHER_WGSL_GENERATED_DIR}/sift_nonextrema_suppress_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_affine_shape_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_orientation_wgsl.cpp
+        ${AETHER_WGSL_GENERATED_DIR}/sift_orientation_atomic_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_dsp_descriptor_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_dsp_descriptor_f16_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_dsp_descriptor_f16_atomic_wgsl.cpp

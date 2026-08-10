@@ -77,6 +77,8 @@ std::string load_wgsl(const char* filename) {
     if (f == "sift_nonextrema_suppress.wgsl") return std::string(sift_nonextrema_suppress_wgsl);
     if (f == "sift_affine_shape.wgsl")        return std::string(sift_affine_shape_wgsl);
     if (f == "sift_orientation.wgsl")         return std::string(sift_orientation_wgsl);
+    if (f == "sift_orientation_atomic.wgsl")
+        return std::string(sift_orientation_atomic_wgsl);
     if (f == "sift_dsp_descriptor.wgsl")      return std::string(sift_dsp_descriptor_wgsl);
     if (f == "sift_dsp_descriptor_f16.wgsl")  return std::string(sift_dsp_descriptor_f16_wgsl);
     if (f == "sift_dsp_descriptor_f16_atomic.wgsl")
@@ -585,8 +587,15 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             static_cast<uint32_t>(SiftPyramidDawn::kLevelsPerOctave)};
         wgpu::Buffer p_buf =
             harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
-        wgpu::ComputePipeline pipe_ori =
-            harness.load_compute(load_wgsl("sift_orientation.wgsl"));
+        // [ORIENT-ATOMIC 2026-08-10 用户签] 36 格定点原子黑板版默认开;
+        // kill switch:OFFICIAL_AETHER_ORIENT_ATOMIC=0 回原版。
+        static const bool orient_atomic_on = [] {
+            const char* v = std::getenv("OFFICIAL_AETHER_ORIENT_ATOMIC");
+            return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+        }();
+        wgpu::ComputePipeline pipe_ori = harness.load_compute(
+            load_wgsl(orient_atomic_on ? "sift_orientation_atomic.wgsl"
+                                       : "sift_orientation.wgsl"));
         // [2D-DISPATCH 2026-08-10] 同 affine:二维拆分过 65535 上限。
         harness.dispatch(pipe_ori,
                          {packed, meta_buf, ori_in_buf, ori_out_buf, ori_counter,
