@@ -79,6 +79,8 @@ std::string load_wgsl(const char* filename) {
     if (f == "sift_orientation.wgsl")         return std::string(sift_orientation_wgsl);
     if (f == "sift_dsp_descriptor.wgsl")      return std::string(sift_dsp_descriptor_wgsl);
     if (f == "sift_dsp_descriptor_f16.wgsl")  return std::string(sift_dsp_descriptor_f16_wgsl);
+    if (f == "sift_dsp_descriptor_f16_atomic.wgsl")
+        return std::string(sift_dsp_descriptor_f16_atomic_wgsl);
     if (f == "sift_dsp_descriptor_par.wgsl")  return std::string(sift_dsp_descriptor_par_wgsl);
     if (f == "sift_dsp_mean.wgsl")            return std::string(sift_dsp_mean_wgsl);
     std::cerr << "[SiftExtractDawn] unknown WGSL pass: " << filename << '\n';
@@ -280,6 +282,9 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     struct DetParams {
         uint32_t width, height, cap, octave;
         float peak_threshold, edge_threshold, base_scale, oct_resolution;
+        // [PACK-ZERO 2026-08-10] 本 octave 6 层在 packed 大缓冲中的偏移。
+        uint32_t off[6];
+        uint32_t _pad0, _pad1;
     };
     wgpu::ComputePipeline pipe_detect =
         harness.load_compute(load_wgsl("sift_dog_detect.wgsl"));
@@ -295,13 +300,15 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         DetParams P{static_cast<uint32_t>(ow), static_cast<uint32_t>(oh),
                     kDetectCap, static_cast<uint32_t>(o), peak,
                     static_cast<float>(kEdgeThreshold), base_scale,
-                    static_cast<float>(kOctaveResolution)};
+                    static_cast<float>(kOctaveResolution),
+                    {0, 0, 0, 0, 0, 0}, 0, 0};
+        for (int s = SiftPyramidDawn::kOctaveFirstSub;
+             s <= SiftPyramidDawn::kOctaveLastSub; ++s)
+            P.off[s - SiftPyramidDawn::kOctaveFirstSub] = pyr.level_offset(o, s);
         wgpu::Buffer p_buf =
             harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
         std::vector<wgpu::Buffer> bind;
-        for (int s = SiftPyramidDawn::kOctaveFirstSub;
-             s <= SiftPyramidDawn::kOctaveLastSub; ++s)
-            bind.push_back(pyr.level_buffer(o, s));
+        bind.push_back(packed);
         bind.push_back(det_counter);
         bind.push_back(det_buf);
         bind.push_back(p_buf);
@@ -1030,8 +1037,16 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             const bool want_f16 =
                 (harness.has_f16() && std::getenv("SED_FORCE_F32") == nullptr) ||
                 std::getenv("SED_F16_DESC") != nullptr;
+            // [DESC-ATOMIC 2026-08-10 用户签 cosine>=0.998 门] f16 设备默认走
+            // 定点共享原子加版(消私有 lh[128]+归约树);kill switch:
+            // OFFICIAL_AETHER_DESC_ATOMIC=0 回 _f16 版。非 f16 设备维持 f32 版。
+            static const bool atomic_on = [] {
+                const char* v = std::getenv("OFFICIAL_AETHER_DESC_ATOMIC");
+                return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+            }();
             const char* desc_shader = want_f16
-                ? "sift_dsp_descriptor_f16.wgsl"
+                ? (atomic_on ? "sift_dsp_descriptor_f16_atomic.wgsl"
+                             : "sift_dsp_descriptor_f16.wgsl")
                 : "sift_dsp_descriptor.wgsl";
             wgpu::ComputePipeline pipe_desc =
                 harness.load_compute(load_wgsl(desc_shader));

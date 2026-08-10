@@ -18,6 +18,9 @@ struct Params {
   height : u32,
   radius : u32,   // kernel half-width; full length = 2*radius + 1
   axis   : u32,   // 0 = horizontal, 1 = vertical
+  // [PACK-ZERO 2026-08-10] 层住进 packed 大缓冲:src/dst 各带 element 偏移。
+  src_off : u32,
+  dst_off : u32,
 };
 
 @group(0) @binding(0) var<storage, read>       src   : array<f32>;
@@ -45,16 +48,16 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let cx   : i32 = i32(x);
     for (var k : i32 = 0; k < len; k = k + 1) {
       let sx : i32 = clampi(cx + (k - r), 0, i32(P.width) - 1);
-      acc = acc + taps[k] * src[base + sx];
+      acc = acc + taps[k] * src[P.src_off + u32(base + sx)];
     }
   } else {
     // vertical: sample along y, clamp to [0, height-1]
     let cy : i32 = i32(y);
     for (var k : i32 = 0; k < len; k = k + 1) {
       let sy : i32 = clampi(cy + (k - r), 0, i32(P.height) - 1);
-      acc = acc + taps[k] * src[sy * i32(P.width) + i32(x)];
+      acc = acc + taps[k] * src[P.src_off + u32(sy * i32(P.width) + i32(x))];
     }
   }
 
-  dst[y * P.width + x] = acc;
+  dst[P.dst_off + y * P.width + x] = acc;
 }

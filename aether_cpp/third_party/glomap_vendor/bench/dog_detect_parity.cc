@@ -297,7 +297,10 @@ int main(int argc, char** argv) {
   struct Params {
     uint32_t width, height, cap, octave;
     float peak_threshold, edge_threshold, base_scale, oct_resolution;
-  };
+    // [PACK-ZERO 2026-08-10] packed 大缓冲内本 octave 6 层偏移(生产同款)。
+  uint32_t off[6];
+  uint32_t _pad0, _pad1;
+};
   wgpu::ComputePipeline pipe = harness.load_compute(load_wgsl("sift_dog_detect.wgsl"));
 
   // ── Stage B+: run the (octave-agnostic) detect kernel over EVERY octave of
@@ -314,12 +317,14 @@ int main(int argc, char** argv) {
               static_cast<uint32_t>(o),
               static_cast<float>(kPeakThreshold), static_cast<float>(kEdgeThreshold),
               static_cast<float>(SiftPyramidDawn::base_scale()),
-              static_cast<float>(kOctaveResolution) };
+              static_cast<float>(kOctaveResolution),
+              {0,0,0,0,0,0}, 0, 0 };
+    for (int s = SiftPyramidDawn::kOctaveFirstSub; s <= SiftPyramidDawn::kOctaveLastSub; ++s)
+      P.off[s - SiftPyramidDawn::kOctaveFirstSub] = gpu.level_offset(o, s);
     wgpu::Buffer p_buf = harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
 
     std::vector<wgpu::Buffer> bind;
-    for (int s = SiftPyramidDawn::kOctaveFirstSub; s <= SiftPyramidDawn::kOctaveLastSub; ++s)
-      bind.push_back(gpu.level_buffer(o, s));
+    bind.push_back(gpu.packed_buffer());
     bind.push_back(kp_counter);
     bind.push_back(kp_buffer);
     bind.push_back(p_buf);

@@ -59,18 +59,24 @@ struct Params {
   edge_threshold : f32, // self->edgeThreshold (10.0 default)
   base_scale     : f32, // cgeom.baseScale
   oct_resolution : f32, // cgeom.octaveResolution (3)
+  // [PACK-ZERO 2026-08-10] 本 octave 6 层在 packed 大缓冲中的 element 偏移。
+  off0 : u32,
+  off1 : u32,
+  off2 : u32,
+  off3 : u32,
+  off4 : u32,
+  off5 : u32,
+  _pad0 : u32,
+  _pad1 : u32,
 };
 
 // gss octave-0 levels s = -1..4 → 6 buffers, index = s+1.
-@group(0) @binding(0) var<storage, read> gss_m1 : array<f32>; // s=-1
-@group(0) @binding(1) var<storage, read> gss_0  : array<f32>; // s= 0
-@group(0) @binding(2) var<storage, read> gss_1  : array<f32>; // s= 1
-@group(0) @binding(3) var<storage, read> gss_2  : array<f32>; // s= 2
-@group(0) @binding(4) var<storage, read> gss_3  : array<f32>; // s= 3
-@group(0) @binding(5) var<storage, read> gss_4  : array<f32>; // s= 4
-@group(0) @binding(6) var<storage, read_write> kp_counter : atomic<u32>;
-@group(0) @binding(7) var<storage, read_write> kp_buffer  : array<u32>; // CAP * KP_STRIDE
-@group(0) @binding(8) var<uniform>             P          : Params;
+// [PACK-ZERO 2026-08-10] 6 层独立绑定 → 单一 packed 大缓冲 + 每层偏移
+// (Params.off0..off5,由 host 按本 octave 填)。数值逐位不变,仅寻址变化。
+@group(0) @binding(0) var<storage, read> packed_gss : array<f32>;
+@group(0) @binding(1) var<storage, read_write> kp_counter : atomic<u32>;
+@group(0) @binding(2) var<storage, read_write> kp_buffer  : array<u32>; // CAP * KP_STRIDE
+@group(0) @binding(3) var<uniform>             P          : Params;
 
 // gss[level_idx] sampled at clamped (x,y). level_idx = s+1 in [0,5].
 fn gss_at(level_idx : i32, x : i32, y : i32) -> f32 {
@@ -80,12 +86,12 @@ fn gss_at(level_idx : i32, x : i32, y : i32) -> f32 {
   let cy : i32 = max(0, min(y, h - 1));
   let k : i32 = cy * w + cx;
   switch (level_idx) {
-    case 0: { return gss_m1[k]; }
-    case 1: { return gss_0[k]; }
-    case 2: { return gss_1[k]; }
-    case 3: { return gss_2[k]; }
-    case 4: { return gss_3[k]; }
-    default: { return gss_4[k]; }
+    case 0: { return packed_gss[P.off0 + u32(k)]; }
+    case 1: { return packed_gss[P.off1 + u32(k)]; }
+    case 2: { return packed_gss[P.off2 + u32(k)]; }
+    case 3: { return packed_gss[P.off3 + u32(k)]; }
+    case 4: { return packed_gss[P.off4 + u32(k)]; }
+    default: { return packed_gss[P.off5 + u32(k)]; }
   }
 }
 

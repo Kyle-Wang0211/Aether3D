@@ -44,6 +44,7 @@ std::string load_wgsl(const char* filename) {
     if (fn == "sift_gray_to_f32.wgsl")   return std::string(sift_gray_to_f32_wgsl);
     if (fn == "sift_gss_blur.wgsl")      return std::string(sift_gss_blur_wgsl);
     if (fn == "sift_gss_resample.wgsl")  return std::string(sift_gss_resample_wgsl);
+    if (fn == "sift_gss_blur_fused.wgsl") return std::string(sift_gss_blur_fused_wgsl);
     std::cerr << "[SiftPyramidDawn] unknown WGSL: " << filename << '\n';
     std::abort();
 #endif
@@ -120,37 +121,61 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     wgpu::ComputePipeline pipe_gray = harness.load_compute(s0_src);
     wgpu::ComputePipeline pipe_blur = harness.load_compute(s1_src);
     wgpu::ComputePipeline pipe_resample = harness.load_compute(s1b_src);
+    // [GSS-FUSED 2026-08-10] H+V 融合 blur(FidelityFX Blur 结构,逐位同
+    // 2-pass)。kill switch:OFFICIAL_AETHER_GSS_FUSED=0;radius>16 自动回落。
+    static const bool fused_on = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_GSS_FUSED");
+        return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+    }();
+    wgpu::ComputePipeline pipe_blur_fused;
+    if (fused_on) {
+        pipe_blur_fused =
+            harness.load_compute(load_wgsl("sift_gss_blur_fused.wgsl"));
+    }
 
     const auto wg = [](int n) -> uint32_t {
         return static_cast<uint32_t>((n + 7) / 8);
     };
 
-    // ── Allocate every level buffer ──
+    // ── [PACK-ZERO 2026-08-10] 布局先行:全部层排进一个 packed 大缓冲 ──
+    // 布局与旧 pack_levels() 的 meta 完全一致(逐层 element offset 前缀和),
+    // blur/resample/gray 直写各自偏移 ⇒ pack 阶段零拷贝。数值逐位不变:
+    // 只是像素的"住址"变了,每条数学路径原样。
     octaves_.assign(static_cast<size_t>(last_octave_ + 1), {});
-    for (int o = 0; o <= last_octave_; ++o) {
-        OctaveBuffers& ob = octaves_[static_cast<size_t>(o)];
-        ob.width = width_ >> o;
-        ob.height = height_ >> o;
-        const size_t bytes =
-            static_cast<size_t>(ob.width) * ob.height * sizeof(float);
-        ob.levels.resize(static_cast<size_t>(kLevelsPerOctave));
-        for (int li = 0; li < kLevelsPerOctave; ++li) {
-            ob.levels[static_cast<size_t>(li)] = harness.alloc(
-                bytes,
-                wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
-                    wgpu::BufferUsage::CopyDst);
+    level_offsets_.assign(
+        static_cast<size_t>(last_octave_ + 1) * kLevelsPerOctave, 0u);
+    {
+        uint32_t running = 0;
+        for (int o = 0; o <= last_octave_; ++o) {
+            OctaveBuffers& ob = octaves_[static_cast<size_t>(o)];
+            ob.width = width_ >> o;
+            ob.height = height_ >> o;
+            for (int li = 0; li < kLevelsPerOctave; ++li) {
+                level_offsets_[static_cast<size_t>(o) * kLevelsPerOctave + li] =
+                    running;
+                running += static_cast<uint32_t>(ob.width) *
+                           static_cast<uint32_t>(ob.height);
+            }
         }
+        packed_buf_ = harness.alloc(
+            static_cast<size_t>(running) * sizeof(float),
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
+                wgpu::BufferUsage::CopyDst);
     }
 
-    const auto level_buf = [&](int o, int s) -> wgpu::Buffer& {
-        return octaves_[static_cast<size_t>(o)]
-            .levels[static_cast<size_t>(s - kOctaveFirstSub)];
+    // 层的身份 = packed 偏移(element)。
+    const auto level_off = [&](int o, int s) -> uint32_t {
+        return level_offsets_[static_cast<size_t>(o) * kLevelsPerOctave +
+                              (s - kOctaveFirstSub)];
     };
 
-    // Run one separable Gaussian (h then v) from `src` into `dst`, sized
-    // (w,h), with kernel sigma `sigma_px` (already divided by octave step).
-    // `scratch` is a same-sized intermediate the caller owns.
-    const auto blur = [&](const wgpu::Buffer& src, const wgpu::Buffer& dst,
+    // Run one separable Gaussian (h then v) from packed@src_off into
+    // dst_buf@dst_off, sized (w,h), with kernel sigma `sigma_px` (already
+    // divided by octave step). `scratch` is a same-sized separate intermediate
+    // (offset 0). dst_buf 一般就是 packed_buf_(dst_off=层偏移);基层平滑的
+    // 临时目标传独立 tmp(dst_off=0)。
+    const auto blur = [&](const wgpu::Buffer& src_buf, uint32_t src_off,
+                          const wgpu::Buffer& dst_buf, uint32_t dst_off,
                           const wgpu::Buffer& scratch, int w, int h,
                           double sigma_px) {
         const std::vector<float> taps = make_gaussian_taps(sigma_px);
@@ -158,25 +183,26 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
         wgpu::Buffer taps_buf =
             harness.upload(taps.data(), taps.size() * sizeof(float),
                            wgpu::BufferUsage::Storage);
-        // Params: {width, height, radius, axis}
+        // Params: {width, height, radius, axis, src_off, dst_off}
         struct BlurParams {
-            uint32_t width, height, radius, axis;
+            uint32_t width, height, radius, axis, src_off, dst_off;
+            uint32_t _pad0, _pad1;
         };
-        // h pass: src → scratch (axis 0). Batched: encoded into the open batch,
-        // submitted once at end_batch(). Dawn tracks the src/scratch/dst storage
+        // h pass: src@src_off → scratch@0 (axis 0). Batched: encoded into the
+        // open batch, submitted once at end_batch(). Dawn tracks the storage
         // hazards so the v-pass sees the h-pass writes (identical to per-call).
         BlurParams ph{static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                      radius, 0u};
+                      radius, 0u, src_off, 0u, 0u, 0u};
         wgpu::Buffer ph_buf = harness.upload(&ph, sizeof(ph),
                                              wgpu::BufferUsage::Uniform);
-        harness.dispatch_batched(pipe_blur, {src, taps_buf, scratch, ph_buf},
+        harness.dispatch_batched(pipe_blur, {src_buf, taps_buf, scratch, ph_buf},
                                  wg(w), wg(h));
-        // v pass: scratch → dst (axis 1)
+        // v pass: scratch@0 → dst@dst_off (axis 1)
         BlurParams pv{static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                      radius, 1u};
+                      radius, 1u, 0u, dst_off, 0u, 0u};
         wgpu::Buffer pv_buf = harness.upload(&pv, sizeof(pv),
                                              wgpu::BufferUsage::Uniform);
-        harness.dispatch_batched(pipe_blur, {scratch, taps_buf, dst, pv_buf},
+        harness.dispatch_batched(pipe_blur, {scratch, taps_buf, dst_buf, pv_buf},
                                  wg(w), wg(h));
     };
 
@@ -201,12 +227,12 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
             harness.upload(packed.data(), words * sizeof(uint32_t),
                            wgpu::BufferUsage::Storage);
         struct GrayParams {
-            uint32_t width, height;
-        } gp{static_cast<uint32_t>(width_), static_cast<uint32_t>(height_)};
+            uint32_t width, height, dst_off, _pad;
+        } gp{static_cast<uint32_t>(width_), static_cast<uint32_t>(height_),
+             level_off(0, kOctaveFirstSub), 0u};
         wgpu::Buffer gp_buf = harness.upload(&gp, sizeof(gp),
                                              wgpu::BufferUsage::Uniform);
-        harness.dispatch_batched(pipe_gray,
-                                 {src_u8, level_buf(0, kOctaveFirstSub), gp_buf},
+        harness.dispatch_batched(pipe_gray, {src_u8, packed_buf_, gp_buf},
                                  wg(width_), wg(height_));
     }
 
@@ -227,11 +253,13 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
             wgpu::Buffer tmp = harness.alloc(
                 static_cast<size_t>(ob0.width) * ob0.height * sizeof(float),
                 wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
-            blur(level_buf(0, kOctaveFirstSub), tmp, scratch, ob0.width,
-                 ob0.height, delta /* /step, step=1 */);
-            harness.copy_region_batched(tmp, 0, level_buf(0, kOctaveFirstSub), 0,
-                                        static_cast<size_t>(ob0.width) *
-                                            ob0.height * sizeof(float));
+            blur(packed_buf_, level_off(0, kOctaveFirstSub), tmp, 0u, scratch,
+                 ob0.width, ob0.height, delta /* /step, step=1 */);
+            harness.copy_region_batched(
+                tmp, 0, packed_buf_,
+                static_cast<uint64_t>(level_off(0, kOctaveFirstSub)) *
+                    sizeof(float),
+                static_cast<size_t>(ob0.width) * ob0.height * sizeof(float));
         }
     }
 
@@ -240,15 +268,41 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     const auto fill_octave = [&](int o) {
         OctaveBuffers& ob = octaves_[static_cast<size_t>(o)];
         const double step = std::pow(2.0, static_cast<double>(o));
-        wgpu::Buffer scratch = harness.alloc(
-            static_cast<size_t>(ob.width) * ob.height * sizeof(float),
-            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+        wgpu::Buffer scratch;  // 仅 2-pass 回落路径需要,懒分配
         for (int s = kOctaveFirstSub + 1; s <= kOctaveLastSub; ++s) {
             const double sigma = level_sigma(o, s);
             const double prev = level_sigma(o, s - 1);
             const double delta = std::sqrt(sigma * sigma - prev * prev);
-            blur(level_buf(o, s - 1), level_buf(o, s), scratch, ob.width,
-                 ob.height, delta / step);
+            const double sigma_px = delta / step;
+            const std::vector<float> taps = make_gaussian_taps(sigma_px);
+            const uint32_t radius =
+                static_cast<uint32_t>((taps.size() - 1) / 2);
+            if (fused_on && radius <= 16u) {
+                // [GSS-FUSED] 单 dispatch,条带滑动;scratch 往返消失。
+                wgpu::Buffer taps_buf = harness.upload(
+                    taps.data(), taps.size() * sizeof(float),
+                    wgpu::BufferUsage::Storage);
+                struct FusedParams {
+                    uint32_t width, height, radius, src_off;
+                    uint32_t dst_off, _pad0, _pad1, _pad2;
+                } fp{static_cast<uint32_t>(ob.width),
+                     static_cast<uint32_t>(ob.height), radius,
+                     level_off(o, s - 1), level_off(o, s), 0u, 0u, 0u};
+                wgpu::Buffer fp_buf = harness.upload(
+                    &fp, sizeof(fp), wgpu::BufferUsage::Uniform);
+                harness.dispatch_batched(
+                    pipe_blur_fused, {packed_buf_, taps_buf, fp_buf},
+                    static_cast<uint32_t>((ob.width + 7) / 8), 1u);
+            } else {
+                if (!scratch) {
+                    scratch = harness.alloc(
+                        static_cast<size_t>(ob.width) * ob.height *
+                            sizeof(float),
+                        wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+                }
+                blur(packed_buf_, level_off(o, s - 1), packed_buf_,
+                     level_off(o, s), scratch, ob.width, ob.height, sigma_px);
+            }
         }
     };
 
@@ -267,16 +321,19 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                                       kOctaveLastSub);  // = 2
         OctaveBuffers& prev = octaves_[static_cast<size_t>(o - 1)];
         struct ResampleParams {
-            uint32_t src_width, dst_width, dst_height;
+            uint32_t src_width, dst_width, dst_height, src_off;
+            uint32_t dst_off, _pad0, _pad1, _pad2;
         } rp{static_cast<uint32_t>(prev.width),
              static_cast<uint32_t>(ob.width),
-             static_cast<uint32_t>(ob.height)};
+             static_cast<uint32_t>(ob.height),
+             level_off(o - 1, prev_sub),
+             level_off(o, kOctaveFirstSub), 0u, 0u, 0u};
         wgpu::Buffer rp_buf = harness.upload(&rp, sizeof(rp),
                                              wgpu::BufferUsage::Uniform);
-        harness.dispatch_batched(
-            pipe_resample,
-            {level_buf(o - 1, prev_sub), level_buf(o, kOctaveFirstSub), rp_buf},
-            wg(ob.width), wg(ob.height));
+        // 同一 buffer 不能在一个 dispatch 里同时绑 read 与 read_write
+        // (WebGPU aliasing 校验)——resample 改为单一 read_write 绑定+双偏移。
+        harness.dispatch_batched(pipe_resample, {packed_buf_, rp_buf},
+                                 wg(ob.width), wg(ob.height));
         fill_octave(o);
     }
 
@@ -285,10 +342,9 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     return true;
 }
 
-const wgpu::Buffer& SiftPyramidDawn::level_buffer(int octave,
-                                                  int sublevel) const {
-    return octaves_[static_cast<size_t>(octave)]
-        .levels[static_cast<size_t>(sublevel - kOctaveFirstSub)];
+uint32_t SiftPyramidDawn::level_offset(int octave, int sublevel) const {
+    return level_offsets_[static_cast<size_t>(octave) * kLevelsPerOctave +
+                          (sublevel - kOctaveFirstSub)];
 }
 
 int SiftPyramidDawn::octave_width(int octave) const {
@@ -326,31 +382,17 @@ wgpu::Buffer SiftPyramidDawn::pack_levels(DawnKernelHarness& harness,
         }
     }
 
-    const size_t total_bytes = static_cast<size_t>(running) * sizeof(float);
-    wgpu::Buffer packed = harness.alloc(
-        total_bytes,
-        wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
-            wgpu::BufferUsage::CopyDst);
-
-    // GPU-side assembly: copy each resident level buffer into its slot, ALL in
-    // ONE command submit (was 48 separate submit+wait round-trips). No pixel
-    // data crosses to the host.
-    harness.begin_batch();
-    for (int o = 0; o < num_octaves; ++o) {
-        const size_t level_bytes =
-            static_cast<size_t>(octaves_[static_cast<size_t>(o)].width) *
-            octaves_[static_cast<size_t>(o)].height * sizeof(float);
-        for (int s = kOctaveFirstSub; s <= kOctaveLastSub; ++s) {
-            const size_t idx = static_cast<size_t>(o) * kLevelsPerOctave +
-                               (s - kOctaveFirstSub);
-            const uint64_t dst_byte =
-                static_cast<uint64_t>((*meta)[idx].offset) * sizeof(float);
-            harness.copy_region_batched(level_buffer(o, s), 0, packed, dst_byte,
-                                        level_bytes);
+    // [PACK-ZERO 2026-08-10] 层从出生就住在 packed_buf_ 的这些偏移上,
+    // 校验布局与 build() 一致后直接返回 —— 零拷贝。
+    for (size_t i = 0; i < num_levels; ++i) {
+        if ((*meta)[i].offset != level_offsets_[i]) {
+            std::cerr << "[SiftPyramidDawn] pack layout drift at level " << i
+                      << "\n";
+            return wgpu::Buffer();
         }
     }
-    harness.end_batch();
-    return packed;
+    (void)harness;
+    return packed_buf_;
 }
 
 std::vector<float> SiftPyramidDawn::read_level(DawnKernelHarness& harness,
@@ -359,9 +401,10 @@ std::vector<float> SiftPyramidDawn::read_level(DawnKernelHarness& harness,
     const size_t bytes =
         static_cast<size_t>(ob.width) * ob.height * sizeof(float);
     wgpu::Buffer staging = harness.alloc_staging_for_readback(bytes);
-    harness.copy_to_staging(
-        ob.levels[static_cast<size_t>(sublevel - kOctaveFirstSub)], staging,
-        bytes);
+    harness.copy_region(
+        packed_buf_,
+        static_cast<uint64_t>(level_offset(octave, sublevel)) * sizeof(float),
+        staging, 0, bytes);
     std::vector<uint8_t> raw = harness.readback(staging, bytes);
     std::vector<float> out(static_cast<size_t>(ob.width) * ob.height);
     std::memcpy(out.data(), raw.data(), bytes);

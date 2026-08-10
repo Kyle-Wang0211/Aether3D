@@ -68,11 +68,12 @@ public:
     std::vector<float> read_level(DawnKernelHarness& harness,
                                   int octave, int sublevel) const;
 
-    // The resident GPU storage buffer for one (octave, sublevel) GSS level.
-    // Lets downstream stages (S2 DoG / S3 detect) bind the pyramid in place —
-    // the GSS stays RESIDENT, never round-tripped (PLAN §1 data flow). The
-    // buffer carries Storage|CopySrc|CopyDst usage.
-    const wgpu::Buffer& level_buffer(int octave, int sublevel) const;
+    // [PACK-ZERO 2026-08-10] 每层不再是独立 buffer:build() 一开始就把全部
+    // (octave, sublevel) 层排进**一个** packed f32 大缓冲(布局与 pack_levels
+    // 的 meta 完全一致),blur/resample 直写各自偏移 ⇒ pack_levels 变零拷贝
+    // (原先 48 次 copy ≈ 数百 MB/帧)。层的身份 = packed_buffer() + 偏移。
+    const wgpu::Buffer& packed_buffer() const { return packed_buf_; }
+    uint32_t level_offset(int octave, int sublevel) const;  // element offset
 
     // Octave width/height (== width >> o, height >> o).
     int octave_width(int octave) const;
@@ -108,17 +109,18 @@ public:
     static double level_sigma(int octave, int sublevel);
 
 private:
-    // One GPU storage buffer per (octave, sublevel), sized to that octave.
+    // Octave geometry; pixel storage lives in packed_buf_ at level_offsets_.
     struct OctaveBuffers {
         int width = 0;
         int height = 0;
-        std::vector<wgpu::Buffer> levels;  // index = s - kOctaveFirstSub
     };
 
     int width_ = 0;
     int height_ = 0;
     int last_octave_ = 0;
     std::vector<OctaveBuffers> octaves_;  // index = octave (first_octave = 0)
+    wgpu::Buffer packed_buf_;             // 所有层的唯一驻留缓冲
+    std::vector<uint32_t> level_offsets_; // index = o*kLevelsPerOctave+(s-first)
 };
 
 }  // namespace tools
