@@ -7076,6 +7076,14 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   popts->ba_global_loss_type = 2;              // CAUCHY (was defaulting to 0=TRIVIAL)
   popts->ba_global_loss_scale = 1.0;
   popts->ba_global_function_tolerance = 1e-6;  // converge-stop
+  // [BA-FTOL 2026-08-11 研究旋钮,默认不改行为] 全局 BA 相对代价下降阈值。
+  // 与硬迭代帽的区别:ftol 仍按**收敛判据**停,只是把"已经不影响交付的
+  // 末尾迭代"划进收敛;硬帽则可能在真收敛前截断(真机 b32 三 solve 均
+  // term=0 收敛于 49/50/30 迭代 ⇒ 帽<30 必截真活)。无损交付线优先验这把。
+  if (const char* e = std::getenv("OFFICIAL_AETHER_BA_GLOBAL_FTOL")) {
+    const double v = std::atof(e);
+    if (v > 0.0) popts->ba_global_function_tolerance = v;
+  }
   // [FINALIZE-TOTAL-ROUNDS 2026-08-10 用户签] 总轮预算 5→3。
   // 轮预算自平衡:砍单段(STAGE1_ROUNDS_CAP=1)的轮经余额公式流给 stage2,
   // host 矩阵实测净 +0.5s 且点 −0.3% = 判死;砍**总**预算才减真工作量。
