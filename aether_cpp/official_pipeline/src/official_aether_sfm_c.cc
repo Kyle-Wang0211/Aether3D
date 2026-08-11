@@ -5535,6 +5535,125 @@ constexpr int kRematchValidInlierGate = 15;     // == pipeline min_num_matches
 constexpr int kRematchNearGap = 2;              // chain holes always re-matched
 constexpr int kFinalizeRematchMaxPairs = 800;   // > cap43 worst case (688)
 
+// [ENRICH-TVG-FARM 2026-08-11] Multi-worker TVG verification for the two db
+// enrichment passes (starved-frame re-match + quadratic overlap). The passes
+// are matcher→TVG→persist chains whose CPU bulk is the per-pair RANSAC inside
+// EstimateMandatoryFrameTwoViewGeometry (pure function of camera/points/
+// gravity/matches — no session, no db, no GPU). This farm runs ONLY that
+// estimation on N workers; the caller keeps the GPU matcher serialized and
+// commits results (stats + WriteMatches/WriteTwoViewGeometry) strictly in
+// submission order on its own thread — the sqlite handle is never touched off
+// the enriching thread (OOM-campaign hard rule).
+//
+// Determinism: every job re-seeds COLMAP's thread_local PRNG with a seed
+// derived from the image-id pair, so the RANSAC stream is a function of the
+// pair alone — independent of worker count or scheduling. N=1 and N=3 are
+// bit-identical, reruns are bit-identical. (The serial env-off path keeps the
+// legacy carried-over PRNG stream and stays byte-identical to before.)
+//
+// OFFICIAL_AETHER_ENRICH_TVG_THREADS: 0/unset = off (legacy serial TVG).
+int EnrichTvgThreads() {
+  static const int cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_ENRICH_TVG_THREADS");
+    const int v = e && e[0] ? std::atoi(e) : 0;
+    if (v <= 0) return 0;
+    return std::min(v, 8);
+  }();
+  return cached;
+}
+
+uint32_t EnrichTvgPairSeed(colmap::image_t id1, colmap::image_t id2) {
+  uint64_t h = (static_cast<uint64_t>(id1) << 32) | id2;
+  h ^= h >> 33;
+  h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 33;
+  h *= 0xc4ceb9fe1a85ec53ULL;
+  h ^= h >> 33;
+  // Never 0/-1: SetPRNGSeed(-1) means "seed from time" upstream.
+  const uint32_t seed = static_cast<uint32_t>(h) | 1u;
+  return seed == static_cast<uint32_t>(-1) ? 1u : seed;
+}
+
+struct EnrichTvgJob {
+  // Inputs — pts_* must stay valid until the job is committed; the callers
+  // gate the farm to in-memory (live borrowed) feature storage.
+  const FrameRecord* frame_a = nullptr;
+  const FrameRecord* frame_b = nullptr;
+  const std::vector<Eigen::Vector2d>* pts_a = nullptr;
+  const std::vector<Eigen::Vector2d>* pts_b = nullptr;
+  int a_idx = -1, b_idx = -1;  // frame indices (probe-debt growth bookkeeping)
+  colmap::FeatureMatches matches;
+  const colmap::TwoViewGeometryOptions* tvg_options = nullptr;
+  bool was_probe_debt = false;  // re-match bookkeeping rides along
+  // Output
+  aether::sfm::MandatoryGravityTwoViewResultV1 tvg;
+  std::atomic<bool> ready{false};
+};
+
+class EnrichTvgFarm {
+ public:
+  explicit EnrichTvgFarm(int n_workers) {
+    workers_.reserve(static_cast<size_t>(n_workers));
+    for (int i = 0; i < n_workers; ++i) {
+      workers_.emplace_back([this] {
+#if defined(__APPLE__)
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+        for (;;) {
+          EnrichTvgJob* job = nullptr;
+          {
+            std::unique_lock<std::mutex> lk(mu_);
+            cv_.wait(lk, [this] { return stop_ || !queue_.empty(); });
+            if (stop_ && queue_.empty()) return;
+            job = queue_.front();
+            queue_.pop_front();
+          }
+          colmap::SetPRNGSeed(EnrichTvgPairSeed(job->frame_a->image_id,
+                                                job->frame_b->image_id));
+          job->tvg = EstimateMandatoryFrameTwoViewGeometry(
+              *job->frame_a, *job->pts_a, *job->frame_b, *job->pts_b,
+              job->matches, *job->tvg_options);
+          job->ready.store(true, std::memory_order_release);
+          done_cv_.notify_all();
+        }
+      });
+    }
+  }
+
+  ~EnrichTvgFarm() {
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    for (auto& w : workers_) w.join();
+  }
+
+  void Submit(EnrichTvgJob* job) {
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      queue_.push_back(job);
+    }
+    cv_.notify_one();
+  }
+
+  // Blocks until the given job (the caller's in-order front) is estimated.
+  void Wait(EnrichTvgJob* job) {
+    if (job->ready.load(std::memory_order_acquire)) return;
+    std::unique_lock<std::mutex> lk(mu_);
+    done_cv_.wait(
+        lk, [&] { return job->ready.load(std::memory_order_acquire); });
+  }
+
+ private:
+  std::vector<std::thread> workers_;
+  std::mutex mu_;
+  std::condition_variable cv_;       // workers wait for jobs
+  std::condition_variable done_cv_;  // caller waits for completions
+  std::deque<EnrichTvgJob*> queue_;
+  bool stop_ = false;
+};
+
 void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
   // [SIGNED 2026-07-26] Un-gated from kProductionOfficialEndpointOnly. This
   // pass is pair GENERATION + matching under colmap-DEFAULT
@@ -5720,6 +5839,38 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
     const colmap::TwoViewGeometryOptions tvg_options;  // colmap defaults
     std::vector<uint32_t> pair_buf;
     size_t done = 0;
+    // [ENRICH-TVG-FARM 2026-08-11] Optional N-worker TVG verification. The
+    // matcher stays serialized on THIS thread; estimated pairs are committed
+    // (stats + db writes) strictly in todo order below, so sqlite stays
+    // single-threaded and counters keep their serial meaning.
+    const int tvg_threads = EnrichTvgThreads();
+    std::unique_ptr<EnrichTvgFarm> farm;
+    if (tvg_threads > 0) farm = std::make_unique<EnrichTvgFarm>(tvg_threads);
+    const size_t max_inflight = static_cast<size_t>(tvg_threads) * 2;
+    std::deque<std::unique_ptr<EnrichTvgJob>> inflight;
+    const auto commit_front = [&] {
+      EnrichTvgJob* job = inflight.front().get();
+      farm->Wait(job);
+      if (MandatoryGravityTvgPersistable(job->tvg)) {
+        // Mirrors the serial block below: write + stats + probe-debt growth.
+        s->db->WriteMatches(job->frame_a->image_id, job->frame_b->image_id,
+                            job->matches);
+        const colmap::TwoViewGeometry& geometry = job->tvg.geometry;
+        s->db->WriteTwoViewGeometry(job->frame_a->image_id,
+                                    job->frame_b->image_id, geometry);
+        ++s->stat_finalize_rematch_written;
+        s->stat_finalize_rematch_inliers +=
+            static_cast<int64_t>(geometry.inlier_matches.size());
+        if (job->was_probe_debt && !geometry.inlier_matches.empty()) {
+          s->probe_debt_grow.push_back(ProbeDebtGrowPair{
+              job->a_idx, job->b_idx, geometry.inlier_matches});
+        }
+      }
+      inflight.pop_front();
+    };
+    const auto drain_all = [&] {
+      while (!inflight.empty()) commit_front();
+    };
     for (const auto& [j, f] : todo) {
       // [P1-ENRICH-BUDGET] Same time gate as VerifySpatialPair: stop STARTING
       // new re-match attempts once the budget is exhausted; the remaining
@@ -5783,6 +5934,30 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
         matches[m].point2D_idx1 = pair_buf[2 * m];
         matches[m].point2D_idx2 = pair_buf[2 * m + 1];
       }
+      // [ENRICH-TVG-FARM 2026-08-11] Farm path: only when both frames' points
+      // are the live in-memory borrow (&fr.points, stable for the whole
+      // finalize). db-loaded cache entries slide-evict, so those pairs (and
+      // the env-off default) keep the inline estimation.
+      const bool farm_eligible =
+          farm && !s->frames[j].descriptors.empty() &&
+          !s->frames[f].descriptors.empty();
+      if (farm_eligible) {
+        auto job = std::make_unique<EnrichTvgJob>();
+        job->frame_a = &s->frames[j];
+        job->frame_b = &s->frames[f];
+        job->pts_a = fa->pts;
+        job->pts_b = fb->pts;
+        job->a_idx = j;
+        job->b_idx = f;
+        job->matches = std::move(matches);
+        job->tvg_options = &tvg_options;
+        job->was_probe_debt = was_probe_debt;
+        farm->Submit(job.get());
+        inflight.push_back(std::move(job));
+        while (inflight.size() >= max_inflight) commit_front();
+        continue;
+      }
+      if (farm) drain_all();  // keep todo-order commits before inline work
       const auto tvg = EstimateMandatoryFrameTwoViewGeometry(
           s->frames[j], *fa->pts, s->frames[f], *fb->pts, matches,
           tvg_options);
@@ -5812,6 +5987,9 @@ void FinalizeRematchStarvedFrames(aether_sfm_session* s) {
             ProbeDebtGrowPair{j, f, geometry.inlier_matches});
       }
     }
+    // [ENRICH-TVG-FARM] In-flight pairs complete even on a budget stop — the
+    // same "started work finishes" semantics as the serial gate.
+    if (farm) drain_all();
     LOG(WARNING) << "[aether_sfm] finalize re-match: starved_frames="
                  << n_starved
                  << " candidates=" << s->stat_finalize_rematch_candidates
@@ -6100,6 +6278,32 @@ void AddOfficialQuadraticPairs(aether_sfm_session* s) {
       });
       // Consumer = THIS thread: budget gate, stats, TVG, and db writes in
       // exact todo order — the same sequence the serial loop produces.
+      // [ENRICH-TVG-FARM 2026-08-11] Optional N-worker TVG stage between the
+      // matcher producer and the (single-threaded) db commit. The pipeline is
+      // live-only by eligibility, so &frames[].points is stable for every job.
+      const int q_tvg_threads = EnrichTvgThreads();
+      std::unique_ptr<EnrichTvgFarm> q_farm;
+      if (q_tvg_threads > 0)
+        q_farm = std::make_unique<EnrichTvgFarm>(q_tvg_threads);
+      const size_t q_max_inflight = static_cast<size_t>(q_tvg_threads) * 2;
+      std::deque<std::unique_ptr<EnrichTvgJob>> q_inflight;
+      const auto q_commit_front = [&] {
+        EnrichTvgJob* job = q_inflight.front().get();
+        q_farm->Wait(job);
+        if (MandatoryGravityTvgPersistable(job->tvg)) {
+          s->db->WriteMatches(job->frame_a->image_id, job->frame_b->image_id,
+                              job->matches);
+          s->db->WriteTwoViewGeometry(job->frame_a->image_id,
+                                      job->frame_b->image_id,
+                                      job->tvg.geometry);
+          ++s->stat_spatial_quadratic_written;
+          ++written;
+        }
+        q_inflight.pop_front();
+      };
+      const auto q_drain_all = [&] {
+        while (!q_inflight.empty()) q_commit_front();
+      };
       for (size_t idx = 0; idx < todo.size(); ++idx) {
         QuadMatchResult r;
         {
@@ -6129,6 +6333,21 @@ void AddOfficialQuadraticPairs(aether_sfm_session* s) {
           matches[m].point2D_idx1 = r.pairs[2 * m];
           matches[m].point2D_idx2 = r.pairs[2 * m + 1];
         }
+        if (q_farm) {
+          auto job = std::make_unique<EnrichTvgJob>();
+          job->frame_a = &s->frames[r.i];
+          job->frame_b = &s->frames[r.j];
+          job->pts_a = &s->frames[r.i].points;
+          job->pts_b = &s->frames[r.j].points;
+          job->a_idx = r.i;
+          job->b_idx = r.j;
+          job->matches = std::move(matches);
+          job->tvg_options = &tvg_options;
+          q_farm->Submit(job.get());
+          q_inflight.push_back(std::move(job));
+          while (q_inflight.size() >= q_max_inflight) q_commit_front();
+          continue;
+        }
         const colmap::image_t img1 = s->frames[r.i].image_id;
         const colmap::image_t img2 = s->frames[r.j].image_id;
         const auto tvg = EstimateMandatoryFrameTwoViewGeometry(
@@ -6140,6 +6359,9 @@ void AddOfficialQuadraticPairs(aether_sfm_session* s) {
         ++s->stat_spatial_quadratic_written;
         ++written;
       }
+      // [ENRICH-TVG-FARM] In-flight pairs complete on every exit path
+      // (natural end, budget stop, early producer end).
+      if (q_farm) q_drain_all();
       {
         std::lock_guard<std::mutex> lk(q_mu);
         consumer_abort = true;
@@ -6868,6 +7090,15 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
     if (v > 0) popts->ba_global_max_refinements = v;
   }
   popts->ba_global_max_num_iterations = 50;
+  // [BA-ITER-CAP 2026-08-11 研究旋钮,默认不改行为] 全局 BA 单 solve 迭代
+  // 上限覆盖(两段生效)。b31 真机账:stage1 两 solve 各 51 iters 打满
+  // (term=NO_CONVERGENCE,上游刻意语义),51 iters ≈ 10.4s/solve = 拍完
+  // 等待的最大单项。COLMAP FAQ 把"减少 LM 迭代"列为标准提速手段;质量
+  // 必须过五场 host 矩阵 + 真机质量带(点数≥0.98×,允许正向超出)。
+  if (const char* e = std::getenv("OFFICIAL_AETHER_BA_GLOBAL_MAX_ITERS")) {
+    const int v = std::atoi(e);
+    if (v > 0) popts->ba_global_max_num_iterations = v;
+  }
   popts->ba_refine_focal_length = false;
   popts->ba_refine_principal_point = false;
   popts->ba_refine_extra_params = false;
@@ -7720,22 +7951,49 @@ void RefineGlobalBA(aether_sfm_session* s,
           // gap-ascending) → spatial. Unarmed runs keep the legacy order
           // bit-identically.
           // [GPU-HANG-B1] enrichment(GPU matcher)各 pass 边界打点。
+          // [ENRICH-SPLIT 2026-08-11] Per-pass wall clock — the 22.4 s device
+          // enrich window is the finalize critical-path pole once stage-1 BA
+          // shrinks, and the three passes were previously indistinguishable.
+          double rematch_ms = 0, quad_ms = 0, spatial_ms = 0;
           if (budget_armed) {
             s->gpu_watchdog.InProgress();
+            const double t_r = NowMs();
             FinalizeRematchStarvedFrames(s);
+            rematch_ms = NowMs() - t_r;
             s->gpu_watchdog.InProgress();
+            const double t_q = NowMs();
             AddOfficialQuadraticPairs(s);
+            quad_ms = NowMs() - t_q;
             s->gpu_watchdog.InProgress();
+            const double t_sp = NowMs();
             AddSpatialRevisitMatches(s);
+            spatial_ms = NowMs() - t_sp;
             s->gpu_watchdog.InProgress();
           } else {
             s->gpu_watchdog.InProgress();
+            const double t_q = NowMs();
             AddOfficialQuadraticPairs(s);
+            quad_ms = NowMs() - t_q;
             s->gpu_watchdog.InProgress();
+            const double t_sp = NowMs();
             AddSpatialRevisitMatches(s);
+            spatial_ms = NowMs() - t_sp;
             s->gpu_watchdog.InProgress();
+            const double t_r = NowMs();
             FinalizeRematchStarvedFrames(s);
+            rematch_ms = NowMs() - t_r;
             s->gpu_watchdog.InProgress();
+          }
+          {
+            char eline[256];
+            std::snprintf(eline, sizeof(eline),
+                          "{\"t\":%lld,\"type\":\"enrich_split\","
+                          "\"armed\":%d,\"rematch_ms\":%.0f,"
+                          "\"quadratic_ms\":%.0f,\"spatial_ms\":%.0f}",
+                          static_cast<long long>(EpochMs()),
+                          budget_armed ? 1 : 0, rematch_ms, quad_ms,
+                          spatial_ms);
+            AppendMatchFailJsonl(s, eline);
           }
         } catch (const std::exception& e) {
           LOG(WARNING) << "[aether_sfm] finalize db enrichment aborted: "
@@ -7807,6 +8065,16 @@ void RefineGlobalBA(aether_sfm_session* s,
             if (Stage1FtolOverride() > 0.0) {
               ba_opts.ceres->solver_options.function_tolerance =
                   Stage1FtolOverride();
+            }
+            // [BA-ITER-CAP 2026-08-11] stage-1-only iteration cap (stage 2
+            // keeps ba_global_max_num_iterations): stage 1 is window-bound
+            // filler whose solves burn the full 50-iteration budget twice on
+            // device (b31: 2×51 iters, 21.5 s); the enriched graph gets its
+            // converged polish in stage 2 either way.
+            if (const char* e =
+                    std::getenv("OFFICIAL_AETHER_BA_S1_MAX_ITERS")) {
+              const int v = std::atoi(e);
+              if (v > 0) ba_opts.ceres->solver_options.max_num_iterations = v;
             }
           }
           // Window checks between the sub-steps too: a healthy capture whose
@@ -7917,7 +8185,47 @@ void RefineGlobalBA(aether_sfm_session* s,
     colmap::IncrementalPipeline pipeline(
         popts, colmap::Database::Open(s->db_path), manager);
     s->gpu_watchdog.InProgress();  // [GPU-HANG-B1] stage-2 入口打点
+    // [FRAME-LOSS-DIAG 2026-08-11 用户铁律"拍多少帧就注册多少帧"] stage-2 的
+    // RefineReconstruction 结尾会无条件 FilterFrames(判据两条:该帧 3D 观测
+    // 数 <1,或相机内参 bogus),随后 TearDown 把无位姿的帧连 image 一起 erase
+    // ⇒ 真机实测 101 帧喂入、live 注册 100+、finalize 只剩 97。这里做**只读**
+    // 分诊:记下进 stage-2 前每帧的观测数与内参健康度,出来后 diff 出被删的是
+    // 哪几帧、走的哪条支路。上游 #3271 官方定性"预期行为"、无豁免开关,所以
+    // 修法要靠分诊结果选(bogus → 放宽三参数有社区实证;0 观测 → 抄
+    // image_registrator 的补注册)。
+    std::unordered_map<colmap::frame_t, std::pair<size_t, std::string>>
+        diag_before;
+    for (const auto& [frame_id, frame] : refined->Frames()) {
+      if (!frame.HasPose()) continue;
+      size_t obs = 0;
+      std::string img_name;
+      for (const auto& data_id : frame.ImageIds()) {
+        if (!refined->ExistsImage(data_id.id)) continue;
+        const auto& im = refined->Image(data_id.id);
+        obs += im.NumPoints3D();
+        if (img_name.empty()) img_name = im.Name();
+      }
+      diag_before.emplace(frame_id, std::make_pair(obs, img_name));
+    }
     pipeline.RefineReconstruction(refined);
+    {
+      int lost_zero_obs = 0, lost_with_obs = 0;
+      std::string lost_detail;
+      for (const auto& [frame_id, before] : diag_before) {
+        const bool still =
+            refined->ExistsFrame(frame_id) && refined->Frame(frame_id).HasPose();
+        if (still) continue;
+        (before.first == 0 ? lost_zero_obs : lost_with_obs)++;
+        if (lost_detail.size() < 400) {
+          lost_detail += " " + before.second + "(obs=" +
+                         std::to_string(before.first) + ")";
+        }
+      }
+      LOG(WARNING) << "[frame-loss] before=" << diag_before.size()
+                   << " after=" << refined->NumRegFrames()
+                   << " lost_zero_obs=" << lost_zero_obs
+                   << " lost_with_obs=" << lost_with_obs << " |" << lost_detail;
+    }
     // [GRAVITY-RA GAUGE-REANCHOR] 自由规范 BA 之后把模型锚回原 gauge(见
     // 函数注释;基线路径快照为空 = no-op)。
     MaybeReanchorAfterGravityRa(gravity_ra_snapshot, refined.get());
