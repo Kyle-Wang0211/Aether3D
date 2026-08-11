@@ -38,6 +38,7 @@
 #include "colmap/sfm/incremental_mapper_impl.h"
 
 #include <array>
+#include <chrono>  // [AETHER-T1] timing hooks in IterativeGlobalRefinement
 
 namespace colmap {
 
@@ -942,6 +943,72 @@ size_t IncrementalMapper::CompleteAndMergeTracks(
   return num_completed_observations + num_merged_observations;
 }
 
+// [AETHER-T2 2026-07-29] Local-path counterpart of the AETHER-T1 hooks below.
+//
+// WHY: the capture-time local BA is the single largest streaming cost (measured
+// 353 ms/frame = 56.5% of accounted stream time on cap7_day_A), but its INTERNAL
+// split was entirely unknown — three separate research passes all concluded that
+// every proposed speedup (solver ordering, thread budget, refinement rounds,
+// window size) is unrankable until we know how much of the 353 ms is Ceres at
+// all. Two upstream comments in this very function contradict each other on
+// exactly this point ("track merging/completion would slow down the local bundle
+// adjustment significantly" at L1026 vs "the filtering is not a bottleneck at
+// this point" at L1062) and NEITHER carries any profiling data.
+//
+// Accumulation only — zero behavioural change. The counters do not consume the
+// PRNG, do not branch, and do not participate in any float used by the solve,
+// so an instrumented build stays bit-identical to an uninstrumented one (that
+// invariant is itself part of the acceptance for this change).
+//
+// The aether streaming wrapper zeroes these before a frame it wants attributed
+// and reads them after (single caller at a time on that path).
+extern "C" {
+double aether_ilr_find_ms = 0.0;    // FindLocalBundle (candidate selection)
+double aether_ilr_setup_ms = 0.0;   // ba_config build + adjuster construction
+double aether_ilr_solve_ms = 0.0;   // the Ceres Solve() itself
+double aether_ilr_merge_ms = 0.0;   // MergeTracks+CompleteTracks+CompleteImage
+double aether_ilr_filter_ms = 0.0;  // FilterPoints3DInImages+FilterPoints3D
+// Ceres-internal split (from CeresBundleAdjustmentSummary::ceres_summary).
+double aether_ilr_preproc_ms = 0.0;   // preprocessor = the Schur ordering search
+double aether_ilr_minim_ms = 0.0;     // minimizer
+double aether_ilr_postproc_ms = 0.0;  // postprocessor
+// [SCHUR-PROBE 2026-08-08] Where the minimizer's time actually goes. Ceres
+// reports these three directly; together they answer whether the remaining
+// local-BA cost is Jacobian evaluation (attackable by analytic Jacobians —
+// already taken, colmap#4513) or the linear algebra, i.e. forming the Schur
+// complement over every observation (6 cameras => a 36x36 reduced system, so
+// the Cholesky itself is microseconds and CANNOT be the cost).
+double aether_ilr_jac_ms = 0.0;    // jacobian_evaluation_time
+double aether_ilr_lin_ms = 0.0;    // linear_solver_time (Schur form + solve)
+double aether_ilr_resid_ms = 0.0;  // residual_evaluation_time
+int64_t aether_ilr_num_resid = 0;  // sum of num_residuals_reduced per solve
+int64_t aether_ilr_num_param = 0;  // sum of num_parameters_reduced per solve
+int aether_ilr_rounds = 0;   // refinement rounds actually run (cap is 2)
+int aether_ilr_solves = 0;   // Solve() calls (== rounds that had a local bundle)
+int aether_ilr_iters = 0;    // total Ceres iterations consumed
+int aether_ilr_term_conv = 0;      // solves that stopped on a convergence test
+int aether_ilr_term_nocnv = 0;     // solves that ran out of iterations
+int aether_ilr_term_other = 0;     // user-abort / failure
+
+// [TAIL-CACHE-FIRST V1] Exact ordered local-bundle trace. The production
+// six-image BA window is query + at most five neighbors, but keep spare room
+// for diagnostic overrides. This is observation only: it copies the vector
+// returned by FindLocalBundle without sorting, padding, or feeding it back.
+int aether_ilr_bundle_trace_calls = 0;
+uint32_t aether_ilr_bundle_trace_query[16] = {};
+int aether_ilr_bundle_trace_neighbor_count[16] = {};
+int aether_ilr_bundle_trace_neighbor_total[16] = {};
+uint32_t aether_ilr_bundle_trace_neighbors[16][15] = {};
+}
+
+namespace {
+inline double AetherNowMs() {
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
+
 IncrementalMapper::LocalBundleAdjustmentReport
 IncrementalMapper::AdjustLocalBundle(
     const Options& options,
@@ -956,7 +1023,25 @@ IncrementalMapper::AdjustLocalBundle(
   LocalBundleAdjustmentReport report;
 
   // Find images that have most 3D points with given image in common.
+  double aether_t = AetherNowMs();
   const std::vector<image_t> local_bundle = FindLocalBundle(options, image_id);
+  aether_ilr_find_ms += AetherNowMs() - aether_t;
+  const int aether_trace_slot = aether_ilr_bundle_trace_calls++;
+  if (aether_trace_slot >= 0 && aether_trace_slot < 16) {
+    aether_ilr_bundle_trace_query[aether_trace_slot] =
+        static_cast<uint32_t>(image_id);
+    aether_ilr_bundle_trace_neighbor_total[aether_trace_slot] =
+        static_cast<int>(local_bundle.size());
+    const int aether_trace_count =
+        std::min<int>(static_cast<int>(local_bundle.size()), 15);
+    aether_ilr_bundle_trace_neighbor_count[aether_trace_slot] =
+        aether_trace_count;
+    for (int i = 0; i < aether_trace_count; ++i) {
+      aether_ilr_bundle_trace_neighbors[aether_trace_slot][i] =
+          static_cast<uint32_t>(local_bundle[static_cast<size_t>(i)]);
+    }
+  }
+  aether_t = AetherNowMs();
 
   // Do the bundle adjustment only if there is any connected images.
   BundleAdjustmentConfig ba_config;
@@ -1039,7 +1124,34 @@ IncrementalMapper::AdjustLocalBundle(
 
     auto bundle_adjuster =
         CreateDefaultBundleAdjuster(ba_options, ba_config, *reconstruction_);
+    aether_ilr_setup_ms += AetherNowMs() - aether_t;  // [AETHER-T2]
+    aether_t = AetherNowMs();
     const auto summary = bundle_adjuster->Solve();
+    aether_ilr_solve_ms += AetherNowMs() - aether_t;  // [AETHER-T2]
+    // [AETHER-T2] Ceres-internal split. The preprocessor number is the one that
+    // decides whether an explicit linear_solver_ordering is worth anything: it
+    // is where Ceres re-derives the Schur elimination order on every Solve().
+    ++aether_ilr_solves;
+    if (const auto* cs =
+            dynamic_cast<const CeresBundleAdjustmentSummary*>(summary.get())) {
+      const ceres::Solver::Summary& cx = cs->ceres_summary;
+      aether_ilr_preproc_ms += cx.preprocessor_time_in_seconds * 1000.0;
+      aether_ilr_minim_ms += cx.minimizer_time_in_seconds * 1000.0;
+      aether_ilr_postproc_ms += cx.postprocessor_time_in_seconds * 1000.0;
+      // [SCHUR-PROBE 2026-08-08] observation-only
+      aether_ilr_jac_ms += cx.jacobian_evaluation_time_in_seconds * 1000.0;
+      aether_ilr_lin_ms += cx.linear_solver_time_in_seconds * 1000.0;
+      aether_ilr_resid_ms += cx.residual_evaluation_time_in_seconds * 1000.0;
+      aether_ilr_num_resid += cx.num_residuals_reduced;
+      aether_ilr_num_param += cx.num_parameters_reduced;
+      aether_ilr_iters += static_cast<int>(cx.iterations.size());
+      switch (cx.termination_type) {
+        case ceres::CONVERGENCE: ++aether_ilr_term_conv; break;
+        case ceres::NO_CONVERGENCE: ++aether_ilr_term_nocnv; break;
+        default: ++aether_ilr_term_other; break;
+      }
+    }
+    aether_t = AetherNowMs();
 
     report.num_adjusted_observations = summary->num_residuals / 2;
 
@@ -1054,18 +1166,25 @@ IncrementalMapper::AdjustLocalBundle(
         triangulator_->CompleteTracks(tri_options, variable_point3D_ids);
     report.num_completed_observations +=
         triangulator_->CompleteImage(tri_options, image_id);
+    aether_ilr_merge_ms += AetherNowMs() - aether_t;  // [AETHER-T2]
   }
 
   // Filter both the modified images and all changed 3D points to make sure
   // there are no outlier points in the model. This results in duplicate work as
   // many of the provided 3D points may also be contained in the adjusted
   // images, but the filtering is not a bottleneck at this point.
+  // [AETHER-T2] "not a bottleneck" is an upstream assertion with no profiling
+  // behind it, and it sits two lines under the opposite assertion about track
+  // merging. Both are now measured instead of believed. Note this block runs
+  // even when local_bundle was empty (it is outside the if).
+  const double aether_t_filter = AetherNowMs();
   report.num_filtered_observations = obs_manager_->FilterPoints3DInImages(
       options.filter_max_reproj_error, options.filter_min_tri_angle, image_ids);
   report.num_filtered_observations +=
       obs_manager_->FilterPoints3D(options.filter_max_reproj_error,
                                    options.filter_min_tri_angle,
                                    point3D_ids);
+  aether_ilr_filter_ms += AetherNowMs() - aether_t_filter;
 
   return report;
 }
@@ -1209,6 +1328,13 @@ void IncrementalMapper::IterativeLocalRefinement(
     const image_t image_id) {
   BundleAdjustmentOptions custom_ba_options = ba_options;
   for (int i = 0; i < max_num_refinements; ++i) {
+    // [AETHER-T2] Round counter. The early-exit below compares an OBSERVATION
+    // CHURN RATIO (merged+completed+filtered over adjusted) against
+    // max_refinement_change=0.001 — one observation in a thousand keeps the
+    // loop alive — so whether round 2 actually fires is an empirical question,
+    // and round 2 costs a full second Problem construction + preprocessing +
+    // merge/complete/filter pass, not just a second solve.
+    ++aether_ilr_rounds;
     const auto report = AdjustLocalBundle(options,
                                           custom_ba_options,
                                           tri_options,
@@ -1243,6 +1369,17 @@ void IncrementalMapper::IterativeLocalRefinement(
   ClearModifiedPoints3D();
 }
 
+// [AETHER-T1 2026-07-26] Pure-observation timing hooks: the aether finalize
+// wrapper zeroes these before a refinement it wants attributed and reads them
+// after (single caller at a time on the finalize path). Accumulation only —
+// zero behavioural change to the refinement itself.
+extern "C" {
+double aether_igr_pre_ms = 0.0;    // leading CompleteAndMergeTracks+Retriangulate
+double aether_igr_ba_ms = 0.0;     // AdjustGlobalBundle across rounds
+double aether_igr_merge_ms = 0.0;  // per-round CompleteAndMergeTracks+FilterPoints
+int aether_igr_rounds = 0;
+}
+
 void IncrementalMapper::IterativeGlobalRefinement(
     const int max_num_refinements,
     const double max_refinement_change,
@@ -1250,20 +1387,32 @@ void IncrementalMapper::IterativeGlobalRefinement(
     const BundleAdjustmentOptions& ba_options,
     const IncrementalTriangulator::Options& tri_options,
     const bool normalize_reconstruction) {
+  const auto aether_now = [] {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+  double aether_t = aether_now();
   CompleteAndMergeTracks(tri_options);
   const size_t num_retriangulated_observations = Retriangulate(tri_options);
+  aether_igr_pre_ms += aether_now() - aether_t;
   VLOG(1) << "=> Retriangulated observations: "
           << num_retriangulated_observations;
   for (int i = 0; i < max_num_refinements; ++i) {
     const size_t num_observations = reconstruction_->ComputeNumObservations();
+    aether_t = aether_now();
     AdjustGlobalBundle(options, ba_options);
+    aether_igr_ba_ms += aether_now() - aether_t;
     if (normalize_reconstruction && !options.use_prior_position) {
       // Normalize scene for numerical stability and
       // to avoid large scale changes in the viewer.
       reconstruction_->Normalize();
     }
+    aether_t = aether_now();
     size_t num_changed_observations = CompleteAndMergeTracks(tri_options);
     num_changed_observations += FilterPoints(options);
+    aether_igr_merge_ms += aether_now() - aether_t;
+    ++aether_igr_rounds;
     const double changed =
         num_observations == 0
             ? 0

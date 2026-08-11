@@ -75,6 +75,7 @@ struct Result {
   float floor_y = 0.0f;
   float eps = 0.0f;        // 本云推出的尺度基准长度(m),诊断用
   int candidates = 0;
+  int guard = 0;  // [FLOOR-GUARD 2026-08-09] 0=未触发 1=候选质量守卫 2=地板合理性守卫
   int clusters = 0;        // 达到 kMinCluster 的簇数
   int killed_clusters = 0;
   std::vector<uint32_t> kill;  // 判虚点在输入数组中的下标
@@ -165,6 +166,39 @@ inline Result Detect(const std::vector<P3>& pts) {
   }
   r.candidates = static_cast<int>(cand.size());
   if (cand.empty()) return r;
+
+  // [FLOOR-GUARD 2026-08-09 生产事故修复] cap_1786199789306631:直方图"最低
+  // 显著水平层"选中了**床面**(floor_y=-0.099,真地板≈-0.9)——地板拍得稀疏、
+  // 每 bin 不足 1.5%n 被跳过,床面这种致密水平面胜出。于是床下的真实世界
+  // (地板/柜子/家具,13,720 点)全成了"地板下候选",镜像判据又被床上方的
+  // 墙面/床头板满足(≥0.6),一刀误杀 13,321 点。这个失效模式在原型阶段
+  // 犯过并记录过(直方图选床面 -0.28 而非地板 -0.88),生产代码没设防。
+  //
+  // 守卫①(候选质量):反光鬼点带是**稀疏伪影**——cap5 实锤靶 52 点占全云
+  //   0.06%。候选若超过全云 2%,不是鬼是世界,fail-safe 不删。
+  //   (本次事故 13,720/119k = 11.5%,直接触发。)
+  // 守卫②(地板合理性):真地板必然贴近全云低分位。floor_y 高出 p2(Y) 超过
+  //   3×eps ⇒ 检出的不是地板(是床/桌等中层平面),fail-safe 不删。
+  //   (cap5:floor -1.06 vs p2≈-1.1,间隙 0.3×eps 通过;本次 -0.099 vs
+  //   ≈-0.9,6.9×eps 触发。下沉地板/楼梯场景也会触发 ⇒ 方向是保护。)
+  // 两道守卫只会放过鬼点(漏杀),永不误杀真实结构——符合交付无损底线。
+  constexpr float kMaxCandidateFrac = 0.02f;
+  constexpr float kFloorGapMul = 3.0f;
+  if (static_cast<float>(cand.size()) > kMaxCandidateFrac * static_cast<float>(n)) {
+    r.guard = 1;
+    return r;
+  }
+  {
+    std::vector<float> ys2;
+    ys2.reserve(n);
+    for (const auto& p : pts) ys2.push_back(p.y);
+    std::nth_element(ys2.begin(), ys2.begin() + n / 50, ys2.end());
+    const float p2 = ys2[n / 50];
+    if (floor_y - p2 > kFloorGapMul * eps) {
+      r.guard = 2;
+      return r;
+    }
+  }
 
   // 3) 候选单链接聚簇(候选是百级,网格加速的 flood fill)
   detail::Grid cg(cluster_eps);

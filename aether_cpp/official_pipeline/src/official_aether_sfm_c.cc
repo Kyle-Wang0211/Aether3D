@@ -45,7 +45,10 @@
 #undef AETHER_GPU_TIMESTAMP_INTERNAL
 
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/estimators/rotation_averaging.h"
 #include "colmap/estimators/two_view_geometry.h"
+#include "colmap/geometry/pose_prior.h"
+#include "colmap/scene/pose_graph.h"
 #include "colmap/feature/types.h"
 #include "colmap/feature/utils.h"
 #include "colmap/geometry/essential_matrix.h"
@@ -317,6 +320,8 @@ extern "C" int aether_ba_ring_count(void);
 extern "C" int aether_ba_ring_get(int i, double* total_s, double* jac_s,
                                   double* lin_s, double* res_s, int* iters,
                                   int* term, int* threads);
+extern "C" int aether_ba_get_gravity_prior(const char* name,
+                                           double* out_gravity_cam_xyz);
 extern "C" int aether_ba_set_gravity_prior(const char* name,
                                             const double* gravity_cam_xyz,
                                             double sigma_rad);
@@ -700,6 +705,13 @@ struct aether_sfm_session {
   // every reader gates on the flag (and defensively on the pointer).
   std::shared_ptr<colmap::Reconstruction> live_recon;
   bool live_recon_ready = false;                                // camera+rig added
+  // [LIVE-CLOUD-SNAPSHOT-DIAG V2] Telemetry-only prior snapshot. Exact COLMAP
+  // point IDs never cross the public ABI, so the comparison lives beside the
+  // native model and is never read by reconstruction or display code.
+  uint64_t live_cloud_diag_snapshot_seq_v2 = 0;
+  bool live_cloud_diag_has_previous_points_v2 = false;
+  uint64_t live_cloud_diag_previous_snapshot_seq_v2 = 0;
+  aether::sfm::LiveCloudDiagPointMapV2 live_cloud_diag_previous_points_v2;
   // [PAIR-DRAFT 2026-08-09] 显示层临时配对云(第 2 张专用)。单写者=add_frame/
   // remove_frame/finalize(worker isolate),读者=同 isolate 的 previewTracked
   // —— 与 live_recon 完全相同的线程契约,无锁。live 模型一旦有点即被清空,
@@ -1696,6 +1708,143 @@ void AppendMatchFailJsonl(aether_sfm_session* s, const std::string& line) {
     std::fclose(f);
   } catch (...) {
     // telemetry only — never take add_frame down
+  }
+}
+
+// [LIVE-CLOUD-SNAPSHOT-DIAG V2] Observe the exact native model at a publish
+// boundary. This function only reads Reconstruction/FrameRecord state and writes
+// a diagnostics sidecar plus its own previous-snapshot map. It is deliberately
+// fail-open: no allocation, fit, formatting, or I/O failure may affect capture.
+void AppendLiveCloudSnapshotDiagnosticsV2(aether_sfm_session* s,
+                                          const char* stage) {
+  try {
+    if (!s || !stage || !s->live_recon_ready || !s->live_recon) return;
+    const double snapshot_start_ms = NowMs();
+    const uint64_t snapshot_seq = ++s->live_cloud_diag_snapshot_seq_v2;
+
+    std::vector<aether::sfm::LiveCloudArkitBaCenterPairV2> center_pairs;
+    center_pairs.reserve(s->frames.size());
+    for (const FrameRecord& frame : s->frames) {
+      if (!frame.has_pose || frame.image_id == 0 ||
+          !s->live_recon->ExistsImage(frame.image_id)) {
+        continue;
+      }
+      const colmap::Image& image = s->live_recon->Image(frame.image_id);
+      if (!image.HasPose()) continue;
+      const Eigen::Vector3d arkit_center =
+          frame.cam_from_world.TgtOriginInSrc();
+      const Eigen::Vector3d ba_center =
+          image.CamFromWorld().TgtOriginInSrc();
+      center_pairs.push_back({
+          {arkit_center.x(), arkit_center.y(), arkit_center.z()},
+          {ba_center.x(), ba_center.y(), ba_center.z()},
+      });
+    }
+    const aether::sfm::LiveCloudArkitBaSim3SummaryV2 sim3 =
+        aether::sfm::SummarizeLiveCloudArkitBaSim3V2(center_pairs);
+    const double sim3_compute_ms = NowMs() - snapshot_start_ms;
+    char sim3_line[3072];
+    std::snprintf(
+        sim3_line, sizeof(sim3_line),
+        "{\"t\":%lld,\"type\":\"live_cloud_arkit_ba_sim3_v2\","
+        "\"contract\":\"PW_LIVE_CLOUD_SNAPSHOT_DIAG_V2_20260810\","
+        "\"stage\":\"%s\",\"snapshot_seq\":%llu,"
+        "\"valid\":%s,\"status\":\"%s\",\"input_pairs\":%zu,"
+        "\"pair_count\":%zu,\"inlier_count\":%zu,"
+        "\"ba_to_arkit_scale\":%.12g,"
+        "\"ba_to_arkit_tx_m\":%.12g,\"ba_to_arkit_ty_m\":%.12g,"
+        "\"ba_to_arkit_tz_m\":%.12g,\"ba_to_arkit_qx\":%.12g,"
+        "\"ba_to_arkit_qy\":%.12g,\"ba_to_arkit_qz\":%.12g,"
+        "\"ba_to_arkit_qw\":%.12g,\"ba_to_arkit_rotation_deg\":%.12g,"
+        "\"arkit_to_ba_scale\":%.12g,"
+        "\"arkit_to_ba_tx_m\":%.12g,\"arkit_to_ba_ty_m\":%.12g,"
+        "\"arkit_to_ba_tz_m\":%.12g,\"arkit_to_ba_qx\":%.12g,"
+        "\"arkit_to_ba_qy\":%.12g,\"arkit_to_ba_qz\":%.12g,"
+        "\"arkit_to_ba_qw\":%.12g,\"arkit_to_ba_rotation_deg\":%.12g,"
+        "\"residual_p50_m\":%.12g,\"residual_p90_m\":%.12g,"
+        "\"residual_max_m\":%.12g,\"residual_all_max_m\":%.12g,"
+        "\"compute_ms\":%.3f,\"observation_only\":true}",
+        static_cast<long long>(EpochMs()), stage,
+        static_cast<unsigned long long>(snapshot_seq),
+        sim3.valid ? "true" : "false", sim3.status.c_str(),
+        sim3.input_pair_count, sim3.pair_count, sim3.inlier_count,
+        sim3.ba_to_arkit_scale, sim3.ba_to_arkit_translation_m[0],
+        sim3.ba_to_arkit_translation_m[1],
+        sim3.ba_to_arkit_translation_m[2],
+        sim3.ba_to_arkit_quaternion_xyzw[0],
+        sim3.ba_to_arkit_quaternion_xyzw[1],
+        sim3.ba_to_arkit_quaternion_xyzw[2],
+        sim3.ba_to_arkit_quaternion_xyzw[3],
+        sim3.ba_to_arkit_rotation_deg, sim3.arkit_to_ba_scale,
+        sim3.arkit_to_ba_translation_m[0],
+        sim3.arkit_to_ba_translation_m[1],
+        sim3.arkit_to_ba_translation_m[2],
+        sim3.arkit_to_ba_quaternion_xyzw[0],
+        sim3.arkit_to_ba_quaternion_xyzw[1],
+        sim3.arkit_to_ba_quaternion_xyzw[2],
+        sim3.arkit_to_ba_quaternion_xyzw[3],
+        sim3.arkit_to_ba_rotation_deg, sim3.residual_p50_m,
+        sim3.residual_p90_m, sim3.residual_max_m,
+        sim3.residual_all_max_m, sim3_compute_ms);
+    AppendMatchFailJsonl(s, sim3_line);
+
+    const double point_start_ms = NowMs();
+    aether::sfm::LiveCloudDiagPointMapV2 current_points;
+    current_points.reserve(s->live_recon->NumPoints3D());
+    for (const auto& [point_id, point] : s->live_recon->Points3D()) {
+      current_points.emplace(
+          static_cast<std::uint64_t>(point_id),
+          std::array<double, 3>{point.xyz.x(), point.xyz.y(), point.xyz.z()});
+    }
+
+    const bool baseline = !s->live_cloud_diag_has_previous_points_v2;
+    aether::sfm::LiveCloudSameIdPointDeltaSummaryV2 point_delta;
+    if (baseline) {
+      point_delta.current_count = current_points.size();
+      point_delta.new_count = current_points.size();
+    } else {
+      point_delta = aether::sfm::SummarizeLiveCloudSameIdPointDeltasV2(
+          s->live_cloud_diag_previous_points_v2, current_points);
+    }
+    const double point_compute_ms = NowMs() - point_start_ms;
+    char point_line[2304];
+    std::snprintf(
+        point_line, sizeof(point_line),
+        "{\"t\":%lld,\"type\":\"live_cloud_same_id_point_delta_v2\","
+        "\"contract\":\"PW_LIVE_CLOUD_SNAPSHOT_DIAG_V2_20260810\","
+        "\"stage\":\"%s\",\"snapshot_seq\":%llu,"
+        "\"previous_snapshot_seq\":%llu,\"baseline\":%s,"
+        "\"valid\":%s,\"previous_count\":%zu,\"current_count\":%zu,"
+        "\"common_count\":%zu,\"valid_delta_count\":%zu,"
+        "\"new_count\":%zu,\"dropped_count\":%zu,"
+        "\"median_dx_m\":%.12g,\"median_dy_m\":%.12g,"
+        "\"median_dz_m\":%.12g,\"coherent_median_m\":%.12g,"
+        "\"p50_m\":%.12g,\"p90_m\":%.12g,\"p99_m\":%.12g,"
+        "\"max_m\":%.12g,\"gte_5cm_count\":%zu,"
+        "\"gte_10cm_count\":%zu,\"worst_point_id\":\"%llu\","
+        "\"compute_ms\":%.3f,\"observation_only\":true}",
+        static_cast<long long>(EpochMs()), stage,
+        static_cast<unsigned long long>(snapshot_seq),
+        static_cast<unsigned long long>(
+            baseline ? 0 : s->live_cloud_diag_previous_snapshot_seq_v2),
+        baseline ? "true" : "false", point_delta.valid ? "true" : "false",
+        point_delta.previous_count, point_delta.current_count,
+        point_delta.common_count, point_delta.valid_delta_count,
+        point_delta.new_count, point_delta.dropped_count,
+        point_delta.median_delta_m[0], point_delta.median_delta_m[1],
+        point_delta.median_delta_m[2], point_delta.coherent_median_norm_m,
+        point_delta.p50_norm_m, point_delta.p90_norm_m,
+        point_delta.p99_norm_m, point_delta.max_norm_m,
+        point_delta.warning_5cm_count, point_delta.severe_10cm_count,
+        static_cast<unsigned long long>(point_delta.worst_point_id),
+        point_compute_ms);
+    AppendMatchFailJsonl(s, point_line);
+
+    s->live_cloud_diag_previous_points_v2 = std::move(current_points);
+    s->live_cloud_diag_has_previous_points_v2 = true;
+    s->live_cloud_diag_previous_snapshot_seq_v2 = snapshot_seq;
+  } catch (...) {
+    // Diagnostics are fail-open by contract. Do not change model or return code.
   }
 }
 
@@ -6334,6 +6483,208 @@ double LiveTriMinAngleDegOverride() {
   return cached;
 }
 
+// [GRAVITY-RA 2026-08-10 用户签决"抄官方/不自研"] finalize 重力对齐旋转平均
+// pass(ECCV24 arXiv:2410.12763,vendored COLMAP 4.1.0 官方实现)。默认关 =
+// 逐字节出货;env 开启后插在 stage-1 与 stage-2 之间:用 db 的 TVG 相对旋转 +
+// 每帧 ARKit 重力(1-DoF 圆回归分层求解)重解全局旋转,平移按"相机中心不变"
+// 重组(t_new = -R_new·C_old),再交 stage-2 全局 BA 收回平移与点。
+bool FinalizeGravityRaEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_FINALIZE_GRAVITY_RA");
+    return e != nullptr && e[0] == '1';
+  }();
+  return cached;
+}
+
+// 返回 RA 应用前的位姿快照(gauge 重锚用;空 = pass 没跑/没应用)。
+std::unordered_map<colmap::frame_t, colmap::Rigid3d> MaybeRunFinalizeGravityRa(
+    const std::string& db_path, colmap::Reconstruction* refined) {
+  if (!FinalizeGravityRaEnabled() || refined == nullptr) return {};
+  const double t0 = NowMs();
+  try {
+    // 快照旧位姿:RA 写回会把平移抹成 NaN(官方 controller 是从零建图的
+    // 用法),我们要保相机中心。
+    std::unordered_map<colmap::frame_t, colmap::Rigid3d> old_poses;
+    for (const auto& [frame_id, frame] : refined->Frames()) {
+      if (frame.HasPose()) old_poses.emplace(frame_id, frame.RigFromWorld());
+    }
+    if (old_poses.size() < 3) return {};
+
+    // pose graph:enriched db 的 TVG 相对旋转(官方分解入口)。
+    auto database = colmap::Database::Open(db_path);
+    colmap::DatabaseCache::Options cache_options;
+    cache_options.min_num_matches = 15;
+    auto cache = colmap::DatabaseCache::Create(*database, cache_options);
+    colmap::MaybeDecomposeRelativePoses(cache.get());
+    colmap::PoseGraph pose_graph;
+    pose_graph.Load(*cache->CorrespondenceGraph());
+    if (pose_graph.Empty()) {
+      LOG(WARNING) << "[gravity-ra] empty pose graph — skipped";
+      return {};
+    }
+
+    // 每帧重力:registry 的 gravity_cam 是相机系"物理向下",直接作
+    // PosePrior::gravity(COLMAP 的 gravity_dir 约定 = 世界 +Y 即"重力轴",
+    // 实测:取反会让 RA 世界整体倒置 —— gauge 轴 [-0.66,0.69,-0.29]@176.5°;
+    // 不取反 gauge 应为纯 yaw。规范对齐无论哪种都能拉回,但符号必须写对,
+    // 免得后人拿 gauge 轴当诊断时被误导)。
+    std::vector<colmap::PosePrior> pose_priors;
+    pose_priors.reserve(refined->NumImages());
+    for (const auto& [image_id, image] : refined->Images()) {
+      double g[3];
+      if (!aether_ba_get_gravity_prior(image.Name().c_str(), g)) continue;
+      Eigen::Vector3d gravity(g[0], g[1], g[2]);
+      const double n = gravity.norm();
+      if (!std::isfinite(n) || n < 1e-9) continue;
+      colmap::PosePrior prior;
+      prior.pose_prior_id = image_id;
+      prior.gravity = gravity / n;
+      pose_priors.push_back(prior);
+    }
+
+    colmap::RotationEstimatorOptions ra_options;
+    ra_options.use_gravity = !pose_priors.empty();
+    ra_options.use_stratified = true;
+    // skip_initialization 保持 false:PR #4225 —— gravity 模式的 MST 初始化
+    // 是防 180° 翻转的关键(修复前 5/1000 随机翻转)。
+    ra_options.skip_initialization = false;
+    // refinement pass 语义(官方注释:"Set to true for refinement passes")。
+    ra_options.filter_unregistered = true;
+
+    if (!colmap::RunRotationAveraging(
+            ra_options, pose_graph, *refined, pose_priors)) {
+      LOG(WARNING) << "[gravity-ra] solve failed — old poses restored";
+      for (const auto& [frame_id, pose] : old_poses) {
+        refined->Frame(frame_id).SetRigFromWorld(pose);
+      }
+      return {};
+    }
+
+    // 规范对齐:RA 解带任意全局规范(重力钉住竖轴后仍余全局 yaw;首测
+    // 不对齐时全帧统一偏 ~176.5°,stage-2 因点云仍在旧规范而屠到 42/110)。
+    // 求单个全局旋转 S = polar(Σ R_ra_iᵀ·R_old_i),把 RA 解拉回旧模型规范;
+    // 重力符号若不一致,S 会带出非 yaw 分量 —— 遥测里记 S 的轴向供核对。
+    Eigen::Matrix3d gauge_accum = Eigen::Matrix3d::Zero();
+    int gauge_n = 0;
+    for (const auto& [frame_id, old_pose] : old_poses) {
+      const auto& frame = refined->Frame(frame_id);
+      if (!frame.HasPose()) continue;
+      const auto& ra_q = frame.RigFromWorld().rotation();
+      if (ra_q.coeffs().hasNaN()) continue;
+      gauge_accum += ra_q.toRotationMatrix().transpose() *
+                     old_pose.rotation().toRotationMatrix();
+      ++gauge_n;
+    }
+    Eigen::Matrix3d gauge = Eigen::Matrix3d::Identity();
+    if (gauge_n >= 3) {
+      Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+          gauge_accum, Eigen::ComputeFullU | Eigen::ComputeFullV);
+      gauge = svd.matrixU() * svd.matrixV().transpose();
+      if (gauge.determinant() < 0) {
+        Eigen::Matrix3d flip = Eigen::Matrix3d::Identity();
+        flip(2, 2) = -1;
+        gauge = svd.matrixU() * flip * svd.matrixV().transpose();
+      }
+    }
+    const Eigen::AngleAxisd gauge_aa(gauge);
+    const Eigen::Quaterniond gauge_q(gauge);
+
+    // 写回:相机中心不变,旋转取"规范对齐后的 RA 结果";没解到的帧恢复旧位姿。
+    int applied = 0;
+    double max_delta_deg = 0.0, sum_delta_deg = 0.0;
+    for (const auto& [frame_id, old_pose] : old_poses) {
+      auto& frame = refined->Frame(frame_id);
+      const colmap::Rigid3d ra_pose =
+          frame.HasPose() ? frame.RigFromWorld() : old_pose;
+      const bool ra_valid = frame.HasPose() &&
+                            !ra_pose.rotation().coeffs().hasNaN();
+      if (!ra_valid) {
+        frame.SetRigFromWorld(old_pose);
+        continue;
+      }
+      const Eigen::Quaterniond aligned_q = ra_pose.rotation() * gauge_q;
+      const Eigen::Vector3d center_old =
+          -(old_pose.rotation().inverse() * old_pose.translation());
+      frame.SetRigFromWorld(
+          colmap::Rigid3d(aligned_q, -(aligned_q * center_old)));
+      const double delta_deg =
+          old_pose.rotation().angularDistance(aligned_q) * 180.0 / M_PI;
+      max_delta_deg = std::max(max_delta_deg, delta_deg);
+      sum_delta_deg += delta_deg;
+      ++applied;
+    }
+    LOG(INFO) << "[gravity-ra] applied=" << applied << "/" << old_poses.size()
+              << " priors=" << pose_priors.size()
+              << " gauge_deg=" << gauge_aa.angle() * 180.0 / M_PI
+              << " gauge_axis=[" << gauge_aa.axis().transpose() << "]"
+              << " mean_delta=" << (applied ? sum_delta_deg / applied : 0.0)
+              << "deg max_delta=" << max_delta_deg
+              << "deg ms=" << (NowMs() - t0);
+    return old_poses;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[gravity-ra] exception: " << e.what() << " — skipped";
+  } catch (...) {
+    LOG(WARNING) << "[gravity-ra] unknown exception — skipped";
+  }
+  return {};
+}
+
+// [GRAVITY-RA GAUGE-REANCHOR 2026-08-10] stage-2 是自由规范求解:RA 扰动初值
+// 后整个模型的 gauge 会被 BA 带走(实测 vs 基线整体转 1.18°、尺度漂 0.86%,
+// 刚体对齐后翘曲仍 7.5mm 爆 E9-C 门)。交付铁律 = 同 gauge 直出 ⇒ 这里用
+// Umeyama(含尺度)把 stage-2 之后的模型整体锚回 RA 前的位姿快照 —— 与
+// 位置先验 BA"每 pass 对当前重建重估 Sim3"同一先例。快照 gauge 即
+// live_reuse 贴住 ARKit 的原 gauge,基线路径不跑此函数(快照为空)。
+void MaybeReanchorAfterGravityRa(
+    const std::unordered_map<colmap::frame_t, colmap::Rigid3d>& snapshot,
+    colmap::Reconstruction* refined) {
+  if (snapshot.empty() || refined == nullptr) return;
+  try {
+    std::vector<Eigen::Vector3d> src, dst;
+    src.reserve(snapshot.size());
+    dst.reserve(snapshot.size());
+    for (const auto& [frame_id, old_pose] : snapshot) {
+      if (!refined->ExistsFrame(frame_id)) continue;
+      const auto& frame = refined->Frame(frame_id);
+      if (!frame.HasPose()) continue;
+      const auto& cur = frame.RigFromWorld();
+      if (cur.rotation().coeffs().hasNaN() || cur.translation().hasNaN()) {
+        continue;
+      }
+      src.push_back(-(cur.rotation().inverse() * cur.translation()));
+      dst.push_back(
+          -(old_pose.rotation().inverse() * old_pose.translation()));
+    }
+    if (src.size() < 3) return;
+    Eigen::Matrix<double, 3, Eigen::Dynamic> S(3, src.size()), D(3, src.size());
+    for (size_t i = 0; i < src.size(); ++i) {
+      S.col(i) = src[i];
+      D.col(i) = dst[i];
+    }
+    const Eigen::Matrix4d T = Eigen::umeyama(S, D, /*with_scaling=*/true);
+    const Eigen::Matrix3d sR = T.topLeftCorner<3, 3>();
+    const double scale = std::cbrt(sR.determinant());
+    if (!std::isfinite(scale) || scale < 0.5 || scale > 2.0) {
+      LOG(WARNING) << "[gravity-ra] reanchor scale " << scale
+                   << " out of sane band — skipped";
+      return;
+    }
+    const Eigen::Matrix3d R = sR / scale;
+    const colmap::Sim3d new_from_old(
+        scale, Eigen::Quaterniond(R), T.topRightCorner<3, 1>());
+    refined->Transform(new_from_old);
+    const Eigen::AngleAxisd aa(R);
+    LOG(INFO) << "[gravity-ra] reanchored: rot="
+              << aa.angle() * 180.0 / M_PI
+              << "deg scale=" << scale
+              << " t=" << T.topRightCorner<3, 1>().norm();
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[gravity-ra] reanchor exception: " << e.what();
+  } catch (...) {
+    LOG(WARNING) << "[gravity-ra] reanchor unknown exception";
+  }
+}
+
 int LiveLocalBaMtFloorOverride() {  // <0 → don't touch
   static const int cached = [] {
     if (const char* e = std::getenv("OFFICIAL_AETHER_LIVE_LBA_MT_FLOOR")) {
@@ -6503,7 +6854,19 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   popts->ba_global_loss_type = 2;              // CAUCHY (was defaulting to 0=TRIVIAL)
   popts->ba_global_loss_scale = 1.0;
   popts->ba_global_function_tolerance = 1e-6;  // converge-stop
-  popts->ba_global_max_refinements = 5;
+  // [FINALIZE-TOTAL-ROUNDS 2026-08-10 用户签] 总轮预算 5→3。
+  // 轮预算自平衡:砍单段(STAGE1_ROUNDS_CAP=1)的轮经余额公式流给 stage2,
+  // host 矩阵实测净 +0.5s 且点 −0.3% = 判死;砍**总**预算才减真工作量。
+  // 两场真机 DB host 复放(每臂多次,同臂输出逐次相同):
+  //   85帧: finalize 8.2→5.5s(−33%) 点 46,835→47,297(+1.0%) reproj +0.011px
+  //   132帧: 14.8→9.9s(−33%)      点 81,601→82,225(+0.76%) reproj +0.011px
+  // 机理:后两轮 BA+复筛在"再抛光"——多筛一批点换 0.01px。用户签收
+  // reproj +1% 的质量带权衡(点数正向)。回滚:env 推 5(ENV-FILE 免重装)。
+  popts->ba_global_max_refinements = 3;
+  if (const char* e = std::getenv("OFFICIAL_AETHER_FINALIZE_TOTAL_ROUNDS")) {
+    const int v = std::atoi(e);
+    if (v > 0) popts->ba_global_max_refinements = v;
+  }
   popts->ba_global_max_num_iterations = 50;
   popts->ba_refine_focal_length = false;
   popts->ba_refine_principal_point = false;
@@ -7546,11 +7909,18 @@ void RefineGlobalBA(aether_sfm_session* s,
     aether_igr_merge_ms = 0.0;
     aether_igr_rounds = 0;
     aether_ba_ring_reset();  // [AETHER BA-RING] attribute stage-2 solves
+    // [GRAVITY-RA 2026-08-10] env 门控(默认关):重力对齐 RA 重解全局旋转,
+    // 平移保相机中心;随后 stage-2 全局 BA 收回平移与点。
+    const auto gravity_ra_snapshot =
+        MaybeRunFinalizeGravityRa(s->db_path, refined.get());
     auto manager = std::make_shared<colmap::ReconstructionManager>();
     colmap::IncrementalPipeline pipeline(
         popts, colmap::Database::Open(s->db_path), manager);
     s->gpu_watchdog.InProgress();  // [GPU-HANG-B1] stage-2 入口打点
     pipeline.RefineReconstruction(refined);
+    // [GRAVITY-RA GAUGE-REANCHOR] 自由规范 BA 之后把模型锚回原 gauge(见
+    // 函数注释;基线路径快照为空 = no-op)。
+    MaybeReanchorAfterGravityRa(gravity_ra_snapshot, refined.get());
     s->gpu_watchdog.InProgress();  // [GPU-HANG-B1] stage-2 结束打点
     const double stage2_ms = NowMs() - t_s2;
     // [AETHER-T1] Pullable split record — the p1_done→refined stretch used to
@@ -7805,8 +8175,10 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
                     "{\"t\":%lld,\"type\":\"build_stamp\","
                     "\"built\":\"%s %s\","
                     "\"diag_contract\":\"PW_LIVE_CLOUD_DIAG_V1_20260810\","
+                    "\"snapshot_diag_contract\":"
+                    "\"PW_LIVE_CLOUD_SNAPSHOT_DIAG_V2_20260810\","
                     "\"native_diag_build_id\":"
-                    "\"PW_LIVE_CLOUD_DIAG_NATIVE_V1_20260810_AETHER_50fe48c_INPUT_452ec853\","
+                    "\"PW_LIVE_CLOUD_DIAG_NATIVE_V2_20260810_AETHER_0ab02a0_SNAPSHOT_01\","
                     "\"observation_only\":true}",
                     static_cast<long long>(EpochMs()), __DATE__, __TIME__);
       AppendMatchFailJsonl(s, bline);
@@ -8788,6 +9160,8 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     s->draft_pair_points.clear();
     s->draft_pair_obs_offsets.clear();
     s->draft_pair_obs.clear();
+    bool live_local_ba_attempted = false;
+    bool live_local_ba_succeeded = false;
     if (rec.has_pose && s->live_recon_ready &&
         live_reg_n >= (pair_cloud_enabled ? 2u : 3u) &&
         StreamingLocalBaEnabled() &&
@@ -8963,13 +9337,16 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
             0;
         ResetLocalBundleTraceV1();
         const double t2_l0 = NowMs();
-        if (live_reg_n >= 3)
-        mapper.IterativeLocalRefinement(
-            official_options.ba_local_max_refinements,
-            official_options.ba_local_max_refinement_change,
-            official_options.Mapper(),
-            official_options.LocalBundleAdjustment(),
-            official_options.Triangulation(), image_id);
+        if (live_reg_n >= 3) {
+          live_local_ba_attempted = true;
+          mapper.IterativeLocalRefinement(
+              official_options.ba_local_max_refinements,
+              official_options.ba_local_max_refinement_change,
+              official_options.Mapper(),
+              official_options.LocalBundleAdjustment(),
+              official_options.Triangulation(), image_id);
+          live_local_ba_succeeded = true;
+        }
         t2_lba_ms += NowMs() - t2_l0;
         const LocalBundleTraceSnapshotV1 fresh_trace =
             CaptureLocalBundleTraceV1();
@@ -9103,7 +9480,10 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     // live_recon (DEFAULT OFF; OFFICIAL_AETHER_INCREMENTAL_GLOBAL_BA=1). No-op unless the
     // env switch is on and the cadence/thermal gates pass; mutates live_recon in
     // place, so the unconditional preview snapshot just below reflects it.
+    const int64_t incremental_refines_before = s->stat_incremental_refines;
     MaybeIncrementalGlobalRefine(s);
+    const bool incremental_global_refine_succeeded =
+        s->stat_incremental_refines > incremental_refines_before;
 
     // Publish the BA-refined live cloud into preview_points (served unchanged by
     // the getter). Short lock; the getter never blocks on the BA itself.
@@ -9116,58 +9496,70 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     }
 
     s->frames.push_back(std::move(rec));
+    // The real record owns this ordinal before any observation-only work. A
+    // telemetry allocation or write failure must never add a withdrawn record
+    // or change the accepted-frame result.
+    ordinal_guard.committed = true;
     // [LIVE-CLOUD-DIAG V1] Compare the published live model's optimized
     // camera centers against each frame's immutable ARKit seed. Read-only:
     // this summary is never fed back to BA, point creation, or display.
-    if (s->live_recon) {
-      std::vector<std::array<double, 3>> center_deltas;
-      center_deltas.reserve(s->frames.size());
-      int latest_compared_fid = -1;
-      for (const FrameRecord& frame : s->frames) {
-        if (!frame.has_pose || frame.image_id == 0 ||
-            !s->live_recon->ExistsImage(frame.image_id)) {
-          continue;
+    try {
+      if (s->live_recon) {
+        std::vector<std::array<double, 3>> center_deltas;
+        center_deltas.reserve(s->frames.size());
+        int latest_compared_fid = -1;
+        for (const FrameRecord& frame : s->frames) {
+          if (!frame.has_pose || frame.image_id == 0 ||
+              !s->live_recon->ExistsImage(frame.image_id)) {
+            continue;
+          }
+          const colmap::Image& image = s->live_recon->Image(frame.image_id);
+          if (!image.HasPose()) continue;
+          const Eigen::Vector3d prior_center =
+              frame.cam_from_world.TgtOriginInSrc();
+          const Eigen::Vector3d optimized_center =
+              image.CamFromWorld().TgtOriginInSrc();
+          const Eigen::Vector3d delta = optimized_center - prior_center;
+          if (!delta.allFinite()) continue;
+          center_deltas.push_back({delta.x(), delta.y(), delta.z()});
+          latest_compared_fid = frame.frame_id;
         }
-        const colmap::Image& image = s->live_recon->Image(frame.image_id);
-        if (!image.HasPose()) continue;
-        const Eigen::Vector3d prior_center =
-            frame.cam_from_world.TgtOriginInSrc();
-        const Eigen::Vector3d optimized_center =
-            image.CamFromWorld().TgtOriginInSrc();
-        const Eigen::Vector3d delta = optimized_center - prior_center;
-        if (!delta.allFinite()) continue;
-        center_deltas.push_back({delta.x(), delta.y(), delta.z()});
-        latest_compared_fid = frame.frame_id;
+        const aether::sfm::LiveCloudBaDeltaSummaryV1 diag =
+            aether::sfm::SummarizeLiveCloudBaDeltasV1(center_deltas);
+        if (diag.valid) {
+          char dline[1152];
+          std::snprintf(
+              dline, sizeof(dline),
+              "{\"t\":%lld,\"type\":\"ba_arkit_center_delta_v1\","
+              "\"contract\":\"PW_LIVE_CLOUD_DIAG_V1_20260810\","
+              "\"stage\":\"post_live_update\",\"fid\":%d,\"n\":%zu,"
+              "\"local_ba_attempted\":%s,\"local_ba_succeeded\":%s,"
+              "\"incremental_global_refine_succeeded\":%s,"
+              "\"median_dx_m\":%.9g,\"median_dy_m\":%.9g,"
+              "\"median_dz_m\":%.9g,\"coherent_median_m\":%.9g,"
+              "\"p50_m\":%.9g,\"p90_m\":%.9g,\"max_m\":%.9g,"
+              "\"latest_fid\":%d,\"latest_dx_m\":%.9g,"
+              "\"latest_dy_m\":%.9g,\"latest_dz_m\":%.9g,"
+              "\"latest_m\":%.9g,\"residual_rms_m\":%.9g,"
+              "\"observation_only\":true}",
+              static_cast<long long>(EpochMs()), frame_id, diag.count,
+              live_local_ba_attempted ? "true" : "false",
+              live_local_ba_succeeded ? "true" : "false",
+              incremental_global_refine_succeeded ? "true" : "false",
+              diag.median_delta_m[0], diag.median_delta_m[1],
+              diag.median_delta_m[2], diag.coherent_median_norm_m,
+              diag.p50_norm_m, diag.p90_norm_m, diag.max_norm_m,
+              latest_compared_fid, diag.latest_delta_m[0],
+              diag.latest_delta_m[1], diag.latest_delta_m[2],
+              diag.latest_norm_m, diag.residual_rms_m);
+          AppendMatchFailJsonl(s, dline);
+        }
       }
-      const aether::sfm::LiveCloudBaDeltaSummaryV1 diag =
-          aether::sfm::SummarizeLiveCloudBaDeltasV1(center_deltas);
-      if (diag.valid) {
-        char dline[1024];
-        std::snprintf(
-            dline, sizeof(dline),
-            "{\"t\":%lld,\"type\":\"ba_arkit_center_delta_v1\","
-            "\"contract\":\"PW_LIVE_CLOUD_DIAG_V1_20260810\","
-            "\"stage\":\"post_live_update\",\"fid\":%d,\"n\":%zu,"
-            "\"median_dx_m\":%.9g,\"median_dy_m\":%.9g,"
-            "\"median_dz_m\":%.9g,\"coherent_median_m\":%.9g,"
-            "\"p50_m\":%.9g,\"p90_m\":%.9g,\"max_m\":%.9g,"
-            "\"latest_fid\":%d,\"latest_dx_m\":%.9g,"
-            "\"latest_dy_m\":%.9g,\"latest_dz_m\":%.9g,"
-            "\"latest_m\":%.9g,\"residual_rms_m\":%.9g,"
-            "\"observation_only\":true}",
-            static_cast<long long>(EpochMs()), frame_id, diag.count,
-            diag.median_delta_m[0], diag.median_delta_m[1],
-            diag.median_delta_m[2], diag.coherent_median_norm_m,
-            diag.p50_norm_m, diag.p90_norm_m, diag.max_norm_m,
-            latest_compared_fid, diag.latest_delta_m[0],
-            diag.latest_delta_m[1], diag.latest_delta_m[2],
-            diag.latest_norm_m, diag.residual_rms_m);
-        AppendMatchFailJsonl(s, dline);
-      }
+    } catch (...) {
+      // Diagnostics are fail-open by contract. In particular, allocation or
+      // sidecar-write failures cannot change accepted frames or return codes.
     }
-    // The real record now owns this ordinal; the guard must not add a
-    // placeholder for it.
-    ordinal_guard.committed = true;
+    AppendLiveCloudSnapshotDiagnosticsV2(s, "post_local_ba");
     s->last_extract_ms = extract_ms;
     s->last_match_ms = NowMs() - t_match0;
     // [AETHER-T2] frame_split: one compact pullable line per frame (~150 B;
@@ -10926,7 +11318,13 @@ aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
   // [A1B-ASYNC-PVBA 2026-07-27] Experiment arm (default OFF): kick/harvest
   // instead of the in-line solve. Unset env ⇒ the sync body below runs
   // byte-identically.
-  if (AsyncPreviewBaEnabled()) return AsyncPreviewBaTick(s);
+  if (AsyncPreviewBaEnabled()) {
+    const aether_sfm_result_t result = AsyncPreviewBaTick(s);
+    if (result == AETHER_SFM_OK) {
+      AppendLiveCloudSnapshotDiagnosticsV2(s, "post_global_ba");
+    }
+    return result;
+  }
   try {
     colmap::DatabaseCache::Options cache_options;
     cache_options.min_num_matches = 15;
@@ -10977,6 +11375,7 @@ aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
       std::lock_guard<std::mutex> lk(s->preview_mutex);
       s->preview_points.swap(snap);
     }
+    AppendLiveCloudSnapshotDiagnosticsV2(s, "post_global_ba");
     return AETHER_SFM_OK;
   } catch (const std::exception&) {
     return AETHER_SFM_ERR_INTERNAL;  // keep the windowed cloud on failure

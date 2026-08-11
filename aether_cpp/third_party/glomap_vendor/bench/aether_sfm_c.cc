@@ -3534,6 +3534,21 @@ double TriMinAngleDeg(const char* env_name) {
   return 2.0;
 }
 
+// [TRI-TRANSITIVITY 2026-08-05] 与 official_pipeline/src/official_aether_sfm_c.cc
+// 的同名 helper **保持同名同语义同 env**(见那份的完整依据注释)。
+// ⚠️ 这两个 TU 是平行实现:iOS 产品核只编 official 那份(实测 libpwofficial_core.a
+// 里只有 official_aether_sfm_c.cc.o),而 host 重放器 official_replay_bench_exe
+// 链接的是本份。所以**只改一份 = host A/B 测的是另一套代码**(本次已踩:两臂
+// 输出逐位相同,因为改动没进重放器)。任何要用 host 验证的产品核改动,必须两份同步。
+int TriMaxTransitivity() {
+  const char* e = std::getenv("OFFICIAL_AETHER_TRI_TRANSITIVITY");
+  if (e && e[0]) {
+    const int v = std::atoi(e);
+    if (v >= 1 && v <= 5) return v;
+  }
+  return 1;  // 上游默认
+}
+
 // [AETHER BA-MIXED 2026-07-11] Finalize global BA mixed-precision solves
 // (fp32 factorize/solve of the reduced camera system + fp64 iterative-
 // refinement steps). ⚠️ DEFAULT OFF — host A/B (cap42, spatial_ab streaming
@@ -3773,6 +3788,9 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   // Triangulation() too — keep phase 2 from re-admitting the <2° tail that
   // phase 1 now refuses to create.
   popts->triangulation.min_angle = TriMinAngleDeg("AETHER_TRI_MIN_ANGLE_P2");
+  // ⛔ [TRI-TRANSITIVITY 2026-08-05 已撤回] 同产品核:该旋钮在 finalize 路径无效
+  // (Retriangulate 不读它;读它的 TriangulateImage 只在增量注册新图时跑)。
+  // host A/B 两臂逐位相同已证。详见 official_aether_sfm_c.cc 同位置的注释。
   // [FINALIZE-OVERLAP 2026-07-11] Load ALL images into the DatabaseCache, not
   // just match-connected ones. The live-reuse recon registers frames by ARKit
   // pose; a frame whose every db pair fell below min_num_matches exists in the

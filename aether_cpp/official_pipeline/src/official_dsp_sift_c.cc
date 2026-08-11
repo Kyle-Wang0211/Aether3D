@@ -378,7 +378,7 @@ int aether_sift_match_pairs(const uint8_t* desc1,
     colmap::FeatureMatchingOptions opts(
         colmap::FeatureMatcherType::SIFT_BRUTEFORCE);
     opts.sift = std::make_shared<colmap::SiftMatchingOptions>();
-    opts.sift->max_ratio = max_ratio > 0 ? max_ratio : 0.7;
+    opts.sift->max_ratio = max_ratio > 0 ? max_ratio : 0.8;
     opts.sift->cross_check = true;  // mutual B→A verification — see above
     opts.sift->cpu_brute_force_matcher = true;
     opts.use_gpu = false;

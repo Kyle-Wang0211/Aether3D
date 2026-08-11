@@ -254,6 +254,24 @@ extern "C" void aether_ba_clear_position_priors() {
 // Mandatory production gravity prior. The streaming owner calls this once per
 // accepted ARKit frame before any BA can observe that image. Invalid gravity is
 // rejected instead of being installed as an optional/no-op prior.
+// [GRAVITY-RA 2026-08-10] Read-back for the finalize rotation-averaging pass:
+// per-image gravity_cam (physical-down in camera frame) as registered by the
+// mandatory live/resume ingest. Returns 0 when the image has no entry.
+extern "C" int aether_ba_get_gravity_prior(const char* name,
+                                           double* out_gravity_cam_xyz) {
+  if (name == nullptr || out_gravity_cam_xyz == nullptr || name[0] == '\0') {
+    return 0;
+  }
+  auto& registry = GetAetherGravityPriorRegistry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  const auto it = registry.gravity_cam.find(name);
+  if (it == registry.gravity_cam.end()) return 0;
+  out_gravity_cam_xyz[0] = it->second.x();
+  out_gravity_cam_xyz[1] = it->second.y();
+  out_gravity_cam_xyz[2] = it->second.z();
+  return 1;
+}
+
 extern "C" int aether_ba_set_gravity_prior(const char* name,
                                             const double* gravity_cam_xyz,
                                             double sigma_rad) {
