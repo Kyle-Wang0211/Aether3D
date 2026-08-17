@@ -4,6 +4,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Host-only corruption/fault injection for the tail-cache exactness gate.
+# Default OFF is a product invariant: device archives must not expose these
+# symbols.  The option is enabled only in the isolated host replay build.
+option(AETHER_TAIL_CACHE_FAULT_TEST_HOOKS
+       "Enable host-only tail-cache fault-injection hooks" OFF)
+option(AETHER_COMPILE_DESCRIPTOR_RESIDENCY_V1
+       "Compile the descriptor-residency experiment into the official core" ON)
+
 set(V    ${CMAKE_CURRENT_SOURCE_DIR})
 set(COLMAP  ${V}/colmap-src)
 set(GLOMAP  ${V}/glomap-src)
@@ -39,13 +47,11 @@ set(COLMAP_EXCLUDE
   ${COLMAP}/colmap/util/cudacc.cc
   ${COLMAP}/colmap/util/gtest_main.cc          # test runner (needs gmock)
   ${COLMAP}/colmap/util/testing.cc             # test helpers
-  # [MIGRATION 4.0.4] COLMAP 4.0 added a native global-SfM module in estimators/.
-  # rotation_averaging_impl.cc #includes <Eigen/CholmodSupport> (SuiteSparse/GPL, no
-  # cholmod.h here). It is reached ONLY by sfm/global_mapper.cc, which is NOT in our
-  # explicit sfm/ source list (we vendor incremental SfM only). colmap_bench uses the
-  # incremental pipeline, so this TU is dead for our build -> exclude (matches 3.14's
-  # CHOLMOD-stripped iOS vendoring).
-  ${COLMAP}/colmap/estimators/rotation_averaging_impl.cc
+  # [GRAVITY-RA 2026-08-10 用户签决] rotation_averaging_impl.cc 解封:原排除
+  # 理由(#include <Eigen/CholmodSupport> = SuiteSparse/GPL)已过期 —— 本树
+  # optim/sparse_cholesky.h:36 已把 Cholmod 关进 COLMAP_CHOLMOD_ENABLED(未定义),
+  # fallback 纯 Eigen SimplicialLDLT,impl.cc 本身零 Cholmod include(grep 核实)。
+  # finalize 的重力对齐 RA pass(official_aether_sfm_c.cc)需要它。
   # [MIGRATION 4.1.0] Caspar GPU BA backend: the TU guards only its #include with
   # CASPAR_ENABLED, not the implementation (upstream compiles it conditionally in
   # their CMake). CASPAR_ENABLED is undefined here and every call site
@@ -101,6 +107,32 @@ endif()
 file(GLOB_RECURSE POSELIB_SRC ${POSELIB}/PoseLib/*.cc ${POSELIB}/PoseLib/*.cpp)
 list(FILTER POSELIB_SRC EXCLUDE REGEX "_test")
 
+# [LICENSE RED LINE 2026-08-17] Two vendored directories must NEVER be compiled
+# into anything that ships (license audit, see NOTICE):
+#   thirdparty/LSD     — this tree carries the AGPL-3.0 ORIGINAL (upstream later
+#                        swapped in a BSD reimplementation; ours predates that).
+#                        Sole in-tree user is colmap/image/line.cc, which no
+#                        glob includes today — adding colmap/image/*.cc to any
+#                        source list silently AGPL-contaminates every binary.
+#   thirdparty/SiftGPU — UNC license, commercial use requires a separate
+#                        agreement. Referenced by feature/sift.cc only inside
+#                        #if defined(COLMAP_GPU_ENABLED), which stays undefined.
+# Configure-time tripwire: every shipped target (pwofficial_core, glomap_core,
+# glomap_full) derives its COLMAP sources from COLMAP_SRC, so one check here
+# covers them all.
+foreach(_lic_src IN LISTS COLMAP_SRC)
+  if(_lic_src MATCHES "thirdparty/(LSD|SiftGPU)/"
+     OR _lic_src MATCHES "colmap/image/line\\.cc$")
+    message(FATAL_ERROR "License red line: ${_lic_src} is AGPL/UNC-licensed "
+      "and must not be compiled into any target. See the 2026-08-17 license "
+      "audit note above.")
+  endif()
+endforeach()
+if(DEFINED COLMAP_GPU_ENABLED AND COLMAP_GPU_ENABLED)
+  message(FATAL_ERROR "License red line: COLMAP_GPU_ENABLED compiles SiftGPU "
+    "(UNC license, commercial use needs a separate agreement).")
+endif()
+
 add_library(glomap_core STATIC ${COLMAP_SRC} ${POSELIB_SRC})
 
 target_include_directories(glomap_core PUBLIC
@@ -123,6 +155,101 @@ target_compile_definitions(glomap_core PRIVATE
   # all intentionally UNDEFINED -> optional features compile out.
 
 target_compile_options(glomap_core PRIVATE -w)   # silence warnings during bring-up
+
+# ---- Pocketworld independent "official" capture route -----------------------
+#
+# This target is a physical source copy of the shipping streaming-SfM core.  It
+# intentionally shares only third-party COLMAP/PoseLib sources with glomap_core;
+# all app-owned adapter/extractor sources live under aether_cpp/official_pipeline.
+# The final iOS dynamic framework hides this target's complete C/C++ surface and
+# exposes only the separate pwofficial_* forwarding ABI.
+set(PWOFFICIAL_PIPELINE ${V}/../../official_pipeline)
+set(AETHER_PRECLAMP_SOURCE_CLOSURE_SHA256_V1 "" CACHE STRING
+    "Reviewed strict-8192 private source-closure SHA-256 marker")
+set(AETHER_FROZEN_PWOFFICIAL_CORE_SHA256
+    "1ac64d0a138f47f6285c36e6b4b257832ac3932264b8df664797cbeb2217bb04")
+set(PWOFFICIAL_COLMAP_SRC ${COLMAP_SRC})
+list(REMOVE_ITEM PWOFFICIAL_COLMAP_SRC
+  ${V}/bench/aether_threaded_extract.cc
+  ${V}/bench/aether_sfm_c.cc
+  ${V}/bench/dsp_sift_c.cc
+  ${COLMAP}/colmap/controllers/incremental_pipeline.cc
+  ${COLMAP}/colmap/estimators/bundle_adjustment_ceres.cc)
+list(APPEND PWOFFICIAL_COLMAP_SRC
+  ${PWOFFICIAL_PIPELINE}/src/official_aether_threaded_extract.cc
+  ${PWOFFICIAL_PIPELINE}/src/official_aether_sfm_c.cc
+  ${PWOFFICIAL_PIPELINE}/src/mandatory_arkit_gravity_v1.cc
+  ${PWOFFICIAL_PIPELINE}/src/upright_relative_pose_v1.cc
+  ${PWOFFICIAL_PIPELINE}/src/mandatory_gravity_tvg_v1.cc
+  ${PWOFFICIAL_PIPELINE}/src/arkit_pose_store_v1.cc
+  ${PWOFFICIAL_PIPELINE}/src/pair_selection_v2.cc
+  ${PWOFFICIAL_PIPELINE}/src/pair_policy_v2_c.cc
+  ${PWOFFICIAL_PIPELINE}/src/visual_loop_index_v1.cc
+  ${PWOFFICIAL_PIPELINE}/src/official_gpu_timestamp_writer_v1.cc
+  ${PWOFFICIAL_PIPELINE}/src/official_gpu_timestamp_weak_stubs_v1.cc
+  ${PWOFFICIAL_PIPELINE}/src/official_dsp_sift_c.cc
+  ${PWOFFICIAL_PIPELINE}/src/official_incremental_pipeline.cc
+  ${PWOFFICIAL_PIPELINE}/src/official_bundle_adjustment_ceres.cc)
+
+add_library(pwofficial_core STATIC ${PWOFFICIAL_COLMAP_SRC} ${POSELIB_SRC})
+target_include_directories(pwofficial_core PUBLIC
+  ${PWOFFICIAL_PIPELINE}/include
+  ${PWOFFICIAL_PIPELINE}/../include
+  ${COLMAP} ${POSELIB} ${V}/stubs
+  ${GLOG}
+  ${CERES}/include ${CERESB}/include ${CERES}/config
+  ${EIGEN}
+  /opt/homebrew/include)
+target_compile_definitions(pwofficial_core PRIVATE
+  EIGEN_MPL2_ONLY
+  GLOG_USE_GLOG_EXPORT
+  GLOG_NO_ABBREVIATED_SEVERITIES
+  GLOG_VERSION_MAJOR=0
+  GLOG_VERSION_MINOR=7
+  GLOMAP_CUDA_DISABLED
+  AETHER_GPU_TIMESTAMPS_ENV_OFFICIAL=1
+  VL_DISABLE_SSE2 VL_DISABLE_AVX)
+set_source_files_properties(
+  ${PWOFFICIAL_PIPELINE}/src/official_aether_sfm_c.cc
+  PROPERTIES COMPILE_DEFINITIONS
+    AETHER_COMPILE_DESCRIPTOR_RESIDENCY_V1=$<BOOL:${AETHER_COMPILE_DESCRIPTOR_RESIDENCY_V1}>)
+if(AETHER_TAIL_CACHE_FAULT_TEST_HOOKS)
+  target_compile_definitions(pwofficial_core PRIVATE
+    AETHER_TAIL_CACHE_FAULT_TEST_HOOKS=1)
+endif()
+target_compile_options(pwofficial_core PRIVATE -w)
+set_target_properties(pwofficial_core PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+  C_VISIBILITY_PRESET hidden
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES)
+
+# The phone-window bridge/writer is an isolated private object alongside the
+# byte-frozen official core archive; it is never inserted into or used to
+# rebuild that archive. Enabling this production-only overlay is fail-fast:
+# the reviewed source closure must exist before compilation and is embedded in
+# this private object only.
+option(AETHER_BUILD_PRECLAMP_STAGE_B_PRIVATE
+       "Build the private strict-8192 Stage-B overlay" OFF)
+if(AETHER_BUILD_PRECLAMP_STAGE_B_PRIVATE)
+  include(${PWOFFICIAL_PIPELINE}/cmake/ValidateStageBSourceClosure.cmake)
+  add_library(pwofficial_stage_b_private STATIC EXCLUDE_FROM_ALL
+    ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
+    ${PWOFFICIAL_PIPELINE}/src/official_preclamp_replay_driver_v1.cc
+    ${PWOFFICIAL_PIPELINE}/../src/crypto/sha256.cpp)
+  target_include_directories(pwofficial_stage_b_private PRIVATE
+    ${PWOFFICIAL_PIPELINE}/src
+    ${PWOFFICIAL_PIPELINE}/../include)
+  target_compile_definitions(pwofficial_stage_b_private PRIVATE
+    AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+    AETHER_PRECLAMP_SOURCE_CLOSURE_SHA256_V1="${AETHER_PRECLAMP_SOURCE_CLOSURE_SHA256_V1}")
+  target_compile_features(pwofficial_stage_b_private PRIVATE cxx_std_17)
+  set_target_properties(pwofficial_stage_b_private PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    C_VISIBILITY_PRESET hidden
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
+endif()
 
 # [MIGRATION 4.0.4] colmap-only static lib for colmap_bench_exe. The 3.14->4.0.4
 # colmap migration is independent of glomap-src / poselib-src / the DSP-SIFT threaded
@@ -173,6 +300,38 @@ target_compile_options(colmap_only PRIVATE -w)
 option(BUILD_BENCH "Build glomap_bench executable" ON)
 if(BUILD_BENCH)
   find_library(ACCELERATE_FW Accelerate)
+  # Source-independent executable contract for the shipping COLMAP clamp's
+  # post-push stopping rule. The separate shell contract hashes the production
+  # source block so this copied loop cannot be mistaken for production linkage.
+  add_executable(legacy_group_clamp_contract_exe
+    bench/legacy_group_clamp_contract.cc)
+
+  # RED-first contract for the portable canonical exact selector. The initial
+  # contract was first observed failing at link with the implementation absent.
+  add_executable(canonical_feature_selector_v1_contract_exe
+    ${AT}/../tests/sift/test_canonical_feature_selector_v1.cpp
+    ${AT}/../src/sfm/canonical_feature_selector_v1.cc)
+  set_target_properties(canonical_feature_selector_v1_contract_exe
+    PROPERTIES CXX_STANDARD 20)
+  target_include_directories(canonical_feature_selector_v1_contract_exe PRIVATE
+    ${AT}/../include)
+
+  # Private timestamp sidecar contract. The fixture links the production
+  # official core and calls the same internal serializer used by frame_split;
+  # no diagnostic type or test seam enters the stable C ABI.
+  add_executable(official_gpu_timestamp_writer_contract_exe
+    bench/official_gpu_timestamp_writer_contract.cc)
+  target_include_directories(official_gpu_timestamp_writer_contract_exe PRIVATE
+    ${PWOFFICIAL_PIPELINE}/src)
+  target_compile_definitions(official_gpu_timestamp_writer_contract_exe PRIVATE
+    AETHER_GPU_TIMESTAMPS_ENV_OFFICIAL=1)
+  target_link_libraries(official_gpu_timestamp_writer_contract_exe PRIVATE
+    pwofficial_core
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    sqlite3)
+  target_compile_options(official_gpu_timestamp_writer_contract_exe PRIVATE -w)
+
   # [MIGRATION 4.0.4 / STEP 5] glomap_bench_exe DROPPED: it is the only consumer of
   # GLOMAP's GlobalMapper / colmap_converter symbols, which were removed from
   # glomap_core when GLOMAP was dropped. Its bench/glomap_bench.cc is now dead.
@@ -217,6 +376,16 @@ if(BUILD_BENCH)
   add_executable(ghost_mask_parity_exe bench/ghost_mask_parity.cc)
   set_target_properties(ghost_mask_parity_exe PROPERTIES CXX_STANDARD 17)
   target_compile_options(ghost_mask_parity_exe PRIVATE -w -ffp-contract=off)
+
+  # ─── [L1 2026-07-12] Mac end-to-end harness for the ghost L1 arbitration ───
+  # l1_ghost_tool_exe drives the EXACT production headers (aether_l1_plan.h +
+  # aether_l1_arbitrate.h) over the cap46/47 device fixtures: `plan` writes the
+  # budgeted set-cover arbitration plan + points sidecar, `arbitrate` consumes
+  # the CoreML depth bins and rewrites ghost_mask.bin bits 5/6. Header-only,
+  # zero deps; -ffp-contract=off mirrors the ghost-mask parity contract.
+  add_executable(l1_ghost_tool_exe bench/l1_ghost_tool.cc)
+  set_target_properties(l1_ghost_tool_exe PROPERTIES CXX_STANDARD 17)
+  target_compile_options(l1_ghost_tool_exe PRIVATE -w -ffp-contract=off)
 
   # parameterized incremental-SfM bench (HOST ceres 2.2.0 + glog) — per-frame
   # registration cost curve + reproj for the <=2s@frame-300 SLA lever sweeps.
@@ -487,6 +656,95 @@ if(BUILD_BENCH)
       ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
       ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
 
+    # Focused legacy-clamp count contract. Uses the exact gpu_extract_e2e
+    # synthetic fixture and extraction calls, then exits before O(N^2) recall.
+    add_executable(gpu_extract_count_contract_exe
+      bench/gpu_extract_count_contract.cc
+      bench/dsp_sift_gpu_c.cc
+      bench/dsp_sift_c.cc
+      ${AT}/../tools/sift_extract_dawn.cc
+      ${AT}/../tools/sift_pyramid_dawn.cc)
+    set_target_properties(gpu_extract_count_contract_exe PROPERTIES CXX_STANDARD 20)
+    target_include_directories(gpu_extract_count_contract_exe PRIVATE
+      ${V}/stubs ${AT}/../tools ${AT}/stb
+      ${_DAWN_INC_STATIC} ${_DAWN_INC_GEN})
+    target_compile_definitions(gpu_extract_count_contract_exe PRIVATE
+      EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+      AETHER_WGSL_DIR="${AT}/../shaders/wgsl")
+    target_compile_options(gpu_extract_count_contract_exe PRIVATE -w)
+    target_link_libraries(gpu_extract_count_contract_exe PRIVATE
+      glomap_core
+      ${_DAWN_HARNESS_LIB}
+      ${_WEBGPU_DAWN_LIB}
+      /opt/homebrew/lib/libglog.dylib
+      "-lsqlite3"
+      ${ACCELERATE_FW}
+      ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
+      ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
+
+    # [SCALE-PERSIST 2026-08-06] host smoke for the _v2 GPU/CPU exits: real
+    # Dawn chain via aether_dsp_sift_extract_gpu_v2; checks out_scales /
+    # out_orientations are populated and sane. Same TU/link set as the count
+    # contract above.
+    add_executable(gpu_scale_v2_smoke_exe
+      bench/gpu_scale_v2_smoke.cc
+      bench/dsp_sift_gpu_c.cc
+      bench/dsp_sift_c.cc
+      ${AT}/../tools/sift_extract_dawn.cc
+      ${AT}/../tools/sift_pyramid_dawn.cc)
+    set_target_properties(gpu_scale_v2_smoke_exe PROPERTIES CXX_STANDARD 20)
+    target_include_directories(gpu_scale_v2_smoke_exe PRIVATE
+      ${V}/stubs ${AT}/../tools ${AT}/stb
+      ${_DAWN_INC_STATIC} ${_DAWN_INC_GEN})
+    target_compile_definitions(gpu_scale_v2_smoke_exe PRIVATE
+      EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+      AETHER_WGSL_DIR="${AT}/../shaders/wgsl")
+    target_compile_options(gpu_scale_v2_smoke_exe PRIVATE -w)
+    target_link_libraries(gpu_scale_v2_smoke_exe PRIVATE
+      glomap_core
+      ${_DAWN_HARNESS_LIB}
+      ${_WEBGPU_DAWN_LIB}
+      /opt/homebrew/lib/libglog.dylib
+      "-lsqlite3"
+      ${ACCELERATE_FW}
+      ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
+      ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
+
+    # Strict-8192 P1 production-chain gate: the real Dawn extractor and GPU C
+    # entry feed the real official streaming session with out_cap=max_features.
+    add_executable(preclamp_instr_v1_production_integration_exe
+      bench/preclamp_instr_v1_production_integration.cc
+      bench/dsp_sift_gpu_c.cc
+      ${AT}/../tools/sift_extract_dawn.cc
+      ${AT}/../tools/sift_pyramid_dawn.cc
+      ${AT}/../src/sfm/canonical_feature_selector_v1.cc)
+    set_target_properties(preclamp_instr_v1_production_integration_exe
+      PROPERTIES CXX_STANDARD 20)
+    target_include_directories(preclamp_instr_v1_production_integration_exe PRIVATE
+      ${PWOFFICIAL_PIPELINE}/include
+      ${PWOFFICIAL_PIPELINE}/src
+      ${V}/stubs ${AT}/../tools ${AT}/../include ${AT}/stb
+      ${_DAWN_INC_STATIC} ${_DAWN_INC_GEN})
+    target_compile_definitions(preclamp_instr_v1_production_integration_exe PRIVATE
+      EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+      GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7 GLOMAP_CUDA_DISABLED
+      AETHER_FEATURE_SELECTION_ENV_OFFICIAL=1
+      AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+      AETHER_PRECLAMP_INSTR_TEST_HOOKS=1
+      AETHER_WGSL_DIR="${AT}/../shaders/wgsl")
+    target_compile_options(preclamp_instr_v1_production_integration_exe PRIVATE
+      -w -UNDEBUG)
+    target_link_libraries(preclamp_instr_v1_production_integration_exe PRIVATE
+      pwofficial_core
+      ${_DAWN_HARNESS_LIB}
+      ${_WEBGPU_DAWN_LIB}
+      /opt/homebrew/lib/libceres.dylib
+      /opt/homebrew/lib/libglog.dylib
+      "-lsqlite3"
+      ${ACCELERATE_FW}
+      ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
+      ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
+
     # ─── GPU DSP-SIFT: per-frame timing (persistent-harness / pipeline-cache) ──
     # gpu_extract_timing_exe calls aether_dsp_sift_extract_gpu N times on one
     # image to measure cold (frame 0: Dawn init + pipeline compiles) vs warm
@@ -600,6 +858,29 @@ if(BUILD_BENCH)
       ${ACCELERATE_FW}
       ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
       ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
+
+    # Every host extractor target compiles the same portable selector TU and
+    # the self-test-only environment namespace. The official iOS carrier uses
+    # the separate compile definition in the top-level CMake target.
+    foreach(target IN ITEMS
+        clamp_parity_exe
+        gpu_extract_e2e_exe
+        gpu_extract_count_contract_exe
+        gpu_scale_v2_smoke_exe
+        gpu_extract_timing_exe
+        gpu_extract_batch_exe
+        gpu_extract_twoview_exe
+        reproj_e2e_exe)
+      target_sources(${target} PRIVATE
+        ${AT}/../src/sfm/canonical_feature_selector_v1.cc
+        ${AT}/../official_pipeline/src/official_preclamp_instr_v1.cc
+        ${AT}/../src/crypto/sha256.cpp)
+      target_include_directories(${target} PRIVATE
+        ${AT}/../include
+        ${AT}/../official_pipeline/src)
+      target_compile_definitions(${target} PRIVATE
+        AETHER_FEATURE_SELECTION_ENV_SELFTEST=1)
+    endforeach()
   else()
     message(STATUS "gss_parity_exe skipped: prebuilt Dawn not found at "
                    "${AETHER_HOST_BUILD_DIR} (build the top-level aether_cpp "
@@ -680,4 +961,172 @@ if(AETHER_HOST_GLOMAP_BENCH)
     /opt/homebrew/lib/libglog.dylib
     sqlite3)
   target_compile_options(ba_replay_bench_exe PRIVATE -w)
+
+  # [INCREMENTAL-GLOBAL-BA A/B 2026-07-13] HOST replay of a pulled device
+  # sfm_live.db through the streaming ABI (aether_sfm_add_frame_features →
+  # finalize_async), to A/B AETHER_INCREMENTAL_GLOBAL_BA (capture-time rolling
+  # global BA + finalize collapse) against the finalize sparse cloud. Links
+  # glomap_full (COLMAP_SRC includes aether_sfm_c.cc when BUILD_BENCH=OFF).
+  add_executable(sfm_replay_bench_exe ${V}/bench/sfm_replay_bench.cc)
+  target_compile_definitions(sfm_replay_bench_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0)
+  target_include_directories(sfm_replay_bench_exe BEFORE PRIVATE
+    ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+    /opt/homebrew/include /opt/homebrew/include/eigen3)
+  target_link_libraries(sfm_replay_bench_exe
+    glomap_full
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    sqlite3)
+  target_compile_options(sfm_replay_bench_exe PRIVATE -w)
+
+  # [BUILD-GRAPH FIX 2026-08-17] official_gpu_match_host.o used to be a
+  # hand-compiled orphan: the four official_* bench targets below link the
+  # literal ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o but nothing
+  # in the build graph knew how to produce it — `rm -rf build-*` bricked them
+  # with a bare "file not found". This rule reproduces the manual command;
+  # verified by external-symbol parity against the surviving 2026-08-11
+  # object in build-host-fullbench/ (sole diff = one clang-version weak
+  # template instantiation).
+  #   The -D rename is load-bearing: sfm_{replay,regen,finalize_resume}_bench
+  # .cc each carry their own strong no-op stub of
+  # aether_gpu_match_set_preview_fps30, and pwofficial_core only weak-imports
+  # it — linking the .mm's un-renamed strong definition would be a
+  # duplicate-symbol error against those stubs.
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+    COMMAND ${CMAKE_CXX_COMPILER} -std=c++17 -fobjc-arc -O3
+      -I${V}/../../include
+      -Daether_gpu_match_set_preview_fps30=aether_gpu_match_set_preview_fps30_hostimpl
+      -c ${PWOFFICIAL_PIPELINE}/src/official_gpu_match.mm
+      -o ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+    DEPENDS ${PWOFFICIAL_PIPELINE}/src/official_gpu_match.mm
+      ${V}/../../include/aether/sfm/descriptor_residency_policy_v1.h
+    COMMENT "Compiling official_gpu_match_host.o (host Metal matcher for official_* benches)")
+  add_custom_target(official_gpu_match_host_obj
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o)
+
+  # [OFFICIAL-QUADRATIC A/B 2026-07-25] The same host replay driver, linked
+  # against pwofficial_core so the OFFICIAL route's finalize is what runs —
+  # including AddOfficialQuadraticPairs (upstream COLMAP quadratic overlap).
+  # Run twice over one pulled db, changing only the environment:
+  #     (unset)                             -> overlap = 10 (upstream default)
+  #     OFFICIAL_AETHER_QUADRATIC_OVERLAP=0 -> pass disabled (baseline)
+  # and diff the finalize sparse cloud. The GPU matcher/extractor symbols are
+  # weak, so both arms fall back to the identical CPU matcher on host.
+  add_executable(official_replay_bench_exe ${V}/bench/sfm_replay_bench.cc
+    # [TAIL-CACHE HOST 2026-08-02] the Stage-B probe writer TU is part of the
+    # official core's source closure on device; the host bench must link it
+    # too now that official_aether_sfm_c.cc references DiscardPending().
+    ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
+    ${V}/../../src/crypto/sha256.cpp)
+  target_compile_definitions(official_replay_bench_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0
+    AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+    AETHER_REPLAY_LINK_REAL_GPU_MATCH=1)
+  if(AETHER_TAIL_CACHE_FAULT_TEST_HOOKS)
+    target_compile_definitions(official_replay_bench_exe PRIVATE
+      AETHER_TAIL_CACHE_FAULT_TEST_HOOKS=1)
+  endif()
+  target_include_directories(official_replay_bench_exe BEFORE PRIVATE
+    ${PWOFFICIAL_PIPELINE}/include
+    ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+    /opt/homebrew/include /opt/homebrew/include/eigen3)
+  target_link_libraries(official_replay_bench_exe
+    pwofficial_core
+    ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+    "-framework Metal" "-framework Foundation"
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    sqlite3)
+  target_compile_options(official_replay_bench_exe PRIVATE -w)
+
+  # [FLOATER-VERIFY 2026-08-06] Finalize-only resume bench: reruns the product
+  # crash-resume finalize over a REAL device db (+ .arkit_pose_v1 sidecar),
+  # consuming the device's actual on-capture match graph. Same link closure as
+  # official_replay_bench_exe.
+  add_executable(sfm_finalize_resume_bench_exe
+    ${V}/bench/sfm_finalize_resume_bench.cc
+    ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
+    ${V}/../../src/crypto/sha256.cpp)
+  target_compile_definitions(sfm_finalize_resume_bench_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0
+    AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+    AETHER_REPLAY_LINK_REAL_GPU_MATCH=1)
+  target_include_directories(sfm_finalize_resume_bench_exe BEFORE PRIVATE
+    ${PWOFFICIAL_PIPELINE}/include
+    ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+    /opt/homebrew/include /opt/homebrew/include/eigen3)
+  target_link_libraries(sfm_finalize_resume_bench_exe
+    pwofficial_core
+    ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+    "-framework Metal" "-framework Foundation"
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    sqlite3)
+  target_compile_options(sfm_finalize_resume_bench_exe PRIVATE -w)
+
+  # [SCALE-PERSIST 2026-08-06] Host verification driver for keypoint-scale
+  # persistence: real photos (PIL grayscale raws) through the PRODUCTION
+  # aether_sfm_add_frame CPU-extraction path against pwofficial_core. Same
+  # link closure as official_replay_bench_exe.
+  add_executable(sfm_scale_persist_driver_exe
+    ${V}/bench/sfm_scale_persist_driver.cc
+    ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
+    ${V}/../../src/crypto/sha256.cpp)
+  target_compile_definitions(sfm_scale_persist_driver_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0
+    AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+    AETHER_REPLAY_LINK_REAL_GPU_MATCH=1)
+  target_include_directories(sfm_scale_persist_driver_exe BEFORE PRIVATE
+    ${PWOFFICIAL_PIPELINE}/include
+    ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+    /opt/homebrew/include /opt/homebrew/include/eigen3)
+  target_link_libraries(sfm_scale_persist_driver_exe
+    pwofficial_core
+    ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+    "-framework Metal" "-framework Foundation"
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    sqlite3)
+  target_compile_options(sfm_scale_persist_driver_exe PRIVATE -w)
+
+  # [FLOATER-COV 2026-08-07] Per-point BA covariance dump: computes the
+  # conditional 3D-point covariance (colmap covariance.cc, Params::POINTS) on
+  # a saved bin model for offline shell-band AUC validation. Host-only bench,
+  # same link closure as sfm_finalize_resume_bench_exe.
+  add_executable(sfm_point_cov_dump_exe
+    ${V}/bench/sfm_point_cov_dump.cc)
+  target_compile_definitions(sfm_point_cov_dump_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+    GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0)
+  target_include_directories(sfm_point_cov_dump_exe BEFORE PRIVATE
+    ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+    /opt/homebrew/include /opt/homebrew/include/eigen3)
+  target_link_libraries(sfm_point_cov_dump_exe
+    pwofficial_core
+    ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+    "-framework Metal" "-framework Foundation"
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    sqlite3)
+  target_compile_options(sfm_point_cov_dump_exe PRIVATE -w)
+
+  # [BUILD-GRAPH FIX 2026-08-17] Hook the generated .o into every consumer so
+  # a clean build dir produces it before the first link.
+  foreach(_gpu_match_consumer official_replay_bench_exe
+      sfm_finalize_resume_bench_exe sfm_scale_persist_driver_exe
+      sfm_point_cov_dump_exe)
+    add_dependencies(${_gpu_match_consumer} official_gpu_match_host_obj)
+  endforeach()
+
 endif()
