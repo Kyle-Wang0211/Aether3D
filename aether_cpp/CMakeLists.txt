@@ -1127,11 +1127,56 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 endif()
 add_test(NAME test_detector_free_depth_contract
     COMMAND test_detector_free_depth_contract)
-add_executable(aether_lk_gpu_probe tools/aether_lk_gpu_probe.cpp)
-target_link_libraries(aether_lk_gpu_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
-target_include_directories(aether_lk_gpu_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
-target_compile_options(aether_lk_gpu_probe PRIVATE -ffp-contract=off)
-add_executable(aether_fp_probe tools/aether_fp_probe.cpp)
-target_link_libraries(aether_fp_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
-target_include_directories(aether_fp_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
-target_compile_options(aether_fp_probe PRIVATE -ffp-contract=off)
+# 这两个探针原本落在 Dawn 守卫**外面**(其余五个都在 387-837 那个块里),
+# 于是没有 Dawn 的机器上 configure 会直接报 "links to target dawn::webgpu_dawn
+# but the target was not found"。补上守卫。
+if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
+    add_executable(aether_lk_gpu_probe tools/aether_lk_gpu_probe.cpp)
+    target_link_libraries(aether_lk_gpu_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
+    target_include_directories(aether_lk_gpu_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    target_compile_options(aether_lk_gpu_probe PRIVATE -ffp-contract=off)
+    add_executable(aether_fp_probe tools/aether_fp_probe.cpp)
+    target_link_libraries(aether_fp_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
+    target_include_directories(aether_fp_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    target_compile_options(aether_fp_probe PRIVATE -ffp-contract=off)
+endif()
+
+# ─── official_pipeline 契约测试(2026-09-04 注册)──────────────────────────
+# 这三个是 09-02 / 09-04 两把出货刀的守门人。它们此前**只入库、未注册** ⇒ 从不运行,
+# 等于没有守门人。三个都是自带 main() 的自足测试,不依赖 gtest。
+#   global_ptol_policy_test            作用域化 PTOL 策略 + BA 收据(策略头是 header-only)
+#   pair_selection_v2_colmap_parity_test  空间候选逐字复刻 COLMAP SpatialPairGenerator
+#   global_ptol_integration_contract_test 源码文本契约,需 official_pipeline 目录作参数
+foreach(aether_official_test
+        global_ptol_policy_test
+        pair_selection_v2_colmap_parity_test
+        global_ptol_integration_contract_test)
+    if(aether_official_test STREQUAL "pair_selection_v2_colmap_parity_test")
+        add_executable(${aether_official_test}
+            official_pipeline/tests/${aether_official_test}.cc
+            official_pipeline/src/pair_selection_v2.cc)
+    else()
+        add_executable(${aether_official_test}
+            official_pipeline/tests/${aether_official_test}.cc)
+    endif()
+    target_include_directories(${aether_official_test} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/official_pipeline/src)
+    target_compile_options(${aether_official_test} PRIVATE
+        ${AETHER_STRICT_COMPILE_OPTIONS}
+        $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-UNDEBUG;-fexceptions>)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        string(REPLACE "_" "-" aether_official_test_bundle "${aether_official_test}")
+        set_target_properties(${aether_official_test} PROPERTIES
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER
+                "com.aether.tests.${aether_official_test_bundle}"
+            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+            XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO")
+    endif()
+endforeach()
+add_test(NAME global_ptol_policy_test COMMAND global_ptol_policy_test)
+add_test(NAME pair_selection_v2_colmap_parity_test
+    COMMAND pair_selection_v2_colmap_parity_test)
+# 源码文本契约:读的是仓里的源码本身,所以要把 official_pipeline 目录传进去。
+add_test(NAME global_ptol_integration_contract_test
+    COMMAND global_ptol_integration_contract_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/official_pipeline)
