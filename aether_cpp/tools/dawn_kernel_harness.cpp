@@ -761,6 +761,11 @@ bool DawnKernelHarness::init() {
         // adapter lacking f16.
         std::vector<wgpu::FeatureName> feats;
         feats.push_back(wgpu::FeatureName::Subgroups);
+        if (adapter_.HasFeature(wgpu::FeatureName::ShaderModuleCompilationOptions)) {
+            feats.push_back(wgpu::FeatureName::ShaderModuleCompilationOptions);
+            has_strict_math_ = true;
+        }
+        if (const char* sm = std::getenv("AETHER_STRICT_MATH")) strict_math_ = (sm[0] == '1');
         if (adapter_.HasFeature(wgpu::FeatureName::ShaderF16)) {
             feats.push_back(wgpu::FeatureName::ShaderF16);
             has_f16_ = true;
@@ -968,7 +973,8 @@ DawnKernelHarness::load_compute(std::string_view wgsl_source,
     // same static kernels every frame; the '\0' separator keeps two distinct
     // entry points on an identical source from colliding. String compare is
     // O(len) but trivially cheap next to shader compile + pipeline creation.
-    std::string key(entry_point);
+    std::string key(strict_math() ? "S:" : "F:");
+    key.append(entry_point);
     key.push_back('\0');
     key.append(wgsl_source.data(), wgsl_source.size());
     auto it = pipeline_cache_.find(key);
@@ -983,6 +989,9 @@ DawnKernelHarness::load_compute(std::string_view wgsl_source,
         wgsl_source.data(),
         wgsl_source.size(),
     };
+    wgpu::ShaderModuleCompilationOptions compile_opts{};
+    compile_opts.strictMath = true;
+    if (strict_math()) wgsl_desc.nextInChain = &compile_opts;   // chain: descriptor -> WGSL source -> options
     wgpu::ShaderModuleDescriptor shader_desc{};
     shader_desc.nextInChain = &wgsl_desc;
     wgpu::ShaderModule shader = device_.CreateShaderModule(&shader_desc);
@@ -1508,6 +1517,34 @@ void DawnKernelHarness::end_batch() {
     batch_bind_groups_.clear();
 }
 
+DawnKernelHarness::AsyncBatch DawnKernelHarness::end_batch_async() {
+    AsyncBatch b;
+    if (!device_healthy_) return b;
+    wgpu::CommandBuffer commands = batch_encoder_.Finish();
+    queue_.Submit(1, &commands);
+    b.done = std::make_shared<bool>(false);
+    auto flag = b.done;
+    b.future = queue_.OnSubmittedWorkDone(wgpu::CallbackMode::WaitAnyOnly,
+                                          [flag](wgpu::QueueWorkDoneStatus, wgpu::StringView) { *flag = true; });
+    b.valid = true;
+    b.keep = std::move(batch_bind_groups_);
+    batch_encoder_ = nullptr;
+    batch_bind_groups_.clear();
+    return b;
+}
+bool DawnKernelHarness::wait_async(AsyncBatch& b) {
+    if (!b.valid) return device_healthy_;
+    b.valid = false;
+    if (*b.done) { b.keep.clear(); return true; }
+    const wgpu::WaitStatus st = instance_.WaitAny(b.future, runtime_wait_ns());
+    b.keep.clear();
+    if (st != wgpu::WaitStatus::Success || !*b.done) {
+        device_healthy_ = false;
+        std::cerr << "[DawnKernelHarness] async GPU wait timeout/failure (st=" << int(st) << ") — device marked unhealthy\n";
+        return false;
+    }
+    return true;
+}
 wgpu::Buffer DawnKernelHarness::alloc_indirect_args() {
     wgpu::BufferDescriptor desc{
         .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::Indirect |
@@ -1694,6 +1731,9 @@ wgpu::RenderPipeline DawnKernelHarness::load_render_pipeline(
         wgpu::PrimitiveTopology topology) {
     wgpu::ShaderSourceWGSL wgsl_desc{};
     wgsl_desc.code = wgpu::StringView{ wgsl_source.data(), wgsl_source.size() };
+    wgpu::ShaderModuleCompilationOptions compile_opts{};
+    compile_opts.strictMath = true;
+    if (strict_math()) wgsl_desc.nextInChain = &compile_opts;   // chain: descriptor -> WGSL source -> options
     wgpu::ShaderModuleDescriptor shader_desc{};
     shader_desc.nextInChain = &wgsl_desc;
     wgpu::ShaderModule shader = device_.CreateShaderModule(&shader_desc);

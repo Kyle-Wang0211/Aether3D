@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <memory>
 #include <vector>
 
 namespace aether {
@@ -119,6 +120,11 @@ public:
                              const wgpu::Buffer& dst, uint64_t dst_offset,
                              size_t size);
     void end_batch();  // submit + single WaitAny
+    // Asynchronous variant: submit the open batch and return immediately; wait_async() blocks on completion (once).
+    // Lets a producer thread queue GPU work (e.g. a frame's pyramid) while the consumer thread is still busy.
+    struct AsyncBatch { wgpu::Future future{}; std::shared_ptr<bool> done; bool valid = false; std::vector<wgpu::BindGroup> keep; };
+    AsyncBatch end_batch_async();
+    bool wait_async(AsyncBatch& b);
 
     // Bind `bindings` to @group(0) (same order convention as dispatch()) and
     // dispatch an INDIRECT workgroup grid: the (wg_x, wg_y, wg_z) triple is
@@ -226,6 +232,12 @@ public:
     // some Adreno do not (and have an f16-crash history) → the f16 descriptor
     // variant is gated on this and falls back to f32 when false.
     bool has_f16() const { return has_f16_; }
+    // Strict math: chain wgpu::ShaderModuleCompilationOptions{strictMath=true} on every shader module
+    // (Metal: fastMathEnabled=false / mathMode=safe). Off by default (Dawn default = fast math).
+    // Env AETHER_STRICT_MATH=1 at init() turns it on. Bit-exact ports (OpenCV replicas) need it ON.
+    void set_strict_math(bool v) { strict_math_ = v; }
+    bool strict_math() const { return strict_math_ && has_strict_math_; }
+    bool has_strict_math() const { return has_strict_math_; }
 
     // Accessors for advanced callers.
     const wgpu::Instance& instance() const { return instance_; }
@@ -346,6 +358,8 @@ private:
     std::unordered_map<std::string, wgpu::ComputePipeline> pipeline_cache_;
 
     bool has_f16_ = false;  // ShaderF16 was granted at device creation
+    bool has_strict_math_ = false;  // ShaderModuleCompilationOptions granted at device creation
+    bool strict_math_ = false;
     bool init_called_ = false;
     // [GPU-HANG-A1 2026-08-06] Sticky device-health flag; see healthy().
     bool device_healthy_ = true;

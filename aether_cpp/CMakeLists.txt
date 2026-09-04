@@ -412,6 +412,24 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
 
     aether_dawn_hello_sample(aether_dawn_hello          tools/aether_dawn_hello.cpp)           # P1.4 adapter info
     aether_dawn_hello_sample(aether_dawn_hello_compute  tools/aether_dawn_hello_compute.cpp)   # P1.5 compute roundtrip
+    # [2026-09-04] XRSLAM detection on GPU — M1 probe (Harris + GFTT candidates), see ~/Developer/xrslam-gpu-detect/docs/PLAN.md
+    add_library(pw_gpu_frontend STATIC tools/pw_gpu_frontend.cpp)
+    target_link_libraries(pw_gpu_frontend PUBLIC aether_dawn_kernel_harness dawn::webgpu_dawn)
+    target_include_directories(pw_gpu_frontend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    target_compile_options(pw_gpu_frontend PRIVATE -ffp-contract=off)   # CLAHE weight tables must round like OpenCV (no FMA)
+    add_executable(aether_gpufe_dumpcheck tools/aether_gpufe_dumpcheck.cpp)
+    target_link_libraries(aether_gpufe_dumpcheck PRIVATE pw_gpu_frontend
+      $ENV{HOME}/Developer/opencv-401-build-mac/lib/libopencv_video.a $ENV{HOME}/Developer/opencv-401-build-mac/lib/libopencv_imgproc.a $ENV{HOME}/Developer/opencv-401-build-mac/lib/libopencv_core.a z "-framework Accelerate")
+    target_include_directories(aether_gpufe_dumpcheck PRIVATE $ENV{HOME}/Developer/opencv-401-build-mac $ENV{HOME}/Developer/opencv-401-src/include $ENV{HOME}/Developer/opencv-401-src/modules/core/include $ENV{HOME}/Developer/opencv-401-src/modules/imgproc/include $ENV{HOME}/Developer/opencv-401-src/modules/video/include)
+    target_compile_options(aether_gpufe_dumpcheck PRIVATE -ffp-contract=off)
+    add_executable(aether_gpufe_selftest tools/aether_gpufe_selftest.cpp)
+    target_link_libraries(aether_gpufe_selftest PRIVATE pw_gpu_frontend)
+    add_executable(aether_sum9_probe tools/aether_sum9_probe.cpp)
+    target_link_libraries(aether_sum9_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
+    target_include_directories(aether_sum9_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    add_executable(aether_gftt_gpu_probe tools/aether_gftt_gpu_probe.cpp)
+    target_link_libraries(aether_gftt_gpu_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
+    target_include_directories(aether_gftt_gpu_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
     aether_dawn_hello_sample(aether_dawn_hello_triangle tools/aether_dawn_hello_triangle.cpp)  # P1.7 graphics roundtrip (PPM out)
 
     # ─── Phase 6.3 / Plan B refinement — reusable Dawn kernel-smoke harness ─
@@ -1109,3 +1127,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 endif()
 add_test(NAME test_detector_free_depth_contract
     COMMAND test_detector_free_depth_contract)
+add_executable(aether_lk_gpu_probe tools/aether_lk_gpu_probe.cpp)
+target_link_libraries(aether_lk_gpu_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
+target_include_directories(aether_lk_gpu_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+target_compile_options(aether_lk_gpu_probe PRIVATE -ffp-contract=off)
+add_executable(aether_fp_probe tools/aether_fp_probe.cpp)
+target_link_libraries(aether_fp_probe PRIVATE aether_dawn_kernel_harness dawn::webgpu_dawn)
+target_include_directories(aether_fp_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+target_compile_options(aether_fp_probe PRIVATE -ffp-contract=off)
