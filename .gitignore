@@ -47,9 +47,11 @@ aether_cpp/test_data/splat/garden_*.splat
 build-dev/
 
 # CMake build dirs (host + iOS device + iOS simulator)
-aether_cpp/build/
-aether_cpp/build-ios-device/
-aether_cpp/build-ios-sim/
+# 通配:任何 aether_cpp/build* 构建树都不入库。
+# 2026-09-04:build_codex_fix/ 曾因为这里只逐个点名 build/ build-ios-device/
+# build-ios-sim/ 而被自然跟踪进来(991 个文件),让 git status 要跑 25 分钟、
+# push 要十几分钟。改成通配,新开的构建目录不会再重蹈。
+aether_cpp/build*/
 
 # Distribution artifacts (iOS xcframework, etc.) — regeneratable via scripts/build_ios_xcframework.sh
 dist/
