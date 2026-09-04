@@ -224,6 +224,37 @@ set_target_properties(pwofficial_core PROPERTIES
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN YES)
 
+# PTOL policy and production-wiring regression gates. Keep these as persistent
+# CTest targets instead of ad-hoc shell compiles. The policy target explicitly
+# carries -ffast-math because the shipping iOS core gets that mode from its
+# toolchain; non-finite parsing must remain correct under the same optimizer
+# assumptions on every host verification build.
+include(CTest)
+if(BUILD_TESTING)
+  find_package(Threads REQUIRED)
+  add_executable(global_ptol_policy_test
+    ${PWOFFICIAL_PIPELINE}/tests/global_ptol_policy_test.cc)
+  target_include_directories(global_ptol_policy_test PRIVATE
+    ${PWOFFICIAL_PIPELINE}/src)
+  target_compile_options(global_ptol_policy_test PRIVATE
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-O3>
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-ffast-math>
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall>
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wextra>
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Werror>)
+  target_link_libraries(global_ptol_policy_test PRIVATE Threads::Threads)
+  add_test(NAME global_ptol_policy_test COMMAND global_ptol_policy_test)
+
+  add_executable(global_ptol_integration_contract_test
+    ${PWOFFICIAL_PIPELINE}/tests/global_ptol_integration_contract_test.cc)
+  target_compile_options(global_ptol_integration_contract_test PRIVATE
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall>
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wextra>
+    $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Werror>)
+  add_test(NAME global_ptol_integration_contract_test
+    COMMAND global_ptol_integration_contract_test ${PWOFFICIAL_PIPELINE})
+endif()
+
 # The phone-window bridge/writer is an isolated private object alongside the
 # byte-frozen official core archive; it is never inserted into or used to
 # rebuild that archive. Enabling this production-only overlay is fail-fast:

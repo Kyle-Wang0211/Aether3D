@@ -230,15 +230,24 @@ int main(int argc, char** argv) {
     return 1;
   }
 #endif
-  // A/B knob: Lowe ratio on the temporal/live match path. Default 0.7 = the
-  // aether_sfm_options_default value (aether_sfm_c.cc:4429), so omitting the
-  // flag reproduces the untouched baseline byte-for-byte.
+  // A/B knob: Lowe ratio on the temporal/live match path.
+  // [RATIO-FIDELITY 2026-08-12 用户签] 默认从硬编码 0.7 改为**哨兵 -1 = 不覆盖**,
+  // 即继承所链核的 aether_sfm_options_default。原先的 0.7 抄自**退役旧核**
+  // (bench/aether_sfm_c.cc:4543),而本 exe 链的是产品核 pwofficial_core,
+  // 其默认是 0.8f(official_aether_sfm_c.cc)——与上游 COLMAP
+  // (colmap-src/colmap/feature/sift.h:113 `max_ratio = 0.8`,亦即 Lowe 原文
+  // 推荐值)一致。这个抄错的常量让每次 host 复放都比生产更严:同 DB 同位姿下
+  // 0.7 的匹配集是 0.8 的**严格子集**(732/732 配对无一例外),点云只有真机
+  // 交付的 74-82%;改回后两场复现率 100.3%/105%。
+  // 用哨兵而非硬写 0.8:常量再也不会和产品核各自漂移。
   const double ratio =
-      std::atof(ArgS(argc, argv, "--ratio", "0.7").c_str());
+      std::atof(ArgS(argc, argv, "--ratio", "-1").c_str());
 
   const char* incr = std::getenv("AETHER_INCREMENTAL_GLOBAL_BA");
-  std::printf("REPLAY src_db=%s poses=%s out=%s k=%d max_frames=%d ratio=%.3f "
-              "AETHER_INCREMENTAL_GLOBAL_BA=%s\n",
+  // ratio_arg=-1 表示"未覆盖";真正生效的值见下面的 RATIO effective= 行
+  // (必须在 options_default 之后才知道)。
+  std::printf("REPLAY src_db=%s poses=%s out=%s k=%d max_frames=%d "
+              "ratio_arg=%.3f AETHER_INCREMENTAL_GLOBAL_BA=%s\n",
               src_db.c_str(), poses_path.c_str(), out_dir.c_str(), k,
               max_frames, ratio, incr ? incr : "(unset)");
   std::fflush(stdout);
@@ -299,7 +308,12 @@ int main(int argc, char** argv) {
 #endif
   opt.use_gpu_extract = 0;
   opt.k_neighbors = k;     // production capture uses 12 (spatial-first)
-  opt.match_max_ratio = (float)ratio;  // A/B: temporal-path Lowe ratio
+  // ratio<0(默认)= 不覆盖,保留核自带的生产默认;>0 才是显式 A/B 覆盖。
+  if (ratio > 0) opt.match_max_ratio = (float)ratio;
+  const double ratio_eff = opt.match_max_ratio;   // 实际生效值,进 REPLAY 行留证
+  std::printf("RATIO effective=%.3f source=%s\n", ratio_eff,
+              ratio > 0 ? "cli-override" : "core-default");
+  std::fflush(stdout);
   const std::string sess_db = out_dir + "/session.db";
   std::remove(sess_db.c_str());
   aether_sfm_session_t* s = nullptr;

@@ -31,6 +31,10 @@ extern "C" int aether_dsp_sift_extract_gpu_v2(const uint8_t*, int, int, int,
   return -1;  // unavailable → add_frame stays on the CPU _v2 route
 }
 extern "C" void aether_sed_last_stages(double*, int) {}
+// [2026-08-13] 两个后来新增的 weak 引用,本 bench 的桩集是从旧版 replay bench
+// 抄的,漏了它们 ⇒ 链接缺符号。与 sfm_replay_bench.cc 同款 no-op 桩。
+extern "C" void aether_gpu_match_set_preview_fps30(int) {}
+extern "C" const char* aether_sed_last_fail_reason(void) { return nullptr; }
 
 static void WritePly(const std::string& path, const aether_sfm_point_t* pts,
                      int n) {

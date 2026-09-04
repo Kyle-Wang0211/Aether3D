@@ -138,6 +138,11 @@ int main(int argc, char** argv) {
   const std::string out_dir = argv[2];
   const int k = std::atoi(ArgS(argc, argv, "--k", "12").c_str());
   const int max_frames = std::atoi(ArgS(argc, argv, "--max-frames", "0").c_str());
+  // 生产 Dart create() 显式 matchMaxRatio=0.8;--ratio<0 = 保持 options 默认。
+  const double ratio = std::atof(ArgS(argc, argv, "--ratio", "-1").c_str());
+  // --resume-db=<path>:跳过喂帧,把既有 db 复制进 out_dir 后直接 finalize
+  // (=产品"重新重建"路径;meta 仍需提供帧路径供真彩取色)。
+  const std::string resume_db = ArgS(argc, argv, "--resume-db", "");
 
   std::vector<FrameMeta> frames;
   {
@@ -161,8 +166,8 @@ int main(int argc, char** argv) {
       if (max_frames > 0 && static_cast<int>(frames.size()) >= max_frames) break;
     }
   }
-  std::printf("REGEN meta=%s out=%s frames=%zu k=%d\n", meta_path.c_str(),
-              out_dir.c_str(), frames.size(), k);
+  std::printf("REGEN meta=%s out=%s frames=%zu k=%d ratio=%.2f\n", meta_path.c_str(),
+              out_dir.c_str(), frames.size(), k, ratio > 0 ? ratio : -1.0);
   std::fflush(stdout);
 
   aether_sfm_options_t opt;
@@ -170,9 +175,31 @@ int main(int argc, char** argv) {
   opt.use_gpu_match = 0;
   opt.use_gpu_extract = 0;
   opt.k_neighbors = k;
+  if (ratio > 0) opt.match_max_ratio = (float)ratio;
+  if (!resume_db.empty() && !frames.empty()) {
+    // resume 不喂帧,会话尺寸取自 meta(Dart create 同款显式设置)。
+    std::vector<uint8_t> probe;
+    int pw = 0, ph = 0;
+    if (DecodeGray(frames[0].path.c_str(), &probe, &pw, &ph)) {
+      opt.image_width = pw;
+      opt.image_height = ph;
+    }
+  }
 
   const std::string sess_db = out_dir + "/sfm_live.db";
   std::remove(sess_db.c_str());
+  if (!resume_db.empty()) {
+    // db + .arkit_pose_v1 侧车(RebuildFrameRecordsForResume 的身份链)。
+    for (const char* suffix : {"", ".arkit_pose_v1"}) {
+      std::ifstream in(resume_db + suffix, std::ios::binary);
+      std::ofstream out(sess_db + suffix, std::ios::binary);
+      if (!in || !out) {
+        std::fprintf(stderr, "resume-db copy failed (%s)\n", suffix);
+        return 1;
+      }
+      out << in.rdbuf();
+    }
+  }
   aether_sfm_session_t* s = nullptr;
   aether_sfm_result_t rc = aether_sfm_create(sess_db.c_str(), &opt, &s);
   if (rc != AETHER_SFM_OK) {
@@ -182,6 +209,7 @@ int main(int argc, char** argv) {
 
   const auto t0 = std::chrono::steady_clock::now();
   int fed = 0;
+  if (!resume_db.empty()) goto finalize_now;
   for (const auto& m : frames) {
     std::vector<uint8_t> gray;
     int w = 0, h = 0;
@@ -203,9 +231,11 @@ int main(int argc, char** argv) {
       std::fflush(stdout);
     }
   }
+finalize_now:;
   const auto t1 = std::chrono::steady_clock::now();
 
   char fj[1024] = {0};
+  {
   rc = aether_sfm_finalize_async(s, fj, sizeof(fj));
   if (rc != AETHER_SFM_OK) {
     std::fprintf(stderr, "finalize_async failed: %d\n", rc);
@@ -220,6 +250,7 @@ int main(int argc, char** argv) {
   if (status == AETHER_SFM_FINALIZE_ERROR) {
     std::fprintf(stderr, "finalize refinement failed\n");
     return 1;
+  }
   }
   const auto t2 = std::chrono::steady_clock::now();
 
