@@ -29,6 +29,7 @@
 
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 
+#include <atomic>
 #include <cstdlib>
 
 #include "colmap/estimators/alignment.h"
@@ -41,6 +42,7 @@
 #include "colmap/util/threading.h"
 
 #include "gravity_ba_prior_v1.h"
+#include "aether_ba_solve_policy_v1.h"
 
 #include <iomanip>
 
@@ -53,6 +55,9 @@
 
 #include <Eigen/Geometry>  // Eigen::umeyama
 
+namespace aether::official::ba {
+}  // namespace aether::official::ba
+
 namespace colmap {
 
 // [AETHER FINALIZE-SEGMENTS 2026-07-11] Telemetry-only stash of the LAST ceres
@@ -62,6 +67,39 @@ namespace colmap {
 // this stash and persists it into official_finalize_segments.json. Written after every
 // SolveWithGpuFallback; zero effect on the solve itself.
 namespace {
+// [ANALYTIC-JAC-PROBE 2026-08-13 诊断旋钮,默认关] 上游 CreateCameraCostFunction
+// 内部有 `if constexpr`:当 functor 是 ReprojErrorCostFunctor /
+// ReprojErrorConstantPoseCostFunctor 且相机模型 has_img_from_cam_with_jac 时,
+// **自动换成解析 Jacobian 版**(reprojection_error.h:456)。我们的相机是 PINHOLE
+// (has_jac=true)且单相机走平凡帧路径 ⇒ 解析版应当**早已在跑**。
+// 但"读代码得出的结论"不算数(08-13 假 config_echo 教训),这个开关强制走自动
+// 微分,用 ba_rounds 的 jac_s 实测差值证明解析版确实在生效、并量出它值多少。
+// OFFICIAL_AETHER_BA_FORCE_AUTODIFF=1 开启;默认行为逐位不变。
+bool ForceAutoDiffJacobians() {
+  static const bool cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_BA_FORCE_AUTODIFF");
+    return e != nullptr && e[0] == '1';
+  }();
+  return cached;
+}
+
+// CreateCameraCostFunction 的"永远自动微分"孪生体:同一套 model_id 分发,
+// 但不走那段 if constexpr,直接 Create()。仅供上面的诊断旋钮使用。
+template <template <typename> class CostFunctor, typename... Args>
+ceres::CostFunction* CreateAutoDiffOnlyCameraCostFunction(
+    const CameraModelId camera_model_id, Args&&... args) {
+  switch (camera_model_id) {
+#define CAMERA_MODEL_CASE(CameraModel) \
+  case CameraModel::model_id:          \
+    return CostFunctor<CameraModel>::Create(std::forward<Args>(args)...);
+
+    CAMERA_MODEL_SWITCH_CASES
+
+#undef CAMERA_MODEL_CASE
+  }
+  return nullptr;
+}
+
 std::mutex& AetherLastSolveMutex() {
   static std::mutex m;
   return m;
@@ -72,41 +110,8 @@ std::string g_aether_last_dense_backend;   // e.g. "LAPACK" (Accelerate) / "EIGE
 int g_aether_last_mixed = 0;
 int g_aether_last_threads = 0;
 
-// [AETHER BA-RING 2026-07-26, signed] Per-solve observation ring (see the
-// append site in the stash block). Guarded by AetherLastSolveMutex; the
-// finalize worker resets before the block it wants attributed and drains
-// after via the extern "C" accessors below.
-struct AetherBaSolveRec {
-  double total_s = 0, jac_s = 0, lin_s = 0, res_s = 0;
-  int iters = 0, term = 0, threads = 0;
-};
-constexpr int kAetherBaRingCap = 32;
-AetherBaSolveRec g_aether_ba_ring[kAetherBaRingCap];
-int g_aether_ba_ring_count = 0;
-
-extern "C" void aether_ba_ring_reset(void) {
-  std::lock_guard<std::mutex> lk(AetherLastSolveMutex());
-  g_aether_ba_ring_count = 0;
-}
-extern "C" int aether_ba_ring_count(void) {
-  std::lock_guard<std::mutex> lk(AetherLastSolveMutex());
-  return g_aether_ba_ring_count;
-}
-extern "C" int aether_ba_ring_get(int i, double* total_s, double* jac_s,
-                                  double* lin_s, double* res_s, int* iters,
-                                  int* term, int* threads) {
-  std::lock_guard<std::mutex> lk(AetherLastSolveMutex());
-  if (i < 0 || i >= g_aether_ba_ring_count) return 0;
-  const AetherBaSolveRec& r = g_aether_ba_ring[i];
-  if (total_s) *total_s = r.total_s;
-  if (jac_s) *jac_s = r.jac_s;
-  if (lin_s) *lin_s = r.lin_s;
-  if (res_s) *res_s = r.res_s;
-  if (iters) *iters = r.iters;
-  if (term) *term = r.term;
-  if (threads) *threads = r.threads;
-  return 1;
-}
+// Monotonic process identity only. Receipt storage itself is session-owned.
+std::atomic<uint64_t> g_aether_ba_solve_seq{1};
 
 // [AETHER DENSE-BACKEND TIER ROUTING 2026-07-12] Default num_images threshold
 // at/above which DENSE_SCHUR routes its dense Cholesky to LAPACK (Accelerate)
@@ -427,12 +432,10 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
   // host 测量旋钮(近似解/松绑类 —— 改结果,上桌必须用户签质量带):
   //   OFFICIAL_AETHER_EXTRA_SPSE=1  ITERATIVE_SCHUR + SPSE 预条件子
   //   OFFICIAL_AETHER_EXTRA_SPSE=2  SPSE 作线性求解器(PoBA 形态,Ceres 文档配方)
-  //   OFFICIAL_AETHER_GLOBAL_PTOL=<x> parameter_tolerance 覆盖(colmap#2703
-  //   维护者点名候选;上游硬编码 0.0)
-  if (const char* ptol = std::getenv("OFFICIAL_AETHER_GLOBAL_PTOL")) {
-    const double v = std::atof(ptol);
-    if (v > 0.0) custom_solver_options.parameter_tolerance = v;
-  }
+  //   OFFICIAL_AETHER_GLOBAL_PTOL=<x> is applied immediately before a
+  //   ceres::Solve only while an explicit ScopedGlobalBaSolveV1 is active.
+  //   Keeping the override out of this shared local/global option factory is
+  //   what prevents the global experiment from leaking into local BA.
   if (const char* spse = std::getenv("OFFICIAL_AETHER_EXTRA_SPSE")) {
     custom_solver_options.linear_solver_type = ceres::ITERATIVE_SCHUR;
     if (spse[0] == '2') {
@@ -930,15 +933,56 @@ std::shared_ptr<CeresBundleAdjustmentSummary> CreateSummaryAndLogFailure(
   return summary;
 }
 
+void AppendAetherBaSolveReceiptV1(
+    uint64_t solve_seq,
+    aether::official::ba::SolveScopeV1 scope,
+    const aether::official::ba::GlobalPtolResolutionV1& ptol,
+    bool gpu_fallback,
+    const ceres::Solver::Summary& ceres_summary) {
+  aether::official::ba::BaSolveReceiptV1 r;
+  r.total_s = ceres_summary.total_time_in_seconds;
+  r.jac_s = ceres_summary.jacobian_evaluation_time_in_seconds;
+  r.lin_s = ceres_summary.linear_solver_time_in_seconds;
+  r.res_s = ceres_summary.residual_evaluation_time_in_seconds;
+  r.pre_s = ceres_summary.preprocessor_time_in_seconds;
+  r.min_s = ceres_summary.minimizer_time_in_seconds;
+  r.post_s = ceres_summary.postprocessor_time_in_seconds;
+  r.iters = ceres_summary.num_successful_steps +
+            ceres_summary.num_unsuccessful_steps;
+  r.term = static_cast<int>(ceres_summary.termination_type);
+  r.threads = ceres_summary.num_threads_used;
+  r.solve_seq = solve_seq;
+  r.scope = scope;
+  r.ptol = ptol;
+  r.gpu_fallback = gpu_fallback;
+  if (!aether::official::ba::RecordBaSessionSolveReceiptV1(r)) {
+    LOG(ERROR) << "[AETHER][PTOL] unbound ceres::Solve receipt seq="
+               << solve_seq << " scope="
+               << aether::official::ba::SolveScopeNameV1(scope);
+  }
+}
+
 ceres::Solver::Summary SolveWithGpuFallback(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
     ceres::Problem* problem) {
-  const ceres::Solver::Options solver_options =
+  ceres::Solver::Options solver_options =
       options.ceres->CreateSolverOptions(config, *problem);
+  const aether::official::ba::SolveScopeV1 scope =
+      aether::official::ba::CurrentBaSolveScopeV1();
+  const aether::official::ba::GlobalPtolResolutionV1 ptol =
+      aether::official::ba::ResolveGlobalPtolV1(
+          std::getenv("OFFICIAL_AETHER_GLOBAL_PTOL"),
+          scope,
+          solver_options.parameter_tolerance);
+  solver_options.parameter_tolerance = ptol.effective;
 
   ceres::Solver::Summary ceres_summary;
+  const uint64_t solve_seq =
+      g_aether_ba_solve_seq.fetch_add(1, std::memory_order_relaxed);
   ceres::Solve(solver_options, problem, &ceres_summary);
+  AppendAetherBaSolveReceiptV1(
+      solve_seq, scope, ptol, /*gpu_fallback=*/false, ceres_summary);
 
   if (ceres_summary.termination_type == ceres::FAILURE &&
       options.ceres->use_gpu) {
@@ -951,9 +995,19 @@ ceres::Solver::Summary SolveWithGpuFallback(
       auto cpu_options =
           std::make_shared<CeresBundleAdjustmentOptions>(*options.ceres);
       cpu_options->use_gpu = false;
-      const ceres::Solver::Options cpu_solver_options =
+      ceres::Solver::Options cpu_solver_options =
           cpu_options->CreateSolverOptions(config, *problem);
+      const aether::official::ba::GlobalPtolResolutionV1 cpu_ptol =
+          aether::official::ba::ResolveGlobalPtolV1(
+              std::getenv("OFFICIAL_AETHER_GLOBAL_PTOL"),
+              scope,
+              cpu_solver_options.parameter_tolerance);
+      cpu_solver_options.parameter_tolerance = cpu_ptol.effective;
+      const uint64_t cpu_solve_seq =
+          g_aether_ba_solve_seq.fetch_add(1, std::memory_order_relaxed);
       ceres::Solve(cpu_solver_options, problem, &ceres_summary);
+      AppendAetherBaSolveReceiptV1(
+          cpu_solve_seq, scope, cpu_ptol, /*gpu_fallback=*/true, ceres_summary);
     }
   }
 
@@ -988,24 +1042,6 @@ ceres::Solver::Summary SolveWithGpuFallback(
             ceres_summary.dense_linear_algebra_library_type);
     g_aether_last_mixed = ceres_summary.mixed_precision_solves_used ? 1 : 0;
     g_aether_last_threads = ceres_summary.num_threads_used;
-    // [AETHER BA-RING 2026-07-26, signed] Per-solve ring for the finalize
-    // per-round attribution (T-timer follow-up to finalize_split): the
-    // reader resets before stage-1/stage-2 and drains after, so live
-    // local-BA solves written in between are simply overwritten noise.
-    // Settles the "thread tax vs round-position iteration count" confound
-    // and prices ftol early-stop behaviour for the round-allocation
-    // sign-off. Pure observation.
-    if (g_aether_ba_ring_count < kAetherBaRingCap) {
-      AetherBaSolveRec& r = g_aether_ba_ring[g_aether_ba_ring_count++];
-      r.total_s = ceres_summary.total_time_in_seconds;
-      r.jac_s = ceres_summary.jacobian_evaluation_time_in_seconds;
-      r.lin_s = ceres_summary.linear_solver_time_in_seconds;
-      r.res_s = ceres_summary.residual_evaluation_time_in_seconds;
-      r.iters = ceres_summary.num_successful_steps +
-                ceres_summary.num_unsuccessful_steps;
-      r.term = static_cast<int>(ceres_summary.termination_type);
-      r.threads = ceres_summary.num_threads_used;
-    }
   }
 
   return ceres_summary;
@@ -1152,9 +1188,14 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
             point3D.xyz.data(),
             camera.params.data());
       } else {
+        // [ANALYTIC-JAC-PROBE] 默认分支 = 工厂自动选解析版(PINHOLE 命中);
+        // 诊断开关强制自动微分,用于量解析版的真实收益。
         problem_->AddResidualBlock(
-            CreateCameraCostFunction<ReprojErrorCostFunctor>(camera.model_id,
-                                                             point2D.xy),
+            ForceAutoDiffJacobians()
+                ? CreateAutoDiffOnlyCameraCostFunction<ReprojErrorCostFunctor>(
+                      camera.model_id, point2D.xy)
+                : CreateCameraCostFunction<ReprojErrorCostFunctor>(
+                      camera.model_id, point2D.xy),
             loss_function_.get(),
             point3D.xyz.data(),
             rig_from_world.params.data(),

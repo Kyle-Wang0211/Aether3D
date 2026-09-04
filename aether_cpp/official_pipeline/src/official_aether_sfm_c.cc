@@ -22,6 +22,7 @@
 // placeholders pending the GPU-match (GpuMatch.m) integration.
 
 #include "aether_sfm_c.h"
+#include "aether_ba_solve_policy_v1.h"
 #include "arkit_pose_store_v1.h"
 #include "mandatory_arkit_gravity_v1.h"
 #include "mandatory_gravity_tvg_v1.h"
@@ -312,14 +313,6 @@ extern "C" uint32_t aether_ilr_bundle_trace_query[16];
 extern "C" int aether_ilr_bundle_trace_neighbor_count[16];
 extern "C" int aether_ilr_bundle_trace_neighbor_total[16];
 extern "C" uint32_t aether_ilr_bundle_trace_neighbors[16][15];
-// [AETHER BA-RING 2026-07-26] Per-solve ceres Summary ring (defined in
-// official_bundle_adjustment_ceres.cc): reset before an attributed block,
-// drained into a ba_rounds jsonl record after.
-extern "C" void aether_ba_ring_reset(void);
-extern "C" int aether_ba_ring_count(void);
-extern "C" int aether_ba_ring_get(int i, double* total_s, double* jac_s,
-                                  double* lin_s, double* res_s, int* iters,
-                                  int* term, int* threads);
 extern "C" int aether_ba_get_gravity_prior(const char* name,
                                            double* out_gravity_cam_xyz);
 extern "C" int aether_ba_set_gravity_prior(const char* name,
@@ -663,6 +656,11 @@ struct aether_sfm_session {
   std::string image_path;
   bool owns_db_file = false;  // streaming sessions delete their temp db on free
   uint64_t descriptor_residency_nonce = 0;
+  // Per-session PTOL receipt account. Bundle-adjuster calls bind this object
+  // thread-locally; it is never reset process-wide, so concurrent sessions
+  // cannot erase or absorb one another's solve counts.
+  aether::official::ba::BaSessionAggregateAccumulatorV1 ba_ptol_aggregate;
+  aether::official::ba::BaSessionReceiptRingV1 ba_ptol_receipts;
 
   // Streaming state (NULL for pure-batch sessions until finalize fills recon).
   std::shared_ptr<colmap::Database> db;
@@ -776,6 +774,10 @@ struct aether_sfm_session {
   // dominates the raw pair's inlier count (so every downstream ghost/tri-angle
   // gate and min_num_matches=15 stay in force). Weak-texture lever only; useless
   // on view-dependent reflections (the appearance is wrong, epipolar can't fix).
+  // [POSE-DIRECT-E 2026-08-11] 第二级(ARKit 位姿自举)的归因计数。
+  int64_t stat_pose_direct_attempted = 0;  // 饿死对上尝试自举的次数
+  int64_t stat_pose_direct_rescued = 0;    // 自举成功、TVG 过门并落库的对数
+  int64_t stat_pose_direct_inliers = 0;    // Σ 救回对的最终 TVG 内点
   int64_t stat_guided_temporal_attempted = 0;      // guided matcher calls completed
   int64_t stat_guided_temporal_upgraded = 0;       // pairs where guided replaced raw
   int64_t stat_guided_temporal_extra_inliers = 0;  // Σ(guided − raw) TVG inliers on upgrade
@@ -869,6 +871,15 @@ struct aether_sfm_session {
   std::atomic<int> thermal_state{-1};
   int64_t stat_thermal_throttled_frames = 0;  // frames fed with reduced K
   bool throttle_active_logged = false;        // transition-edge logging state
+  // [PHASE2-CONFIG-ECHO 2026-08-12] 真实生效的 phase-2 全局 BA 配置。
+  // 出处:Dart 侧 finalize_phase2 遥测原先把 gftol/gref/giter 写成**硬编码
+  // 字面量**却标 source=config_echo(gref 还停在早已改掉的 5),08-11 夜里
+  // 差点据此误判 ftol 旋钮"没生效"。改为 native 落盘真值,Dart 只做透传。
+  double stat_phase2_gftol = 0.0;   // ba_global_function_tolerance 实际值
+  int stat_phase2_gref = 0;         // ba_global_max_refinements 实际值
+  int stat_phase2_giter = 0;        // ba_global_max_num_iterations 实际值
+  // [FTOL-AB 2026-08-12] 逐场交替臂:-1=关闭,0=base 臂,1=变体臂。
+  int stat_phase2_ftol_ab_arm = -1;
   // [FINALIZE-REMATCH 2026-07-11] Finalize-time starved-frame re-match pass
   // counters (see FinalizeRematchStarvedFrames).
   int64_t stat_finalize_rematch_starved_frames = 0;
@@ -2069,30 +2080,114 @@ void AppendGpuTimestampFrameRecord(aether_sfm_session* s, int frame_id) {
   ++s->gpu_timestamp_next_record_id;
 }
 
+std::string JsonSafe(const char* text, size_t max_len);
+
 // [AETHER BA-RING 2026-07-26, signed] Drain the per-solve ceres ring into a
 // pullable ba_rounds record. Settles the stage-1 "thread tax vs
 // round-position iteration count" confound and prices ftol early-stop for
 // the round-allocation sign-off. Pure observation.
 void AppendBaRingJsonl(aether_sfm_session* s, int stage) {
   try {
-    const int n = aether_ba_ring_count();
-    if (n <= 0) return;
+    // One owner-specific lock produces one immutable snapshot. Timing and
+    // PTOL fields therefore always come from the same Solve receipt even if
+    // another thread appends/resets this session immediately afterwards.
+    const aether::official::ba::BaReceiptRingSnapshotV1 snapshot =
+        s->ba_ptol_receipts.Drain();
+    if (snapshot.count == 0 && snapshot.overwrite_count == 0) return;
     std::string line = "{\"t\":" + std::to_string(EpochMs()) +
                        ",\"type\":\"ba_rounds\",\"stage\":" +
-                       std::to_string(stage) + ",\"solves\":[";
-    char buf[160];
-    for (int i = 0; i < n && i < 12; ++i) {
-      double total_s, jac_s, lin_s, res_s;
-      int iters, term, threads;
-      if (!aether_ba_ring_get(i, &total_s, &jac_s, &lin_s, &res_s, &iters,
-                              &term, &threads)) {
-        break;
-      }
+                       std::to_string(stage) +
+                       ",\"receipt_overwrite_count\":" +
+                       std::to_string(snapshot.overwrite_count) +
+                       ",\"solves\":[";
+    char buf[768];
+    for (std::size_t i = 0; i < snapshot.count; ++i) {
+      const aether::official::ba::BaSolveReceiptV1& receipt =
+          snapshot.receipts[i];
+      const auto& ptol = receipt.ptol;
+      const std::string safe_raw =
+          JsonSafe(ptol.raw.data(), ptol.raw.size() - 1);
       std::snprintf(buf, sizeof(buf),
                     "%s{\"total_s\":%.2f,\"jac_s\":%.2f,\"lin_s\":%.2f,"
-                    "\"res_s\":%.2f,\"iters\":%d,\"term\":%d,\"thr\":%d}",
-                    i ? "," : "", total_s, jac_s, lin_s, res_s, iters, term,
-                    threads);
+                    "\"res_s\":%.2f,\"pre_s\":%.2f,\"min_s\":%.2f,"
+                    "\"post_s\":%.2f,\"solve_seq\":%llu,"
+                    "\"scope\":\"%s\",\"ptol_raw\":%s%s%s,"
+                    "\"ptol_raw_truncated\":%d,\"ptol_requested\":%.17g,"
+                    "\"ptol_parse_status\":\"%s\",\"ptol_base\":%.17g,"
+                    "\"ptol_effective\":%.17g,\"ptol_source\":\"%s\","
+                    "\"ptol_fallback\":\"%s\",\"gpu_fallback\":%d,"
+                    "\"iters\":%d,\"term\":%d,\"thr\":%d}",
+                    i ? "," : "", receipt.total_s, receipt.jac_s,
+                    receipt.lin_s, receipt.res_s, receipt.pre_s,
+                    receipt.min_s, receipt.post_s,
+                    static_cast<unsigned long long>(receipt.solve_seq),
+                    aether::official::ba::SolveScopeNameV1(receipt.scope),
+                    ptol.raw_present ? "\"" : "",
+                    ptol.raw_present ? safe_raw.c_str() : "null",
+                    ptol.raw_present ? "\"" : "",
+                    ptol.raw_truncated ? 1 : 0, ptol.requested,
+                    aether::official::ba::PtolParseStatusNameV1(
+                        ptol.parse_status),
+                    ptol.base, ptol.effective,
+                    aether::official::ba::PtolSourceNameV1(ptol.source),
+                    aether::official::ba::PtolFallbackNameV1(ptol),
+                    receipt.gpu_fallback ? 1 : 0, receipt.iters,
+                    receipt.term, receipt.threads);
+      line += buf;
+    }
+    line += "]}";
+    AppendMatchFailJsonl(s, line);
+  } catch (...) {
+    // telemetry only
+  }
+}
+
+void AppendBaSessionAggregateJsonl(aether_sfm_session* s,
+                                   const char* reason) {
+  try {
+    const aether::official::ba::BaSessionAggregateSnapshotV1 snapshot =
+        aether::official::ba::GetBaSessionAggregateSnapshotV1(
+            &s->ba_ptol_aggregate);
+    const uint64_t accounted = snapshot.scopes[0].solve_count +
+                               snapshot.scopes[1].solve_count;
+    std::string line =
+        "{\"t\":" + std::to_string(EpochMs()) +
+        ",\"type\":\"ba_ptol_session_v1\",\"reason\":\"" +
+        JsonSafe(reason, 32) + "\",\"total_solve_count\":" +
+        std::to_string(snapshot.total_solve_count) +
+        ",\"accounted_solve_count\":" + std::to_string(accounted) +
+        ",\"count_mismatch\":" +
+        std::to_string(accounted == snapshot.total_solve_count ? 0 : 1) +
+        ",\"overflow_semantics\":"
+        "\"ring_overwrite_reset_discard_or_raw_truncate\"" +
+        ",\"scopes\":[";
+    char buf[768];
+    for (std::size_t i = 0; i < snapshot.scopes.size(); ++i) {
+      const auto& aggregate = snapshot.scopes[i];
+      const auto& ptol = aggregate.last;
+      const std::string raw = JsonSafe(ptol.raw.data(), ptol.raw.size() - 1);
+      std::snprintf(
+          buf, sizeof(buf),
+          "%s{\"scope\":\"%s\",\"solve_count\":%llu,"
+          "\"gpu_fallback_count\":%llu,\"raw\":%s%s%s,"
+          "\"raw_truncated\":%d,\"parse\":\"%s\","
+          "\"requested\":%.17g,\"base\":%.17g,\"effective\":%.17g,"
+          "\"source\":\"%s\",\"fallback\":\"%s\","
+          "\"mismatch\":%llu,\"overflow\":%llu}",
+          i == 0 ? "" : ",",
+          aether::official::ba::SolveScopeNameV1(aggregate.scope),
+          static_cast<unsigned long long>(aggregate.solve_count),
+          static_cast<unsigned long long>(aggregate.gpu_fallback_count),
+          aggregate.has_last && ptol.raw_present ? "\"" : "",
+          aggregate.has_last && ptol.raw_present ? raw.c_str() : "null",
+          aggregate.has_last && ptol.raw_present ? "\"" : "",
+          aggregate.has_last && ptol.raw_truncated ? 1 : 0,
+          aether::official::ba::PtolParseStatusNameV1(ptol.parse_status),
+          ptol.requested, ptol.base, ptol.effective,
+          aether::official::ba::PtolSourceNameV1(ptol.source),
+          aether::official::ba::PtolFallbackNameV1(ptol),
+          static_cast<unsigned long long>(aggregate.mismatch),
+          static_cast<unsigned long long>(aggregate.overflow));
       line += buf;
     }
     line += "]}";
@@ -2425,6 +2520,25 @@ constexpr double kSpatialPreliminaryMinInlierRatio = 0.10;
 constexpr double kSpatialFinalMinInlierRatio = 0.25;
 constexpr double kSpatialMatchRatio = 0.8;
 constexpr double kGuidedMaxErrorPixels = 4.0;
+// [POSE-DIRECT-E 2026-08-11] 自举带宽。实测(cap_1786414194441541,86 个相邻帧对、
+// 44,361 个已验证 TVG 内点):由 ARKit 相对位姿直接导出的 E,其 Sampson 残差
+// 中位 2.79px / p99 52px / max 93.8px(尾巴几乎全部来自第 0 帧,ARKit 刚初始化)。
+// 4px 精带只能容纳 63.3% 的真对应,128px 带容纳 100.000% —— 用户铁律"真对应一个
+// 都不能漏"要求后者。宽带只用于**自举**:先在宽带内取候选、由 RANSAC 反解出一个
+// 数据自证的 E,再用标准 4px 精带做最终重配,消歧能力不打折。
+constexpr double kPoseDirectBootstrapErrorPixels = 128.0;
+// [POSE-DIRECT-DIAG] 仅诊断:允许 env 覆盖自举带宽,用于定位单位/尺度问题。
+inline double PoseDirectBandPixels() {
+  static const double cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_POSE_DIRECT_BAND_PX");
+    if (!e || !*e) return kPoseDirectBootstrapErrorPixels;
+    const double v = std::atof(e);
+    return v > 0.0 ? v : kPoseDirectBootstrapErrorPixels;
+  }();
+  return cached;
+}
+// 纯旋转时 E 退化(t≈0),低于此基线不做 pose-direct。
+constexpr double kPoseDirectMinBaselineMeters = 0.02;
 constexpr double kSpatialFinalMaxErrorPixels = 1.0;
 constexpr int kSpatialMaxTotalPairs = 1200;
 // Reserve finish-time budget for 2-of-3 confirmation, neighborhood expansion,
@@ -2542,10 +2656,20 @@ bool PairDraftEnabled() {
 // self-vs-official comparison: the official triangulator never even TRIED the
 // 2-view geometry that makes up most of the delta. Unset keeps upstream's
 // default, so shipped behaviour is byte-identical.
+// [TRI-2VIEW 2026-08-12 用户签决转正] 默认从 true 翻成 **false = 保留 2-view 观测**。
+// 官方选项帮助原文自陈 ignore_two_view_tracks=true "resulting in fewer 3D points
+// than possible"。两个真机 cap 用新尺子(Sim3 对齐 + 观测保留率 + ETH3D 体素归一化
+// + 米制核对)复核,方向与幅度一致、无一项变差:
+//   cap101: 点 +12.8% 观测 +9.2% reproj −1.7% 覆盖R@2cm 98.33% 精度P@2cm 95.09% 米制 0.972
+//   cap60 : 点 +9.5%  观测 +5.5% reproj −1.4% 覆盖R@2cm 98.00% 精度P@2cm 94.91% 米制 0.955
+//   浮点(密度归一)14.03%→13.78% 略降;track≥3 −1.4% 是分母效应(新增点多为 2-view)
+// ⚠️ 此前曾被旧的"逐点最近邻 churn"尺子以 45% 好点消失误判死刑 —— 那把尺子量的是
+// gauge 不是覆盖(见 [[project-pocketworld-pose-direct-e-verdict]])。
+// 逃生阀:OFFICIAL_AETHER_TRI_IGNORE_2VIEW=1 恢复旧行为。
 bool TriIgnoreTwoViewTracks() {
   static const bool cached = [] {
     const char* e = std::getenv("OFFICIAL_AETHER_TRI_IGNORE_2VIEW");
-    return !(e && e[0] == '0');
+    return e && e[0] == '1';
   }();
   return cached;
 }
@@ -2730,6 +2854,30 @@ bool EnrichTargetedEnabled() {
 bool GuidedTemporalEnabled() {
   static const bool cached = [] {
     const char* e = std::getenv("OFFICIAL_AETHER_GUIDED_TEMPORAL");
+    return e && e[0] == '1';
+  }();
+  return cached;
+}
+
+// [POSE-DIRECT-E 2026-08-11] 引导链的第二级,DEFAULT OFF。
+// 第一级(GUIDED_TEMPORAL)要求先用原始匹配估出一个可持久化的 TVG 当种子;
+// 07-12 的设计笔记已点明它够不着"真饿死对"(原始匹配少到估不出几何)。
+// 08-11 真机实测正是这种对:重复木纹/平滑桌面的贴脸帧,原始匹配全被 Lowe 比值
+// 判死(通过率 0.2-0.9% vs 正常 4-9.5%),整帧在库里一条记录都没有 ⇒ finalize
+// 丢帧,违反"拍多少注册多少"。本级用 ARKit 相对位姿直接构造 E 当种子。
+// 原注释担心的 "drift-prone" 已量化:相邻帧的相对位姿误差只体现为 1-9px 的极线
+// 残差(见 kPoseDirectBootstrapErrorPixels),不是方向性错误 —— 且 ARKit 重力
+// 早已是 TVG 的必需先验,这里的假设并不更强。
+// RED LINE 不变:自举出的候选必须再过一遍同样的 mandatory-gravity TVG RANSAC,
+// 且只有严格优于原始时才采纳;下游 tri-angle / reproj / min_num_matches 全部原样。
+// ⚰️ 判死(2026-08-11 用户看真彩并排后签决):任何能救回饿死对的档位都在**污染
+// 交付质量** —— 4px/8px 达成 101/101 但米制尺度崩到 ARKit 的 0.70/0.78(基线 0.965);
+// 128px 米制无损却只多注册 1 帧、体素归一化精度 P@2cm 从 ~99% 掉到 85%;而且同一份
+// db 对照实测**净增 935 个孤立浮点**(4527→5462)。根因:重复纹理上"错位一格"的匹配
+// 同样满足极线约束,极线约束分不出第 N 根木纹和第 N+1 根。**保持默认关,勿复活。**
+bool PoseDirectEEnabled() {
+  static const bool cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_POSE_DIRECT_E");
     return e && e[0] == '1';
   }();
   return cached;
@@ -3452,7 +3600,10 @@ bool PrepareGuidedGeometry(const aether_sfm_session* s,
                            std::array<float, 9>* matrix_ab,
                            std::array<float, 9>* matrix_ba,
                            int* guide_mode,
-                           float* max_residual) {
+                           float* max_residual,
+                           // [POSE-DIRECT-E 2026-08-11] 自举级要更宽的带;默认值
+                           // 保持出货口径,既有两个调用点逐字节不变。
+                           double max_error_pixels = kGuidedMaxErrorPixels) {
   if (!s || !xy_a || !xy_b || !matrix_ab || !matrix_ba || !guide_mode ||
       !max_residual) {
     return false;
@@ -3479,8 +3630,8 @@ bool PrepareGuidedGeometry(const aether_sfm_session* s,
     // Match COLMAP's native two-view convention for unequal cameras: average
     // each camera's pixel-to-normalized threshold.
     const double normalized_error =
-        0.5 * (a.camera.CamFromImgThreshold(kGuidedMaxErrorPixels) +
-               b.camera.CamFromImgThreshold(kGuidedMaxErrorPixels));
+        0.5 * (a.camera.CamFromImgThreshold(max_error_pixels) +
+               b.camera.CamFromImgThreshold(max_error_pixels));
     *max_residual = static_cast<float>(normalized_error * normalized_error);
     *guide_mode = 1;
     return true;
@@ -3490,8 +3641,7 @@ bool PrepareGuidedGeometry(const aether_sfm_session* s,
     CopyPixelPoints(b.points, xy_b);
     CopyMatrixRowMajor(*geometry.F, matrix_ab);
     CopyMatrixRowMajor(geometry.F->transpose(), matrix_ba);
-    *max_residual = static_cast<float>(kGuidedMaxErrorPixels *
-                                       kGuidedMaxErrorPixels);
+    *max_residual = static_cast<float>(max_error_pixels * max_error_pixels);
     *guide_mode = 1;
     return true;
   }
@@ -3505,12 +3655,31 @@ bool PrepareGuidedGeometry(const aether_sfm_session* s,
     CopyPixelPoints(b.points, xy_b);
     CopyMatrixRowMajor(*geometry.H, matrix_ab);
     CopyMatrixRowMajor(inverse, matrix_ba);
-    *max_residual = static_cast<float>(kGuidedMaxErrorPixels *
-                                       kGuidedMaxErrorPixels);
+    *max_residual = static_cast<float>(max_error_pixels * max_error_pixels);
     *guide_mode = 2;
     return true;
   }
   return false;
+}
+
+// [POSE-DIRECT-E 2026-08-11] 用两帧的 ARKit CamFromWorld 直接构造引导用的
+// CALIBRATED 几何(E = [t]_x R,cam_b_from_cam_a)。只做"候选搜索区域"的种子,
+// 绝不作为最终几何落库 —— 最终仍由 mandatory-gravity TVG RANSAC 从真实对应重估。
+bool BuildPoseDirectGuideGeometry(const FrameRecord& a,
+                                  const FrameRecord& b,
+                                  colmap::TwoViewGeometry* out) {
+  if (!out || !a.has_pose || !b.has_pose) return false;
+  const colmap::Rigid3d b_from_a =
+      b.cam_from_world * colmap::Inverse(a.cam_from_world);
+  // ⚠️ COLMAP 4.x 的 Rigid3d 访问器是成员函数(重力 RA 那次已踩过一次)。
+  if (!b_from_a.translation().allFinite()) return false;
+  // 纯旋转 ⇒ E 退化,交给既有路径(此时也没有视差可三角化)。
+  if (b_from_a.translation().norm() < kPoseDirectMinBaselineMeters) return false;
+  const Eigen::Matrix3d essential = colmap::EssentialMatrixFromPose(b_from_a);
+  if (!essential.allFinite()) return false;
+  out->config = colmap::TwoViewGeometry::CALIBRATED;
+  out->E = essential;
+  return true;
 }
 
 // Geometry-guided re-match core. Shared by the spatial-enrichment verify chain
@@ -3523,7 +3692,8 @@ bool RunGuidedMatch(aether_sfm_session* s,
                     const FrameRecord& a,
                     const FrameRecord& b,
                     const colmap::TwoViewGeometry& geometry,
-                    colmap::FeatureMatches* guided_matches) {
+                    colmap::FeatureMatches* guided_matches,
+                    double max_error_pixels = kGuidedMaxErrorPixels) {
   if (!s || !guided_matches || !s->options.use_gpu_match ||
       aether_gpu_match_gemm_pairs_guided == nullptr) {
     return false;
@@ -3536,7 +3706,8 @@ bool RunGuidedMatch(aether_sfm_session* s,
   int guide_mode = 0;
   float max_residual = 0.0f;
   if (!PrepareGuidedGeometry(s, a, b, geometry, &xy_a, &xy_b, &matrix_ab,
-                             &matrix_ba, &guide_mode, &max_residual)) {
+                             &matrix_ba, &guide_mode, &max_residual,
+                             max_error_pixels)) {
     return false;
   }
 
@@ -6923,9 +7094,13 @@ int LiveLocalBaMtFloorOverride() {  // <0 → don't touch
 aether_sfm_result_t RunIncremental(
     const std::string& db_path, const std::string& image_path,
     const aether_sfm_options_t& opts,
+    aether::official::ba::BaSessionAggregateAccumulatorV1* ba_ptol_aggregate,
+    aether::official::ba::BaSessionReceiptRingV1* ba_ptol_receipts,
     std::shared_ptr<colmap::ReconstructionManager>* out_manager,
     std::shared_ptr<const colmap::Reconstruction>* out_recon, char* out_json,
     int out_cap, bool local_only = false) {
+  aether::official::ba::ScopedBaSessionAggregateBindingV1 ba_session_binding(
+      ba_ptol_aggregate, ba_ptol_receipts);
   try {
     auto pipeline_opts = std::make_shared<colmap::IncrementalPipelineOptions>();
     pipeline_opts->triangulation.ignore_two_view_tracks = TriIgnoreTwoViewTracks();
@@ -7068,7 +7243,7 @@ void RefineFailClosed(aether_sfm_session* s, const char* why) {
 // RefineReconstruction-vs-TriangulateReconstruction choice is a SEPARATE algorithmic
 // decision, intentionally left unchanged here for a controlled A/B.
 std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
-    const aether_sfm_session* s) {
+    aether_sfm_session* s) {
   auto popts = std::make_shared<colmap::IncrementalPipelineOptions>();
   popts->triangulation.ignore_two_view_tracks = TriIgnoreTwoViewTracks();
   popts->min_num_matches = 15;
@@ -7084,6 +7259,25 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
     const double v = std::atof(e);
     if (v > 0.0) popts->ba_global_function_tolerance = v;
   }
+  // [FTOL-AB 2026-08-12 用户签] 逐场交替臂。AB_PERIOD(每 N 帧翻相位)是**匹配
+  // 路径**的臂,且注释明写只对无状态旋钮有效 —— ftol 是 finalize 一次性旋钮,
+  // 逐帧翻相位对它无意义。这里按 capture 定臂:同一作品全程同臂,不同作品交替。
+  // 选臂用 db 路径(含 cap_<μs>)的 FNV-1a 奇偶 —— 无状态、可复现、免落盘计数
+  // 器;拍摄时刻本身随机,长期约 50/50。臂号进 segments,由 Dart 透传遥测。
+  // 与上面的固定 FTOL 旋钮互斥:固定旋钮已设值时不参与交替(臂=-1)。
+  if (const char* e = std::getenv("OFFICIAL_AETHER_BA_GLOBAL_FTOL_AB")) {
+    const double v = std::atof(e);
+    if (v > 0.0 && !std::getenv("OFFICIAL_AETHER_BA_GLOBAL_FTOL")) {
+      uint64_t h = 1469598103934665603ULL;
+      for (const char c : s->db_path) {
+        h ^= static_cast<uint8_t>(c);
+        h *= 1099511628211ULL;
+      }
+      const int arm = static_cast<int>(h & 1ULL);
+      if (arm == 1) popts->ba_global_function_tolerance = v;
+      s->stat_phase2_ftol_ab_arm = arm;
+    }
+  }
   // [FINALIZE-TOTAL-ROUNDS 2026-08-10 用户签] 总轮预算 5→3。
   // 轮预算自平衡:砍单段(STAGE1_ROUNDS_CAP=1)的轮经余额公式流给 stage2,
   // host 矩阵实测净 +0.5s 且点 −0.3% = 判死;砍**总**预算才减真工作量。
@@ -7092,7 +7286,17 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   //   132帧: 14.8→9.9s(−33%)      点 81,601→82,225(+0.76%) reproj +0.011px
   // 机理:后两轮 BA+复筛在"再抛光"——多筛一批点换 0.01px。用户签收
   // reproj +1% 的质量带权衡(点数正向)。回滚:env 推 5(ENV-FILE 免重装)。
-  popts->ba_global_max_refinements = 3;
+  //
+  // 🔴 [ROUNDS-REVERT 2026-08-13 用户签] 上面的 5→3 已**撤回**,默认回到上游
+  // COLMAP 的 5(incremental_pipeline.h:135)。撤回依据不是新的聚合数字——
+  // 今天的 host 矩阵(b34/s4 各 3 发,同臂逐位相同)与 08-10 的方向一致:
+  //   3→5 轮:点数 −0.6~0.8%,reproj −0.012~0.015px,finalize +52~69%
+  // 而是**用户肉眼判据**:5 轮的作品"浮点少了很多"。机理是外层每轮多跑一次
+  // FilterPoints,被删掉的那 0.6~0.8% 不是随机点,是不干净的点——"点数"与
+  // "平均 reproj"两个聚合指标把这件事稀释掉了,肉眼没有。
+  // ⚠️ 教训:局部质量(浮点/鬼层)不能只看聚合指标,肉眼判据优先。
+  // 时间代价真机实测:80帧/46.6k点 finalize 14.2s(30s 预算内);大场景仍需盯。
+  popts->ba_global_max_refinements = 5;
   if (const char* e = std::getenv("OFFICIAL_AETHER_FINALIZE_TOTAL_ROUNDS")) {
     const int v = std::atoi(e);
     if (v > 0) popts->ba_global_max_refinements = v;
@@ -7146,6 +7350,12 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakePhase2Options(
   // with zero correspondences keeps it inert but resolvable.
   popts->load_all_images = true;
   popts->image_path = s->image_path;  // [4.0.4] image_path moved into options
+  // [PHASE2-CONFIG-ECHO 2026-08-12] 记下**最终生效**的三个值(在所有 env 覆盖
+  // 与 AB 选臂之后),供 WriteFinalizeSegments 落盘。Dart 遥测从此透传真值,
+  // 不再自己编。
+  s->stat_phase2_gftol = popts->ba_global_function_tolerance;
+  s->stat_phase2_gref = popts->ba_global_max_refinements;
+  s->stat_phase2_giter = popts->ba_global_max_num_iterations;
   return popts;
 }
 
@@ -7243,6 +7453,10 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         "\"guided_temporal_extra_inliers\":%lld,"
         "\"solver_used\":\"%s\",\"sparse_backend\":\"%s\","
         "\"dense_backend\":\"%s\","
+        // [PHASE2-CONFIG-ECHO 2026-08-12] phase-2 全局 BA 的**真实生效值**
+        // (env 覆盖与 AB 选臂之后)。ftol_ab_arm:-1=交替关闭,0=base,1=变体。
+        "\"gftol_used\":%.3e,\"gref_used\":%d,\"giter_used\":%d,"
+        "\"ftol_ab_arm\":%d,"
         "\"mixed\":%d,\"threads\":%d}\n",
         static_cast<long long>(epoch_ms), live_reuse ? 1 : 0,
         static_cast<long long>(cache_pre_ms),
@@ -7323,7 +7537,8 @@ void WriteFinalizeSegments(aether_sfm_session* s, bool live_reuse,
         static_cast<long long>(s->stat_guided_temporal_upgraded),
         static_cast<long long>(s->stat_guided_temporal_extra_inliers),
         solver_used.c_str(), sparse_backend.c_str(), dense_backend.c_str(),
-        mixed, threads);
+        s->stat_phase2_gftol, s->stat_phase2_gref, s->stat_phase2_giter,
+        s->stat_phase2_ftol_ab_arm, mixed, threads);
     if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return;
     FILE* f = std::fopen(tmp.string().c_str(), "w");
     if (!f) return;
@@ -7826,6 +8041,8 @@ void ApplyProbeDebtGrowth(aether_sfm_session* s,
 void RefineGlobalBA(aether_sfm_session* s,
                     std::shared_ptr<colmap::Reconstruction> model,
                     bool live_reuse) {
+  aether::official::ba::ScopedBaSessionAggregateBindingV1 ba_session_binding(
+      &s->ba_ptol_aggregate, &s->ba_ptol_receipts);
   try {
 #if defined(__APPLE__)
     // [S3.5 RESTORE 2026-07-11] The refined model IS the user-visible result
@@ -8039,7 +8256,7 @@ void RefineGlobalBA(aether_sfm_session* s,
           pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
         }
 #endif
-        aether_ba_ring_reset();  // [AETHER BA-RING] attribute stage-1 solves
+        aether::official::ba::ResetActiveBaSessionReceiptRingV1();
         try {
           colmap::IncrementalMapper mapper(cache_pre);
           mapper.BeginReconstruction(refined);
@@ -8106,7 +8323,10 @@ void RefineGlobalBA(aether_sfm_session* s,
             const size_t num_obs = refined->ComputeNumObservations();
             // [AETHER-T1] stage-1 per-part attribution (our own loop).
             const double t_s1ba = NowMs();
-            mapper.AdjustGlobalBundle(mapper_opts, ba_opts);
+            {
+              aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
+              mapper.AdjustGlobalBundle(mapper_opts, ba_opts);
+            }
             s->t1_stage1_ba_ms += NowMs() - t_s1ba;
             const double t_s1mg = NowMs();
             size_t num_changed = mapper.CompleteAndMergeTracks(tri_opts);
@@ -8184,7 +8404,7 @@ void RefineGlobalBA(aether_sfm_session* s,
     aether_igr_ba_ms = 0.0;
     aether_igr_merge_ms = 0.0;
     aether_igr_rounds = 0;
-    aether_ba_ring_reset();  // [AETHER BA-RING] attribute stage-2 solves
+    aether::official::ba::ResetActiveBaSessionReceiptRingV1();
     // [GRAVITY-RA 2026-08-10] env 门控(默认关):重力对齐 RA 重解全局旋转,
     // 平移保相机中心;随后 stage-2 全局 BA 收回平移与点。
     const auto gravity_ra_snapshot =
@@ -8201,6 +8421,17 @@ void RefineGlobalBA(aether_sfm_session* s,
     // 哪几帧、走的哪条支路。上游 #3271 官方定性"预期行为"、无豁免开关,所以
     // 修法要靠分诊结果选(bogus → 放宽三参数有社区实证;0 观测 → 抄
     // image_registrator 的补注册)。
+    if (s->stat_pose_direct_attempted > 0 ||
+        s->stat_guided_temporal_attempted > 0) {
+      LOG(WARNING) << "[guided-chain] rung1_attempted="
+                   << s->stat_guided_temporal_attempted
+                   << " rung1_upgraded=" << s->stat_guided_temporal_upgraded
+                   << " rung1_extra_inliers="
+                   << s->stat_guided_temporal_extra_inliers
+                   << " | rung2_attempted=" << s->stat_pose_direct_attempted
+                   << " rung2_rescued=" << s->stat_pose_direct_rescued
+                   << " rung2_inliers=" << s->stat_pose_direct_inliers;
+    }
     std::unordered_map<colmap::frame_t, std::pair<size_t, std::string>>
         diag_before;
     for (const auto& [frame_id, frame] : refined->Frames()) {
@@ -8257,6 +8488,7 @@ void RefineGlobalBA(aether_sfm_session* s,
       AppendMatchFailJsonl(s, sline);
     }
     AppendBaRingJsonl(s, 2);  // [AETHER BA-RING] stage-2 per-solve drain
+    AppendBaSessionAggregateJsonl(s, "post_stage2");
     // [A1B-ASYNC-PVBA] experiment-arm accounting (absent when off/idle).
     if (s->stat_apvba_kicks > 0) {
       char aline[512];
@@ -8397,13 +8629,30 @@ aether_sfm_result_t aether_sfm_run(const char* db_path, const char* image_path,
 
   std::shared_ptr<colmap::ReconstructionManager> manager;
   std::shared_ptr<const colmap::Reconstruction> recon;
+  // The account exists before the first solve. Sequential batches therefore
+  // start at zero, concurrent batches have distinct owners, and a caller that
+  // does not request out_session still cannot write into another session.
+  aether::official::ba::BaSessionAggregateAccumulatorV1 batch_ptol_aggregate;
+  aether::official::ba::BaSessionReceiptRingV1 batch_ptol_receipts;
   // Batch/reference inputs do not carry the mandatory per-frame ARKit gravity
   // contract. Never let a previous streaming session's registry leak into a
   // batch solve in the same process.
   aether_ba_clear_gravity_priors();
   const aether_sfm_result_t rc = RunIncremental(
-      db_path, image_path, opts, &manager, &recon, out_json, out_cap);
-  if (rc != AETHER_SFM_OK) return rc;
+      db_path, image_path, opts, &batch_ptol_aggregate,
+      &batch_ptol_receipts, &manager, &recon, out_json, out_cap);
+  const auto persist_temporary_batch_receipts = [&](const char* reason) {
+    auto receipt_sink = std::make_unique<aether_sfm_session>();
+    receipt_sink->db_path = db_path;
+    receipt_sink->ba_ptol_aggregate.Replace(batch_ptol_aggregate.Snapshot());
+    receipt_sink->ba_ptol_receipts.Replace(batch_ptol_receipts.Snapshot());
+    AppendBaRingJsonl(receipt_sink.get(), -1);
+    AppendBaSessionAggregateJsonl(receipt_sink.get(), reason);
+  };
+  if (rc != AETHER_SFM_OK) {
+    persist_temporary_batch_receipts("batch_error");
+    return rc;
+  }
 
   if (out_session) {
     auto* s = new aether_sfm_session();
@@ -8414,12 +8663,19 @@ aether_sfm_result_t aether_sfm_run(const char* db_path, const char* image_path,
     }
 #endif
     s->options = opts;
+    s->ba_ptol_aggregate.Replace(batch_ptol_aggregate.Snapshot());
+    s->ba_ptol_receipts.Replace(batch_ptol_receipts.Snapshot());
     s->db_path = db_path;
     s->image_path = image_path;
     s->owns_db_file = false;  // batch path consumes a caller-owned db
     s->recon_manager = manager;
     s->recon = recon;
     *out_session = s;
+  } else {
+    // The C ABI explicitly permits out_session=nullptr. Preserve that mode's
+    // native receipts in the existing pullable sidecar rather than destroying
+    // its temporary ledger or relying on the size of the summary out_json.
+    persist_temporary_batch_receipts("batch_no_session");
   }
   return AETHER_SFM_OK;
 }
@@ -8552,6 +8808,8 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
 static void MaybeIncrementalGlobalRefine(aether_sfm_session* s) {
   if (!IncrementalGlobalBaEnabled()) return;
   if (!s || !s->live_recon_ready || !s->live_recon) return;
+  aether::official::ba::ScopedBaSessionAggregateBindingV1 ba_session_binding(
+      &s->ba_ptol_aggregate, &s->ba_ptol_receipts);
   const int thermal_now = s->thermal_state.load(std::memory_order_relaxed);
   if (thermal_now >= 3) return;  // critical: hand the device to camera/GPU
   const size_t n_reg = s->reg_order.size();
@@ -8614,7 +8872,10 @@ static void MaybeIncrementalGlobalRefine(aether_sfm_session* s) {
     // [BA-THREADS-POST 2026-07-28] capture-period budget split off from the
     // finalize budget (which no longer reserves cores — camera is off there).
     opt.ceres->solver_options.num_threads = LiveBaThreads();
-    colmap::CreateDefaultBundleAdjuster(opt, cfg, *s->live_recon)->Solve();
+    {
+      aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
+      colmap::CreateDefaultBundleAdjuster(opt, cfg, *s->live_recon)->Solve();
+    }
 
     s->last_global_refine_reg = n_reg;
     s->incremental_global_ba_ran = true;
@@ -8654,6 +8915,8 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
     const float* scales, int n, int width, int height, float fx, float fy,
     float cx, float cy, const double pose_qwxyz[4], const double pose_t[3],
     double extract_ms, int* out_frame_id) {
+  aether::official::ba::ScopedBaSessionAggregateBindingV1 ba_session_binding(
+      &s->ba_ptol_aggregate, &s->ba_ptol_receipts);
   try {
     // Production capture is an ARKit `.gravity` route. Validate and convert
     // the required pose before the first database or reconstruction mutation;
@@ -9335,8 +9598,19 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       }
       s->gpu_watchdog.InProgress();  // [GPU-HANG-B1] match 调用后打点
       if (mrc != 0) continue;
-      if (num_matches <= 0) continue;
-      if (used_gpu) gpu_matches += num_matches; else cpu_matches += num_matches;
+      // [POSE-DIRECT-E 2026-08-11 定位修复] 原始匹配为 0 的配对以前在这一行
+      // 直接丢弃 —— 而这恰恰是最需要自举的"饿死对":真机 cap_1786414194441541
+      // 的 frame_000041 有 12 个候选,9 个死在这里,根本没机会进引导链。
+      // 开启第二级且两帧都有 ARKit 位姿时放行;进链后救不回来仍旧丢弃,
+      // 下游任何门都不放宽。第二级关闭时行为逐字节不变。
+      const bool zero_raw_matches = num_matches <= 0;
+      if (zero_raw_matches &&
+          !(PoseDirectEEnabled() && prev.has_pose && rec.has_pose)) {
+        continue;
+      }
+      if (num_matches > 0) {
+        if (used_gpu) gpu_matches += num_matches; else cpu_matches += num_matches;
+      }
 
       const double t2_v0 = NowMs();  // [AETHER-T2] TVG + db-write section
       colmap::FeatureMatches matches(num_matches);
@@ -9361,32 +9635,90 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       // tri-angle (2.0°), reproj, ghost L1/L2, and finalize min_num_matches=15
       // gates run unchanged, and view-dependent reflection matches (appearance
       // wrong, epipolar can't fix) still fall exactly as before.
-      if (GuidedTemporalEnabled() && gpu_match_avail &&
+      // [GUIDED-CHAIN 2026-08-11] 两级回退链。两个旋钮都不设 ⇒ 走 else,逐字节
+      // 等同出货二进制。第一级=原始匹配自估种子(07-12 已实现,够不着饿死对);
+      // 第二级=ARKit 位姿自举(08-11,专治饿死对)。
+      if ((GuidedTemporalEnabled() || PoseDirectEEnabled()) && gpu_match_avail &&
           aether_gpu_match_gemm_pairs_guided != nullptr) {
-        const auto initial_tvg = EstimateMandatoryFrameTwoViewGeometry(
-            prev, prev.points, rec, rec.points, matches, tvg_options);
-        if (!MandatoryGravityTvgPersistable(initial_tvg)) continue;
-        two_view_geometry = initial_tvg.geometry;
-        colmap::FeatureMatches guided;
-        if (RunGuidedMatch(s, prev, rec, two_view_geometry, &guided) &&
-            !guided.empty()) {
-          ++s->stat_guided_temporal_attempted;
-          const auto guided_tvg = EstimateMandatoryFrameTwoViewGeometry(
-              prev, prev.points, rec, rec.points, guided, tvg_options);
-          if (MandatoryGravityTvgPersistable(guided_tvg) &&
-              guided_tvg.geometry.inlier_matches.size() >
-              two_view_geometry.inlier_matches.size()) {
-            ++s->stat_guided_temporal_upgraded;
-            s->stat_guided_temporal_extra_inliers +=
-                static_cast<int64_t>(
-                    guided_tvg.geometry.inlier_matches.size()) -
-                static_cast<int64_t>(two_view_geometry.inlier_matches.size());
-            matches = std::move(guided);
-            num_matches = static_cast<int>(matches.size());
-            two_view_geometry = guided_tvg.geometry;
+        bool raw_seed_ok = false;
+        if (!zero_raw_matches) {
+          const auto initial_tvg = EstimateMandatoryFrameTwoViewGeometry(
+              prev, prev.points, rec, rec.points, matches, tvg_options);
+          raw_seed_ok = MandatoryGravityTvgPersistable(initial_tvg);
+          if (raw_seed_ok) two_view_geometry = initial_tvg.geometry;
+        }
+        bool pair_ok = raw_seed_ok;
+
+        // ── 第一级:原始匹配估得出几何 ⇒ 在自己的 E/F 精带内放宽比值重配 ──
+        if (raw_seed_ok && GuidedTemporalEnabled()) {
+          colmap::FeatureMatches guided;
+          if (RunGuidedMatch(s, prev, rec, two_view_geometry, &guided) &&
+              !guided.empty()) {
+            ++s->stat_guided_temporal_attempted;
+            const auto guided_tvg = EstimateMandatoryFrameTwoViewGeometry(
+                prev, prev.points, rec, rec.points, guided, tvg_options);
+            if (MandatoryGravityTvgPersistable(guided_tvg) &&
+                guided_tvg.geometry.inlier_matches.size() >
+                two_view_geometry.inlier_matches.size()) {
+              ++s->stat_guided_temporal_upgraded;
+              s->stat_guided_temporal_extra_inliers +=
+                  static_cast<int64_t>(
+                      guided_tvg.geometry.inlier_matches.size()) -
+                  static_cast<int64_t>(two_view_geometry.inlier_matches.size());
+              matches = std::move(guided);
+              num_matches = static_cast<int>(matches.size());
+              two_view_geometry = guided_tvg.geometry;
+            }
           }
         }
+
+        // ── 第二级:原始匹配饿死(第一级够不着)⇒ ARKit 位姿自举 ──
+        // (a) 宽带(128px,实测容纳 100.000% 真对应)只为拿到足够候选让 RANSAC
+        //     反解几何;(b) 再用这个数据自证的 E 走标准 4px 精带做最终重配,
+        //     消歧能力回到出货口径。两步的产物都必须过 mandatory-gravity TVG。
+        if (!raw_seed_ok && PoseDirectEEnabled()) {
+          colmap::TwoViewGeometry seed;
+          if (BuildPoseDirectGuideGeometry(prev, rec, &seed)) {
+            ++s->stat_pose_direct_attempted;
+            colmap::FeatureMatches boot;
+            if (RunGuidedMatch(s, prev, rec, seed, &boot,
+                               PoseDirectBandPixels()) &&
+                !boot.empty()) {
+              const auto boot_tvg = EstimateMandatoryFrameTwoViewGeometry(
+                  prev, prev.points, rec, rec.points, boot, tvg_options);
+              if (MandatoryGravityTvgPersistable(boot_tvg)) {
+                colmap::FeatureMatches refined;
+                bool took_refined = false;
+                if (RunGuidedMatch(s, prev, rec, boot_tvg.geometry, &refined) &&
+                    !refined.empty()) {
+                  const auto refined_tvg = EstimateMandatoryFrameTwoViewGeometry(
+                      prev, prev.points, rec, rec.points, refined, tvg_options);
+                  if (MandatoryGravityTvgPersistable(refined_tvg) &&
+                      refined_tvg.geometry.inlier_matches.size() >
+                          boot_tvg.geometry.inlier_matches.size()) {
+                    matches = std::move(refined);
+                    two_view_geometry = refined_tvg.geometry;
+                    took_refined = true;
+                  }
+                }
+                if (!took_refined) {
+                  matches = std::move(boot);
+                  two_view_geometry = boot_tvg.geometry;
+                }
+                num_matches = static_cast<int>(matches.size());
+                pair_ok = true;
+                ++s->stat_pose_direct_rescued;
+                s->stat_pose_direct_inliers += static_cast<int64_t>(
+                    two_view_geometry.inlier_matches.size());
+              }
+            }
+          }
+        }
+
+        // 两级都没救回 ⇒ 与出货行为一致,丢弃该对(不放宽任何下游门)。
+        if (!pair_ok) continue;
       } else {
+        if (zero_raw_matches) continue;  // 出货路径:与既有行为一致
         const auto tvg = EstimateMandatoryFrameTwoViewGeometry(
             prev, prev.points, rec, rec.points, matches, tvg_options);
         if (!MandatoryGravityTvgPersistable(tvg)) continue;
@@ -9621,6 +9953,9 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
               std::make_shared<colmap::Reconstruction>(*s->live_recon);
           ResetLocalBundleTraceV1();
           std::thread shadow_thread([&] {
+            aether::official::ba::ScopedBaSessionAggregateBindingV1
+                ba_session_binding(&s->ba_ptol_aggregate,
+                                   &s->ba_ptol_receipts);
             try {
               colmap::IncrementalMapper shadow_mapper(tail_shadow_cache);
               shadow_mapper.BeginReconstruction(tail_shadow_recon);
@@ -9876,6 +10211,32 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
       // sidecar-write failures cannot change accepted frames or return codes.
     }
     AppendLiveCloudSnapshotDiagnosticsV2(s, "post_local_ba");
+    // [LIVE-POSE-DUMP 2026-08-20] HOST-bench-only evolution snapshots,
+    // env-gated (default off; the app never sets it): every K accepted
+    // frames dump the current live_recon so host schedulers can replay
+    // evolving inputs. Same-count re-dumps overwrite idempotently.
+    if (const char* dump_dir = std::getenv("OFFICIAL_AETHER_LIVE_POSE_DUMP");
+        dump_dir && dump_dir[0] && s->live_recon) {
+      static const int kDumpEvery = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_LIVE_POSE_DUMP_EVERY");
+        const int k = v ? std::atoi(v) : 0;
+        return k > 0 ? k : 0;
+      }();
+      const size_t nreg = s->live_recon->NumRegImages();
+      if (kDumpEvery > 0 && nreg > 0 &&
+          nreg % static_cast<size_t>(kDumpEvery) == 0) {
+        try {
+          char sub[64];
+          std::snprintf(sub, sizeof(sub), "/live_reg%05zu", nreg);
+          const std::string snap_dir = std::string(dump_dir) + sub;
+          std::filesystem::create_directories(snap_dir);
+          s->live_recon->Write(snap_dir);
+        } catch (const std::exception& e) {
+          LOG(WARNING) << "[aether_sfm] live evolution dump failed: "
+                       << e.what();
+        }
+      }
+    }
     s->last_extract_ms = extract_ms;
     s->last_match_ms = NowMs() - t_match0;
     // [AETHER-T2] frame_split: one compact pullable line per frame (~150 B;
@@ -10670,6 +11031,20 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
       s->live_recon.reset();          // moved-from shared_ptr is null already; be explicit
       s->live_recon_ready = false;    // live getters now gate off
       work->UpdatePoint3DErrors();    // live path fills errors lazily
+      // [LIVE-POSE-DUMP 2026-08-20] HOST-bench-only, env-gated (default off;
+      // the app never sets it): dump the exact end-of-capture live_recon
+      // (poses + points, COLMAP bin) BEFORE the worker refines it in place —
+      // after this call the pre-refine state is unrecoverable.
+      if (const char* dump_dir = std::getenv("OFFICIAL_AETHER_LIVE_POSE_DUMP");
+          dump_dir && dump_dir[0]) {
+        try {
+          const std::string end_dir = std::string(dump_dir) + "/live_end";
+          std::filesystem::create_directories(end_dir);
+          work->Write(end_dir);
+        } catch (const std::exception& e) {
+          LOG(WARNING) << "[aether_sfm] live pose dump failed: " << e.what();
+        }
+      }
       if (out_json && out_cap > 0) {
         std::snprintf(
             out_json, out_cap,
@@ -10706,6 +11081,25 @@ int aether_sfm_finalize_status(aether_sfm_session_t* s) {
 }
 
 // ─── outputs ────────────────────────────────────────────────────────
+aether_sfm_result_t aether_sfm_frame_health(aether_sfm_session_t* s,
+                                            int32_t* out_valid_pairs, int max,
+                                            int* out_n) {
+  if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  const int n = static_cast<int>(s->frames.size());
+  const int m = n < max ? n : max;
+  if (out_valid_pairs) {
+    for (int i = 0; i < m; ++i) {
+      // live_win_valid 由拍摄期匹配路径实时维护;越界(尚未落项)按 0 处理,
+      // 与 starved() 谓词的取值方式逐字一致。
+      out_valid_pairs[i] = i < static_cast<int>(s->live_win_valid.size())
+                               ? static_cast<int32_t>(s->live_win_valid[i])
+                               : 0;
+    }
+  }
+  if (out_n) *out_n = m;
+  return AETHER_SFM_OK;
+}
+
 aether_sfm_result_t aether_sfm_get_poses(aether_sfm_session_t* s,
                                          aether_sfm_pose_t* out_poses, int cap,
                                          int* out_count) {
@@ -11549,6 +11943,9 @@ aether_sfm_result_t AsyncPreviewBaTick(aether_sfm_session_t* s) {
       auto kick_cache = colmap::DatabaseCache::Create(*s->db,
                                                       kick_cache_options);
       s->async_pvba_thread = std::thread([s, snap_model, kick_cache] {
+        aether::official::ba::ScopedBaSessionAggregateBindingV1
+            ba_session_binding(&s->ba_ptol_aggregate,
+                               &s->ba_ptol_receipts);
 #if defined(__APPLE__)
         pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
 #endif
@@ -11572,18 +11969,21 @@ aether_sfm_result_t AsyncPreviewBaTick(aether_sfm_session_t* s) {
           }
           colmap::IncrementalMapper mapper(cache);
           mapper.BeginReconstruction(snap_model);
-          if (AsyncPreviewBaParamOnly()) {
-            // [A1B-V6] parameters only: one official global solve, zero
-            // structural mutation (see the knob's provenance comment).
-            mapper.AdjustGlobalBundle(official_options.Mapper(), ba_opts);
-          } else {
-            mapper.IterativeGlobalRefinement(
-                official_options.ba_global_max_refinements,
-                official_options.ba_global_max_refinement_change,
-                official_options.Mapper(), ba_opts,
-                official_options.Triangulation(),
-                /*normalize_reconstruction=*/false);
-            mapper.FilterFrames(official_options.Mapper());
+          {
+            aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
+            if (AsyncPreviewBaParamOnly()) {
+              // [A1B-V6] parameters only: one official global solve, zero
+              // structural mutation (see the knob's provenance comment).
+              mapper.AdjustGlobalBundle(official_options.Mapper(), ba_opts);
+            } else {
+              mapper.IterativeGlobalRefinement(
+                  official_options.ba_global_max_refinements,
+                  official_options.ba_global_max_refinement_change,
+                  official_options.Mapper(), ba_opts,
+                  official_options.Triangulation(),
+                  /*normalize_reconstruction=*/false);
+              mapper.FilterFrames(official_options.Mapper());
+            }
           }
           mapper.EndReconstruction(/*discard=*/false);
           snap_model->UpdatePoint3DErrors();
@@ -11628,6 +12028,8 @@ aether_sfm_result_t AsyncPreviewBaTick(aether_sfm_session_t* s) {
 // (mutates live_recon); the getter is called after this returns.
 aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
   if (!s) return AETHER_SFM_ERR_INVALID_ARG;
+  aether::official::ba::ScopedBaSessionAggregateBindingV1 ba_session_binding(
+      &s->ba_ptol_aggregate, &s->ba_ptol_receipts);
   if (!s->live_recon_ready || !s->live_recon ||
       s->live_recon->NumRegImages() < 3)
     return AETHER_SFM_ERR_NOT_REGISTERED;
@@ -11673,12 +12075,15 @@ aether_sfm_result_t aether_sfm_global_refine(aether_sfm_session_t* s) {
 
     colmap::IncrementalMapper mapper(cache);
     mapper.BeginReconstruction(s->live_recon);
-    mapper.IterativeGlobalRefinement(
-        official_options.ba_global_max_refinements,
-        official_options.ba_global_max_refinement_change,
-        official_options.Mapper(), official_options.GlobalBundleAdjustment(),
-        official_options.Triangulation(),
-        /*normalize_reconstruction=*/false);
+    {
+      aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
+      mapper.IterativeGlobalRefinement(
+          official_options.ba_global_max_refinements,
+          official_options.ba_global_max_refinement_change,
+          official_options.Mapper(), official_options.GlobalBundleAdjustment(),
+          official_options.Triangulation(),
+          /*normalize_reconstruction=*/false);
+    }
     mapper.FilterFrames(official_options.Mapper());
     mapper.EndReconstruction(/*discard=*/false);
     s->live_recon->UpdatePoint3DErrors();
@@ -12507,13 +12912,42 @@ int aether_sfm_live_repay(aether_sfm_session_t* s, int max_pairs) {
     // the starved-window debt (rationale + gates: block comment above
     // IdlePrepayEnabled). Default ON; OFFICIAL_AETHER_IDLE_PREPAY=0 kills.
     if (!IdlePrepayEnabled()) return 0;
-    if (s->last_add_frame_done_ms <= 0.0 ||
-        NowMs() - s->last_add_frame_done_ms < IdlePrepayIdleMs()) {
-      return 0;  // not frame-idle (or never fed) — never touch the matcher
-    }
-    if (s->thermal_state.load(std::memory_order_relaxed) >= 2) {
-      ++s->stat_repay_skipped_thermal;  // serious+: idle leg never prepays
-      return 0;
+    // [STARVED-ALWAYS 2026-08-14 用户签] 拍摄期断联补配对不再等空闲、不再避热。
+    //
+    // 为什么改:原设计要求"距上一帧处理完 >2000ms 的帧空闲 + 热档 < serious",
+    // 而真实拍摄里用户一直在按快门,2 秒空闲窗**根本凑不满** —— 两场真机遥测
+    // `idle_prepay_ticks=0 / repay_calls=0`,这条腿从未跑过。断联帧因此一路带到
+    // finalize 才补,而那时用户已经离开现场,补的是配对不是观测。
+    //
+    // 现在:只要有断联帧就在下一次匹配机会里补(预算见调用处)。
+    //   · OFFICIAL_AETHER_STARVED_ALWAYS=0 → 回到旧的空闲+热门(可一键回滚);
+    //   · 仍在 thermal critical(3)停手 —— 那一档系统自己会杀进程,
+    //     且内存里有"热压 GPU 丢命令导致相机冻结"的定罪记录;
+    //   · OFFICIAL_AETHER_STARVED_THERMAL_STOP 可改这道门(3=默认,4=永不停)。
+    const bool starvedAlways = [] {
+      const char* e = std::getenv("OFFICIAL_AETHER_STARVED_ALWAYS");
+      return !(e && e[0] == '0');  // 默认开
+    }();
+    const int thermalStop = [] {
+      const char* e = std::getenv("OFFICIAL_AETHER_STARVED_THERMAL_STOP");
+      const int v = e && e[0] ? std::atoi(e) : 3;
+      return v <= 0 ? 3 : v;
+    }();
+    if (!starvedAlways) {
+      if (s->last_add_frame_done_ms <= 0.0 ||
+          NowMs() - s->last_add_frame_done_ms < IdlePrepayIdleMs()) {
+        return 0;  // 旧路径:不是帧空闲就不碰匹配器
+      }
+      if (s->thermal_state.load(std::memory_order_relaxed) >= 2) {
+        ++s->stat_repay_skipped_thermal;
+        return 0;
+      }
+    } else {
+      if (s->last_add_frame_done_ms <= 0.0) return 0;  // 从未喂帧(resume)不碰
+      if (s->thermal_state.load(std::memory_order_relaxed) >= thermalStop) {
+        ++s->stat_repay_skipped_thermal;
+        return 0;
+      }
     }
     ++s->stat_idle_prepay_ticks;
     const int64_t attempted_before = s->stat_repay_attempted;
@@ -12709,6 +13143,8 @@ void aether_sfm_free(aether_sfm_session_t* s) {
   if (s->async_pvba_thread.joinable()) s->async_pvba_thread.join();
   // [GPU-HANG-B1] worker 线程都收完了再停巡逻线程(finalize 期间它要在岗);
   // 必须先于 delete —— 回调捕获了 s。
+  AppendBaRingJsonl(s, 0);  // aborted/non-finalized sessions still persist receipts
+  AppendBaSessionAggregateJsonl(s, "session_free");
   s->gpu_watchdog.Stop();
   // Snapshot counters before clearing the backend-owned buffers. The record is
   // emitted for both experiment states, so a default-off build is explicit.

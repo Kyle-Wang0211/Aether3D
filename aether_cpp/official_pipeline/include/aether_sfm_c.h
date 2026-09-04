@@ -202,6 +202,23 @@ typedef struct aether_sfm_pose {
 
 // Caller passes a buffer of capacity cap; *out_count = total poses (== #frames).
 // Poses are read from Reconstruction::Images()[id].CamFromWorld().
+// [FRAME-HEALTH 2026-08-14] 逐帧连通度(拍摄期实时)。
+//
+// out_valid_pairs[i] = 第 i 帧在时间 K 窗口内、内点 >= 15 的有效配对数。
+// 判据与 finalize 的 starved 完全同源(kRematchMinValidWindowPairs=4:
+// cap43 标定,健康帧 4-21,塌陷块 0-3),所以 UI 的"红框"与核里的补配对
+// 说的是同一件事,不会各判各的。
+//
+// 用途:AR 拍摄界面把机位按连通度着色(< 4 = 断联 = 红框),并在用户走近
+// 断联机位时提示补拍 —— 让用户补**真实观测**,而不是等 finalize 补配对。
+//
+// 纯只读,不改任何状态;与 aether_sfm_stream_stats 同一线程契约
+// (从 add_frame 的 worker 线程调用)。out_n 写入实际帧数(<= max)。
+aether_sfm_result_t aether_sfm_frame_health(aether_sfm_session_t* s,
+                                            int32_t* out_valid_pairs,
+                                            int max,
+                                            int* out_n);
+
 aether_sfm_result_t aether_sfm_get_poses(aether_sfm_session_t* s,
                                          aether_sfm_pose_t* out_poses,
                                          int cap, int* out_count);

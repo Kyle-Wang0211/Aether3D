@@ -36,6 +36,8 @@
 #include "colmap/util/file.h"
 #include "colmap/util/timer.h"
 
+#include "aether_ba_solve_policy_v1.h"
+
 #include <cstdlib>  // [AETHER] std::getenv/std::atoi for env threshold overrides
 
 namespace colmap {
@@ -79,6 +81,7 @@ void IterativeGlobalRefinement(const IncrementalPipelineOptions& options,
                                const IncrementalMapper::Options& mapper_options,
                                IncrementalMapper& mapper) {
   LOG(INFO) << "Retriangulation and Global bundle adjustment";
+  aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
   mapper.IterativeGlobalRefinement(options.ba_global_max_refinements,
                                    options.ba_global_max_refinement_change,
                                    mapper_options,
@@ -472,7 +475,11 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   }
 
   LOG(INFO) << "Global bundle adjustment";
-  mapper.AdjustGlobalBundle(mapper_options, options_->GlobalBundleAdjustment());
+  {
+    aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
+    mapper.AdjustGlobalBundle(mapper_options,
+                              options_->GlobalBundleAdjustment());
+  }
   reconstruction.Normalize();
   mapper.FilterPoints(mapper_options);
   mapper.FilterFrames(mapper_options);
@@ -820,12 +827,15 @@ void IncrementalPipeline::TriangulateReconstruction(
   }
 
   LOG(INFO) << "Retriangulation and Global bundle adjustment";
-  mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
-                                   options_->ba_global_max_refinement_change,
-                                   options_->Mapper(),
-                                   options_->GlobalBundleAdjustment(),
-                                   options_->Triangulation(),
-                                   /*normalize_reconstruction=*/false);
+  {
+    aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
+    mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
+                                     options_->ba_global_max_refinement_change,
+                                     options_->Mapper(),
+                                     options_->GlobalBundleAdjustment(),
+                                     options_->Triangulation(),
+                                     /*normalize_reconstruction=*/false);
+  }
   mapper.EndReconstruction(/*discard=*/false);
 
   reconstruction->UpdatePoint3DErrors();
@@ -846,12 +856,15 @@ void IncrementalPipeline::RefineReconstruction(
       << "No images with matches found in the database";
   IncrementalMapper mapper(database_cache_);
   mapper.BeginReconstruction(reconstruction);
-  mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
-                                   options_->ba_global_max_refinement_change,
-                                   options_->Mapper(),
-                                   options_->GlobalBundleAdjustment(),
-                                   options_->Triangulation(),
-                                   /*normalize_reconstruction=*/false);
+  {
+    aether::official::ba::ScopedGlobalBaSolveV1 global_ba_scope;
+    mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
+                                     options_->ba_global_max_refinement_change,
+                                     options_->Mapper(),
+                                     options_->GlobalBundleAdjustment(),
+                                     options_->Triangulation(),
+                                     /*normalize_reconstruction=*/false);
+  }
   mapper.FilterFrames(options_->Mapper());
   mapper.EndReconstruction(/*discard=*/false);
   reconstruction->UpdatePoint3DErrors();

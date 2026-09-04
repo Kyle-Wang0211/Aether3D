@@ -5,13 +5,31 @@
 #include <map>
 #include <unordered_set>
 #include <utility>
+#include <cstdlib>
 #include <vector>
 
 namespace aether::sfm {
 namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
-constexpr double kViewAngleMaxRad = 45.0 * kPi / 180.0;
+constexpr double kViewAngleMaxDegDefault = 45.0;
+
+// [VIEW-ANGLE-AB 2026-08-11] 主光轴夹角门做成 env 可调,用于 host A/B。
+// 现状 45°(出货,写死已久);hloc(Apache-2.0)的 pairs_from_poses 用 30°。
+// 收紧 = 候选更共视但可能丢真配对;放宽 = 机会更多但废配对更多 —— 方向
+// 靠实测定,不猜。unset ⇒ 45.0,与出货逐字节一致。
+double ViewAngleMaxRad() {
+  static const double cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_VIEW_ANGLE_MAX_DEG");
+    double deg = kViewAngleMaxDegDefault;
+    if (e && *e) {
+      const double v = std::atof(e);
+      if (v > 0.0 && v <= 180.0) deg = v;
+    }
+    return deg * kPi / 180.0;
+  }();
+  return cached;
+}
 
 double Dot(const std::array<double, 3>& a,
            const std::array<double, 3>& b) {
@@ -37,7 +55,7 @@ PairSelectionLegacyResultV2 SelectLegacySpatialCandidatesV2(
   result.ordered_frame_ids.reserve(static_cast<size_t>(k));
 
   if (!temporal_only && current.pose_valid) {
-    const double min_dot = std::cos(kViewAngleMaxRad);
+    const double min_dot = std::cos(ViewAngleMaxRad());
     std::vector<std::pair<double, int32_t>> compatible;
     compatible.reserve(history.size());
     for (const PairSelectionFrameV2& previous : history) {
@@ -128,7 +146,26 @@ PairSelectionResultV2 SelectSpatialTemporalCandidatesV2(
       static_cast<size_t>(spatial_k + temporal_lookback));
 
   if (spatial_k > 0 && current.pose_valid) {
-    const double min_dot = std::cos(kViewAngleMaxRad);
+    // [COLMAP-SPATIAL-PARITY 2026-09-02] Spatial eligibility now replicates
+    // COLMAP SpatialPairGenerator::Next() (colmap/controllers/pairing.cc,
+    // vendored tree third_party/glomap_vendor/colmap-src, COLMAP 3.14.0.dev0,
+    // BSD-3-Clause): position-KNN sorted by distance, cut by max_distance —
+    // and NOTHING else. The former self-invented 45-degree forward-axis gate
+    // (view-angle cone) is REMOVED from this production path: it made the
+    // candidate COUNT collapse whenever the camera forward axis swept through
+    // a turn (n_cand 8→3 mid-session, 2026-09-02 telemetry), which no COLMAP
+    // pair source does. Upstream defaults (pairing.h): max_distance = 100,
+    // min_num_neighbors = 0. Upstream break predicate (pairing.cc, Next()):
+    //   if (distance_squared_matrix_(current_idx_, j) > max_distance_squared
+    //       && j > options_.min_num_neighbors) break;
+    // where j indexes the KNN result INCLUDING the query itself at j == 0
+    // (skipped via an identity check). Our `compatible` list never contains
+    // the query, so our 0-based index maps to upstream's j - 1; the literal
+    // transcription is therefore `index + 1 > kSpatialMinNumNeighbors`.
+    constexpr double kSpatialMaxDistance = 100.0;   // COLMAP pairing.h default
+    constexpr int32_t kSpatialMinNumNeighbors = 0;  // COLMAP pairing.h default
+    const double max_distance_squared =
+        kSpatialMaxDistance * kSpatialMaxDistance;
     std::vector<std::pair<double, int32_t>> compatible;
     compatible.reserve(history.size());
     for (const PairSelectionFrameV2& previous : history) {
@@ -140,25 +177,26 @@ PairSelectionResultV2 SelectSpatialTemporalCandidatesV2(
           previous.frame_id >= current.frame_id - recent_exclusion) {
         continue;
       }
-      const double dot = std::clamp(
-          Dot(current.forward_xyz, previous.forward_xyz), -1.0, 1.0);
-      if (dot < min_dot) continue;
       compatible.emplace_back(
           SquaredDistance(current.center_xyz, previous.center_xyz),
           previous.frame_id);
     }
 
-    result.spatial_count = std::min<int32_t>(
+    const int32_t knn = std::min<int32_t>(
         spatial_k, static_cast<int32_t>(compatible.size()));
-    std::partial_sort(compatible.begin(),
-                      compatible.begin() + result.spatial_count,
+    std::partial_sort(compatible.begin(), compatible.begin() + knn,
                       compatible.end());
-    for (int32_t index = 0; index < result.spatial_count; ++index) {
+    for (int32_t index = 0; index < knn; ++index) {
+      if (compatible[index].first > max_distance_squared &&
+          index + 1 > kSpatialMinNumNeighbors) {
+        break;
+      }
       candidates.push_back(
           {.first_frame_id = compatible[index].second,
            .second_frame_id = current.frame_id,
            .source_mask =
                static_cast<uint32_t>(PairCandidateSourceV2::kSpatial)});
+      ++result.spatial_count;
     }
   }
 
