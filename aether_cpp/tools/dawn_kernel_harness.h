@@ -101,6 +101,22 @@ public:
                   const std::vector<wgpu::Buffer>& bindings,
                   uint32_t wg_x, uint32_t wg_y = 1, uint32_t wg_z = 1);
 
+    // [W256 2026-09-07] 子区间绑定。Mali-G72(Vulkan)maxStorageBufferBindingSize
+    // = 256 MB 而 maxBufferSize = 1 GB:12MP 打包金字塔(≈400 MB)本身合法,
+    // 只是**每次绑定**不得超 256 MB。offset 须按 minStorageBufferOffsetAlignment
+    // (256 B)对齐;size = WGPU_WHOLE_SIZE 表示到缓冲尾。三端同一代码路径。
+    struct BufBinding {
+        wgpu::Buffer buffer;
+        uint64_t offset = 0;
+        uint64_t size = WGPU_WHOLE_SIZE;
+        explicit BufBinding(wgpu::Buffer b, uint64_t off = 0,
+                            uint64_t sz = WGPU_WHOLE_SIZE)
+            : buffer(std::move(b)), offset(off), size(sz) {}
+    };
+    void dispatch(const wgpu::ComputePipeline& pipeline,
+                  const std::vector<BufBinding>& bindings,
+                  uint32_t wg_x, uint32_t wg_y = 1, uint32_t wg_z = 1);
+
     // ─── Batched dispatch (one command encoder, many passes, ONE wait) ───
     // dispatch() submits + WaitAny-syncs PER call; for a chain of many small
     // dispatches (e.g. the ~80 GSS blur passes) that per-call sync latency
@@ -113,6 +129,9 @@ public:
     void begin_batch();
     void dispatch_batched(const wgpu::ComputePipeline& pipeline,
                           const std::vector<wgpu::Buffer>& bindings,
+                          uint32_t wg_x, uint32_t wg_y = 1, uint32_t wg_z = 1);
+    void dispatch_batched(const wgpu::ComputePipeline& pipeline,
+                          const std::vector<BufBinding>& bindings,
                           uint32_t wg_x, uint32_t wg_y = 1, uint32_t wg_z = 1);
     // Encode a buffer-to-buffer copy into the open batch (no submit). Used to
     // assemble the packed pyramid in ONE submit instead of 48.

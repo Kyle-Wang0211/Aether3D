@@ -730,20 +730,46 @@ bool DawnKernelHarness::init() {
         // support 1024 (verified at runtime: this adapter reports
         // maxComputeWorkgroupSizeX=1024).
         wgpu::Limits required_limits{};
-        required_limits.maxComputeInvocationsPerWorkgroup = 512;
-        required_limits.maxComputeWorkgroupSizeX = 512;
+        // [MALI-LIMITS 2026-09-06] 先读 adapter 支持的上限,再把每项要求钳到
+        // 支持值:Mali-G72 的 maxComputeInvocationsPerWorkgroup=384(<512)让
+        // RequestDevice 直接失败。提取器核最大 workgroup 256(K9o),不需要 512;
+        // Brush prefix_sum(512)只在训练路径,不支持的机器上本来不会调用。
+        wgpu::Limits adapter_limits{};
+        const bool have_adapter_limits =
+            adapter_.GetLimits(&adapter_limits) == wgpu::Status::Success;
+        auto clamp_to_adapter = [&](uint32_t want, uint32_t have) -> uint32_t {
+            return have_adapter_limits && have < want ? have : want;
+        };
+        auto clamp_to_adapter64 = [&](uint64_t want, uint64_t have) -> uint64_t {
+            return have_adapter_limits && have < want ? have : want;
+        };
+        required_limits.maxComputeInvocationsPerWorkgroup =
+            clamp_to_adapter(512, adapter_limits.maxComputeInvocationsPerWorkgroup);
+        required_limits.maxComputeWorkgroupSizeX =
+            clamp_to_adapter(512, adapter_limits.maxComputeWorkgroupSizeX);
         // Phase 6.3a Step 6: Brush rasterize_backwards binds 10 storage
         // buffers (uniforms + 6 read inputs + 3 atomic-write outputs).
         // WebGPU's default cap is 8; bump to 10 so the pipeline can be
         // created. Apple Silicon supports up to 64; this 10 is well below
         // any modern GPU's max — verified by adapter introspection.
-        required_limits.maxStorageBuffersPerShaderStage = 10;
+        required_limits.maxStorageBuffersPerShaderStage =
+            clamp_to_adapter(10, adapter_limits.maxStorageBuffersPerShaderStage);
         // GPU DSP-SIFT Stage C: the packed fo=0 GSS pyramid (every octave×level
         // concatenated) is ~320MB for a 4K capture, above WebGPU's default
         // 256MB maxBufferSize / maxStorageBufferBindingSize. Bump both to 1GB
         // (this adapter advertises 4GB; Apple Silicon / desktop all support it).
-        required_limits.maxBufferSize = 1024ull * 1024ull * 1024ull;
-        required_limits.maxStorageBufferBindingSize = 1024ull * 1024ull * 1024ull;
+        required_limits.maxBufferSize =
+            clamp_to_adapter64(1024ull * 1024ull * 1024ull, adapter_limits.maxBufferSize);
+        required_limits.maxStorageBufferBindingSize =
+            clamp_to_adapter64(1024ull * 1024ull * 1024ull, adapter_limits.maxStorageBufferBindingSize);
+        std::fprintf(stderr,
+                     "[DawnKernelHarness] limits: invocations/wg=%u wgSizeX=%u storageBufs=%u maxBuffer=%llu maxStorageBinding=%llu (adapter: %u %u %u %llu %llu)\n",
+                     required_limits.maxComputeInvocationsPerWorkgroup, required_limits.maxComputeWorkgroupSizeX,
+                     required_limits.maxStorageBuffersPerShaderStage,
+                     (unsigned long long)required_limits.maxBufferSize, (unsigned long long)required_limits.maxStorageBufferBindingSize,
+                     adapter_limits.maxComputeInvocationsPerWorkgroup, adapter_limits.maxComputeWorkgroupSizeX,
+                     adapter_limits.maxStorageBuffersPerShaderStage,
+                     (unsigned long long)adapter_limits.maxBufferSize, (unsigned long long)adapter_limits.maxStorageBufferBindingSize);
         device_desc.requiredLimits = &required_limits;
 
         // Phase 6.3a Step 6: Brush rasterize_backwards.wgsl uses
@@ -760,7 +786,14 @@ bool DawnKernelHarness::init() {
         // f32 path is used). Conditional so the device request never fails on an
         // adapter lacking f16.
         std::vector<wgpu::FeatureName> feats;
-        feats.push_back(wgpu::FeatureName::Subgroups);
+        // [MALI-SUBGROUPS 2026-09-06] Subgroups 只在 adapter 支持时才请求:
+        // Mate 10(Mali-G72,Kirin 970 Vulkan)不支持 ⇒ 原来无条件请求让
+        // RequestDevice 直接失败 ⇒ GPU 提取器在该机上从未跑起来(CPU 回退又被
+        // 12MP OOM 守卫拦下 ⇒ 掉帧)。提取器核不用 subgroup;只有训练用的
+        // Brush rasterize_backwards 需要,它在不支持的机器上本来就不会被调用。
+        if (adapter_.HasFeature(wgpu::FeatureName::Subgroups)) {
+            feats.push_back(wgpu::FeatureName::Subgroups);
+        }
         if (adapter_.HasFeature(wgpu::FeatureName::ShaderModuleCompilationOptions)) {
             feats.push_back(wgpu::FeatureName::ShaderModuleCompilationOptions);
             has_strict_math_ = true;
@@ -772,11 +805,26 @@ bool DawnKernelHarness::init() {
         }
         // [GPU-TS] The namespace-specific parser ran before adapter creation.
         // OFF never reaches a TimestampQuery HasFeature/request path.
+        // [K8c 2026-09-06] OFFICIAL_AETHER_DAWN_LAZY_CLEAR=0 ⇒ 关掉 Dawn 的
+        // lazy_clear_resource_on_first_use:新建 storage buffer 不再在首次使用
+        // 时整段清零(12MP 金字塔 ≈ 490 MB/帧的白写)。只影响本 harness 的
+        // device(匹配器有自己的 instance/device)。前提:本 device 上所有
+        // alloc() 出来的缓冲都在读之前被整段写满(提取器已审计:packed/
+        // scratch/tmp/cell_start/cell_items/staging 全是)。
+        static const bool no_lazy_clear = [] {
+            const char* v = std::getenv("OFFICIAL_AETHER_DAWN_LAZY_CLEAR");
+            return v != nullptr && v[0] == '0' && v[1] == '\0';
+        }();
+        std::vector<const char*> disabled_toggles;
         if (timestamp_feature_requested) {
             ts_feature_request_to_device_ = true;
             feats.push_back(wgpu::FeatureName::TimestampQuery);
-            timestamp_toggles.disabledToggleCount = 1;
-            timestamp_toggles.disabledToggles = &disabled_timestamp_toggle;
+            disabled_toggles.push_back(disabled_timestamp_toggle);
+        }
+        if (no_lazy_clear) disabled_toggles.push_back("lazy_clear_resource_on_first_use");
+        if (!disabled_toggles.empty()) {
+            timestamp_toggles.disabledToggleCount = disabled_toggles.size();
+            timestamp_toggles.disabledToggles = disabled_toggles.data();
             device_desc.nextInChain = &timestamp_toggles;
         }
         device_desc.requiredFeatureCount = feats.size();
@@ -1011,6 +1059,15 @@ DawnKernelHarness::load_compute(std::string_view wgsl_source,
 void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
                                   const std::vector<wgpu::Buffer>& bindings,
                                   uint32_t wg_x, uint32_t wg_y, uint32_t wg_z) {
+    std::vector<BufBinding> b;
+    b.reserve(bindings.size());
+    for (const auto& x : bindings) b.emplace_back(x);
+    dispatch(pipeline, b, wg_x, wg_y, wg_z);
+}
+
+void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
+                                  const std::vector<BufBinding>& bindings,
+                                  uint32_t wg_x, uint32_t wg_y, uint32_t wg_z) {
     if (!device_healthy_) return;  // [GPU-HANG-A1] 不健康即短路,绝不再等
     const double hb_t0 = hb_now_ms(ts_enabled_);   // [HOST-BD] encode start
     // ─── Build a single bind group covering all `bindings` ───
@@ -1021,9 +1078,9 @@ void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
     std::vector<wgpu::BindGroupEntry> bg_entries(bindings.size());
     for (size_t i = 0; i < bindings.size(); ++i) {
         bg_entries[i].binding = static_cast<uint32_t>(i);
-        bg_entries[i].buffer = bindings[i];
-        bg_entries[i].offset = 0;
-        bg_entries[i].size = WGPU_WHOLE_SIZE;
+        bg_entries[i].buffer = bindings[i].buffer;   // [W256] 子区间
+        bg_entries[i].offset = bindings[i].offset;
+        bg_entries[i].size = bindings[i].size;
     }
     wgpu::BindGroupDescriptor bg_desc{};
     bg_desc.layout = pipeline.GetBindGroupLayout(0);
@@ -1448,14 +1505,24 @@ void DawnKernelHarness::dispatch_batched(
         const wgpu::ComputePipeline& pipeline,
         const std::vector<wgpu::Buffer>& bindings,
         uint32_t wg_x, uint32_t wg_y, uint32_t wg_z) {
+    std::vector<BufBinding> b;
+    b.reserve(bindings.size());
+    for (const auto& x : bindings) b.emplace_back(x);
+    dispatch_batched(pipeline, b, wg_x, wg_y, wg_z);
+}
+
+void DawnKernelHarness::dispatch_batched(
+        const wgpu::ComputePipeline& pipeline,
+        const std::vector<BufBinding>& bindings,
+        uint32_t wg_x, uint32_t wg_y, uint32_t wg_z) {
     // [GPU-HANG-A1] begin_batch 短路后 batch_encoder_ 为空,这里必须一并短路。
     if (!device_healthy_) return;
     std::vector<wgpu::BindGroupEntry> bg_entries(bindings.size());
     for (size_t i = 0; i < bindings.size(); ++i) {
         bg_entries[i].binding = static_cast<uint32_t>(i);
-        bg_entries[i].buffer = bindings[i];
-        bg_entries[i].offset = 0;
-        bg_entries[i].size = WGPU_WHOLE_SIZE;
+        bg_entries[i].buffer = bindings[i].buffer;   // [W256] 子区间
+        bg_entries[i].offset = bindings[i].offset;
+        bg_entries[i].size = bindings[i].size;
     }
     wgpu::BindGroupDescriptor bg_desc{};
     bg_desc.layout = pipeline.GetBindGroupLayout(0);

@@ -19,7 +19,7 @@ const PEAK_REL : f32 = 0.8;
 const MAX_ORI : u32 = 4u;
 const KP_STRIDE : u32 = 8u;
 const OUT_STRIDE : u32 = 8u;     // oriented kp record (x,y,a11,a12,a21,a22,o,s)
-const WG : u32 = 64u;
+const WG : u32 = 384u;  // [K9] 每 keypoint 256 lane:逐像素工作互相独立、直方图是整数原子、max 与顺序无关 ⇒ 逐位同;目的=提高驻留 SIMD 组数
 const PI : f32 = 3.14159265358979323846;
 const CAP : u32 = 65536u;        // oriented-kp output capacity guard
 
@@ -171,7 +171,7 @@ fn build_taps(sigma : f32, dst : ptr<workgroup, array<f32,16>>) -> u32 {
   return u32(r);
 }
 
-@compute @workgroup_size(64, 1, 1)
+@compute @workgroup_size(384, 1, 1)
 fn main(@builtin(workgroup_id) wid : vec3<u32>,
         @builtin(local_invocation_id) lid : vec3<u32>) {
   // [2D-DISPATCH 2026-08-10] n_kept 可超 WebGPU 单维派发上限 65535

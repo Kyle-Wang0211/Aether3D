@@ -23,10 +23,12 @@ struct Params {
   dst_off : u32,
 };
 
-@group(0) @binding(0) var<storage, read>       src   : array<f32>;
+// [K2g 2026-09-06] 单一 read_write 绑定 + 双偏移(与 fused 核同构):src/dst 都是
+// packed 大缓冲里不相交的层区间,scratch 也住在 packed 里(下一层的槽) ⇒ 2-pass
+// 路径不再需要任何独立 scratch/tmp 缓冲。数学逐字符不变。
+@group(0) @binding(0) var<storage, read_write> data  : array<f32>;
 @group(0) @binding(1) var<storage, read>       taps  : array<f32>; // length 2*radius+1, sum=1
-@group(0) @binding(2) var<storage, read_write> dst   : array<f32>;
-@group(0) @binding(3) var<uniform>             P     : Params;
+@group(0) @binding(2) var<uniform>             P     : Params;
 
 fn clampi(v : i32, lo : i32, hi : i32) -> i32 {
   return max(lo, min(v, hi));
@@ -48,16 +50,16 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let cx   : i32 = i32(x);
     for (var k : i32 = 0; k < len; k = k + 1) {
       let sx : i32 = clampi(cx + (k - r), 0, i32(P.width) - 1);
-      acc = acc + taps[k] * src[P.src_off + u32(base + sx)];
+      acc = acc + taps[k] * data[P.src_off + u32(base + sx)];
     }
   } else {
     // vertical: sample along y, clamp to [0, height-1]
     let cy : i32 = i32(y);
     for (var k : i32 = 0; k < len; k = k + 1) {
       let sy : i32 = clampi(cy + (k - r), 0, i32(P.height) - 1);
-      acc = acc + taps[k] * src[P.src_off + u32(sy * i32(P.width) + i32(x))];
+      acc = acc + taps[k] * data[P.src_off + u32(sy * i32(P.width) + i32(x))];
     }
   }
 
-  dst[P.dst_off + y * P.width + x] = acc;
+  data[P.dst_off + y * P.width + x] = acc;
 }

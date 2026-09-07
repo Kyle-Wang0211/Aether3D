@@ -1,3 +1,8 @@
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
 // SPDX-License-Identifier: LicenseRef-Aether3D-Proprietary
 // Copyright (c) 2024-2026 Aether3D. All rights reserved.
 
@@ -57,6 +62,14 @@ namespace {
 // aether::shaders::*_wgsl symbols (zero filesystem dependency). Single source
 // of truth on both — the .wgsl files — so host and device cannot diverge.
 std::string load_wgsl(const char* filename) {
+// [EXTRACT-WGSL-DIR 2026-09-06] 运行期覆盖:env OFFICIAL_AETHER_EXTRACT_WGSL_DIR=<dir>("~/…" 按 HOME 展开)且 <dir>/<file> 存在
+//   ⇒ 用文件文本(台架推文件迭代,不重装);否则回落编译期常量目录 / 烘焙表。管线缓存以源码全文为键,换文件即换管线。
+    if (const char* d = std::getenv("OFFICIAL_AETHER_EXTRACT_WGSL_DIR")) {
+        std::string dir = d;
+        if (dir.size() > 1 && dir[0] == '~' && dir[1] == '/') { if (const char* h = std::getenv("HOME")) dir = std::string(h) + dir.substr(1); }
+        std::ifstream of(dir + "/" + filename, std::ios::binary);
+        if (of) { std::ostringstream ss; ss << of.rdbuf(); std::fprintf(stderr, "[SiftExtractDawn] WGSL override %s/%s (%zu B)\n", dir.c_str(), filename, (size_t)ss.str().size()); return ss.str(); }
+    }
 #ifdef AETHER_WGSL_DIR
     const std::string path = std::string(AETHER_WGSL_DIR) + "/" + filename;
     std::ifstream f(path, std::ios::binary);
@@ -75,6 +88,10 @@ std::string load_wgsl(const char* filename) {
     if (f == "sift_gss_resample.wgsl")        return std::string(sift_gss_resample_wgsl);
     if (f == "sift_dog_detect.wgsl")          return std::string(sift_dog_detect_wgsl);
     if (f == "sift_nonextrema_suppress.wgsl") return std::string(sift_nonextrema_suppress_wgsl);
+    if (f == "sift_suppress_grid_count.wgsl") return std::string(sift_suppress_grid_count_wgsl);
+    if (f == "sift_suppress_grid_scan.wgsl") return std::string(sift_suppress_grid_scan_wgsl);
+    if (f == "sift_suppress_grid_scatter.wgsl") return std::string(sift_suppress_grid_scatter_wgsl);
+    if (f == "sift_suppress_grid.wgsl") return std::string(sift_suppress_grid_wgsl);
     if (f == "sift_affine_shape.wgsl")        return std::string(sift_affine_shape_wgsl);
     if (f == "sift_orientation.wgsl")         return std::string(sift_orientation_wgsl);
     if (f == "sift_orientation_atomic.wgsl")
@@ -88,6 +105,20 @@ std::string load_wgsl(const char* filename) {
     std::cerr << "[SiftExtractDawn] unknown WGSL pass: " << filename << '\n';
     std::abort();
 #endif
+}
+
+// [W256 2026-09-07] 关键点阶段(affine/orient/descriptor)一次 dispatch 跨所有
+// 八度取样,打包金字塔 ≈400 MB 超过 Mali 单次绑定上限 256 MB ⇒ 绑成两个窗口:
+// lo=[0,2^26) 元素、hi=[2^26,total);内核 level_at 按偏移选窗(层不跨窗)。
+// 小图(total ≤ 2^26)hi 与 lo 同区间——同缓冲只读双绑定合法。
+// [W256 2026-09-07] 关键点阶段(affine/orient/descriptor)着色器**一字不改**,
+// 只把 packed 绑成 A 区子区间 [0, keypoint_region_end):A 区装着它们会读的全部
+// 层(见 sift_pyramid_dawn.h)。A 区必须 ≤ 2^26 元素(256 MB):12MP ≈195 MB。
+static DawnKernelHarness::BufBinding w256_kp(const wgpu::Buffer& b,
+                                             const SiftPyramidDawn& pyr) {
+    if (!SiftPyramidDawn::w256_enabled()) return DawnKernelHarness::BufBinding(b);
+    return DawnKernelHarness::BufBinding(
+        b, 0u, static_cast<uint64_t>(pyr.keypoint_region_end()) * 4u);
 }
 
 // Read `n` u32 from a Storage|CopySrc buffer to host.
@@ -164,6 +195,8 @@ extern "C" void aether_sed_clear_last_stages() {
     }
 }
 
+
+extern "C" void aether_pyr_persist_end_frame();
 
 bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                               int width, int height, int max_features,
@@ -267,6 +300,13 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     wgpu::Buffer meta_buf =
         harness.upload(meta.data(), meta.size() * sizeof(SiftPyramidDawn::LevelMeta),
                        wgpu::BufferUsage::Storage);
+    if (SiftPyramidDawn::w256_enabled() &&
+        pyr.keypoint_region_end() > SiftPyramidDawn::kWindowElems) {
+        // [W256] A 区超 256 MB(> ~16.7 MP)——关键点阶段无法单绑定;显式失败
+        // 走既有回退,绝不静默(见 feedback_silent_exit_is_the_default_bug)。
+        sed_set_fail_reason("w256_keypoint_region_exceeds_256mb");
+        return false;
+    }
     mark("pack_levels");
 
     const float base_scale = static_cast<float>(SiftPyramidDawn::base_scale());
@@ -286,7 +326,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         float peak_threshold, edge_threshold, base_scale, oct_resolution;
         // [PACK-ZERO 2026-08-10] 本 octave 6 层在 packed 大缓冲中的偏移。
         uint32_t off[6];
-        uint32_t _pad0, _pad1;
+        uint32_t z0, _pad1;   // [W256] z0 = 拆分 dispatch 的 z 起点
     };
     wgpu::ComputePipeline pipe_detect =
         harness.load_compute(load_wgsl("sift_dog_detect.wgsl"));
@@ -307,16 +347,66 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         for (int s = SiftPyramidDawn::kOctaveFirstSub;
              s <= SiftPyramidDawn::kOctaveLastSub; ++s)
             P.off[s - SiftPyramidDawn::kOctaveFirstSub] = pyr.level_offset(o, s);
-        wgpu::Buffer p_buf =
-            harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
-        std::vector<wgpu::Buffer> bind;
-        bind.push_back(packed);
-        bind.push_back(det_counter);
-        bind.push_back(det_buf);
-        bind.push_back(p_buf);
-        harness.dispatch_batched(pipe_detect, bind,
-                                 static_cast<uint32_t>((ow + 7) / 8),
-                                 static_cast<uint32_t>((oh + 7) / 8), 3u);
+        // [W256 2026-09-07] 绑定子区间 ≤ 2^26 元素(256 MB)。检测在 zc 读
+        // dog(zc-1..zc+1) = gss(zc-1..zc+2):整八度 6 层若超窗(12MP octave0
+        // = 292 MB),按 z 拆两次:zc∈{1,2} 绑 gss 0..4,zc=3 绑 gss 2..5;
+        // 偏移改为相对绑定起点。集合不变(只是 kp_counter 原子顺序变)。
+        using BB = DawnKernelHarness::BufBinding;
+        const uint32_t n_oct =
+            static_cast<uint32_t>(ow) * static_cast<uint32_t>(oh);
+        struct Part { int z0, zn, l0, l1; };
+        std::vector<Part> parts;
+        {
+            // 6 层区间(A 区 li 0..2 与 B 区 li 3..5 相隔很远)若 ≤ 256 MB 则
+            // 一次 dispatch;否则每个 zc 单独一次:zc 读 gss (zc-1)..(zc+2)。
+            const auto span = [&](int l0, int l1) {
+                uint32_t lo = P.off[l0], hi = P.off[l0] + n_oct;
+                for (int k = l0; k <= l1; ++k) {
+                    lo = std::min(lo, P.off[k]);
+                    hi = std::max(hi, P.off[k] + n_oct);
+                }
+                return hi - lo;
+            };
+            if (!SiftPyramidDawn::w256_enabled() ||
+                span(0, 5) <= SiftPyramidDawn::kWindowElems) {
+                parts = {{0, 3, 0, 5}};
+            } else {
+                for (int zc = 1; zc <= 3; ++zc) {
+                    if (span(zc - 1, zc + 2) > SiftPyramidDawn::kWindowElems) {
+                        sed_set_fail_reason("w256_detect_span_exceeds_256mb");
+                        return false;
+                    }
+                    parts.push_back({zc - 1, 1, zc - 1, zc + 2});
+                }
+            }
+        }
+        const bool w256 = SiftPyramidDawn::w256_enabled();
+        for (const Part& pt : parts) {
+            DetParams Q = P;
+            uint32_t lo = P.off[pt.l0], hi = P.off[pt.l0] + n_oct;
+            for (int k = pt.l0; k <= pt.l1; ++k) {
+                lo = std::min(lo, P.off[k]);
+                hi = std::max(hi, P.off[k] + n_oct);
+            }
+            if (!w256) lo = 0u;   // 旧模式:整缓冲绑定、绝对偏移
+            for (int k = 0; k < 6; ++k)
+                Q.off[k] = (k >= pt.l0 && k <= pt.l1) ? P.off[k] - lo : 0u;
+            Q.z0 = static_cast<uint32_t>(pt.z0);
+            wgpu::Buffer p_buf =
+                harness.upload(&Q, sizeof(Q), wgpu::BufferUsage::Uniform);
+            if (std::getenv("W256_DIAG"))
+                std::fprintf(stderr, "[W256] detect o=%d z0=%d zn=%d bind=%.1fMB\n",
+                             o, pt.z0, pt.zn, (hi - lo) * 4.0 / 1048576.0);
+            harness.dispatch_batched(
+                pipe_detect,
+                {w256 ? BB(packed, static_cast<uint64_t>(lo) * 4u,
+                           static_cast<uint64_t>(hi - lo) * 4u)
+                      : BB(packed),
+                 BB(det_counter), BB(det_buf), BB(p_buf)},
+                static_cast<uint32_t>((ow + 7) / 8),
+                static_cast<uint32_t>((oh + 7) / 8),
+                static_cast<uint32_t>(pt.zn));
+        }
     }
     harness.end_batch();
     uint32_t n_detect = read_u32(harness, det_counter, 1)[0];
@@ -364,18 +454,90 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         } sp{n_detect, static_cast<float>(kSuppressTol)};
         wgpu::Buffer sp_buf =
             harness.upload(&sp, sizeof(sp), wgpu::BufferUsage::Uniform);
-        wgpu::ComputePipeline pipe_sup =
-            harness.load_compute(load_wgsl("sift_nonextrema_suppress.wgsl"));
-        harness.dispatch(pipe_sup, {det_buf, keep_buf, sp_buf},
-                         (n_detect + 63u) / 64u);
+        // [K7 SUPPRESS-GRID 2026-09-06] 网格分桶版:count→scan→scatter→
+        // 分桶抑制四个 pass 一次提交。谓词逐字符不变,候选集是可能压制者的
+        // 超集(证明见 sift_suppress_grid.wgsl)⇒ keep[] 逐位相同;把 O(N²)
+        // 对检查降到 O(N·邻域)。kill switch:OFFICIAL_AETHER_SUPPRESS_GRID=0。
+        static const bool grid_on = [] {
+            const char* v = std::getenv("OFFICIAL_AETHER_SUPPRESS_GRID");
+            return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+        }();
+        if (grid_on) {
+            constexpr uint32_t kCell = 16u;
+            const uint32_t ncx = (static_cast<uint32_t>(width) + kCell - 1u) / kCell;
+            const uint32_t ncy = (static_cast<uint32_t>(height) + kCell - 1u) / kCell;
+            const uint32_t ncells = ncx * ncy;
+            struct GridParams {
+                uint32_t count; float tol; uint32_t width, height;
+                uint32_t cell, ncx, ncy, ncells;
+            } gp{n_detect, static_cast<float>(kSuppressTol),
+                 static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                 kCell, ncx, ncy, ncells};
+            wgpu::Buffer gp_buf =
+                harness.upload(&gp, sizeof(gp), wgpu::BufferUsage::Uniform);
+            std::vector<uint32_t> zeros(static_cast<size_t>(ncells) + 1u, 0u);
+            wgpu::Buffer cell_count = harness.upload(
+                zeros.data(), zeros.size() * sizeof(uint32_t),
+                wgpu::BufferUsage::Storage);
+            wgpu::Buffer cell_cursor = harness.upload(
+                zeros.data(), zeros.size() * sizeof(uint32_t),
+                wgpu::BufferUsage::Storage);
+            wgpu::Buffer cell_start = harness.alloc(
+                zeros.size() * sizeof(uint32_t), wgpu::BufferUsage::Storage);
+            wgpu::Buffer cell_items = harness.alloc(
+                static_cast<size_t>(n_detect) * sizeof(uint32_t),
+                wgpu::BufferUsage::Storage);
+            wgpu::ComputePipeline pipe_cnt =
+                harness.load_compute(load_wgsl("sift_suppress_grid_count.wgsl"));
+            wgpu::ComputePipeline pipe_scan =
+                harness.load_compute(load_wgsl("sift_suppress_grid_scan.wgsl"));
+            wgpu::ComputePipeline pipe_scat =
+                harness.load_compute(load_wgsl("sift_suppress_grid_scatter.wgsl"));
+            wgpu::ComputePipeline pipe_grid =
+                harness.load_compute(load_wgsl("sift_suppress_grid.wgsl"));
+            const uint32_t wgs = (n_detect + 63u) / 64u;
+            harness.begin_batch();
+            harness.dispatch_batched(pipe_cnt, {det_buf, cell_count, gp_buf}, wgs, 1u);
+            harness.dispatch_batched(pipe_scan, {cell_count, cell_start, gp_buf}, 1u, 1u);
+            harness.dispatch_batched(pipe_scat,
+                                     {det_buf, cell_start, cell_cursor, cell_items, gp_buf},
+                                     wgs, 1u);
+            harness.dispatch_batched(pipe_grid,
+                                     {det_buf, cell_start, cell_items, keep_buf, gp_buf},
+                                     wgs, 1u);
+            harness.end_batch();
+        } else {
+            wgpu::ComputePipeline pipe_sup =
+                harness.load_compute(load_wgsl("sift_nonextrema_suppress.wgsl"));
+            harness.dispatch(pipe_sup, {det_buf, keep_buf, sp_buf},
+                             (n_detect + 63u) / 64u);
+        }
     }
 
     // Read detect records + keep flags; compact on host into the affine input
     // (the affine kernel needs [x,y,sigma] in slots 0,1,2 — the detect record
     // already has that, so compaction is a straight copy of kept rows).
-    std::vector<uint32_t> det_recs =
-        read_u32(harness, det_buf, static_cast<size_t>(n_detect) * kKpStride);
-    std::vector<uint32_t> keep = read_u32(harness, keep_buf, n_detect);
+    // [SYNC-MERGE 2026-09-07] det_recs 与 keep 原来各回读一次(两次 submit+
+    // wait+map);合成一个 staging、一次 map:内容逐字节相同,少一次 GPU 同步。
+    const size_t det_bytes = static_cast<size_t>(n_detect) * kKpStride * sizeof(uint32_t);
+    const size_t keep_bytes = static_cast<size_t>(n_detect) * sizeof(uint32_t);
+    const size_t keep_off = (det_bytes + 255u) & ~static_cast<size_t>(255u);  // 拷贝偏移 256 对齐
+    std::vector<uint32_t> det_recs(static_cast<size_t>(n_detect) * kKpStride);
+    std::vector<uint32_t> keep(n_detect);
+    {
+        wgpu::Buffer st = harness.alloc_staging_for_readback(keep_off + keep_bytes);
+        harness.begin_batch();
+        harness.copy_region_batched(det_buf, 0, st, 0, det_bytes);
+        harness.copy_region_batched(keep_buf, 0, st, keep_off, keep_bytes);
+        harness.end_batch();
+        std::vector<uint8_t> raw = harness.readback(st, keep_off + keep_bytes);
+        if (raw.size() < keep_off + keep_bytes) {
+            sed_set_fail_reason("readback_short_or_timeout");
+            throw std::runtime_error("readback short (det+keep)");
+        }
+        std::memcpy(det_recs.data(), raw.data(), det_bytes);
+        std::memcpy(keep.data(), raw.data() + keep_off, keep_bytes);
+    }
     mark("suppress+readback");
 
     std::vector<uint32_t> aff_in;  // KP_STRIDE-packed kept detect records
@@ -510,9 +672,14 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         // [2D-DISPATCH 2026-08-10] WebGPU 单维派发上限 65535;n_kept 超限
         // (128k 检测上限后实测 80,904)按 (x<=65535, y=层数) 拆分,shader 里
         // kp = y*65535+x 重组;n<=65535 时 y=1 逐位同旧。
-        harness.dispatch(pipe_aff, {packed, meta_buf, aff_in_buf, ell_buf, p_buf},
-                         std::min(n_kept, 65535u), (n_kept + 65534u) / 65535u,
-                         1u);
+        {
+            using BB = DawnKernelHarness::BufBinding;
+            harness.dispatch(pipe_aff,
+                             {w256_kp(packed, pyr), BB(meta_buf), BB(aff_in_buf),
+                              BB(ell_buf), BB(p_buf)},
+                             std::min(n_kept, 65535u),
+                             (n_kept + 65534u) / 65535u, 1u);
+        }
     }
     std::vector<uint32_t> ell_raw =
         read_u32(harness, ell_buf, static_cast<size_t>(n_kept) * 5);
@@ -597,13 +764,26 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             load_wgsl(orient_atomic_on ? "sift_orientation_atomic.wgsl"
                                        : "sift_orientation.wgsl"));
         // [2D-DISPATCH 2026-08-10] 同 affine:二维拆分过 65535 上限。
-        harness.dispatch(pipe_ori,
-                         {packed, meta_buf, ori_in_buf, ori_out_buf, ori_counter,
-                          dbg_buf, p_buf},
-                         std::min(n_kept, 65535u), (n_kept + 65534u) / 65535u,
-                         1u);
+        {
+            using BB = DawnKernelHarness::BufBinding;
+            harness.dispatch(pipe_ori,
+                             {w256_kp(packed, pyr), BB(meta_buf), BB(ori_in_buf),
+                              BB(ori_out_buf), BB(ori_counter), BB(dbg_buf),
+                              BB(p_buf)},
+                             std::min(n_kept, 65535u),
+                             (n_kept + 65534u) / 65535u, 1u);
+        }
     }
     n_oriented = read_u32(harness, ori_counter, 1)[0];
+    if (std::getenv("W256_DIAG")) {
+        std::fprintf(stderr,
+                     "[W256] n_detect=%u n_kept=%u n_oriented=%u "
+                     "kp_region=%.1fMB packed_total=%.1fMB (bind cap 256MB)\n",
+                     static_cast<unsigned>(n_detect), static_cast<unsigned>(n_kept),
+                     static_cast<unsigned>(n_oriented),
+                     pyr.keypoint_region_end() * 4.0 / 1048576.0,
+                     pyr.packed_total_elems() * 4.0 / 1048576.0);
+    }
     if (prune_first_attempt) mark("orient (1->K)");
     if (dawn_failed("orientation")) {
         return false;
@@ -1018,9 +1198,13 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                 harness.upload(&DP, sizeof(DP), wgpu::BufferUsage::Uniform);
             wgpu::ComputePipeline pipe_par =
                 harness.load_compute(load_wgsl("sift_dsp_descriptor_par.wgsl"));
-            harness.dispatch(pipe_par,
-                             {packed, meta_buf, desc_in_buf, scale_desc, p_buf2},
-                             groups_x, groups_y, 1u);
+            {
+                using BB = DawnKernelHarness::BufBinding;
+                harness.dispatch(pipe_par,
+                                 {w256_kp(packed, pyr), BB(meta_buf),
+                                  BB(desc_in_buf), BB(scale_desc), BB(p_buf2)},
+                                 groups_x, groups_y, 1u);
+            }
             struct MeanParams { uint32_t count; } MP{n_oriented};
             wgpu::Buffer mp_buf =
                 harness.upload(&MP, sizeof(MP), wgpu::BufferUsage::Uniform);
@@ -1060,10 +1244,14 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             wgpu::ComputePipeline pipe_desc =
                 harness.load_compute(load_wgsl(desc_shader));
             // [2D-DISPATCH 2026-08-10] n_oriented 可超 65535,二维拆分。
-            harness.dispatch(pipe_desc,
-                             {packed, meta_buf, desc_in_buf, rd_buf, p_buf},
-                             std::min(n_oriented, 65535u),
-                             (n_oriented + 65534u) / 65535u, 1u);
+            {
+                using BB = DawnKernelHarness::BufBinding;
+                harness.dispatch(pipe_desc,
+                                 {w256_kp(packed, pyr), BB(meta_buf),
+                                  BB(desc_in_buf), BB(rd_buf), BB(p_buf)},
+                                 std::min(n_oriented, 65535u),
+                                 (n_oriented + 65534u) / 65535u, 1u);
+            }
         }
     }
     mark("descriptor");

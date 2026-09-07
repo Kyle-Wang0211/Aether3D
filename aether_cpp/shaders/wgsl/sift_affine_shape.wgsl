@@ -64,6 +64,8 @@ struct Params {
 // ── workgroup state ──
 var<workgroup> wpatch : array<f32, 1681>;       // resident warped wpatch
 var<workgroup> red   : array<f32, 64>;         // reduction scratch (one lane each)
+var<workgroup> red2  : array<f32, 64>;         // [K5a] lyy 归约暂存(与 red 同树序)
+var<workgroup> red3  : array<f32, 64>;         // [K5a] lxy 归约暂存(与 red 同树序)
 var<workgroup> A_sh  : array<f32, 4>;          // shared current A (col-major a11,a21,a12,a22)
 var<workgroup> T_sh  : array<f32, 2>;          // shared T (image-frame x,y)
 var<workgroup> ctl   : u32;                    // control: 1 = stop the iteration
@@ -341,23 +343,22 @@ fn main(@builtin(workgroup_id) wid : vec3<u32>,
       lyy = lyy + ly * ly * mask;
       lxy = lxy + lx * ly * mask;
     }
-    // reduce lxx,lyy,lxy across lanes (workgroup-barrier tree, no warp shuffle).
-    // three sequential reductions via the shared `red` array.
-    // --- lxx ---
-    red[lane] = lxx; workgroupBarrier();
+    // [K5a 2026-09-06] 三个量在同一棵树里并行归约:每个量的加法树形状与
+    // 原来三次串行归约完全相同(同 off 序列、同 lane 配对)⇒ 逐位相同;
+    // 只是 21 次 barrier 合并成 7 次。
+    red[lane] = lxx; red2[lane] = lyy; red3[lane] = lxy; workgroupBarrier();
     var off = WG / 2u;
-    loop { if (off == 0u) { break; } if (lane < off) { red[lane] = red[lane] + red[lane + off]; } workgroupBarrier(); off = off / 2u; }
-    let Mxx = red[0]; workgroupBarrier();
-    // --- lyy ---
-    red[lane] = lyy; workgroupBarrier();
-    off = WG / 2u;
-    loop { if (off == 0u) { break; } if (lane < off) { red[lane] = red[lane] + red[lane + off]; } workgroupBarrier(); off = off / 2u; }
-    let Myy = red[0]; workgroupBarrier();
-    // --- lxy ---
-    red[lane] = lxy; workgroupBarrier();
-    off = WG / 2u;
-    loop { if (off == 0u) { break; } if (lane < off) { red[lane] = red[lane] + red[lane + off]; } workgroupBarrier(); off = off / 2u; }
-    let Mxy = red[0]; workgroupBarrier();
+    loop {
+      if (off == 0u) { break; }
+      if (lane < off) {
+        red[lane]  = red[lane]  + red[lane + off];
+        red2[lane] = red2[lane] + red2[lane + off];
+        red3[lane] = red3[lane] + red3[lane + off];
+      }
+      workgroupBarrier();
+      off = off / 2u;
+    }
+    let Mxx = red[0]; let Myy = red2[0]; let Mxy = red3[0]; workgroupBarrier();
 
     // ── lane 0: M SVD → convergence test → A update (covdet.c:2564-2598) ──
     if (lane == 0u) {

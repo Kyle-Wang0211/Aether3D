@@ -88,6 +88,10 @@ for source in \
   sift_gss_resample_wgsl.cpp \
   sift_dog_detect_wgsl.cpp \
   sift_nonextrema_suppress_wgsl.cpp \
+  sift_suppress_grid_count_wgsl.cpp \
+  sift_suppress_grid_scan_wgsl.cpp \
+  sift_suppress_grid_scatter_wgsl.cpp \
+  sift_suppress_grid_wgsl.cpp \
   sift_affine_shape_wgsl.cpp \
   sift_orientation_wgsl.cpp \
   sift_dsp_descriptor_wgsl.cpp \

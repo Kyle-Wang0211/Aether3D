@@ -75,6 +75,30 @@ public:
     const wgpu::Buffer& packed_buffer() const { return packed_buf_; }
     uint32_t level_offset(int octave, int sublevel) const;  // element offset
 
+    // [W256 2026-09-07] 打包布局(Mali-G72 单次绑定 ≤256 MB,缓冲本身可到 1 GB):
+    //  * 层起点按 64 元素(256 B)对齐(minStorageBufferOffsetAlignment);
+    //  * **A 区**先放所有八度的前 kKeypointLevels(=3,即 s∈{-1,0,1})层,
+    //    **B 区**再放其余层。关键点阶段(affine/orient/descriptor,原着色器
+    //    一字不改)只读 A 区:VLFeat pick_level 对非末八度恒取 s=0、首八度可取
+    //    s=-1、末八度可取到 s=4(末八度极小,整八度也在 A 区之外时用 B 区……
+    //    见 keypoint_region_end())。12MP:A 区 ≈195 MB < 256 MB。
+    //  * 金字塔/检测阶段按 dispatch 只绑真正触碰的层区间(宿主侧,已证逐位)。
+    //  build() 与 pack_levels() 共用同一函数 ⇒ 布局不可能漂移。
+    static constexpr uint32_t kAlignElems = 64u;
+    static constexpr uint32_t kWindowElems = 1u << 26;   // 256 MB / 4
+    static constexpr int kKeypointLevels = 3;
+    // 回退开关(三端同一):OFFICIAL_AETHER_W256=0 ⇒ 旧的 (o, li) 顺序布局 +
+    // 整缓冲绑定 + 检测不拆(仅 64 元素对齐保留:resample 的子区间绑定需要)。
+    // 只用于台架单变量 A/B 与生产回滚;Mali 12MP 在旧模式下不可用(>256 MB)。
+    static bool w256_enabled();
+    static std::vector<uint32_t> level_layout(int width, int height,
+                                              int last_octave,
+                                              uint32_t* total_elems,
+                                              uint32_t* keypoint_region_end);
+    uint32_t packed_total_elems() const { return packed_total_elems_; }
+    // A 区末尾(元素):关键点阶段把 packed 绑成 [0, keypoint_region_end)。
+    uint32_t keypoint_region_end() const { return keypoint_region_end_; }
+
     // Octave width/height (== width >> o, height >> o).
     int octave_width(int octave) const;
     int octave_height(int octave) const;
@@ -121,6 +145,8 @@ private:
     std::vector<OctaveBuffers> octaves_;  // index = octave (first_octave = 0)
     wgpu::Buffer packed_buf_;             // 所有层的唯一驻留缓冲
     std::vector<uint32_t> level_offsets_; // index = o*kLevelsPerOctave+(s-first)
+    uint32_t packed_total_elems_ = 0;     // [W256] 含对齐填充
+    uint32_t keypoint_region_end_ = 0;    // [W256] A 区末尾
 };
 
 }  // namespace tools

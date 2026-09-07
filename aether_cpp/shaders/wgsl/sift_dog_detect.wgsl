@@ -66,7 +66,7 @@ struct Params {
   off3 : u32,
   off4 : u32,
   off5 : u32,
-  _pad0 : u32,
+  z0 : u32,      // [W256] 拆分 dispatch 的 z 起点(0 或 2);偏移 off* 相对绑定起点
   _pad1 : u32,
 };
 
@@ -161,12 +161,12 @@ fn solve3(Ain : array<f32, 9>, bin : array<f32, 3>, out_x : ptr<function, array<
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let gx : u32 = gid.x;
   let gy : u32 = gid.y;
-  let zc : i32 = i32(gid.z) + 1;  // css sublevel index z in [1, depth-2] = [1,3]
+  let zc : i32 = i32(gid.z) + i32(P.z0) + 1;  // [W256]  // css sublevel index z in [1, depth-2] = [1,3]
   let W : i32 = i32(P.width);
   let H : i32 = i32(P.height);
 
   // depth = 5 → z (1-based extrema range) in {1,2,3}. gid.z in {0,1,2}.
-  if (i32(gid.z) > 2) { return; }
+  if (i32(gid.z) + i32(P.z0) > 2) { return; }
   // extrema interior: x,y in [1, W-2] / [1, H-2].
   if (gx < 1u || gy < 1u || gx >= u32(W - 1) || gy >= u32(H - 1)) { return; }
 
@@ -180,15 +180,22 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   var is_max : bool = (v >= t08);
   var is_min : bool = (v <= -t08);
   if (is_max || is_min) {
-    for (var dz : i32 = -1; dz <= 1; dz = dz + 1) {
+    // [K1c 2026-09-07] 先查同层 8 邻居(缓存最热、最易否决),再查上下层;
+    // 26 个比较是 AND,顺序不影响结果 ⇒ 逐位同;只是平均更早退出。
+    for (var kz : i32 = 0; kz <= 2; kz = kz + 1) {
+      let dz : i32 = select(select(1, -1, kz == 1), 0, kz == 0);
       for (var dy : i32 = -1; dy <= 1; dy = dy + 1) {
         for (var dx : i32 = -1; dx <= 1; dx = dx + 1) {
           if (dx == 0 && dy == 0 && dz == 0) { continue; }
           let nv : f32 = dog_at(zc + dz, x0 + dx, y0 + dy);
           if (!(v > nv)) { is_max = false; }
           if (!(v < nv)) { is_min = false; }
+          // [K1a 2026-09-06] 两个判定都已失败 ⇒ 后续邻居不可能再改变结果,提前退出(纯控制流,逐位不变)
+          if (!(is_max || is_min)) { break; }
         }
+        if (!(is_max || is_min)) { break; }
       }
+      if (!(is_max || is_min)) { break; }
     }
   }
   if (!(is_max || is_min)) { return; }

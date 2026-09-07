@@ -39,6 +39,10 @@ sift_gray_to_f32_wgsl.o
 sift_gss_blur_wgsl.o
 sift_gss_resample_wgsl.o
 sift_nonextrema_suppress_wgsl.o
+sift_suppress_grid_count_wgsl.o
+sift_suppress_grid_scan_wgsl.o
+sift_suppress_grid_scatter_wgsl.o
+sift_suppress_grid_wgsl.o
 sift_orientation_wgsl.o
 canonical_feature_selector_v1.o
 dsp_sift_gpu_c.o

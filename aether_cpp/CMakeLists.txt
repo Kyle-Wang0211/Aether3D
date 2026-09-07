@@ -500,6 +500,10 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
         ${AETHER_WGSL_GENERATED_DIR}/sift_gss_resample_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_dog_detect_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_nonextrema_suppress_wgsl.cpp
+        ${AETHER_WGSL_GENERATED_DIR}/sift_suppress_grid_count_wgsl.cpp
+        ${AETHER_WGSL_GENERATED_DIR}/sift_suppress_grid_scan_wgsl.cpp
+        ${AETHER_WGSL_GENERATED_DIR}/sift_suppress_grid_scatter_wgsl.cpp
+        ${AETHER_WGSL_GENERATED_DIR}/sift_suppress_grid_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_affine_shape_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_orientation_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_orientation_atomic_wgsl.cpp
