@@ -968,6 +968,60 @@ ceres::Solver::Summary SolveWithGpuFallback(
     ceres::Problem* problem) {
   ceres::Solver::Options solver_options =
       options.ceres->CreateSolverOptions(config, *problem);
+  // [AETHER BA-ORDERING 2026-09-07 默认开;回退 OFFICIAL_AETHER_BA_NOORDERING=1]
+  // COLMAP 的 BA 从不设 linear_solver_ordering(全仓 grep:只有 glomap
+  // global_positioning.cc:277 设),所以每次 Solve() Ceres 都自己重推 Schur 消元序。
+  // 那正是 [AETHER-T2] ilr_pre 量到的段:host 10.3 ms/帧、A16 17.6 ms/帧(局部 BA 6.3%),
+  // 而 IterativeLocalRefinement 每帧跑 2 轮 => 每帧付两次。
+  // 出处:Ceres 自己的 examples/bundle_adjuster.cc 的 SetOrdering()(点=消元组 0、
+  // 相机=组 1);同款写法本仓已有先例(global_positioning.cc:277)。
+  // 同样的数学 —— 只是把 Ceres 本来要搜的答案直接递给它。
+  // host 配对交替 x3:ilr_pre -45%、局部 BA -5.9%,cloud.ply sha 与 RESULT 全同。
+  //
+  // 分类的正确性靠证明,不靠"块大小==3"这个猜:
+  //   前置 A:内参不可变(refine_focal_length/principal_point/extra_params 全 false)
+  //     => 内参块是常量块,被 IsParameterBlockConstant 排除,3 维可变块只可能是点 xyz。
+  //   前置 B:组 1 的块全是 7 维(Rigid3d:四元数 4 + 平移 3 连续存)
+  //     => 位姿没有被拆成 quat(4)/trans(3) 两块 => 3 维可变块只可能是点 xyz
+  //     => 组 0 恰好是全部可变点;BA 里任意两个 3D 点不共享残差 => 独立集成立。
+  //   (最初写的是 n_pts == config.NumVariablePoints(),错的:那 4398 个点块是
+  //    AddImageToProblem 加残差时隐式带进来的,VariablePoints() 只数显式标记的。)
+  // 有一条不成立就不设 ordering,退回 Ceres 自搜(fail-safe,行为=改动前)。
+  if (std::getenv("OFFICIAL_AETHER_BA_NOORDERING") == nullptr &&
+      !options.refine_focal_length && !options.refine_principal_point &&
+      !options.refine_extra_params) {
+    auto ordering = std::make_shared<ceres::ParameterBlockOrdering>();
+    std::vector<double*> blocks;
+    problem->GetParameterBlocks(&blocks);
+    size_t n_pts = 0, n_cam = 0;
+    bool all_g1_are_poses = true;
+    for (double* pb : blocks) {
+      if (problem->IsParameterBlockConstant(pb)) continue;
+      const int sz = problem->ParameterBlockSize(pb);
+      if (sz == 3) {
+        ordering->AddElementToGroup(pb, 0);
+        ++n_pts;
+      } else {
+        // Rigid3d(四元数 4 + 平移 3 连续存)= 7。任何别的尺寸都说明这棵树里
+        // 位姿被拆开存了(quat 4 / trans 3),那时 3 维块不再只可能是点 => 不敢用。
+        if (sz != 7) all_g1_are_poses = false;
+        ordering->AddElementToGroup(pb, 1);
+        ++n_cam;
+      }
+    }
+    const bool proven = all_g1_are_poses && n_pts > 0 && n_cam > 0;
+    static std::atomic<int> ord_logged{0};
+    if (ord_logged.fetch_add(1) < 3) {
+      std::fprintf(stderr,
+                   "[AETHER BA-ORDERING] blocks=%zu pts(g0)=%zu cams(g1)=%zu "
+                   "g1_all_pose=%d proven=%d\n",
+                   blocks.size(), n_pts, n_cam, all_g1_are_poses ? 1 : 0,
+                   proven ? 1 : 0);
+    }
+    if (proven) {
+      solver_options.linear_solver_ordering = std::move(ordering);
+    }
+  }
   const aether::official::ba::SolveScopeV1 scope =
       aether::official::ba::CurrentBaSolveScopeV1();
   const aether::official::ba::GlobalPtolResolutionV1 ptol =
@@ -1056,6 +1110,14 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
         loss_function_(options_.ceres->CreateLossFunction()) {
     ceres::Problem::Options problem_options;
     problem_options.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+    // [AETHER BA-FASTPROBLEM 2026-09-07 默认开;回退 OFFICIAL_AETHER_BA_NOFASTPROBLEM=1]
+    // ceres::Problem::Options::disable_all_safety_checks —— Ceres 文档的性能开关,
+    // 跳过每次 AddResidualBlock 的逐次校验。局部 BA 每轮建 ~36k 残差块、每帧 2 轮;
+    // [AETHER-T2] ilr_setup 占局部 BA 的 11.2%(host)/7.8%(A16)。同样的数学。
+    // host 配对交替 x3:ilr_setup -15%,cloud.ply sha 与 RESULT 全同。
+    if (std::getenv("OFFICIAL_AETHER_BA_NOFASTPROBLEM") == nullptr) {
+      problem_options.disable_all_safety_checks = true;
+    }
     problem_ = std::make_shared<ceres::Problem>(problem_options);
 
     // Verify that reconstruction is internally consistent.
