@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 namespace pw::gpufe {
@@ -23,7 +24,7 @@ uint32_t g16(uint32_t n) { return (n + 15) / 16; }
 struct FrameBuf {   // GPU-resident padded pyramid + Scharr derivatives; pooled per (W,H)
     int L = 0; uint32_t W = 0, H = 0; std::vector<P> prm; std::vector<wgpu::Buffer> b_prm; wgpu::Buffer img, der, b_prm_all; size_t n_img = 0, n_der = 0;   // n_img: words (packed u8), n_der: u32 per padded pixel
     wgpu::Buffer b_src, b_hist, b_lut, b_pack, st_pack;   // per-frame scratch (frames may be in flight concurrently)
-    int mode = 0; bool want_pyr = false; wgpu::Buffer st_img; DawnKernelHarness::AsyncBatch pending_det; bool det_ready = false;   // mode 0: levels+derivatives (GPU LK), 1: level 0 only (hybrid), 2: levels, no derivatives (hybrid + GPU pyramid readback)   // hybrid: detection submitted separately (B) after CLAHE (A)
+    int mode = 0; bool want_pyr = false; bool split = false; wgpu::Buffer st_img; DawnKernelHarness::AsyncBatch pending_det; bool det_ready = false;   // mode 0: levels+derivatives (GPU LK), 1: level 0 only (hybrid), 2: levels, no derivatives (hybrid + GPU pyramid readback)   // hybrid: detection submitted separately (B) after CLAHE (A)
     DawnKernelHarness::AsyncBatch pending; bool want_clahe = false; bool ready = false; bool failed = false; bool counted = false; double t_submit = 0;
     bool with_detect = false; wgpu::Buffer b_cnt, b_corners, st_det; std::vector<uint8_t> cand; bool have_cand = false;   // detection fused into the frame batch
 };
@@ -104,8 +105,9 @@ public:
             for (int l = 0; l + 1 < fb.L; ++l) h_.dispatch_batched(p_down_, {fb.img, fb.b_prm[l]}, g16(fb.prm[l].pwq2), g16(fb.prm[l].ph2));
             h_.copy_region_batched(fb.img, 0, fb.st_img, 0, fb.n_img * 4);
         } else if (want_clahe) { h_.dispatch_batched(p_pack_, {fb.img, fb.b_pack, fb.b_prm[0]}, (uint32_t)((n4 + 255) / 256)); h_.copy_region_batched(fb.b_pack, 0, fb.st_pack, 0, n4 * 4); }
-        if (with_detect) {    // batch A ends here (CLAHE); batch B = goodFeaturesToTrack candidates, waited for separately in detect()
-            fb.pending = h_.end_batch_async(); fb.t_submit = now_ms(); fb.counted = true; ++inflight_;
+        if (with_detect) {    // detection (goodFeaturesToTrack candidates) in the SAME submission by default; PW_GPUFE_SPLIT=1 submits it as a second batch B
+            fb.split = split_;   // live 09-04/05: two submissions per frame cost ~11–19 ms of extra GPU occupancy at throttled clocks (empty-submit latency) and tipped the pipeline into collapse
+            if (fb.split) { fb.pending = h_.end_batch_async(); fb.t_submit = now_ms(); fb.counted = true; ++inflight_; }
             const uint32_t W = (uint32_t)w, H = (uint32_t)h; const P& q0 = fb.prm[0];
             const int block = 3, ksize = 3; double scale = (double)(1 << (ksize - 1)) * block * 255.0; scale = 1.0 / scale;
             ensure_detect(W, H, (float)scale, (float)harris_k, (float)quality, q0.pwq, q0.base);
@@ -113,13 +115,15 @@ public:
             if (!fb.b_cnt) { uint32_t zu = 0; fb.b_cnt = h_.upload(&zu, 4, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst); fb.b_corners = h_.alloc(size_t(kMaxCandidates) * 8, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc); fb.st_det = h_.alloc_staging_for_readback(256 + size_t(kMaxCandidates) * 8); }
             const uint32_t zero = 0; q.WriteBuffer(fb.b_cnt, 0, &zero, 4);
             if (quality != qsplit_q_) { qsplit_q_ = quality; float qs[4] = {(float)quality, (float)(quality - (double)(float)quality), 0, 0}; q.WriteBuffer(b_qsplit_, 0, qs, 16); }
-            h_.begin_batch();
-            h_.dispatch_batched(p_harris_fused_, {fb.img, b_eig_, b_gp_}, g16(W), g16(H));   // Sobel fused into Harris (no dx/dy round trip)
+            if (fb.split) h_.begin_batch();
+            if (fused_harris_) h_.dispatch_batched(p_harris_fused_, {fb.img, b_eig_, b_gp_}, g16(W), g16(H));   // PW_GPUFE_FUSED_HARRIS=1: Sobel recomputed inside Harris (−22 MB, but slower on a throttled GPU: ALU-bound)
+            else { h_.dispatch_batched(p_sobel_, {fb.img, b_dx_, b_dy_, b_gp_}, g16(W), g16(H)); h_.dispatch_batched(p_harris_, {b_dx_, b_dy_, b_eig_, b_gp_}, g16(W), g16(H)); }
             h_.dispatch_batched(p_max_, {b_eig_, b_partial_, b_gp_}, maxGroups);
             h_.dispatch_batched(p_thr_, {b_partial_, b_thr_, b_qsplit_}, 1);
             h_.dispatch_batched(p_find_, {b_eig_, b_thr_, fb.b_cnt, fb.b_corners, b_gp_}, g16(W - 2), g16(H - 2));
             h_.copy_region_batched(fb.b_cnt, 0, fb.st_det, 0, 4); h_.copy_region_batched(fb.b_corners, 0, fb.st_det, 256, size_t(kMaxCandidates) * 8);
-            fb.pending_det = h_.end_batch_async();
+            if (fb.split) fb.pending_det = h_.end_batch_async();
+            else { fb.pending = h_.end_batch_async(); fb.t_submit = now_ms(); fb.counted = true; ++inflight_; }
             std::string e; if (!h_.healthy() || DawnKernelHarness::take_device_error(&e)) { error_ = "preprocess: " + (e.empty() ? std::string("device unhealthy") : e); return nullptr; }
             st_.preprocess_ms += now_ms() - t0; ++st_.n_preprocess; return f;
         }
@@ -136,6 +140,7 @@ public:
             if (fb.counted) { fb.counted = false; --inflight_; }
             if (!h_.wait_async(fb.pending)) { fb.failed = true; error_ = "preprocess: GPU wait failed"; return false; }
             st_.pre_wait_ms += now_ms() - t0; st_.pre_gpu_ms += now_ms() - fb.t_submit;
+            if (fb.with_detect && !fb.split) { const double t3 = now_ms(); fb.cand = h_.readback(fb.st_det, 256 + size_t(kMaxCandidates) * 8); fb.det_ready = true; st_.det_read_ms += now_ms() - t3; }
             if (fb.want_pyr) { const double t2 = now_ms(); fb_clahe_[&fb] = h_.readback(fb.st_img, fb.n_img * 4); st_.pre_read_ms += now_ms() - t2; }
             else if (fb.want_clahe) { const double t2 = now_ms(); const size_t n = size_t(fb.W) * fb.H; auto rb = h_.readback(fb.st_pack, ((n + 3) / 4) * 4); fb_clahe_[&fb].assign(rb.begin(), rb.begin() + n); st_.pre_read_ms += now_ms() - t2; }
             std::string e; if (!h_.healthy() || DawnKernelHarness::take_device_error(&e)) { fb.failed = true; error_ = "preprocess: " + (e.empty() ? std::string("device unhealthy") : e); return false; }
@@ -166,6 +171,7 @@ public:
         const double t0 = now_ms(); out.clear();
         if (f.buf->with_detect) {
             FrameBuf& fb = *f.buf;
+            if (!fb.det_ready && !fb.split) { if (!finish(f, nullptr)) return false; }   // single submission: the candidates were read back with the frame
             if (!fb.det_ready) { const double tw = now_ms(); if (!h_.wait_async(fb.pending_det)) { error_ = "detect: GPU wait failed"; return false; } st_.det_gpu_ms += now_ms() - tw;
                 const double t3 = now_ms(); fb.cand = h_.readback(fb.st_det, 256 + size_t(kMaxCandidates) * 8); st_.det_read_ms += now_ms() - t3; fb.det_ready = true;
                 std::string e; if (!h_.healthy() || DawnKernelHarness::take_device_error(&e)) { error_ = "detect: " + e; return false; } }
@@ -178,7 +184,8 @@ public:
         q.WriteBuffer(b_cnt_, 0, &zero, 4);
         if (quality != qsplit_q_) { qsplit_q_ = quality; float qs[4] = {(float)quality, (float)(quality - (double)(float)quality), 0, 0}; q.WriteBuffer(b_qsplit_, 0, qs, 16); }
         h_.begin_batch();   // ONE submission: sobel -> harris -> max partials -> threshold (GPU) -> find -> copies
-        h_.dispatch_batched(p_harris_fused_, {fb.img, b_eig_, b_gp_}, g16(W), g16(H));   // Sobel fused into Harris (no dx/dy round trip)
+        if (fused_harris_) h_.dispatch_batched(p_harris_fused_, {fb.img, b_eig_, b_gp_}, g16(W), g16(H));   // PW_GPUFE_FUSED_HARRIS=1: Sobel recomputed inside Harris (−22 MB, but slower on a throttled GPU: ALU-bound)
+        else { h_.dispatch_batched(p_sobel_, {fb.img, b_dx_, b_dy_, b_gp_}, g16(W), g16(H)); h_.dispatch_batched(p_harris_, {b_dx_, b_dy_, b_eig_, b_gp_}, g16(W), g16(H)); }
         h_.dispatch_batched(p_max_, {b_eig_, b_partial_, b_gp_}, maxGroups);
         h_.dispatch_batched(p_thr_, {b_partial_, b_thr_, b_qsplit_}, 1);
         h_.dispatch_batched(p_find_, {b_eig_, b_thr_, b_cnt_, b_corners_, b_gp_}, g16(W - 2), g16(H - 2));
@@ -346,6 +353,8 @@ private:
     }
     DawnKernelHarness h_;
     std::shared_ptr<PoolState> pool_;
+    const bool split_ = [] { const char* e = std::getenv("PW_GPUFE_SPLIT"); return e && e[0] == '1'; }();
+    const bool fused_harris_ = [] { const char* e = std::getenv("PW_GPUFE_FUSED_HARRIS"); return e && e[0] == '1'; }();
     wgpu::ComputePipeline p_sobel_, p_harris_, p_harris_fused_, p_max_, p_thr_, p_find_, p_hist_, p_lut_, p_interp_, p_pad_, p_down_, p_scharr_, p_pack_, p_unpack_, p_lk_, p_lk_simple_, p_fp_;
     // preprocess scratch
     uint32_t pre_w_ = 0, pre_h_ = 0, tiles_x_ = 0, tiles_y_ = 0, tw_ = 0, th_ = 0, clip_ = 0; float lut_scale_ = 0;

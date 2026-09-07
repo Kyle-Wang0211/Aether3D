@@ -489,8 +489,16 @@ int main(int argc, char** argv) {
     matching_opts.sift->cpu_brute_force_matcher = true;
     matching_opts.sift->max_ratio = 0.7;           // match streaming ratio
     matching_opts.sift->cross_check = true;        // mutual check (required)
+    // [AETHER 2026-09-07] HOST memory gate. Brute-force CPU matching allocates a
+    // per-pair similarity matrix of kp_i*kp_j floats; on this fixture kp_max=8192
+    // => 8192^2*4B = 256MB PER THREAD. On a 12-thread 18GB Mac that is ~3.1GB
+    // peak, and ulimit -v is a no-op on Darwin (verified: a 1GB cap still lets a
+    // 2GB malloc+touch through), so the thread count IS the only real lever.
+    // Default -1 keeps stock COLMAP behaviour -> existing results unchanged.
+    matching_opts.num_threads = g_arg_i(argc, argv, "--threads", -1);
     colmap::TwoViewGeometryOptions geometry_opts;  // COLMAP defaults (E/F/H RANSAC)
-    std::fprintf(stderr, "[match] exhaustive re-match (CPU brute-force)...\n");
+    std::fprintf(stderr, "[match] exhaustive re-match (CPU brute-force, threads=%d)...\n",
+                 matching_opts.num_threads);
     auto matcher = colmap::CreateExhaustiveFeatureMatcher(
         pairing_opts, matching_opts, geometry_opts, db_path);
     matcher->Start();
