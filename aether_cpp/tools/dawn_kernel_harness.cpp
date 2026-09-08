@@ -1118,6 +1118,7 @@ void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
     }
     wgpu::CommandBuffer commands = encoder.Finish();
     const double hb_t1 = hb_now_ms(hb_enabled_);   // [HOST-BD] encode→wait split
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
 
     // Wait for GPU completion via OnSubmittedWorkDone → WaitAny pattern.
@@ -1289,6 +1290,7 @@ bool DawnKernelHarness::gpu_ts_resolve(std::vector<uint64_t>* out_ns) {
     enc.CopyBufferToBuffer(ts_resolve_, 0, ts_readback_, 0,
                            n * sizeof(uint64_t));
     wgpu::CommandBuffer cb = enc.Finish();
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &cb);
 
     bool queue_callback_completed = false;
@@ -1564,6 +1566,7 @@ void DawnKernelHarness::copy_region_batched(const wgpu::Buffer& src,
                                             uint64_t dst_offset, size_t size) {
     // [GPU-HANG-A1] 同 dispatch_batched:begin_batch 短路后 encoder 为空。
     if (!device_healthy_) return;
+    if (hb_enabled_) ++hb_.n_copy;
     batch_encoder_.CopyBufferToBuffer(src, src_offset, dst, dst_offset, size);
 }
 
@@ -1572,6 +1575,7 @@ void DawnKernelHarness::end_batch() {
     const double hb_t0 = hb_now_ms(hb_enabled_);   // [HOST-BD]
     wgpu::CommandBuffer commands = batch_encoder_.Finish();
     const double hb_t1 = hb_now_ms(hb_enabled_);
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
     // [GPU-HANG-A1 2026-08-06] 有限超时(Chromium watchdog / Dawn
     // TimedWaitAny);超时/失败即判设备失活,清掉批状态后返回。
@@ -1604,6 +1608,7 @@ DawnKernelHarness::AsyncBatch DawnKernelHarness::end_batch_async() {
     AsyncBatch b;
     if (!device_healthy_) return b;
     wgpu::CommandBuffer commands = batch_encoder_.Finish();
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
     b.done = std::make_shared<bool>(false);
     auto flag = b.done;
@@ -1672,6 +1677,7 @@ void DawnKernelHarness::dispatch_indirect(
         pass.End();
     }
     wgpu::CommandBuffer commands = encoder.Finish();
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
 
     // [GPU-HANG-A1 2026-08-06] 有限超时(Chromium watchdog / Dawn TimedWaitAny)。
@@ -1696,8 +1702,10 @@ void DawnKernelHarness::copy_to_staging(const wgpu::Buffer& src,
                                          size_t size) {
     if (!device_healthy_) return;  // [GPU-HANG-A1] 不健康即短路,绝不再等
     wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    if (hb_enabled_) ++hb_.n_copy;
     encoder.CopyBufferToBuffer(src, 0, dst, 0, size);
     wgpu::CommandBuffer commands = encoder.Finish();
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
 
     // Wait so the staging buffer is valid for map-read below.
@@ -1724,8 +1732,10 @@ void DawnKernelHarness::copy_region(const wgpu::Buffer& src,
                                      uint64_t dst_offset, size_t size) {
     if (!device_healthy_) return;  // [GPU-HANG-A1] 不健康即短路,绝不再等
     wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    if (hb_enabled_) ++hb_.n_copy;
     encoder.CopyBufferToBuffer(src, src_offset, dst, dst_offset, size);
     wgpu::CommandBuffer commands = encoder.Finish();
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
 
     // [GPU-HANG-A1 2026-08-06] 有限超时(Chromium watchdog / Dawn TimedWaitAny)。
@@ -1904,6 +1914,7 @@ void DawnKernelHarness::dispatch_render_pass(
         pass.End();
     }
     wgpu::CommandBuffer commands = encoder.Finish();
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
 
     // [GPU-HANG-A1 2026-08-06] 有限超时(Chromium watchdog / Dawn TimedWaitAny)。
@@ -1954,6 +1965,7 @@ std::vector<uint8_t> DawnKernelHarness::readback_texture(
     wgpu::Extent3D extent{ w, h, 1 };
     encoder.CopyTextureToBuffer(&src_info, &dst_info, &extent);
     wgpu::CommandBuffer commands = encoder.Finish();
+    if (hb_enabled_) ++hb_.n_submit;
     queue_.Submit(1, &commands);
 
     // [GPU-HANG-A1 2026-08-06] 有限超时(Chromium watchdog / Dawn TimedWaitAny)。

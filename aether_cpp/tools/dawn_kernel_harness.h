@@ -345,6 +345,12 @@ public:
         double create_ms = 0;
         uint32_t n_upload = 0;
         uint32_t n_dispatch = 0;
+        // [SUBMIT-COUNT 2026-09-08] 每次 queue_.Submit 一次往返。pyramid 段
+        // wait−gpu 差 45 ms:是"批次被拆成多次提交"(可合并=真刀)还是
+        // "GPU 干了时间戳没覆盖的活(拷贝/清零)"(不是开销=没刀)——
+        // 这两者用时间分不开,只能数提交次数和拷贝次数。
+        uint32_t n_submit = 0;
+        uint32_t n_copy = 0;
         uint32_t n_readback = 0;
         uint32_t n_create = 0;      // cache MISSES only
     };

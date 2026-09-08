@@ -93,9 +93,18 @@ thread_local std::vector<PersistBuf> g_pyr_persist;
 // didReceiveMemoryWarning 与 Android onTrimMemory 走同一接口)。不用任何
 // 平台独有机制(Metal purgeable 已撤)。
 bool pyr_persist_on() {
+    // [PYR-PERSIST-DEFAULT 2026-09-08 用户裁决:翻默认] 每帧新建 372MB 打包缓冲
+    // 在两端各有一份不同的代价,同一把刀都吃掉:
+    //   · A16/Metal:Dawn 每帧对新缓冲整段惰性清零(GPU 侧,compute-pass 时间戳看不见)
+    //     ⇒ pyramid 的 wait−gpu 42.7 → 5.7 ms,提取段 **−6.3%**;
+    //   · Mali-G72/Vulkan:主机侧每帧 CreateBuffer 372MB
+    //     ⇒ own-loop 196 → 28 ms(wait 没动),提取段 **−5.5%**。
+    // 逐位:两端 cap65536 四摘要/count 与基线全同。内存:峰值本就要这块缓冲,
+    // 复用只是不在帧间释放(Mali 跑后 MemFree 四臂无差别)。
+    // 🔴 Adreno 660 尚未测(P50 不在手上)。回退:OFFICIAL_AETHER_PYR_PERSIST=0。
     static const bool on = [] {
         const char* v = std::getenv("OFFICIAL_AETHER_PYR_PERSIST");
-        return v != nullptr && v[0] == '1' && v[1] == '\0';
+        return v == nullptr || !(v[0] == '0' && v[1] == '\0');
     }();
     return on;
 }

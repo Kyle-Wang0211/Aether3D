@@ -211,6 +211,19 @@ extern "C" void aether_sed_last_stages_gpu(double* out, int cap) {
     for (int i = 0; i < n; ++i) out[i] = g_aether_sed_stage_gpu_ms[i];
 }
 
+// [HOST-BD 2026-09-08] 上面两个数组的第三个同伴:host−gpu 那一块到底花在哪。
+// 五列 = upload / encode(建 bind group + 编码)/ submit+wait / map / create。
+// 剩下的 host − gpu − 这五列 = 提取器自己的 CPU 循环。
+// 只有 OFFICIAL_AETHER_HOST_BD=1(或 GPU 时间戳开着)时非零。
+static thread_local double
+    g_aether_sed_stage_hb[kAetherSedStageCount][7] = {{0}};
+
+extern "C" void aether_sed_last_stages_hb(double* out, int cap) {
+    if (out == nullptr || cap <= 0) return;
+    const int n = cap < kAetherSedStageCount * 7 ? cap : kAetherSedStageCount * 7;
+    for (int i = 0; i < n; ++i) out[i] = g_aether_sed_stage_hb[i / 7][i % 7];
+}
+
 extern "C" void aether_sed_clear_last_stages() {
     for (int i = 0; i < kAetherSedStageCount; ++i) {
         g_aether_sed_stage_ms[i] = 0.0;
@@ -282,7 +295,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     // out as: host_ms - gpu_ms - (upload+encode+wait+map). That residual is the
     // only part no existing counter can see, and it is where the compaction
     // loops / ellipse repacking / host sorts live.
-    double hb_stage[kAetherSedStageCount][5] = {{0}};  // upload, encode, wait, map, create
+    double hb_stage[kAetherSedStageCount][7] = {{0}};  // upload, encode, wait, map, create
     auto hb_snap = harness.host_breakdown();
     std::chrono::high_resolution_clock::time_point t_prev{};
     if (observe_timing) {
@@ -300,6 +313,10 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             hb_stage[sed_idx][2] = h.submit_wait_ms - hb_snap.submit_wait_ms;
             hb_stage[sed_idx][3] = h.map_ms - hb_snap.map_ms;
             hb_stage[sed_idx][4] = h.create_ms - hb_snap.create_ms;
+            hb_stage[sed_idx][5] = double(h.n_submit) - double(hb_snap.n_submit);
+            hb_stage[sed_idx][6] = double(h.n_copy) - double(hb_snap.n_copy);
+            for (int c = 0; c < 7; ++c)          // [HOST-BD] 导出给台架
+                g_aether_sed_stage_hb[sed_idx][c] = hb_stage[sed_idx][c];
             hb_snap = h;
             g_aether_sed_stage_ms[sed_idx++] = ms;
         }
