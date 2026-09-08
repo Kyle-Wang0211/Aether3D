@@ -73,6 +73,18 @@ public:
     // 的 meta 完全一致),blur/resample 直写各自偏移 ⇒ pack_levels 变零拷贝
     // (原先 48 次 copy ≈ 数百 MB/帧)。层的身份 = packed_buffer() + 偏移。
     const wgpu::Buffer& packed_buffer() const { return packed_buf_; }
+    // [KPBUF 2026-09-08] 关键点三段(affine/orient/descriptor)专用的 A 区缓冲。
+    // 动机(09-08 Mali 主机侧分解):这三段 wait 合计 2809/4355 ms,而它们与
+    // 快路径的唯一差别就是"packed 绑成子区间"。09-08 在 Adreno 上已证明**把它们
+    // 改绑整块 packed 并不变快**(KPBIND=0 臂),所以问题不在绑定形状本身,
+    // 而疑似在**与被子区间写过的同一块缓冲共存**(Dawn 只能保守下屏障)。
+    // 独立缓冲切断这层别名关系:整块绑、无子区间、着色器一字不改。
+    // 逐字节按构造无损 —— 拷的就是同一批字节。
+    const wgpu::Buffer& keypoint_buffer() const { return kp_buf_; }
+    bool keypoint_buffer_ready() const { return kp_buf_ != nullptr; }
+    // 金字塔建完后调用:把 [0, keypoint_region_end) 拷进 kp_buf_。
+    void sync_keypoint_buffer(DawnKernelHarness& harness);
+    static bool kpbuf_enabled();
     uint32_t level_offset(int octave, int sublevel) const;  // element offset
 
     // [W256 2026-09-07] 打包布局(Mali-G72 单次绑定 ≤256 MB,缓冲本身可到 1 GB):
@@ -174,6 +186,7 @@ private:
     int last_octave_ = 0;
     std::vector<OctaveBuffers> octaves_;  // index = octave (first_octave = 0)
     wgpu::Buffer packed_buf_;             // 所有层的唯一驻留缓冲
+    wgpu::Buffer kp_buf_;                 // [KPBUF] A 区独立副本(可选)
     std::vector<uint32_t> level_offsets_; // index = o*kLevelsPerOctave+(s-first)
     uint32_t packed_total_elems_ = 0;     // [W256] 含对齐填充
     uint32_t keypoint_region_end_ = 0;    // [W256] A 区末尾

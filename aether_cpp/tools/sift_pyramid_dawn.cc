@@ -506,6 +506,26 @@ uint32_t SiftPyramidDawn::window_elems() {
                                  : static_cast<uint32_t>(elems);
 }
 
+bool SiftPyramidDawn::kpbuf_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_KPBUF");
+        return v != nullptr && !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
+void SiftPyramidDawn::sync_keypoint_buffer(DawnKernelHarness& harness) {
+    if (!kpbuf_enabled() || keypoint_region_end_ == 0) return;
+    const size_t bytes = static_cast<size_t>(keypoint_region_end_) * 4u;
+    if (kp_buf_ == nullptr) {
+        kp_buf_ = pyr_persist_alloc(harness, 7, bytes,
+                                    wgpu::BufferUsage::Storage |
+                                        wgpu::BufferUsage::CopySrc |
+                                        wgpu::BufferUsage::CopyDst);
+    }
+    harness.copy_region(packed_buf_, 0, kp_buf_, 0, bytes);
+}
+
 bool SiftPyramidDawn::w256_bind_enabled() {
     if (const char* v = std::getenv("OFFICIAL_AETHER_W256_BIND")) {
         return !(v[0] == '0' && v[1] == '\0');

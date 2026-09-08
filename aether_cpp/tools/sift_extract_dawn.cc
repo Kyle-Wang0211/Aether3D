@@ -127,6 +127,11 @@ static bool kp_bind_subrange() {
 
 static DawnKernelHarness::BufBinding w256_kp(const wgpu::Buffer& b,
                                              const SiftPyramidDawn& pyr) {
+    // [KPBUF 2026-09-08] 有独立 A 区缓冲时:整块绑它,零子区间。
+    if (SiftPyramidDawn::kpbuf_enabled() && pyr.keypoint_buffer_ready()) {
+        SiftPyramidDawn::note_kp_bind(2);   // 2 = 走独立缓冲
+        return DawnKernelHarness::BufBinding(pyr.keypoint_buffer());
+    }
     const bool sub = kp_bind_subrange();
     SiftPyramidDawn::note_kp_bind(sub ? 1 : 0);
     if (!sub) return DawnKernelHarness::BufBinding(b);
@@ -320,6 +325,9 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         sed_set_fail_reason("w256_keypoint_region_exceeds_256mb");
         return false;
     }
+    // [KPBUF 2026-09-08] 金字塔已定稿 ⇒ 把 A 区拷进独立缓冲。开销落在 pack 段,
+    // 段账里看得见(不藏进别的段)。默认关,OFFICIAL_AETHER_KPBUF=1 打开。
+    pyr.sync_keypoint_buffer(harness);
     mark("pack_levels");
 
     const float base_scale = static_cast<float>(SiftPyramidDawn::base_scale());
