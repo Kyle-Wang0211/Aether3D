@@ -253,7 +253,8 @@ public:
     bool has_f16() const { return has_f16_; }
     // Strict math: chain wgpu::ShaderModuleCompilationOptions{strictMath=true} on every shader module
     // (Metal: fastMathEnabled=false / mathMode=safe). Off by default (Dawn default = fast math).
-    // Env AETHER_STRICT_MATH=1 at init() turns it on. Bit-exact ports (OpenCV replicas) need it ON.
+    // Env OFFICIAL_AETHER_STRICT_MATH=1(official 载体)/ AETHER_STRICT_MATH=1(台架)at init()
+    // turns it on. Bit-exact ports (OpenCV replicas) need it ON.
     void set_strict_math(bool v) { strict_math_ = v; }
     bool strict_math() const { return strict_math_ && has_strict_math_; }
     bool has_strict_math() const { return has_strict_math_; }

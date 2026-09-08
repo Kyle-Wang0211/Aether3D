@@ -804,7 +804,16 @@ bool DawnKernelHarness::init() {
             feats.push_back(wgpu::FeatureName::ShaderModuleCompilationOptions);
             has_strict_math_ = true;
         }
+        // [ENV-PREFIX 2026-09-08] official 载体的自路由键政策:载体里不许出现
+        // 裸 `AETHER_*` 键(build_xcframework.sh 末尾会扫二进制并拒绝出包)。
+        // 这一条一直卡着提取器载体出货。改成 official 构建下用 OFFICIAL_ 前缀,
+        // 台架构建保留旧名。默认值两边都是 false ⇒ 数值零影响。
+#if defined(AETHER_GPU_TIMESTAMPS_ENV_OFFICIAL)
+        if (const char* sm = std::getenv("OFFICIAL_AETHER_STRICT_MATH"))
+            strict_math_ = (sm[0] == '1');
+#else
         if (const char* sm = std::getenv("AETHER_STRICT_MATH")) strict_math_ = (sm[0] == '1');
+#endif
         if (adapter_.HasFeature(wgpu::FeatureName::ShaderF16)) {
             feats.push_back(wgpu::FeatureName::ShaderF16);
             has_f16_ = true;
