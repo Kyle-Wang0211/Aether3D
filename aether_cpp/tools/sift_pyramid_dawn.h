@@ -91,6 +91,21 @@ public:
     // 整缓冲绑定 + 检测不拆(仅 64 元素对齐保留:resample 的子区间绑定需要)。
     // 只用于台架单变量 A/B 与生产回滚;Mali 12MP 在旧模式下不可用(>256 MB)。
     static bool w256_enabled();
+    // [W256-BY-LIMIT 2026-09-08 用户批准] 按设备**自报的** maxStorageBufferBindingSize
+    // 选布局,而不是按机型分叉:整缓冲绑得下就用旧布局(快),绑不下才用子区间。
+    // 依据是 WebGPU 的能力协商本身 —— Mali-G72 给 256 MB、Adreno 660 给得下整块。
+    // 实测(09-08,P50/Adreno 660,13312):子区间布局在绑得下的设备上要 5.7x 代价
+    // (8836 vs 1550 ms);而 Mali 不用它 12MP 根本起不来(390 MB > 256 MB)。
+    // env OFFICIAL_AETHER_W256 仍然两个方向都强制,供台架单变量 A/B 与回滚。
+    static void configure_w256_by_limit(uint64_t required_bytes,
+                                        uint64_t limit_bytes);
+    // 自证:上一次 build() 的判定输入与结果。**必须能从产物侧读到** ——
+    // 只走 stderr 的自证在设备上必然丢(09-07 教训),所以这里给取值口,
+    // 由调用方(探针/产线埋点)和自己的输出通道一起走。
+    // forced_by_env: 0=按能力判 1=env 强制
+    static void w256_last_decision(uint64_t* required_bytes,
+                                   uint64_t* limit_bytes, int* enabled,
+                                   int* forced_by_env);
     static std::vector<uint32_t> level_layout(int width, int height,
                                               int last_octave,
                                               uint32_t* total_elems,

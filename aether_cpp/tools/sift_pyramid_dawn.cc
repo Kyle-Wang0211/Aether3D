@@ -218,6 +218,27 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     }
     // [W256 2026-09-07] 布局由 level_layout() 统一给出(64 元素对齐 + 不跨
     // 256 MB 窗口);pack_levels() 用同一函数复核。
+    // [W256-BY-LIMIT 2026-09-08 用户批准] 先按设备能力定布局,再算布局。
+    // 这里用 level_layout() 的**单区(w256=0)**递推算总量 —— 那正是旧布局下
+    // 关键点阶段要一次绑上去的那一块的字节数,所以它就是判据本身,不是近似:
+    // 绑得下就用旧布局(快),绑不下才切子区间。不构成循环依赖。
+    {
+        uint64_t req_elems = 0;
+        for (int o = 0; o <= last_octave_; ++o) {
+            const uint64_t n = static_cast<uint64_t>(width_ >> o) *
+                               static_cast<uint64_t>(height_ >> o);
+            for (int li = 0; li < kLevelsPerOctave; ++li) {
+                req_elems = (req_elems + kAlignElems - 1u) / kAlignElems * kAlignElems;
+                req_elems += n;
+            }
+        }
+        wgpu::Limits dev_limits{};
+        const uint64_t lim =
+            harness.device().GetLimits(&dev_limits) == wgpu::Status::Success
+                ? static_cast<uint64_t>(dev_limits.maxStorageBufferBindingSize)
+                : 0ull;
+        configure_w256_by_limit(req_elems * 4ull, lim);
+    }
     level_offsets_ = level_layout(width_, height_, last_octave_,
                                   &packed_total_elems_, &keypoint_region_end_);
     packed_buf_ = pyr_persist_alloc(harness, 0,
@@ -449,12 +470,40 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     return true;
 }
 
+namespace {
+// [W256-BY-LIMIT 2026-09-08] build() 在算布局之前填这两个值。
+uint64_t g_w256_required_bytes = 0;
+uint64_t g_w256_limit_bytes = 0;
+bool g_w256_configured = false;
+}  // namespace
+
+void SiftPyramidDawn::configure_w256_by_limit(uint64_t required_bytes,
+                                              uint64_t limit_bytes) {
+    g_w256_required_bytes = required_bytes;
+    g_w256_limit_bytes = limit_bytes;
+    g_w256_configured = true;
+}
+
+void SiftPyramidDawn::w256_last_decision(uint64_t* required_bytes,
+                                         uint64_t* limit_bytes, int* enabled,
+                                         int* forced_by_env) {
+    if (required_bytes) *required_bytes = g_w256_required_bytes;
+    if (limit_bytes) *limit_bytes = g_w256_limit_bytes;
+    if (enabled) *enabled = w256_enabled() ? 1 : 0;
+    if (forced_by_env)
+        *forced_by_env = std::getenv("OFFICIAL_AETHER_W256") != nullptr ? 1 : 0;
+}
+
 bool SiftPyramidDawn::w256_enabled() {
-    static const bool on = [] {
-        const char* v = std::getenv("OFFICIAL_AETHER_W256");
-        return v == nullptr || !(v[0] == '0' && v[1] == '\0');
-    }();
-    return on;
+    // env 两个方向都强制:台架单变量 A/B 与生产回滚都要用。
+    if (const char* v = std::getenv("OFFICIAL_AETHER_W256")) {
+        return !(v[0] == '0' && v[1] == '\0');
+    }
+    // 未设 env ⇒ 按设备自报能力选。**未知一律选能跑的那个**(子区间):
+    // 猜错方向的代价不对称 —— 选错成"整缓冲"在 Mali 上是跑不起来,
+    // 选错成"子区间"只是慢。
+    if (!g_w256_configured || g_w256_limit_bytes == 0) return true;
+    return g_w256_required_bytes > g_w256_limit_bytes;
 }
 
 std::vector<uint32_t> SiftPyramidDawn::level_layout(int width, int height,
