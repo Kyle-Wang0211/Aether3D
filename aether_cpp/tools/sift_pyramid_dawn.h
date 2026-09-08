@@ -85,6 +85,22 @@ public:
     // 金字塔建完后调用:把 [0, keypoint_region_end) 拷进 kp_buf_。
     void sync_keypoint_buffer(DawnKernelHarness& harness);
     static bool kpbuf_enabled();
+
+    // ── [SPLITBUF 2026-09-08] 两缓冲:彻底不用子区间绑定 ──────────────────
+    // A 区(li 0..2,≈195 MB)与 B 区(li 3..5,≈177 MB)各自一块缓冲,
+    // **每块都 < 最小的 granted maxStorageBufferBindingSize(Mali 256 MB)**,
+    // 于是三端都能整块绑,W256 那套"按设备选布局"的分叉可以退役。
+    // 跨区只有三处,都不需要改着色器:
+    //   · resample(B→A):本来就是两个独立绑定;
+    //   · blur 每八度一次(li2→li3):此刻 li5 槽还没写,先把 li2 拷进去当临时源,
+    //     整个 blur 就全在 B 区内完成;
+    //   · detect:唯一要改的着色器 —— 高三层从 binding(4) 读(Mac 摘要闸已过)。
+    static bool splitbuf_enabled();
+    static constexpr bool level_in_hi(int sublevel) {
+        return (sublevel - kOctaveFirstSub) >= kKeypointLevels;
+    }
+    const wgpu::Buffer& packed_hi_buffer() const { return packed_b_; }
+    uint32_t packed_hi_elems() const { return packed_b_elems_; }
     uint32_t level_offset(int octave, int sublevel) const;  // element offset
 
     // [W256 2026-09-07] 打包布局(Mali-G72 单次绑定 ≤256 MB,缓冲本身可到 1 GB):
@@ -136,7 +152,8 @@ public:
     static std::vector<uint32_t> level_layout(int width, int height,
                                               int last_octave,
                                               uint32_t* total_elems,
-                                              uint32_t* keypoint_region_end);
+                                              uint32_t* keypoint_region_end,
+                                              uint32_t* hi_elems = nullptr);
     uint32_t packed_total_elems() const { return packed_total_elems_; }
     // A 区末尾(元素):关键点阶段把 packed 绑成 [0, keypoint_region_end)。
     uint32_t keypoint_region_end() const { return keypoint_region_end_; }
@@ -187,6 +204,8 @@ private:
     std::vector<OctaveBuffers> octaves_;  // index = octave (first_octave = 0)
     wgpu::Buffer packed_buf_;             // 所有层的唯一驻留缓冲
     wgpu::Buffer kp_buf_;                 // [KPBUF] A 区独立副本(可选)
+    wgpu::Buffer packed_b_;               // [SPLITBUF] B 区(li 3..5)
+    uint32_t packed_b_elems_ = 0;         // [SPLITBUF] B 区元素数
     std::vector<uint32_t> level_offsets_; // index = o*kLevelsPerOctave+(s-first)
     uint32_t packed_total_elems_ = 0;     // [W256] 含对齐填充
     uint32_t keypoint_region_end_ = 0;    // [W256] A 区末尾

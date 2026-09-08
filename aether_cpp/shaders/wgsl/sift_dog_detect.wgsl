@@ -77,6 +77,10 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> kp_counter : atomic<u32>;
 @group(0) @binding(2) var<storage, read_write> kp_buffer  : array<u32>; // CAP * KP_STRIDE
 @group(0) @binding(3) var<uniform>             P          : Params;
+// [SPLITBUF 2026-09-08] 高三层(li 3..5)从**第二块缓冲**读。层→缓冲的映射是
+// 编译期固定的(每层本来就各有自己的 case 和偏移),不引入任何数据相关分支。
+// 单缓冲模式下两个绑定指向同一块同一窗口 ⇒ 行为完全等价。
+@group(0) @binding(4) var<storage, read> packed_gss_hi : array<f32>;
 
 // gss[level_idx] sampled at clamped (x,y). level_idx = s+1 in [0,5].
 fn gss_at(level_idx : i32, x : i32, y : i32) -> f32 {
@@ -89,9 +93,9 @@ fn gss_at(level_idx : i32, x : i32, y : i32) -> f32 {
     case 0: { return packed_gss[P.off0 + u32(k)]; }
     case 1: { return packed_gss[P.off1 + u32(k)]; }
     case 2: { return packed_gss[P.off2 + u32(k)]; }
-    case 3: { return packed_gss[P.off3 + u32(k)]; }
-    case 4: { return packed_gss[P.off4 + u32(k)]; }
-    default: { return packed_gss[P.off5 + u32(k)]; }
+    case 3: { return packed_gss_hi[P.off3 + u32(k)]; }
+    case 4: { return packed_gss_hi[P.off4 + u32(k)]; }
+    default: { return packed_gss_hi[P.off5 + u32(k)]; }
   }
 }
 

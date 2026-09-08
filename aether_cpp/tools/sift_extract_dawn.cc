@@ -127,6 +127,11 @@ static bool kp_bind_subrange() {
 
 static DawnKernelHarness::BufBinding w256_kp(const wgpu::Buffer& b,
                                              const SiftPyramidDawn& pyr) {
+    // [SPLITBUF 2026-09-08] A 区本来就是独立缓冲 ⇒ 整块绑,零子区间、零拷贝。
+    if (SiftPyramidDawn::splitbuf_enabled()) {
+        SiftPyramidDawn::note_kp_bind(3);   // 3 = 两缓冲布局的 A 区
+        return DawnKernelHarness::BufBinding(b);
+    }
     // [KPBUF 2026-09-08] 有独立 A 区缓冲时:整块绑它,零子区间。
     if (SiftPyramidDawn::kpbuf_enabled() && pyr.keypoint_buffer_ready()) {
         SiftPyramidDawn::note_kp_bind(2);   // 2 = 走独立缓冲
@@ -388,7 +393,9 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                 }
                 return hi - lo;
             };
-            if (!SiftPyramidDawn::w256_bind_enabled() ||
+            // [SPLITBUF] 两块缓冲各自 < 绑定上限 ⇒ 整块绑、不拆 z、不开窗。
+            if (SiftPyramidDawn::splitbuf_enabled() ||
+                !SiftPyramidDawn::w256_bind_enabled() ||
                 span(0, 5) <= SiftPyramidDawn::window_elems()) {
                 parts = {{0, 3, 0, 5}};
             } else {
@@ -410,6 +417,8 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                 hi = std::max(hi, P.off[k] + n_oct);
             }
             if (!w256) lo = 0u;   // 旧模式:整缓冲绑定、绝对偏移
+            const bool split = SiftPyramidDawn::splitbuf_enabled();
+            if (split) lo = 0u;   // [SPLITBUF] 偏移就是区内绝对值
             for (int k = 0; k < 6; ++k)
                 Q.off[k] = (k >= pt.l0 && k <= pt.l1) ? P.off[k] - lo : 0u;
             Q.z0 = static_cast<uint32_t>(pt.z0);
@@ -420,10 +429,17 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                              o, pt.z0, pt.zn, (hi - lo) * 4.0 / 1048576.0);
             harness.dispatch_batched(
                 pipe_detect,
-                {w256 ? BB(packed, static_cast<uint64_t>(lo) * 4u,
-                           static_cast<uint64_t>(hi - lo) * 4u)
-                      : BB(packed),
-                 BB(det_counter), BB(det_buf), BB(p_buf)},
+                {(w256 && !split) ? BB(packed, static_cast<uint64_t>(lo) * 4u,
+                                       static_cast<uint64_t>(hi - lo) * 4u)
+                                  : BB(packed),
+                 BB(det_counter), BB(det_buf), BB(p_buf),
+                 // [SPLITBUF 2026-09-08] binding(4) = 高三层的来源。现在还指向
+                 // 同一块同一窗口(纯等价),两缓冲落地后换成 B 缓冲。
+                 // 同缓冲的两个**只读**绑定是合法的。
+                 split ? BB(pyr.packed_hi_buffer())
+                       : (w256 ? BB(packed, static_cast<uint64_t>(lo) * 4u,
+                                    static_cast<uint64_t>(hi - lo) * 4u)
+                               : BB(packed))},
                 static_cast<uint32_t>((ow + 7) / 8),
                 static_cast<uint32_t>((oh + 7) / 8),
                 static_cast<uint32_t>(pt.zn));

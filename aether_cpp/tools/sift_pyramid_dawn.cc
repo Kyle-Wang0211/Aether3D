@@ -241,7 +241,14 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
         note_kp_bind(-1);
     }
     level_offsets_ = level_layout(width_, height_, last_octave_,
-                                  &packed_total_elems_, &keypoint_region_end_);
+                                  &packed_total_elems_, &keypoint_region_end_,
+                                  &packed_b_elems_);
+    if (splitbuf_enabled()) {
+        packed_b_ = pyr_persist_alloc(harness, 8,
+            static_cast<size_t>(packed_b_elems_) * sizeof(float),
+            wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
+                wgpu::BufferUsage::CopyDst);
+    }
     packed_buf_ = pyr_persist_alloc(harness, 0,
         static_cast<size_t>(packed_total_elems_) * sizeof(float),
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc |
@@ -254,9 +261,14 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     };
     // [W256] 子区间绑定:[lo, hi) 元素 → 字节 offset/size。lo 总是某层起点
     // (64 元素对齐 = 256 B);每次 dispatch 只绑它真正触碰的层。
-    const bool w256 = w256_bind_enabled();
-    const auto rng = [&](uint32_t lo, uint32_t hi) {
-        if (!w256) return DawnKernelHarness::BufBinding(packed_buf_);
+    const bool split = splitbuf_enabled();
+    // [SPLITBUF] 层 → 它住的那块缓冲。整块绑,偏移就是区内绝对偏移。
+    const auto buf_of = [&](int sublevel) -> const wgpu::Buffer& {
+        return (split && level_in_hi(sublevel)) ? packed_b_ : packed_buf_;
+    };
+    const bool w256 = !split && w256_bind_enabled();
+    const auto rng = [&](const wgpu::Buffer& b, uint32_t lo, uint32_t hi) {
+        if (!w256) return DawnKernelHarness::BufBinding(b);
         return DawnKernelHarness::BufBinding(
             packed_buf_, static_cast<uint64_t>(lo) * 4u,
             static_cast<uint64_t>(hi - lo) * 4u);
@@ -280,8 +292,26 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     // 临时目标传独立 tmp(dst_off=0)。
     // [K2g 2026-09-06] 2-pass blur:src/dst/scratch 全在 packed_buf_ 里(单一
     // read_write 绑定 + 偏移),scratch 用"下一层的槽"(此刻尚未写入)。
+    // [SPLITBUF] 每八度只有一次跨区 blur:li2(A) → li3(B)。此刻 li5 的槽还没
+    // 写过(它由 s=kOctaveLastSub 那次产生),先把源拷进去当临时源,于是整个
+    // blur 的 src/dst/scratch 全在 B 区内,着色器一字不改。
+    const auto cross_sub = kOctaveFirstSub + kKeypointLevels;   // = 2
+    const auto src_off_for = [&](int o, int s) -> uint32_t {
+        if (!split || s != cross_sub) return level_off(o, s - 1);
+        const OctaveBuffers& ob = octaves_[static_cast<size_t>(o)];
+        const uint32_t n = static_cast<uint32_t>(ob.width) *
+                           static_cast<uint32_t>(ob.height);
+        const uint32_t tmp = level_off(o, kOctaveLastSub);
+        harness.copy_region_batched(
+            packed_buf_, static_cast<uint64_t>(level_off(o, s - 1)) * 4u,
+            packed_b_, static_cast<uint64_t>(tmp) * 4u,
+            static_cast<size_t>(n) * 4u);
+        return tmp;
+    };
     const auto blur = [&](uint32_t src_off, uint32_t dst_off, uint32_t scratch_off,
-                          int w, int h, double sigma_px, uint32_t scratch_n) {
+                          int w, int h, double sigma_px, uint32_t scratch_n,
+                          int dst_sub = kOctaveFirstSub) {
+        const wgpu::Buffer& bbuf = buf_of(dst_sub);
         const std::vector<float> taps = make_gaussian_taps(sigma_px);
         const uint32_t n = static_cast<uint32_t>(w) * static_cast<uint32_t>(h);
         const uint32_t lo = std::min({src_off, dst_off, scratch_off});
@@ -299,13 +329,13 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                       radius, 0u, rel(src_off, lo), rel(scratch_off, lo), 0u, 0u};
         wgpu::Buffer ph_buf = harness.upload(&ph, sizeof(ph),
                                              wgpu::BufferUsage::Uniform);
-        harness.dispatch_batched(pipe_blur, {rng(lo, hi), BB(taps_buf), BB(ph_buf)},
+        harness.dispatch_batched(pipe_blur, {rng(bbuf, lo, hi), BB(taps_buf), BB(ph_buf)},
                                  wg(w), wg(h));
         BlurParams pv{static_cast<uint32_t>(w), static_cast<uint32_t>(h),
                       radius, 1u, rel(scratch_off, lo), rel(dst_off, lo), 0u, 0u};
         wgpu::Buffer pv_buf = harness.upload(&pv, sizeof(pv),
                                              wgpu::BufferUsage::Uniform);
-        harness.dispatch_batched(pipe_blur, {rng(lo, hi), BB(taps_buf), BB(pv_buf)},
+        harness.dispatch_batched(pipe_blur, {rng(bbuf, lo, hi), BB(taps_buf), BB(pv_buf)},
                                  wg(w), wg(h));
     };
 
@@ -339,7 +369,7 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                                              wgpu::BufferUsage::Uniform);
         harness.dispatch_batched(
             pipe_gray,
-            {BB(src_u8), rng(l0, l0 + static_cast<uint32_t>(n)), BB(gp_buf)},
+            {BB(src_u8), rng(packed_buf_, l0, l0 + static_cast<uint32_t>(n)), BB(gp_buf)},
             wg(width_), wg(height_));
     }
 
@@ -388,7 +418,7 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                     &fp, sizeof(fp), wgpu::BufferUsage::Uniform);
                 harness.dispatch_batched(
                     pipe_blur_fused,
-                    {rng(level_off(o, s - 1),
+                    {rng(buf_of(s), src_off_for(o, s),
                          level_off(o, s) + static_cast<uint32_t>(ob.width) *
                                                static_cast<uint32_t>(ob.height)),
                      BB(taps_buf), BB(fp_buf)},
@@ -397,11 +427,16 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                 // [K2g] scratch = 下一层的槽(本 octave 的 s+1;最后一层用下一
                 // octave 的首层槽;最后 octave 的最后一层没有空槽 ⇒ 用 fused 核)。
                 uint32_t scratch_off = 0u; bool have = false; uint32_t scratch_n = 0u;
-                if (s + 1 <= kOctaveLastSub) { scratch_off = level_off(o, s + 1); have = true; scratch_n = static_cast<uint32_t>(ob.width) * static_cast<uint32_t>(ob.height); }
-                else if (o + 1 <= last_octave_) { scratch_off = level_off(o + 1, kOctaveFirstSub); have = true; const OctaveBuffers& nb = octaves_[static_cast<size_t>(o + 1)]; scratch_n = static_cast<uint32_t>(nb.width) * static_cast<uint32_t>(nb.height); }
+                // [SPLITBUF] scratch 必须和 dst 同区。s=kOctaveLastSub 时 B 区
+                // 没有空槽(li3/li4 都已写且 detect 还要读)⇒ 走 fused(无 scratch)。
+                // fused 与两遍 blur 逐位相同(GSS-FUSED 2026-08-10,末八度末层本来
+                // 就走它),所以这不是数值上的让步。
+                const bool split_last = split && s == kOctaveLastSub;
+                if (!split_last && s + 1 <= kOctaveLastSub) { scratch_off = level_off(o, s + 1); have = true; scratch_n = static_cast<uint32_t>(ob.width) * static_cast<uint32_t>(ob.height); }
+                else if (!split && o + 1 <= last_octave_) { scratch_off = level_off(o + 1, kOctaveFirstSub); have = true; const OctaveBuffers& nb = octaves_[static_cast<size_t>(o + 1)]; scratch_n = static_cast<uint32_t>(nb.width) * static_cast<uint32_t>(nb.height); }
                 if (have) {
-                    blur(level_off(o, s - 1), level_off(o, s), scratch_off,
-                         ob.width, ob.height, sigma_px, scratch_n);
+                    blur(src_off_for(o, s), level_off(o, s), scratch_off,
+                         ob.width, ob.height, sigma_px, scratch_n, s);
                 } else {
                     wgpu::Buffer taps_buf = harness.upload(
                         taps.data(), taps.size() * sizeof(float),
@@ -416,7 +451,7 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                         &fp, sizeof(fp), wgpu::BufferUsage::Uniform);
                     harness.dispatch_batched(
                         pipe_blur_fused,
-                        {rng(level_off(o, s - 1),
+                        {rng(buf_of(s), src_off_for(o, s),
                              level_off(o, s) + static_cast<uint32_t>(ob.width) *
                                                    static_cast<uint32_t>(ob.height)),
                          BB(taps_buf), BB(fp_buf)},
@@ -451,15 +486,26 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
         const uint32_t rs_dst = level_off(o, kOctaveFirstSub);
         rp.src_off = 0u;   // resample 两种模式都用子区间绑定
         rp.dst_off = 0u;
+        if (split) {
+            // [SPLITBUF] resample 本来就是两个独立绑定(src 只读窗、dst 可写窗),
+            // 跨区天生支持:src 在 B(prev_sub=2 ⇒ li3),dst 在 A(s=-1 ⇒ li0)。
+            // 整块绑各自的缓冲,偏移用区内绝对值。
+            rp.src_off = rs_src;
+            rp.dst_off = rs_dst;
+        }
         wgpu::Buffer rp_buf = harness.upload(&rp, sizeof(rp),
                                              wgpu::BufferUsage::Uniform);
         // 同一 buffer 不能在一个 dispatch 里同时绑 read 与 read_write
         // (WebGPU aliasing 校验)——resample 改为单一 read_write 绑定+双偏移。
         harness.dispatch_batched(
             pipe_resample,
-            {rng_always(rs_src, rs_src + static_cast<uint32_t>(prev.width) *
+            {split ? BB(buf_of(prev_sub))
+                   : rng_always(rs_src,
+                                rs_src + static_cast<uint32_t>(prev.width) *
                                              static_cast<uint32_t>(prev.height)),
-             rng_always(rs_dst, rs_dst + static_cast<uint32_t>(ob.width) *
+             split ? BB(buf_of(kOctaveFirstSub))
+                   : rng_always(rs_dst,
+                                rs_dst + static_cast<uint32_t>(ob.width) *
                                              static_cast<uint32_t>(ob.height)),
              BB(rp_buf)},
             wg(ob.width), wg(ob.height));
@@ -506,6 +552,14 @@ uint32_t SiftPyramidDawn::window_elems() {
                                  : static_cast<uint32_t>(elems);
 }
 
+bool SiftPyramidDawn::splitbuf_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_SPLITBUF");
+        return v != nullptr && !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
 bool SiftPyramidDawn::kpbuf_enabled() {
     static const bool on = [] {
         const char* v = std::getenv("OFFICIAL_AETHER_KPBUF");
@@ -527,6 +581,9 @@ void SiftPyramidDawn::sync_keypoint_buffer(DawnKernelHarness& harness) {
 }
 
 bool SiftPyramidDawn::w256_bind_enabled() {
+    // [SPLITBUF] 两缓冲模式下**不存在任何子区间绑定** —— 自证必须照实报 0,
+    // 顺带让 A 区那道 256MB 窗口守卫失效(A 区是独立缓冲,不受窗口约束)。
+    if (splitbuf_enabled()) return false;
     if (const char* v = std::getenv("OFFICIAL_AETHER_W256_BIND")) {
         return !(v[0] == '0' && v[1] == '\0');
     }
@@ -548,7 +605,31 @@ bool SiftPyramidDawn::w256_enabled() {
 std::vector<uint32_t> SiftPyramidDawn::level_layout(int width, int height,
                                                     int last_octave,
                                                     uint32_t* total_elems,
-                                                    uint32_t* keypoint_region_end) {
+                                                    uint32_t* keypoint_region_end,
+                                                    uint32_t* hi_elems) {
+    if (splitbuf_enabled()) {
+        // [SPLITBUF] 两区各自是一块独立缓冲 ⇒ 偏移各自从 0 起,整块绑。
+        std::vector<uint32_t> offs(
+            static_cast<size_t>(last_octave + 1) * kLevelsPerOctave, 0u);
+        uint32_t run[2] = {0u, 0u};
+        for (int region = 0; region < 2; ++region) {
+            for (int o = 0; o <= last_octave; ++o) {
+                const uint32_t n = static_cast<uint32_t>(width >> o) *
+                                   static_cast<uint32_t>(height >> o);
+                for (int li = 0; li < kLevelsPerOctave; ++li) {
+                    const int r = li < kKeypointLevels ? 0 : 1;
+                    if (r != region) continue;
+                    run[r] = (run[r] + kAlignElems - 1u) / kAlignElems * kAlignElems;
+                    offs[static_cast<size_t>(o) * kLevelsPerOctave + li] = run[r];
+                    run[r] += n;
+                }
+            }
+        }
+        if (keypoint_region_end) *keypoint_region_end = run[0];
+        if (total_elems) *total_elems = run[0];   // packed_buf_ = A 区
+        if (hi_elems) *hi_elems = run[1];
+        return offs;
+    }
     std::vector<uint32_t> offs(
         static_cast<size_t>(last_octave + 1) * kLevelsPerOctave, 0u);
     uint32_t running = 0;
