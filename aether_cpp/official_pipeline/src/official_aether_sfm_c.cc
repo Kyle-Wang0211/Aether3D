@@ -308,6 +308,8 @@ extern "C" int aether_ilr_iters;
 extern "C" int aether_ilr_term_conv;
 extern "C" int aether_ilr_term_nocnv;
 extern "C" int aether_ilr_term_other;
+extern "C" int aether_ilr_ord_applied;
+extern "C" int aether_ilr_ord_skipped;
 extern "C" int aether_ilr_bundle_trace_calls;
 extern "C" uint32_t aether_ilr_bundle_trace_query[16];
 extern "C" int aether_ilr_bundle_trace_neighbor_count[16];
@@ -7098,7 +7100,12 @@ aether_sfm_result_t RunIncremental(
     aether::official::ba::BaSessionReceiptRingV1* ba_ptol_receipts,
     std::shared_ptr<colmap::ReconstructionManager>* out_manager,
     std::shared_ptr<const colmap::Reconstruction>* out_recon, char* out_json,
-    int out_cap, bool local_only = false) {
+    int out_cap, bool local_only = false,
+    // [RS-PARITY 2026-09-08] 非空 = 从这个已有模型**继续**,而不是从零重建。
+    // 复刻 colmap/exe/sfm.cc:344 RunMapper 的 --input_path 分支;管线在
+    // incremental_pipeline.cc:368 看到 manager 非空就置 continue_reconstruction。
+    // 留空 = 一字未变的原行为。
+    const std::string& seed_model_path = std::string()) {
   aether::official::ba::ScopedBaSessionAggregateBindingV1 ba_session_binding(
       ba_ptol_aggregate, ba_ptol_receipts);
   try {
@@ -7198,6 +7205,13 @@ aether_sfm_result_t RunIncremental(
     // it (reproj 1.1847). Cost ~103s desktop (~5-8min device) is a one-time
     // POST-capture price, async-able onto a worker thread later. Left at defaults.
     auto manager = std::make_shared<colmap::ReconstructionManager>();
+    // [RS-PARITY 2026-09-08] 种子模型 = 上一次拍摄的成果。装进 manager 之后
+    // IncrementalPipeline 自己会走续跑分支:新图注册 + 三角化 + BA 叠在老模型
+    // 之上,老的位姿与点不推倒重来。主机 30 张 split 台架实测
+    // 19张/7496点 -> 29张/12247点,COMPONENTS=1,老点全保。
+    if (!seed_model_path.empty()) {
+      manager->Read(seed_model_path);
+    }
 
     const double t0 = NowMs();
     pipeline_opts->image_path = image_path;  // [4.0.4] image_path moved into options
@@ -8680,6 +8694,89 @@ aether_sfm_result_t aether_sfm_run(const char* db_path, const char* image_path,
   return AETHER_SFM_OK;
 }
 
+// [RS-PARITY 2026-09-08] 把 session 当前的重建按 COLMAP 自己的格式落盘
+// (cameras/images/points3D)。这是"补拍"的前置件:设备上此前只存 PLY(仅
+// xyz+rgb)+meta json,track 一个字节都没有,而续跑要靠 2D-3D 对应。
+// 由核直接写,避开"从 {frame_id,x,y} 反查 point2D_idx"那条浮点相等的脆路。
+aether_sfm_result_t aether_sfm_write_model(aether_sfm_session_t* s,
+                                           const char* out_dir) {
+  if (!s || !out_dir) return AETHER_SFM_ERR_INVALID_ARG;
+  try {
+    if (!s->recon) return AETHER_SFM_ERR_NOT_REGISTERED;
+    std::filesystem::create_directories(out_dir);
+    s->recon->Write(out_dir);
+    return AETHER_SFM_OK;
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "[aether_sfm] write_model failed: " << e.what();
+    return AETHER_SFM_ERR_INTERNAL;
+  }
+}
+
+// [RS-PARITY 2026-09-08] 在**已有模型**之上继续跑完整增量管线 —— RS 官方
+// 文档所述 "will continue from the previous state" 的精确对应。
+//
+// 与 aether_sfm_run 的唯一区别是多一个 model_in_path:run 从零重建,本函数
+// 从种子继续。其余(选项、BA 调参、receipts、gravity prior 清空)逐字复用
+// 同一条 RunIncremental,绝不复制一份参数 —— 复制就是制造第二个真相。
+//
+// 主机台架实测(30 张 split,前19张为种子):
+//   种子 19张/7496点 -> 续跑后 29张/12247点,COMPONENTS=1,老点全保。
+//   对照 image_registrator(只注册不三角化)点数停在 7496 不涨 ⇒ 必须走本函数。
+aether_sfm_result_t aether_sfm_continue_from_model(
+    const char* db_path, const char* image_path, const char* model_in_path,
+    const char* model_out_path, const aether_sfm_options_t* options,
+    aether_sfm_session_t** out_session, char* out_json, int out_cap) {
+  if (!db_path || !image_path || !model_in_path) {
+    return AETHER_SFM_ERR_INVALID_ARG;
+  }
+
+  aether_sfm_options_t opts;
+  if (options) {
+    opts = *options;
+  } else {
+    aether_sfm_options_default(&opts);
+  }
+
+  std::shared_ptr<colmap::ReconstructionManager> manager;
+  std::shared_ptr<const colmap::Reconstruction> recon;
+  aether::official::ba::BaSessionAggregateAccumulatorV1 batch_ptol_aggregate;
+  aether::official::ba::BaSessionReceiptRingV1 batch_ptol_receipts;
+  // 与 aether_sfm_run 同一条规矩:批处理入口不携带逐帧 ARKit 重力契约,
+  // 绝不让上一个流式会话的先验漏进来。
+  aether_ba_clear_gravity_priors();
+  const aether_sfm_result_t rc = RunIncremental(
+      db_path, image_path, opts, &batch_ptol_aggregate, &batch_ptol_receipts,
+      &manager, &recon, out_json, out_cap, /*local_only=*/false,
+      /*seed_model_path=*/std::string(model_in_path));
+  if (rc != AETHER_SFM_OK) return rc;
+
+  if (model_out_path && *model_out_path && recon) {
+    try {
+      std::filesystem::create_directories(model_out_path);
+      recon->Write(model_out_path);
+    } catch (const std::exception& e) {
+      // 失败必须留痕 —— 静默出口是本项目的头号复发缺陷。
+      LOG(ERROR) << "[aether_sfm] continue: model write failed: " << e.what();
+      return AETHER_SFM_ERR_INTERNAL;
+    }
+  }
+
+  if (out_session) {
+    auto* s = new aether_sfm_session();
+    aether_preclamp_instr_v1::ResetOfficialSessionRecords(s);
+    s->options = opts;
+    s->ba_ptol_aggregate.Replace(batch_ptol_aggregate.Snapshot());
+    s->ba_ptol_receipts.Replace(batch_ptol_receipts.Snapshot());
+    s->db_path = db_path;
+    s->image_path = image_path;
+    s->owns_db_file = false;  // 续跑消费的是调用方拥有的 db
+    s->recon_manager = manager;
+    s->recon = recon;
+    *out_session = s;
+  }
+  return AETHER_SFM_OK;
+}
+
 aether_sfm_result_t aether_sfm_run_dir(const char* capture_dir,
                                        const aether_sfm_options_t* options,
                                        aether_sfm_session_t** out_session,
@@ -9986,6 +10083,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
         aether_ilr_rounds = aether_ilr_solves = aether_ilr_iters = 0;
         aether_ilr_term_conv = aether_ilr_term_nocnv = aether_ilr_term_other =
             0;
+        aether_ilr_ord_applied = aether_ilr_ord_skipped = 0;
         ResetLocalBundleTraceV1();
         const double t2_l0 = NowMs();
         if (live_reg_n >= 3) {
@@ -10269,6 +10367,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
             "\"ilr_nres\":%lld,\"ilr_npar\":%lld,"
             "\"tvg_up\":%.1f,\"tvg_h\":%.1f,\"tvg_upn\":%d,\"tvg_hn\":%d,"
             "\"m_gpu\":%.0f,\"m_sleep\":%.0f,\"m_chunks\":%d,\"ab\":%d,"
+            "\"ilr_ord\":%d,\"ilr_ordskip\":%d,"
             "\"pf\":%d,\"pf_wait\":%.1f}",
             static_cast<long long>(EpochMs()), frame_id, n_cand,
             active_components, t2_gpu_ms,
@@ -10287,7 +10386,8 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
             aether_tvg_upright_ms, aether_tvg_homography_ms,
             aether_tvg_upright_calls, aether_tvg_homography_calls,
             aether_match_gpu_ms, aether_match_sleep_ms, aether_match_chunks,
-            ab_phase, s->last_pf_state, s->last_pf_wait_ms);
+            ab_phase, aether_ilr_ord_applied, aether_ilr_ord_skipped,
+            s->last_pf_state, s->last_pf_wait_ms);
       } else {
         std::snprintf(
             fline, sizeof(fline),
@@ -10304,6 +10404,7 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
             "\"ilr_nres\":%lld,\"ilr_npar\":%lld,"
             "\"tvg_up\":%.1f,\"tvg_h\":%.1f,\"tvg_upn\":%d,\"tvg_hn\":%d,"
             "\"m_gpu\":%.0f,\"m_sleep\":%.0f,\"m_chunks\":%d,\"ab\":%d,"
+            "\"ilr_ord\":%d,\"ilr_ordskip\":%d,"
             "\"pf\":%d,\"pf_wait\":%.1f}",
             static_cast<long long>(EpochMs()), frame_id, n_cand,
             active_components, t2_gpu_ms,
@@ -10320,7 +10421,8 @@ static aether_sfm_result_t AddFrameFeaturesImpl(
             aether_tvg_upright_ms, aether_tvg_homography_ms,
             aether_tvg_upright_calls, aether_tvg_homography_calls,
             aether_match_gpu_ms, aether_match_sleep_ms, aether_match_chunks,
-            ab_phase, s->last_pf_state, s->last_pf_wait_ms);
+            ab_phase, aether_ilr_ord_applied, aether_ilr_ord_skipped,
+            s->last_pf_state, s->last_pf_wait_ms);
       }
       AppendMatchFailJsonl(s, fline);
     }

@@ -962,6 +962,13 @@ void AppendAetherBaSolveReceiptV1(
   }
 }
 
+// [AETHER BA-ORDERING 观测 2026-09-08] 生效自证必须落盘。
+// 教训:第一版只把 blocks/pts/cams/proven 打到 stderr,而 detached 的真机运行会丢
+// stderr(SOP §1 早写过),结果 build 117 装上去之后根本无法从设备侧证明这把刀跑没跑,
+// 只能靠跨场归一化猜 —— 那不是判据。计数器随 ilr_* 一起进 frame_split。
+extern "C" int aether_ilr_ord_applied = 0;   // 本帧真正设上 ordering 的求解次数
+extern "C" int aether_ilr_ord_skipped = 0;   // 守卫不通过 / 旋钮关掉 而未设的次数
+
 ceres::Solver::Summary SolveWithGpuFallback(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
@@ -987,9 +994,12 @@ ceres::Solver::Summary SolveWithGpuFallback(
   //   (最初写的是 n_pts == config.NumVariablePoints(),错的:那 4398 个点块是
   //    AddImageToProblem 加残差时隐式带进来的,VariablePoints() 只数显式标记的。)
   // 有一条不成立就不设 ordering,退回 Ceres 自搜(fail-safe,行为=改动前)。
-  if (std::getenv("OFFICIAL_AETHER_BA_NOORDERING") == nullptr &&
+  const bool ord_enabled =
+      std::getenv("OFFICIAL_AETHER_BA_NOORDERING") == nullptr &&
       !options.refine_focal_length && !options.refine_principal_point &&
-      !options.refine_extra_params) {
+      !options.refine_extra_params;
+  if (!ord_enabled) { ++aether_ilr_ord_skipped; }
+  if (ord_enabled) {
     auto ordering = std::make_shared<ceres::ParameterBlockOrdering>();
     std::vector<double*> blocks;
     problem->GetParameterBlocks(&blocks);
@@ -1010,6 +1020,7 @@ ceres::Solver::Summary SolveWithGpuFallback(
       }
     }
     const bool proven = all_g1_are_poses && n_pts > 0 && n_cam > 0;
+    if (proven) { ++aether_ilr_ord_applied; } else { ++aether_ilr_ord_skipped; }
     static std::atomic<int> ord_logged{0};
     if (ord_logged.fetch_add(1) < 3) {
       std::fprintf(stderr,
