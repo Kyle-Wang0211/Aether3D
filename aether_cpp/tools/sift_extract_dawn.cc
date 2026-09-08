@@ -114,9 +114,22 @@ std::string load_wgsl(const char* filename) {
 // [W256 2026-09-07] 关键点阶段(affine/orient/descriptor)着色器**一字不改**,
 // 只把 packed 绑成 A 区子区间 [0, keypoint_region_end):A 区装着它们会读的全部
 // 层(见 sift_pyramid_dawn.h)。A 区必须 ≤ 2^26 元素(256 MB):12MP ≈195 MB。
+// [W256-KPBIND 2026-09-08 诊断] 只把**关键点阶段那一次绑定**单拎出来做变量。
+// 09-08 P50 段账:5.62x 里 6.8/7.2 s 压在 affine/orient/clamp/descriptor,
+// 而它们与 w256=0 唯一的差别就是这一句——起点同样是 0,只是 size 从整块
+// 缩到 A 区。OFFICIAL_AETHER_W256_KPBIND=0 ⇒ 这一句退回整缓冲,其余全不动。
+static bool kp_bind_subrange() {
+    if (const char* v = std::getenv("OFFICIAL_AETHER_W256_KPBIND")) {
+        return !(v[0] == '0' && v[1] == '\0');
+    }
+    return SiftPyramidDawn::w256_bind_enabled();
+}
+
 static DawnKernelHarness::BufBinding w256_kp(const wgpu::Buffer& b,
                                              const SiftPyramidDawn& pyr) {
-    if (!SiftPyramidDawn::w256_enabled()) return DawnKernelHarness::BufBinding(b);
+    const bool sub = kp_bind_subrange();
+    SiftPyramidDawn::note_kp_bind(sub ? 1 : 0);
+    if (!sub) return DawnKernelHarness::BufBinding(b);
     return DawnKernelHarness::BufBinding(
         b, 0u, static_cast<uint64_t>(pyr.keypoint_region_end()) * 4u);
 }
@@ -300,8 +313,8 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     wgpu::Buffer meta_buf =
         harness.upload(meta.data(), meta.size() * sizeof(SiftPyramidDawn::LevelMeta),
                        wgpu::BufferUsage::Storage);
-    if (SiftPyramidDawn::w256_enabled() &&
-        pyr.keypoint_region_end() > SiftPyramidDawn::kWindowElems) {
+    if (kp_bind_subrange() &&
+        pyr.keypoint_region_end() > SiftPyramidDawn::window_elems()) {
         // [W256] A 区超 256 MB(> ~16.7 MP)——关键点阶段无法单绑定;显式失败
         // 走既有回退,绝不静默(见 feedback_silent_exit_is_the_default_bug)。
         sed_set_fail_reason("w256_keypoint_region_exceeds_256mb");
@@ -367,12 +380,12 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                 }
                 return hi - lo;
             };
-            if (!SiftPyramidDawn::w256_enabled() ||
-                span(0, 5) <= SiftPyramidDawn::kWindowElems) {
+            if (!SiftPyramidDawn::w256_bind_enabled() ||
+                span(0, 5) <= SiftPyramidDawn::window_elems()) {
                 parts = {{0, 3, 0, 5}};
             } else {
                 for (int zc = 1; zc <= 3; ++zc) {
-                    if (span(zc - 1, zc + 2) > SiftPyramidDawn::kWindowElems) {
+                    if (span(zc - 1, zc + 2) > SiftPyramidDawn::window_elems()) {
                         sed_set_fail_reason("w256_detect_span_exceeds_256mb");
                         return false;
                     }
@@ -380,7 +393,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                 }
             }
         }
-        const bool w256 = SiftPyramidDawn::w256_enabled();
+        const bool w256 = SiftPyramidDawn::w256_bind_enabled();
         for (const Part& pt : parts) {
             DetParams Q = P;
             uint32_t lo = P.off[pt.l0], hi = P.off[pt.l0] + n_oct;

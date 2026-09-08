@@ -85,12 +85,27 @@ public:
     //  * 金字塔/检测阶段按 dispatch 只绑真正触碰的层区间(宿主侧,已证逐位)。
     //  build() 与 pack_levels() 共用同一函数 ⇒ 布局不可能漂移。
     static constexpr uint32_t kAlignElems = 64u;
-    static constexpr uint32_t kWindowElems = 1u << 26;   // 256 MB / 4
+    static constexpr uint32_t kWindowElems = 1u << 26;   // 256 MB / 4(下限缺省)
+    // [W256-BY-LIMIT 2026-09-08] 窗口大小同样不该写死成 Mali 的 256 MB ——
+    // 那是"这台机器一次能绑多少",按 build() 查到的 granted limit 走;
+    // 查不到就退回 kWindowElems(保守 = 能跑)。
+    static uint32_t window_elems();
     static constexpr int kKeypointLevels = 3;
     // 回退开关(三端同一):OFFICIAL_AETHER_W256=0 ⇒ 旧的 (o, li) 顺序布局 +
     // 整缓冲绑定 + 检测不拆(仅 64 元素对齐保留:resample 的子区间绑定需要)。
     // 只用于台架单变量 A/B 与生产回滚;Mali 12MP 在旧模式下不可用(>256 MB)。
     static bool w256_enabled();
+    // [W256-SPLIT 2026-09-08] 把 W256 的两件事拆成两个变量,才能问出
+    // 「7.2 s 是布局重排的钱,还是子区间绑定的钱」:
+    //   w256_enabled()      → **布局**(A/B 区重排)
+    //   w256_bind_enabled() → **绑定**(每次 dispatch 只绑触碰的层区间)
+    // 默认二者同步;只有显式设 OFFICIAL_AETHER_W256_BIND 才分开(诊断臂)。
+    static bool w256_bind_enabled();
+    // 🔴 09-08 教训:KPBIND 那一臂拿不到阳性对照 ⇒ 结果不可用。
+    // 旋钮**必须自报它真的生效了**,而且要走产物通道(不是 stderr)。
+    // note_kp_bind() 由提取器在真正建绑定的那一刻记;-1 = 这一趟没走到那里。
+    static void note_kp_bind(int subrange);
+    static int last_kp_bind();
     // [W256-BY-LIMIT 2026-09-08 用户批准] 按设备**自报的** maxStorageBufferBindingSize
     // 选布局,而不是按机型分叉:整缓冲绑得下就用旧布局(快),绑不下才用子区间。
     // 依据是 WebGPU 的能力协商本身 —— Mali-G72 给 256 MB、Adreno 660 给得下整块。

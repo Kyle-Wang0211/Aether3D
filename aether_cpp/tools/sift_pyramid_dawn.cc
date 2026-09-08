@@ -238,6 +238,7 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                 ? static_cast<uint64_t>(dev_limits.maxStorageBufferBindingSize)
                 : 0ull;
         configure_w256_by_limit(req_elems * 4ull, lim);
+        note_kp_bind(-1);
     }
     level_offsets_ = level_layout(width_, height_, last_octave_,
                                   &packed_total_elems_, &keypoint_region_end_);
@@ -253,7 +254,7 @@ bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
     };
     // [W256] 子区间绑定:[lo, hi) 元素 → 字节 offset/size。lo 总是某层起点
     // (64 元素对齐 = 256 B);每次 dispatch 只绑它真正触碰的层。
-    const bool w256 = w256_enabled();
+    const bool w256 = w256_bind_enabled();
     const auto rng = [&](uint32_t lo, uint32_t hi) {
         if (!w256) return DawnKernelHarness::BufBinding(packed_buf_);
         return DawnKernelHarness::BufBinding(
@@ -492,6 +493,24 @@ void SiftPyramidDawn::w256_last_decision(uint64_t* required_bytes,
     if (enabled) *enabled = w256_enabled() ? 1 : 0;
     if (forced_by_env)
         *forced_by_env = std::getenv("OFFICIAL_AETHER_W256") != nullptr ? 1 : 0;
+}
+
+namespace { int g_last_kp_bind = -1; }
+void SiftPyramidDawn::note_kp_bind(int subrange) { g_last_kp_bind = subrange; }
+int SiftPyramidDawn::last_kp_bind() { return g_last_kp_bind; }
+
+uint32_t SiftPyramidDawn::window_elems() {
+    if (!g_w256_configured || g_w256_limit_bytes == 0) return kWindowElems;
+    const uint64_t elems = g_w256_limit_bytes / 4ull;
+    return elems > 0xFFFFFFFFull ? 0xFFFFFFFFu
+                                 : static_cast<uint32_t>(elems);
+}
+
+bool SiftPyramidDawn::w256_bind_enabled() {
+    if (const char* v = std::getenv("OFFICIAL_AETHER_W256_BIND")) {
+        return !(v[0] == '0' && v[1] == '\0');
+    }
+    return w256_enabled();
 }
 
 bool SiftPyramidDawn::w256_enabled() {
