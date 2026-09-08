@@ -1353,7 +1353,9 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                      ts_bounds[2], ts_bounds[3], ts_bounds[4], ts_bounds[5],
                      ts_bounds[6], ts_bounds[7], ts_bounds[8]);
     }
-    if (harness.gpu_ts_enabled()) {
+    // [HOST-BD 2026-09-08] 外层门也绑在 GPU 时间戳上 ⇒ Mali(无 TimestampQuery)
+    // 一行都出不来。放开:只要主机侧分解开着就进来,gpu 列留 0。
+    if (harness.gpu_ts_enabled() || harness.host_breakdown().n_dispatch > 0) {
         std::vector<uint64_t> pass_ns;
         const bool ts_resolved = harness.gpu_ts_resolve(&pass_ns);
         const bool ts_final =
@@ -1365,7 +1367,9 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                          "pass_ns=%zu\n",
                          ts_resolved ? 1 : 0, ts_final ? 1 : 0, pass_ns.size());
         }
-        if (ts_final) {
+        // [HOST-BD 2026-09-08] 没有 TimestampQuery 的设备(Mali-G72)也要能看
+        // 主机侧分解 —— gpu 列留 0,encode/wait/own-loop 照样成立。
+        if (ts_final || harness.host_breakdown().n_dispatch > 0) {
             uint32_t lo = 0;
             for (int s = 0; s < kAetherSedStageCount; ++s) {
                 const uint32_t hi =

@@ -560,6 +560,12 @@ bool DawnKernelHarness::init() {
     ts_feature_request_to_device_ = false;
     ts_feature_granted_ = false;
     ts_enabled_ = false;
+    // [HOST-BD 2026-09-08] 主机侧分解自带开关:GPU 时间戳有就跟着开,
+    // 没有(Mali-G72 无 TimestampQuery)也能单独开。
+    hb_enabled_ = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_HOST_BD");
+        return v != nullptr && !(v[0] == '0' && v[1] == '\0');
+    }();
     ts_capability_ = AETHER_GPU_TIMESTAMP_CAPABILITY_NOT_PROBED_V1;
     ts_status_ = AETHER_GPU_TIMESTAMP_STATUS_OFF_V1;
     ts_reason_code_ = AETHER_GPU_TIMESTAMP_REASON_NOT_REQUESTED_V1;
@@ -961,6 +967,7 @@ bool DawnKernelHarness::init() {
                           reason_code, reason, 0, 0);
         } else {
             ts_enabled_ = true;
+            hb_enabled_ = true;   // [HOST-BD] 时间戳开着就顺带开主机侧分解
             publish_probe(AETHER_GPU_TIMESTAMP_CAPABILITY_SUPPORTED_V1,
                           AETHER_GPU_TIMESTAMP_STATUS_ENABLED_V1,
                           AETHER_GPU_TIMESTAMP_REASON_NONE_V1, "",
@@ -983,14 +990,14 @@ inline double hb_now_ms(bool armed) {
 
 wgpu::Buffer DawnKernelHarness::upload(const void* data, size_t size,
                                         wgpu::BufferUsage usage) {
-    const double t0 = hb_now_ms(ts_enabled_);
+    const double t0 = hb_now_ms(hb_enabled_);
     wgpu::BufferDescriptor desc{
         .usage = usage | wgpu::BufferUsage::CopyDst,
         .size = size,
     };
     wgpu::Buffer buf = device_.CreateBuffer(&desc);
     queue_.WriteBuffer(buf, /*offset=*/0, data, size);
-    if (ts_enabled_) {
+    if (hb_enabled_) {
         hb_.upload_ms += hb_now_ms(true) - t0;
         ++hb_.n_upload;
     }
@@ -1029,7 +1036,7 @@ DawnKernelHarness::load_compute(std::string_view wgsl_source,
     if (it != pipeline_cache_.end()) {
         return it->second;
     }
-    const double hb_t0 = hb_now_ms(ts_enabled_);   // [HOST-BD] cache MISS only
+    const double hb_t0 = hb_now_ms(hb_enabled_);   // [HOST-BD] cache MISS only
 
     wgpu::ShaderSourceWGSL wgsl_desc{};
     // wgpu::StringView from string_view: pointer + length (avoids strlen).
@@ -1048,7 +1055,7 @@ DawnKernelHarness::load_compute(std::string_view wgsl_source,
     pipeline_desc.compute.module = shader;
     pipeline_desc.compute.entryPoint = wgpu::StringView{entry_point, WGPU_STRLEN};
     wgpu::ComputePipeline pipeline = device_.CreateComputePipeline(&pipeline_desc);
-    if (ts_enabled_) {                              // [HOST-BD]
+    if (hb_enabled_) {                              // [HOST-BD]
         hb_.create_ms += hb_now_ms(true) - hb_t0;
         ++hb_.n_create;
     }
@@ -1069,7 +1076,7 @@ void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
                                   const std::vector<BufBinding>& bindings,
                                   uint32_t wg_x, uint32_t wg_y, uint32_t wg_z) {
     if (!device_healthy_) return;  // [GPU-HANG-A1] 不健康即短路,绝不再等
-    const double hb_t0 = hb_now_ms(ts_enabled_);   // [HOST-BD] encode start
+    const double hb_t0 = hb_now_ms(hb_enabled_);   // [HOST-BD] encode start
     // ─── Build a single bind group covering all `bindings` ───
     // resize-construct + index assignment (vs reserve + push_back): one
     // less moving part, and .data() points at fully-initialized memory
@@ -1101,7 +1108,7 @@ void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
         pass.End();
     }
     wgpu::CommandBuffer commands = encoder.Finish();
-    const double hb_t1 = hb_now_ms(ts_enabled_);   // [HOST-BD] encode→wait split
+    const double hb_t1 = hb_now_ms(hb_enabled_);   // [HOST-BD] encode→wait split
     queue_.Submit(1, &commands);
 
     // Wait for GPU completion via OnSubmittedWorkDone → WaitAny pattern.
@@ -1121,7 +1128,7 @@ void DawnKernelHarness::dispatch(const wgpu::ComputePipeline& pipeline,
                   << int(st) << ") — device marked unhealthy\n";
         return;
     }
-    if (ts_enabled_) {                             // [HOST-BD]
+    if (hb_enabled_) {                             // [HOST-BD]
         hb_.encode_ms += hb_t1 - hb_t0;
         hb_.submit_wait_ms += hb_now_ms(true) - hb_t1;
         ++hb_.n_dispatch;
@@ -1553,9 +1560,9 @@ void DawnKernelHarness::copy_region_batched(const wgpu::Buffer& src,
 
 void DawnKernelHarness::end_batch() {
     if (!device_healthy_) return;  // [GPU-HANG-A1] 不健康即短路,绝不再等
-    const double hb_t0 = hb_now_ms(ts_enabled_);   // [HOST-BD]
+    const double hb_t0 = hb_now_ms(hb_enabled_);   // [HOST-BD]
     wgpu::CommandBuffer commands = batch_encoder_.Finish();
-    const double hb_t1 = hb_now_ms(ts_enabled_);
+    const double hb_t1 = hb_now_ms(hb_enabled_);
     queue_.Submit(1, &commands);
     // [GPU-HANG-A1 2026-08-06] 有限超时(Chromium watchdog / Dawn
     // TimedWaitAny);超时/失败即判设备失活,清掉批状态后返回。
@@ -1573,7 +1580,7 @@ void DawnKernelHarness::end_batch() {
         batch_bind_groups_.clear();
         return;
     }
-    if (ts_enabled_) {                             // [HOST-BD]
+    if (hb_enabled_) {                             // [HOST-BD]
         // Encoding for a batch happened in dispatch_batched(); only Finish()
         // lands here, so it is charged to encode and the WaitAny to wait.
         hb_.encode_ms += hb_t1 - hb_t0;
@@ -1732,7 +1739,7 @@ void DawnKernelHarness::copy_region(const wgpu::Buffer& src,
 std::vector<uint8_t> DawnKernelHarness::readback(const wgpu::Buffer& buf,
                                                    size_t size) {
     if (!device_healthy_) return {};  // [GPU-HANG-A1] 不健康即短路,绝不再等
-    const double hb_t0 = hb_now_ms(ts_enabled_);   // [HOST-BD]
+    const double hb_t0 = hb_now_ms(hb_enabled_);   // [HOST-BD]
     // [GPU-HANG-A1 2026-08-06] 有限超时(Chromium watchdog / Dawn
     // TimedWaitAny);map_completed 区分"回调没回来(挂死→判设备失活)"与
     // "回调回来但 map 失败(良性错误→仅按原语义返回空)"。
@@ -1763,7 +1770,7 @@ std::vector<uint8_t> DawnKernelHarness::readback(const wgpu::Buffer& buf,
     const auto* p = static_cast<const uint8_t*>(buf.GetConstMappedRange(0, size));
     std::vector<uint8_t> out(p, p + size);
     buf.Unmap();
-    if (ts_enabled_) {                              // [HOST-BD]
+    if (hb_enabled_) {                              // [HOST-BD]
         hb_.map_ms += hb_now_ms(true) - hb_t0;
         ++hb_.n_readback;
     }

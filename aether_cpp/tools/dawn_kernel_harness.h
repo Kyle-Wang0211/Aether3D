@@ -392,6 +392,10 @@ private:
     bool ts_feature_request_to_device_ = false;
     bool ts_feature_granted_ = false;
     bool ts_enabled_ = false;
+    // [HOST-BD 2026-09-08] 主机侧分解不需要 GPU 时间戳,却一直和它绑在同一个
+    // 开关上 ⇒ Mali-G72(无 TimestampQuery)上永远拿不到 encode/wait 计数,
+    // 而那正是最需要它的一台。拆开:OFFICIAL_AETHER_HOST_BD=1 单独打开。
+    bool hb_enabled_ = false;
     uint32_t ts_drop_count_ = 0;
     uint32_t ts_capability_ = 0;
     uint32_t ts_status_ = 0;
