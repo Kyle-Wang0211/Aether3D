@@ -1004,6 +1004,14 @@ struct aether_sfm_session {
     double stages[9] = {0};
     bool valid = false;
   } pf_result;
+  // [PF-SLOT-FIX 2026-09-10] 原设计里「预取」和「未命中转发」共用 pf_job 这一个
+  // 深度 1 的槽:第 1 帧必然未命中 → 转发时 `pf_job = {}` 顶掉刚排进去的下一帧
+  // 预取 → 第 2 帧又空 → **第一次未命中自我延续,永远回不到命中**(09-10 实测
+  // 两种调用位置都 pf=3 30/30,纯赔 8.6%)。修法不是「未命中改内联」——那会破坏
+  // 「Dawn 提取载具只被 pf_thread 触碰」的所有权约束;而是给转发一条**自己的槽**,
+  // 线程优先处理它,预取槽原样不动。
+  PfJob pf_sync_job;
+  PfResult pf_sync_result;
   int64_t stat_pf_hits = 0;    // add_frame 到达时结果已就绪
   int64_t stat_pf_waits = 0;   // 到达时仍在算,等了尾巴
   int64_t stat_pf_misses = 0;  // 摘要不匹配/无预取,经线程内联转发
@@ -10503,6 +10511,30 @@ static bool ExtractPrefetchEnabled() {
   }();
   return cached;
 }
+// [PF-DRAIN-ONLY 2026-09-09] 08-09 的判决是「**拍摄期**形态判死(预取目标不可
+// 预测),默认关保持」,复活条件写得很具体:「排空期(FIFO,_spool.first 可
+// 预测)预取是合法候选」。那个条件现在成立了 —— 09-09 实测最后一次快门之后
+// 还有 112 s 喂帧排空 + 33 s finalize,期间每帧仍是「提取 723 ms → 匹配
+// 1105 ms」串行,而排空队列是 FIFO,下一帧完全可预测。
+// 所以门改成两段:env 开 + **相机已停**才 arm。相机状态用 aether_ffi 里
+// SPRINT-MODE 那同一个标志(弱符号:出货载体里有,host 台架里没有)。
+// 判不了(符号缺失)就当"还在拍" ⇒ 不开,保守。
+// OFFICIAL_AETHER_EXTRACT_PREFETCH_DRAIN_ONLY=0 可退回旧的全程形态(仅 host 台架用)。
+extern "C" int aether_gpu_match_get_capture_active(void) __attribute__((weak));
+static bool ExtractPrefetchDrainOnly() {
+  static const bool cached = [] {
+    const char* e = std::getenv("OFFICIAL_AETHER_EXTRACT_PREFETCH_DRAIN_ONLY");
+    return !(e && e[0] == '0' && e[1] == '\0');
+  }();
+  return cached;
+}
+// 返回 0=可以 arm;1=env 没开;2=还在拍摄期(被 drain-only 门挡住)。
+static int ExtractPrefetchBlockReason() {
+  if (!ExtractPrefetchEnabled()) return 1;
+  if (!ExtractPrefetchDrainOnly()) return 0;
+  if (aether_gpu_match_get_capture_active == nullptr) return 2;
+  return aether_gpu_match_get_capture_active() == 0 ? 0 : 2;
+}
 // 便宜的内容摘要:FNV-1a over (w,h,len,首末 64B,素数步长抽样)。用途只是
 // "预取的和送来的是不是同一张图"的守卫(撤回/乱序防污染),不是密码学。
 static uint64_t PfDigestV1(const uint8_t* gray, int w, int h) {
@@ -10572,12 +10604,22 @@ static void PfThreadMain(aether_sfm_session_t* s) {
 #endif
   for (;;) {
     aether_sfm_session_t::PfJob job;
+    bool sync = false;
     {
       std::unique_lock<std::mutex> lk(s->pf_mu);
-      s->pf_cv.wait(lk, [&] { return s->pf_stop || s->pf_job.valid; });
+      s->pf_cv.wait(lk, [&] {
+        return s->pf_stop || s->pf_sync_job.valid || s->pf_job.valid;
+      });
       if (s->pf_stop) return;
-      job = std::move(s->pf_job);
-      s->pf_job = {};
+      // [PF-SLOT-FIX] 同步槽优先:那一侧有人在阻塞等结果,预取只是投机。
+      if (s->pf_sync_job.valid) {
+        job = std::move(s->pf_sync_job);
+        s->pf_sync_job = {};
+        sync = true;
+      } else {
+        job = std::move(s->pf_job);
+        s->pf_job = {};
+      }
     }
     aether_sfm_session_t::PfResult r;
     r.digest = job.digest;
@@ -10588,7 +10630,11 @@ static void PfThreadMain(aether_sfm_session_t* s) {
     r.valid = true;
     {
       std::lock_guard<std::mutex> lk(s->pf_mu);
-      s->pf_result = std::move(r);
+      if (sync) {
+        s->pf_sync_result = std::move(r);   // [PF-SLOT-FIX] 各回各槽
+      } else {
+        s->pf_result = std::move(r);
+      }
     }
     s->pf_cv.notify_all();
   }
@@ -10604,7 +10650,12 @@ static bool PfAdoptOrRun(aether_sfm_session_t* s, const uint8_t* gray,
                          int width, int height,
                          aether_sfm_session_t::PfResult* out) {
   s->last_pf_state = 0;
-  if (!ExtractPrefetchEnabled()) return false;
+  // [PF-DRAIN-ONLY] 自证:4 = env 开着但仍在拍摄期被挡(和"没开"区分开,
+  // 否则 frame_split 里 pf=0 分不清是旋钮没开还是门没放行 ⇒ 又一个静默空转臂)。
+  if (const int why = ExtractPrefetchBlockReason(); why != 0) {
+    s->last_pf_state = (why == 2) ? 4 : 0;
+    return false;
+  }
   // [INTERLEAVED-AB] 相位 1 = 对照臂:本帧不领取,走内联原路(结果逐字节同,
   // 只有时序差)。相位按"即将成为的帧序"算,与 Dart 侧 prefetch 调用一致。
   if (AbPeriod() > 0 &&
@@ -10615,6 +10666,13 @@ static bool PfAdoptOrRun(aether_sfm_session_t* s, const uint8_t* gray,
   if (!s->pf_thread.joinable()) return false;
   const uint64_t digest = PfDigestV1(gray, width, height);
   std::unique_lock<std::mutex> lk(s->pf_mu);
+  if (std::getenv("OFFICIAL_AETHER_PF_DIAG")) {
+    std::fprintf(stderr,
+                 "[PF-DIAG] adopt w=%d h=%d digest=%llu | have valid=%d w=%d h=%d digest=%llu\n",
+                 width, height, (unsigned long long)digest,
+                 (int)s->pf_result.valid, s->pf_result.w, s->pf_result.h,
+                 (unsigned long long)s->pf_result.digest);
+  }
   if (s->pf_result.valid && s->pf_result.digest == digest &&
       s->pf_result.w == width && s->pf_result.h == height) {
     *out = std::move(s->pf_result);
@@ -10637,23 +10695,26 @@ static bool PfAdoptOrRun(aether_sfm_session_t* s, const uint8_t* gray,
     s->last_pf_state = 2;
     return true;
   }
-  // 未命中(没预取过这张,或预取的是别帧):丢弃陈旧结果,借指针转发给
-  // 线程同步跑 —— 语义与内联相同,只是保持了载具的单线程所有权。
-  s->pf_result = {};
-  s->pf_job = {};
-  s->pf_job.borrow = gray;
-  s->pf_job.w = width;
-  s->pf_job.h = height;
-  s->pf_job.digest = digest;
-  s->pf_job.valid = true;
+  // 未命中(没预取过这张,或预取的是别帧):借指针转发给线程同步跑 ——
+  // 语义与内联相同,只是保持了载具的单线程所有权。
+  // [PF-SLOT-FIX 2026-09-10] 🔴 这里**绝不能碰 pf_job / pf_result**:那是下一帧
+  // 的预取,清掉它就等于让第一次未命中自我延续(原缺陷)。走自己的同步槽。
+  s->pf_sync_result = {};
+  s->pf_sync_job = {};
+  s->pf_sync_job.borrow = gray;
+  s->pf_sync_job.w = width;
+  s->pf_sync_job.h = height;
+  s->pf_sync_job.digest = digest;
+  s->pf_sync_job.valid = true;
   s->pf_cv.notify_all();
   const double t0 = NowMs();
   s->pf_cv.wait(lk, [&] {
-    return s->pf_stop || (s->pf_result.valid && s->pf_result.digest == digest);
+    return s->pf_stop ||
+           (s->pf_sync_result.valid && s->pf_sync_result.digest == digest);
   });
   if (s->pf_stop) return false;
-  *out = std::move(s->pf_result);
-  s->pf_result = {};
+  *out = std::move(s->pf_sync_result);
+  s->pf_sync_result = {};
   ++s->stat_pf_misses;
   s->last_pf_wait_ms = NowMs() - t0;
   s->last_pf_state = 3;
@@ -10664,7 +10725,7 @@ extern "C" int aether_sfm_prefetch_frame(aether_sfm_session_t* s,
                                          const uint8_t* gray, int width,
                                          int height) {
   if (!s || !gray || width <= 0 || height <= 0) return 1;
-  if (!ExtractPrefetchEnabled()) return 1;
+  if (ExtractPrefetchBlockReason() != 0) return 1;
   if (AbPeriod() > 0 &&
       ((static_cast<int>(s->frames.size()) / AbPeriod()) & 1) == 1) {
     return 1;  // [INTERLEAVED-AB] 对照臂帧不预取
@@ -10678,6 +10739,10 @@ extern "C" int aether_sfm_prefetch_frame(aether_sfm_session_t* s,
   s->pf_job.w = width;
   s->pf_job.h = height;
   s->pf_job.digest = PfDigestV1(s->pf_job.gray.data(), width, height);
+  if (std::getenv("OFFICIAL_AETHER_PF_DIAG")) {
+    std::fprintf(stderr, "[PF-DIAG] enqueue w=%d h=%d digest=%llu\n", width, height,
+                 (unsigned long long)s->pf_job.digest);
+  }
   s->pf_job.valid = true;
   s->pf_cv.notify_all();
   return 0;

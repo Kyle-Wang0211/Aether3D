@@ -421,6 +421,24 @@ if(BUILD_BENCH)
   # parameterized incremental-SfM bench (HOST ceres 2.2.0 + glog) — per-frame
   # registration cost curve + reproj for the <=2s@frame-300 SLA lever sweeps.
   # BA option fields via argv -> run many configs in parallel on a read-only db.
+  # [AETHER 2026-09-08] HOST 台架:复刻 COLMAP image_registrator。
+  # 验证"把新图注册进已有重建"(RS 的 Align 从上次状态继续)在本项目数据上成立。
+  # 与 colmap_bench_exe 同一套链接项 —— 同样只读 db 跑增量 SfM,零 glomap/VLFeat。
+  add_executable(registrator_bench_exe bench/registrator_bench.cc)
+  target_include_directories(registrator_bench_exe PRIVATE ${V}/stubs)
+  target_compile_definitions(registrator_bench_exe PRIVATE
+    EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT
+    GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7)
+  target_compile_options(registrator_bench_exe PRIVATE -w)
+  target_link_libraries(registrator_bench_exe PRIVATE
+    colmap_only
+    /opt/homebrew/lib/libceres.dylib
+    /opt/homebrew/lib/libglog.dylib
+    /opt/homebrew/opt/libomp/lib/libomp.dylib
+    /opt/homebrew/lib/libfaiss.dylib
+    "-lsqlite3"
+    ${ACCELERATE_FW})
+
   add_executable(colmap_bench_exe bench/colmap_bench.cc)
   target_include_directories(colmap_bench_exe PRIVATE ${V}/stubs)
   target_compile_definitions(colmap_bench_exe PRIVATE
@@ -1151,6 +1169,117 @@ if(AETHER_HOST_GLOMAP_BENCH)
     /opt/homebrew/lib/libglog.dylib
     sqlite3)
   target_compile_options(sfm_point_cov_dump_exe PRIVATE -w)
+
+  # [ARCHIVED-REFEED 2026-09-08] 「从存档照片重建」的主机台架。
+  #
+  # 为什么要有它:拍摄被杀掉的项目,db 落盘的是 4096 字节的 malformed 单页
+  # (跑完 finalize 的是 41MB / wal=0),`sqlite3 .recover` 抢不出任何表 ——
+  # 「开始训练」和「补拍」都建立在"db 里有东西"上,所以两条路都必然 errDb。
+  # 但照片和每张的 ARKit 位姿/内参完整留在 photos_highres/,把它们重新喂一遍
+  # 就能救回来。上机之前先在主机上验这条路成不成立。
+  #
+  # 它链的是**出货那一层的符号**(pwofficial_*),因为 Dart 就是经 dlsym 调这层:
+  #   pwofficial_export_shim.c   —— pwofficial_* → aether_sfm_* 的纯转发
+  #   pwofficial_jpeg_decode.mm  —— ImageIO 解码 + pwofficial_add_jpeg_frame
+  # 这两个 TU 住在**app 仓**的 vendor/official_sfm(不是 aether_cpp),所以路径
+  # 走缓存变量;目录不在就静默跳过这一个目标,而不是让整棵树 configure 失败 ——
+  # 2026-08-17 就吃过一次"手编 .o 被 rm -rf 掉、整个 build 图变砖"的亏。
+  set(PWOFFICIAL_IO_DIR "$ENV{HOME}/Developer/pw-extend-capture/vendor/official_sfm"
+      CACHE PATH "app 仓里 pwofficial_* IO 层(export shim + JPEG 解码)的目录")
+  if(EXISTS ${PWOFFICIAL_IO_DIR}/src/pwofficial_jpeg_decode.mm
+     AND EXISTS ${PWOFFICIAL_IO_DIR}/src/pwofficial_export_shim.c)
+    add_executable(archived_refeed_bench_exe
+      ${V}/bench/archived_refeed_bench.mm
+      ${PWOFFICIAL_IO_DIR}/src/pwofficial_jpeg_decode.mm
+      ${PWOFFICIAL_IO_DIR}/src/pwofficial_export_shim.c
+      ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
+      ${V}/../../src/crypto/sha256.cpp)
+    target_compile_definitions(archived_refeed_bench_exe PRIVATE
+      EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+      GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+      GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0
+      AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+      AETHER_REPLAY_LINK_REAL_GPU_MATCH=1)
+    # 台架 .mm 里 `#include "official_sfm_io_c.h"` 要在 app 仓的 vendor 里找到;
+    # 放在 BEFORE 的第一位,免得被 aether_cpp 自己那份同名头抢先。
+    target_include_directories(archived_refeed_bench_exe BEFORE PRIVATE
+      ${PWOFFICIAL_IO_DIR}/include
+      ${PWOFFICIAL_PIPELINE}/include
+      ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+      /opt/homebrew/include /opt/homebrew/include/eigen3)
+    target_link_libraries(archived_refeed_bench_exe
+      pwofficial_core
+      ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+      "-framework Metal" "-framework Foundation"
+      "-framework CoreGraphics" "-framework ImageIO" "-framework CoreFoundation"
+      /opt/homebrew/lib/libceres.dylib
+      /opt/homebrew/lib/libglog.dylib
+      sqlite3)
+    target_compile_options(archived_refeed_bench_exe PRIVATE -w)
+    add_dependencies(archived_refeed_bench_exe official_gpu_match_host_obj)
+
+    # ── [REAL-GPU-EXTRACT 2026-09-10] 同一台架的第二个目标:改链**真正的 Dawn
+    # 提取器**,于是主机上提取与匹配抢同一块 GPU。这是唯一能在 Mac 上复现
+    # 08-09 判决书给提取流水点名的那个风险(「提取 Dawn ∥ 匹配 Metal 同 GPU,
+    # 占空比风险」)的形态 —— 补桩版结构上复现不出来(提取根本不跑)。
+    # 独立目标:原 archived_refeed_bench_exe 一行不动,不拿一个已验证的工具冒险。
+    # 着色器走 AETHER_WGSL_DIR 运行时加载,不依赖生成的 *_wgsl.cpp。
+    set(AETHER_HOST_DAWN_LIB
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../build/third_party/dawn/src/dawn/native/libwebgpu_dawn.a)
+    if(EXISTS ${AETHER_HOST_DAWN_LIB})
+      add_executable(archived_refeed_gpuextract_exe
+        ${V}/bench/archived_refeed_bench.mm
+        ${PWOFFICIAL_IO_DIR}/src/pwofficial_jpeg_decode.mm
+        ${PWOFFICIAL_IO_DIR}/src/pwofficial_export_shim.c
+        ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
+        ${V}/../../src/crypto/sha256.cpp
+        ${V}/bench/dsp_sift_gpu_c.cc
+        ${V}/../../tools/sift_extract_dawn.cc
+        ${V}/../../tools/sift_pyramid_dawn.cc
+        ${V}/../../tools/dawn_kernel_harness.cpp
+        ${V}/../../src/sfm/canonical_feature_selector_v1.cc)
+      target_compile_definitions(archived_refeed_gpuextract_exe PRIVATE
+        EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
+        GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+        GLOMAP_CUDA_DISABLED COLMAP_CUDA_ENABLED=0
+        AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+        AETHER_REPLAY_LINK_REAL_GPU_MATCH=1
+        AETHER_REFEED_REAL_GPU_EXTRACT=1
+        AETHER_FEATURE_SELECTION_ENV_OFFICIAL=1
+        AETHER_GPU_TIMESTAMPS_ENV_OFFICIAL=1
+        AETHER_GPU_TIMESTAMP_DAWN_REVISION="host"
+        AETHER_GPU_TIMESTAMP_DAWN_ARTIFACT_SHA256="host"
+        AETHER_WGSL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../shaders/wgsl")
+      target_include_directories(archived_refeed_gpuextract_exe BEFORE PRIVATE
+        ${PWOFFICIAL_IO_DIR}/include
+        ${PWOFFICIAL_PIPELINE}/include
+        ${COLMAP} ${GLOMAP} ${POSELIB} ${V}/stubs ${V}/../../include
+        ${V}/../../tools
+        ${PWOFFICIAL_PIPELINE}/src
+        ${V}/../../third_party/dawn/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../build/third_party/dawn/gen/include
+        /opt/homebrew/include /opt/homebrew/include/eigen3)
+      target_link_libraries(archived_refeed_gpuextract_exe
+        pwofficial_core
+        ${CMAKE_CURRENT_BINARY_DIR}/official_gpu_match_host.o
+        ${AETHER_HOST_DAWN_LIB}
+        "-framework Metal" "-framework Foundation" "-framework Cocoa"
+        "-framework IOSurface" "-framework QuartzCore" "-framework IOKit"
+        "-framework CoreGraphics" "-framework ImageIO" "-framework CoreFoundation"
+        /opt/homebrew/lib/libceres.dylib
+        /opt/homebrew/lib/libglog.dylib
+        sqlite3)
+      # 提取器那条链用了 std::span(C++20);这棵树默认 17,只给这个目标抬标准。
+      set_target_properties(archived_refeed_gpuextract_exe PROPERTIES
+        CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+      target_compile_options(archived_refeed_gpuextract_exe PRIVATE -w)
+      add_dependencies(archived_refeed_gpuextract_exe official_gpu_match_host_obj)
+    else()
+      message(STATUS "archived_refeed_gpuextract_exe skipped: no host Dawn at ${AETHER_HOST_DAWN_LIB}")
+    endif()
+  else()
+    message(STATUS "archived_refeed_bench_exe skipped: no IO layer at ${PWOFFICIAL_IO_DIR}")
+  endif()
 
   # [BUILD-GRAPH FIX 2026-08-17] Hook the generated .o into every consumer so
   # a clean build dir produces it before the first link.
