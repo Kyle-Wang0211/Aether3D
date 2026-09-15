@@ -6,10 +6,31 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "dense_pipeline.h"
 
 using namespace aether::dense;
+
+namespace {
+// [v2 2026-09-15] dense_run indexes DenseJob::frames, which pwdense_run2 re-sorts by frame_id; the ABI promises
+// an index into the CALLER's frames array, so both callbacks go through this one context to map it back.
+struct Tramp {
+    pwdense_progress_fn progress = nullptr;
+    pwdense_chunk_fn chunk = nullptr;
+    void* user = nullptr;
+    const std::vector<size_t>* order = nullptr;   // job index -> caller index
+};
+int tramp_progress(const char* phase, int done, int total, void* u) {
+    Tramp* t = (Tramp*)u;
+    return t->progress ? t->progress(phase, done, total, t->user) : 0;
+}
+int tramp_chunk(int frame_index, const float* xyz, const uint8_t* rgb, int n_points, void* u) {
+    Tramp* t = (Tramp*)u;
+    const int caller = (frame_index >= 0 && (size_t)frame_index < t->order->size()) ? (int)(*t->order)[frame_index] : frame_index;
+    return t->chunk(caller, xyz, rgb, n_points, t->user);
+}
+}  // namespace
 
 extern "C" {
 
@@ -41,6 +62,12 @@ const char* pwdense_default_model_path(void) {
 
 int32_t pwdense_run(const pwdense_frame_t* frames, int32_t n_frames, const float* points_xyz, int32_t n_points,
                     const pwdense_options_t* opts, pwdense_progress_fn progress, void* user, pwdense_stats_t* out) {
+    return pwdense_run2(frames, n_frames, points_xyz, n_points, opts, progress, nullptr, user, out);
+}
+
+int32_t pwdense_run2(const pwdense_frame_t* frames, int32_t n_frames, const float* points_xyz, int32_t n_points,
+                     const pwdense_options_t* opts, pwdense_progress_fn progress, pwdense_chunk_fn chunk, void* user,
+                     pwdense_stats_t* out) {
     if (out) std::memset(out, 0, sizeof *out);
     if (!frames || n_frames <= 0 || !points_xyz || n_points < 0 || !opts || !opts->work_dir || !opts->out_ply) {
         if (out) std::strncpy(out->error, "bad arguments", sizeof out->error - 1);
@@ -70,7 +97,10 @@ int32_t pwdense_run(const pwdense_frame_t* frames, int32_t n_frames, const float
     }
 
     DenseStats st;
-    const int rc = dense_run(job, progress, user, &st);
+    // chunk == NULL keeps the pre-v2 call verbatim (no trampoline, no progressive schedule).
+    Tramp tr{progress, chunk, user, &order};
+    const int rc = chunk ? dense_run(job, tramp_progress, tramp_chunk, &tr, &st)
+                         : dense_run(job, progress, (dense_chunk_fn) nullptr, user, &st);
     if (out) {
         out->frames = st.NF; out->inferred = st.inferred; out->images = st.images; out->frames_selected = st.frames_selected; out->box_fallback = st.box_fallback ? 1 : 0;
         out->session_ms = st.session_ms; out->images_ms = st.images_ms; out->ort_session_ms = st.ort_session_ms;

@@ -18,3 +18,10 @@ int32_t pwdense_run(const pwdense_frame_t* frames, int32_t n_frames, const float
     if (out_stats) { memset(out_stats, 0, sizeof *out_stats); strncpy(out_stats->error, "dense stage unavailable on the simulator", sizeof out_stats->error - 1); }
     return -1;
 }
+/* [v2 2026-09-15] progressive delivery: same stub answer as pwdense_run. */
+int32_t pwdense_run2(const pwdense_frame_t* frames, int32_t n_frames, const float* points_xyz, int32_t n_points,
+                     const pwdense_options_t* opts, pwdense_progress_fn progress, pwdense_chunk_fn chunk, void* user,
+                     pwdense_stats_t* out_stats) {
+    (void)chunk;
+    return pwdense_run(frames, n_frames, points_xyz, n_points, opts, progress, user, out_stats);
+}

@@ -1202,4 +1202,10 @@ if(APPLE AND EXISTS ${PW_OPENCV401_MAC}/lib/libopencv_imgproc.a AND EXISTS ${PW_
     add_executable(aether_dense_fuse_test src/dense/test_fuse.cc)
     target_link_libraries(aether_dense_fuse_test PRIVATE aether_dense_fuse)
     target_compile_options(aether_dense_fuse_test PRIVATE -ffp-contract=off -fno-fast-math)
+    # [2026-09-15] Stage 3 (progressive delivery): the same fixture pack fused three ways — legacy fuse_pack(),
+    # the per-frame split, and the FuseScheduler-driven progressive schedule under three synthetic inference
+    # orders — must produce one identical PLY. --neg-delivery-order is its negative control.
+    add_executable(aether_dense_progressive_test src/dense/test_progressive.cc src/dense/dense_fuse_pack.cc)
+    target_link_libraries(aether_dense_progressive_test PRIVATE aether_dense_fuse)
+    target_compile_options(aether_dense_progressive_test PRIVATE -ffp-contract=off -fno-fast-math)
 endif()

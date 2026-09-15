@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define PWDENSE_API __attribute__((visibility("default")))
-#define PWDENSE_ABI_VERSION 1
+#define PWDENSE_ABI_VERSION 2
 
 typedef struct pwdense_frame_t {
     int32_t frame_id;          /* refined-pose frame id (official_sfm_sparse_meta.json poses[].frame_id) */
@@ -56,12 +56,28 @@ PWDENSE_API int32_t pwdense_abi_version(void);
 PWDENSE_API int32_t pwdense_available(void);                       /* 1 on device builds, 0 on the simulator stub */
 PWDENSE_API int32_t pwdense_options_default(pwdense_options_t* o);  /* fills the certified fixture97 parameters */
 PWDENSE_API const char* pwdense_default_model_path(void);           /* casdiffmvs.onnx shipped inside PWDense.framework */
+/* [v2 2026-09-15] Progressive delivery. Called from pwdense_run2 once per REFERENCE frame the moment that
+   frame's fusion is done (dependency order: a reference is fused as soon as it and its nsrc source views are
+   inferred, so chunks arrive while inference is still running). xyz = n*3 floats, rgb = n*3 bytes, in the sparse
+   PLY's world frame, already box-filtered — exactly the bytes that frame contributes to out_ply. frame_index =
+   index into the caller's frames array. Buffers are valid only during the call. Return non-zero to cancel.
+   The final out_ply is byte-identical to pwdense_run's (frames written in frame order regardless of the order
+   in which they were fused). */
+typedef int (*pwdense_chunk_fn)(int32_t frame_index, const float* xyz, const uint8_t* rgb, int32_t n_points,
+                                void* user);
+
 /* Returns 0 ok, 1 cancelled, 2 input error, 3 model error, 4 fusion error, -1 unavailable. */
 PWDENSE_API int32_t pwdense_run(const pwdense_frame_t* frames, int32_t n_frames,
                                 const float* points_xyz, int32_t n_points,
                                 const pwdense_options_t* opts,
                                 pwdense_progress_fn progress, void* user,
                                 pwdense_stats_t* out_stats);
+/* v2: same as pwdense_run plus the per-frame chunk callback (chunk may be NULL == pwdense_run). */
+PWDENSE_API int32_t pwdense_run2(const pwdense_frame_t* frames, int32_t n_frames,
+                                 const float* points_xyz, int32_t n_points,
+                                 const pwdense_options_t* opts,
+                                 pwdense_progress_fn progress, pwdense_chunk_fn chunk, void* user,
+                                 pwdense_stats_t* out_stats);
 
 #ifdef __cplusplus
 }

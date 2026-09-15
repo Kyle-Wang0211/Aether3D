@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <set>
 
 #include "dense_images.h"
@@ -23,6 +24,10 @@ bool write_rows(const std::string& path, const void* data, size_t bytes, long of
     FILE* f = std::fopen(path.c_str(), "r+b"); if (!f) return false;
     std::fseek(f, offset, SEEK_SET); const bool ok = std::fwrite(data, 1, bytes, f) == bytes; std::fclose(f); return ok;
 }
+// One reference frame's bookkeeping while its points sit in a spill file: enough to rebuild FusePackStats in
+// frame order no matter which order the frames were fused in.
+struct RefRecord { bool done = false; uint64_t hs[5] = {0, 0, 0, 0, 0}; uint64_t digest = 0; double ph = 0, ge = 0, fi = 0; size_t n = 0; };
+
 bool create_zero_file(const std::string& path, size_t bytes) {
     FILE* f = std::fopen(path.c_str(), "wb"); if (!f) return false;
     const bool ok = bytes == 0 || (std::fseek(f, (long)bytes - 1, SEEK_SET) == 0 && std::fputc(0, f) != EOF);
@@ -30,7 +35,7 @@ bool create_zero_file(const std::string& path, size_t bytes) {
 }
 }  // namespace
 
-int dense_run(const DenseJob& job, dense_progress_fn progress, void* user, DenseStats* st) {
+int dense_run(const DenseJob& job, dense_progress_fn progress, dense_chunk_fn chunk, void* user, DenseStats* st) {
     DenseStats scratch; DenseStats& S = st ? *st : scratch;
     if (job.frames.empty() || job.jpeg_paths.size() != job.frames.size() || job.points.size() % 3) { S.error = "bad job inputs"; return 2; }
     const int W = job.session.W, H = job.session.H, NS = job.session.nsrc, NV = NS + 1;
@@ -121,7 +126,38 @@ int dense_run(const DenseJob& job, dense_progress_fn progress, void* user, Dense
         std::fclose(f);
     }
 
-    // 4. inference, one view at a time, rows written straight into the pack
+    // 4. inference, one view at a time, rows written straight into the pack. With a chunk callback every
+    //    reference frame is fused and delivered the moment its ref view and all NS source views are inferred
+    //    (FuseScheduler), so the app sees points long before the last view is done; the points are spilled to
+    //    fused_<f>.bin and assembled in frame order in step 5, which is what makes out_ply identical.
+    const int nref = r1 - r0 + 1;
+    auto spill_path = [&](int f) { char b[32]; std::snprintf(b, sizeof b, "/fused_%05d.bin", f); return pack + b; };
+    std::vector<RefRecord> rec(nref);
+    FuseScheduler sched(tab.neighbors.data(), NF, NS, r0, r1);
+    std::vector<int> ready;
+    int nfused = 0; double fuse_ms = 0;
+    // Fuses every ref the scheduler just released, delivers its chunk and spills it. rc: 0 ok, 1 cancel, 2/4 error.
+    auto drain = [&](int& rc) {
+        rc = 0; sched.take_ready(ready);
+        if (ready.empty()) return true;
+        const auto tf = clk::now();
+        FusePack pk;   // fresh mapping: only a map created after the write is guaranteed to see the new rows
+        if (!pk.open(pack)) { S.error = "cannot open pack"; rc = 2; return false; }
+        for (int f : ready) {
+            FuseFrameResult fr;
+            if (!fuse_pack_frame(pk, f - r0, boxp, fr)) { S.error = "fusion failed on pack"; rc = 4; return false; }
+            RefRecord& R = rec[f - r0];
+            std::memcpy(R.hs, fr.hs, sizeof R.hs); R.digest = fr.digest;
+            R.ph = fr.photo_frac; R.ge = fr.geo_frac; R.fi = fr.final_frac; R.n = fr.points(); R.done = true;
+            if (!fuse_spill_write(spill_path(f), fr.xyz, fr.rgb)) { S.error = "cannot spill fused frame"; rc = 2; return false; }
+            ++nfused;
+            if (chunk(orig[f], fr.xyz.data(), fr.rgb.data(), (int)R.n, user)) { rc = 1; return false; }
+            if (progress && progress("fuse", nfused, nref, user)) { rc = 1; return false; }
+        }
+        fuse_ms += ms_since(tf);
+        return true;
+    };
+
     {
         DenseRunner run; std::string err;
         if (!run.init(job.model_path, job.webgpu, W, H, NV, &err, &S.ort_session_ms)) { S.error = "ort init: " + err; return 3; }
@@ -154,6 +190,7 @@ int dense_run(const DenseJob& job, dense_progress_fn progress, void* user, Dense
                 }
             }
             ++done;
+            if (chunk) { sched.mark_inferred(v); int rc = 0; if (!drain(rc)) return rc; }
         }
         S.inferred = done;
         std::sort(ms.begin(), ms.end()); S.infer_ms_median = ms.empty() ? 0 : ms[ms.size() / 2];
@@ -163,10 +200,33 @@ int dense_run(const DenseJob& job, dense_progress_fn progress, void* user, Dense
 
     // 5. fusion from the pack (refs are local 0..nref-1); the box crops the delivered points
     t = clk::now();
-    const int rc = fuse_pack(pack, 0, r1 - r0, job.out_ply, progress, user, &S.fuse, boxp);
-    S.fuse_ms = ms_since(t);
-    if (rc == 1) return 1;
-    if (rc != 0) { S.error = "fusion failed on pack"; return 4; }
+    if (!chunk) {   // pre-Stage-3 path, untouched
+        const int rc = fuse_pack(pack, 0, r1 - r0, job.out_ply, progress, user, &S.fuse, boxp);
+        S.fuse_ms = ms_since(t);
+        if (rc == 1) return 1;
+        if (rc != 0) { S.error = "fusion failed on pack"; return 4; }
+        if (progress) progress("done", 1, 1, user);
+        return 0;
+    }
+    { int rc = 0; if (!drain(rc)) return rc; }        // refs left over (a ref whose own view is its last dependency)
+    for (int i = 0; i < nref; ++i) if (!rec[i].done) { S.error = "reference frame never became fusable"; return 4; }
+    // assemble in FRAME order: the PLY bytes, the FNV fold and the frac sums are then exactly fuse_pack's
+    FusePlyWriter ply;
+    if (!ply.begin(job.out_ply)) { S.error = "cannot write ply"; return 4; }
+    double ph = 0, ge = 0, fi = 0; uint64_t hall = 1469598103934665603ULL;
+    S.fuse.frame_digest.clear();
+    for (int f = r0; f <= r1; ++f) {
+        const RefRecord& R = rec[f - r0];
+        hall = fnv1a64(R.hs, sizeof R.hs, hall);
+        S.fuse.frame_digest.push_back(R.digest);
+        if (!fuse_spill_append(spill_path(f), ply)) { S.error = "cannot read spilled frame"; return 4; }
+        std::remove(spill_path(f).c_str());
+        ph += R.ph; ge += R.ge; fi += R.fi;
+    }
+    if (!ply.finish()) { S.error = "cannot write ply"; return 4; }
+    S.fuse.frames = nref; S.fuse.points = ply.points();
+    S.fuse.photo_frac = ph / nref; S.fuse.geo_frac = ge / nref; S.fuse.final_frac = fi / nref; S.fuse.digest = hall;
+    S.fuse_ms = fuse_ms + ms_since(t);
     if (progress) progress("done", 1, 1, user);
     return 0;
 }

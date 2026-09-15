@@ -2,6 +2,14 @@
 //   session table (dense_session) -> photos (dense_images) -> per-view inference (dense_runner) written to an
 //   on-disk pack -> session released -> certified fusion from the pack (dense_fuse_pack) -> PLY.
 // Every stage is the gated one; this file only sequences them and owns the disk pack.
+//
+// [2026-09-15 Stage 3] Progressive delivery. With a chunk callback the job no longer waits for the last view:
+// after each inferred view every reference frame whose ref view and all nsrc source views are now inferred is
+// fused (FuseScheduler + fuse_pack_frame) and its points are handed to the caller immediately, while
+// inference is still running. The fused points are spilled to work_dir/fused_<f>.bin and the PLY is assembled
+// in frame order at the end, so out_ply and FusePackStats are byte-for-byte what the chunk-less path writes
+// (gated on the certified fixture pack by test_progressive.cc). chunk == nullptr takes the pre-Stage-3 path
+// unchanged: infer everything, release the ORT session, then fuse_pack() the whole range.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -45,7 +53,19 @@ struct DenseStats {
     std::string error;
 };
 
+// Called once per REFERENCE frame the moment that frame's fusion is done, in dependency order. xyz = n*3
+// floats, rgb = n*3 bytes, in the sparse PLY's world frame and already box-filtered — exactly the bytes that
+// frame contributes to out_ply. frame_index indexes DenseJob::frames. Buffers live only for the call.
+// Non-zero return cancels the job (dense_run returns 1).
+typedef int (*dense_chunk_fn)(int frame_index, const float* xyz, const uint8_t* rgb, int n_points, void* user);
+
 // Returns 0 ok, 1 cancelled, 2 input error, 3 model error, 4 fusion error.
-int dense_run(const DenseJob& job, dense_progress_fn progress, void* user, DenseStats* stats);
+// `user` is passed to both callbacks. chunk == nullptr -> the pre-Stage-3 schedule, bit-for-bit.
+int dense_run(const DenseJob& job, dense_progress_fn progress, dense_chunk_fn chunk, void* user, DenseStats* stats);
+
+// Pre-Stage-3 signature, kept for the device parity bench (ios_dense_bench/dense_bench_main.cc:76).
+inline int dense_run(const DenseJob& job, dense_progress_fn progress, void* user, DenseStats* stats) {
+    return dense_run(job, progress, (dense_chunk_fn) nullptr, user, stats);
+}
 
 }  // namespace aether::dense
