@@ -1184,3 +1184,22 @@ add_test(NAME pair_selection_v2_colmap_parity_test
 add_test(NAME global_ptol_integration_contract_test
     COMMAND global_ptol_integration_contract_test
             ${CMAKE_CURRENT_SOURCE_DIR}/official_pipeline)
+
+# [2026-09-15] Stage 2 of the on-device dense point cloud: the official CasDiffMVS fusion
+# (cvg/diffmvs filter.py + certified fuse_official.py) ported to C++ — src/dense/dense_fuse.{h,cc}.
+# Bilinear resampling is cv::remap itself (filter.py:41 calls cv2.remap); the iPhone product already
+# links OpenCV 4.0.1 (pocketworld ios/Runner.xcodeproj:470 libopencv_generic_4_0_1.a). The host gate
+# links the same 4.0.1 tree (~/Developer/opencv-401-build-mac, -ffp-contract=off, WITH_LAPACK=OFF),
+# matching the device archive flags (build_generic_core.sh:127 -ffp-contract=off -fno-fast-math).
+set(PW_OPENCV401_MAC $ENV{HOME}/Developer/opencv-401-build-mac)
+set(PW_OPENCV401_SRC $ENV{HOME}/Developer/opencv-401-src)
+if(APPLE AND EXISTS ${PW_OPENCV401_MAC}/lib/libopencv_imgproc.a AND EXISTS ${PW_OPENCV401_SRC}/modules/imgproc/include)
+    add_library(aether_dense_fuse STATIC src/dense/dense_fuse.cc)
+    target_include_directories(aether_dense_fuse PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/dense
+        ${PW_OPENCV401_MAC} ${PW_OPENCV401_SRC}/include ${PW_OPENCV401_SRC}/modules/core/include ${PW_OPENCV401_SRC}/modules/imgproc/include)
+    target_link_libraries(aether_dense_fuse PUBLIC ${PW_OPENCV401_MAC}/lib/libopencv_imgproc.a ${PW_OPENCV401_MAC}/lib/libopencv_core.a z "-framework Accelerate")
+    target_compile_options(aether_dense_fuse PRIVATE -ffp-contract=off -fno-fast-math)
+    add_executable(aether_dense_fuse_test src/dense/test_fuse.cc)
+    target_link_libraries(aether_dense_fuse_test PRIVATE aether_dense_fuse)
+    target_compile_options(aether_dense_fuse_test PRIVATE -ffp-contract=off -fno-fast-math)
+endif()
