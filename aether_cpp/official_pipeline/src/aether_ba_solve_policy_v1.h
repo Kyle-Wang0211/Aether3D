@@ -63,6 +63,25 @@ struct BaSolveReceiptV1 {
   bool gpu_fallback = false;
 };
 
+// [BA-PROGRESS 2026-09-16] Process-wide, lock-free progress carrier for the
+// finalize global BA. Written only by the finalize worker (stage/round) and by
+// the Ceres iteration callback (iteration); read by the polling C ABI. Purely
+// observational: nothing in the solver or the pipeline reads it back.
+//   stage: 0 = not running / finished, 1 = finalize stage 1, 2 = finalize stage 2
+//   round: 1-based refinement round inside the current stage (0 = unknown)
+//   iteration / max_iterations: 1-based Ceres iteration of the current solve
+struct BaProgressV1 {
+  std::atomic<int> stage{0};
+  std::atomic<int> round{0};
+  std::atomic<int> iteration{0};
+  std::atomic<int> max_iterations{0};
+};
+
+inline BaProgressV1& GlobalBaProgressV1() {
+  static BaProgressV1 progress;
+  return progress;
+}
+
 struct BaReceiptRingSnapshotV1 {
   std::array<BaSolveReceiptV1, kBaReceiptRingCapacityV1> receipts{};
   std::size_t count = 0;

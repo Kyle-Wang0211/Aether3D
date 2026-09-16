@@ -381,6 +381,9 @@ aether_sfm_result_t pwofficial_finalize_async(aether_sfm_session_t* s,
 
 int pwofficial_finalize_status(aether_sfm_session_t* s);
 
+int pwofficial_finalize_progress(aether_sfm_session_t* s, int* stage,
+                                 int* round, int* iter, int* max_iter);
+
 void pwofficial_free(aether_sfm_session_t* s);
 
 aether_sfm_result_t pwofficial_get_points(aether_sfm_session_t* s,

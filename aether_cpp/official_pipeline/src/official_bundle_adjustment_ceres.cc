@@ -113,6 +113,23 @@ int g_aether_last_threads = 0;
 // Monotonic process identity only. Receipt storage itself is session-owned.
 std::atomic<uint64_t> g_aether_ba_solve_seq{1};
 
+// [BA-PROGRESS 2026-09-16] Read-only iteration ticker for the finalize waiting
+// page. It copies IterationSummary::iteration into the process-wide progress
+// carrier and always returns SOLVER_CONTINUE, which Minimizer::RunCallbacks
+// turns into the exact same `return true` as the empty-callback list — so the
+// solve path, the state vector and every Solver::Options field are untouched.
+// It deliberately never reads the parameter blocks, so
+// update_state_every_iteration stays off.
+class AetherGlobalBaProgressCallbackV1 : public ceres::IterationCallback {
+ public:
+  ceres::CallbackReturnType operator()(
+      const ceres::IterationSummary& summary) override {
+    aether::official::ba::GlobalBaProgressV1().iteration.store(
+        summary.iteration + 1, std::memory_order_relaxed);
+    return ceres::SOLVER_CONTINUE;
+  }
+};
+
 // [AETHER DENSE-BACKEND TIER ROUTING 2026-07-12] Default num_images threshold
 // at/above which DENSE_SCHUR routes its dense Cholesky to LAPACK (Accelerate)
 // instead of Eigen LLT. Host inflection scan (2026-07-12, M-series host,
@@ -1043,6 +1060,15 @@ ceres::Solver::Summary SolveWithGpuFallback(
   solver_options.parameter_tolerance = ptol.effective;
 
   ceres::Solver::Summary ceres_summary;
+  // [BA-PROGRESS 2026-09-16] Global scope only — local BA is untouched.
+  AetherGlobalBaProgressCallbackV1 aether_ba_progress_callback;
+  if (scope == aether::official::ba::SolveScopeV1::kGlobal) {
+    auto& aether_ba_progress = aether::official::ba::GlobalBaProgressV1();
+    aether_ba_progress.max_iterations.store(
+        solver_options.max_num_iterations, std::memory_order_relaxed);
+    aether_ba_progress.iteration.store(0, std::memory_order_relaxed);
+    solver_options.callbacks.push_back(&aether_ba_progress_callback);
+  }
   const uint64_t solve_seq =
       g_aether_ba_solve_seq.fetch_add(1, std::memory_order_relaxed);
   ceres::Solve(solver_options, problem, &ceres_summary);
@@ -1068,6 +1094,14 @@ ceres::Solver::Summary SolveWithGpuFallback(
               scope,
               cpu_solver_options.parameter_tolerance);
       cpu_solver_options.parameter_tolerance = cpu_ptol.effective;
+      // [BA-PROGRESS 2026-09-16] Same ticker on the CPU fallback solve.
+      if (scope == aether::official::ba::SolveScopeV1::kGlobal) {
+        auto& aether_ba_progress = aether::official::ba::GlobalBaProgressV1();
+        aether_ba_progress.max_iterations.store(
+            cpu_solver_options.max_num_iterations, std::memory_order_relaxed);
+        aether_ba_progress.iteration.store(0, std::memory_order_relaxed);
+        cpu_solver_options.callbacks.push_back(&aether_ba_progress_callback);
+      }
       const uint64_t cpu_solve_seq =
           g_aether_ba_solve_seq.fetch_add(1, std::memory_order_relaxed);
       ceres::Solve(cpu_solver_options, problem, &ceres_summary);

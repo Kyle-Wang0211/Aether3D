@@ -192,6 +192,18 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
 // Lock-free poll of the background refinement (aether_sfm_finalize_status_t).
 int aether_sfm_finalize_status(aether_sfm_session_t* s);
 
+// [BA-PROGRESS 2026-09-16] Coarse progress of the background global BA, for a
+// waiting page that wants more than the four-valued status. Every out pointer
+// is optional. Values are only meaningful while the status is LOCAL_READY;
+// at every other status this writes a hard zero, never a stale value.
+//   stage    : 0 = idle/finished, 1 = finalize stage 1, 2 = finalize stage 2
+//   round    : 1-based refinement round inside that stage (0 = not started)
+//   iter     : 1-based Ceres iteration of the global solve in flight
+//   max_iter : that solve's max_num_iterations budget
+// Lock-free; always returns 0.
+int aether_sfm_finalize_progress(aether_sfm_session_t* s, int* stage,
+                                 int* round, int* iter, int* max_iter);
+
 // ─── outputs (only valid after finalize/run OK) ─────────────────────
 typedef struct aether_sfm_pose {
   int frame_id;     // matches out_frame_id from add_frame

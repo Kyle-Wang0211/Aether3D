@@ -178,6 +178,21 @@ PWOFFICIAL_EXPORT int pwofficial_finalize_status(aether_sfm_session_t* s) {
 #endif
 }
 
+PWOFFICIAL_EXPORT int pwofficial_finalize_progress(aether_sfm_session_t* s,
+                                                   int* stage, int* round,
+                                                   int* iter, int* max_iter) {
+#if TARGET_OS_SIMULATOR
+  (void)s;
+  if (stage) *stage = 0;
+  if (round) *round = 0;
+  if (iter) *iter = 0;
+  if (max_iter) *max_iter = 0;
+  return 0;
+#else
+  return aether_sfm_finalize_progress(s, stage, round, iter, max_iter);
+#endif
+}
+
 PWOFFICIAL_EXPORT aether_sfm_result_t pwofficial_get_poses(aether_sfm_session_t* s,
                                                  aether_sfm_pose_t* out_poses,
                                                  int cap, int* out_count) {

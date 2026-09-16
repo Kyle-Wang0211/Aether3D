@@ -8248,6 +8248,16 @@ void RefineGlobalBA(aether_sfm_session* s,
                     bool live_reuse) {
   aether::official::ba::ScopedBaSessionAggregateBindingV1 ba_session_binding(
       &s->ba_ptol_aggregate, &s->ba_ptol_receipts);
+  // [BA-PROGRESS 2026-09-16] Coarse finalize progress carrier — observational
+  // only (polled by aether_sfm_finalize_progress). Reset on entry so a poll
+  // can never see the previous finalize's stage/round.
+  {
+    auto& ba_progress = aether::official::ba::GlobalBaProgressV1();
+    ba_progress.stage.store(0, std::memory_order_relaxed);
+    ba_progress.round.store(0, std::memory_order_relaxed);
+    ba_progress.iteration.store(0, std::memory_order_relaxed);
+    ba_progress.max_iterations.store(0, std::memory_order_relaxed);
+  }
   try {
 #if defined(__APPLE__)
     // [S3.5 RESTORE 2026-07-11] The refined model IS the user-visible result
@@ -8525,6 +8535,11 @@ void RefineGlobalBA(aether_sfm_session* s,
           for (int i = 0; i < s1_rounds_max; ++i) {
             if (enrich_done.load()) break;  // window closed
             s->gpu_watchdog.InProgress();  // [GPU-HANG-B1] stage-1 逐轮打点
+            {  // [BA-PROGRESS 2026-09-16] stage-1 逐轮打点
+              auto& ba_progress = aether::official::ba::GlobalBaProgressV1();
+              ba_progress.stage.store(1, std::memory_order_relaxed);
+              ba_progress.round.store(i + 1, std::memory_order_relaxed);
+            }
             const size_t num_obs = refined->ComputeNumObservations();
             // [AETHER-T1] stage-1 per-part attribution (our own loop).
             const double t_s1ba = NowMs();
@@ -8610,6 +8625,13 @@ void RefineGlobalBA(aether_sfm_session* s,
     aether_igr_merge_ms = 0.0;
     aether_igr_rounds = 0;
     aether::official::ba::ResetActiveBaSessionReceiptRingV1();
+    {  // [BA-PROGRESS 2026-09-16] stage-2 入口打点;stage-2 的逐轮进度由
+       // vendored colmap 自己维护的 aether_igr_rounds 提供(getter 取 max),
+       // 不动 vendored colmap。
+      auto& ba_progress = aether::official::ba::GlobalBaProgressV1();
+      ba_progress.stage.store(2, std::memory_order_relaxed);
+      ba_progress.round.store(0, std::memory_order_relaxed);
+    }
     // [GRAVITY-RA 2026-08-10] env 门控(默认关):重力对齐 RA 重解全局旋转,
     // 平移保相机中心;随后 stage-2 全局 BA 收回平移与点。
     const auto gravity_ra_snapshot =
@@ -8781,6 +8803,9 @@ void RefineGlobalBA(aether_sfm_session* s,
       s->recon = refined;
       s->refine_ms = NowMs() - t0;
     }
+    // [BA-PROGRESS 2026-09-16] finished — a poll must not read a stale stage.
+    aether::official::ba::GlobalBaProgressV1().stage.store(
+        0, std::memory_order_relaxed);
     s->finalize_status.store(2);  // AETHER_SFM_FINALIZE_REFINED
   } catch (const std::exception& e) {
     RefineFailClosed(s, e.what());
@@ -11418,6 +11443,18 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
         s->recon_manager.reset();  // no mapper manager on this path
         s->recon.reset();          // LOCAL model intentionally unpublished
       }
+      // [BA-PROGRESS 2026-09-16] Reset the carrier BEFORE the status flips to
+      // LOCAL_READY. The worker's own entry reset is not enough: between this
+      // store and the thread actually starting, a 250 ms poll would otherwise
+      // read the PREVIOUS finalize's stage/round (caught by the poisoned IDLE
+      // control, which saw the stale tuple as the first LOCAL_READY sample).
+      {
+        auto& ba_progress = aether::official::ba::GlobalBaProgressV1();
+        ba_progress.stage.store(0, std::memory_order_relaxed);
+        ba_progress.round.store(0, std::memory_order_relaxed);
+        ba_progress.iteration.store(0, std::memory_order_relaxed);
+        ba_progress.max_iterations.store(0, std::memory_order_relaxed);
+      }
       s->finalize_status.store(1);  // LOCAL_READY (worker refining)
       s->refine_thread =
           std::thread(RefineGlobalBA, s, std::move(work), /*live_reuse=*/true);
@@ -11436,6 +11473,38 @@ aether_sfm_result_t aether_sfm_finalize_async(aether_sfm_session_t* s,
 int aether_sfm_finalize_status(aether_sfm_session_t* s) {
   if (!s) return 3;
   return s->finalize_status.load();
+}
+
+// [BA-PROGRESS 2026-09-16] Coarse finalize progress for the waiting page.
+// Companion poll to aether_sfm_finalize_status; every out pointer is optional.
+//   stage    : 0 = idle/finished, 1 = finalize stage 1, 2 = finalize stage 2
+//   round    : 1-based refinement round inside that stage (0 = not started)
+//   iter     : 1-based Ceres iteration of the global solve in flight
+//   max_iter : that solve's max_num_iterations budget
+// Only meaningful while the status is LOCAL_READY (worker refining); at every
+// other status this reports a hard zero instead of the last run's value.
+// Always returns 0.
+int aether_sfm_finalize_progress(aether_sfm_session_t* s, int* stage,
+                                 int* round, int* iter, int* max_iter) {
+  int v_stage = 0, v_round = 0, v_iter = 0, v_max = 0;
+  if (s && s->finalize_status.load() == 1) {
+    auto& p = aether::official::ba::GlobalBaProgressV1();
+    v_stage = p.stage.load(std::memory_order_relaxed);
+    v_round = p.round.load(std::memory_order_relaxed);
+    v_iter = p.iteration.load(std::memory_order_relaxed);
+    v_max = p.max_iterations.load(std::memory_order_relaxed);
+    // Stage 2 runs its rounds inside vendored colmap's
+    // IterativeGlobalRefinement, which already counts them into
+    // aether_igr_rounds — read that rather than patching vendored colmap.
+    if (v_stage == 2 && aether_igr_rounds > v_round) {
+      v_round = aether_igr_rounds;
+    }
+  }
+  if (stage) *stage = v_stage;
+  if (round) *round = v_round;
+  if (iter) *iter = v_iter;
+  if (max_iter) *max_iter = v_max;
+  return 0;
 }
 
 // ─── outputs ────────────────────────────────────────────────────────
