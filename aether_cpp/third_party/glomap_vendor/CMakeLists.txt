@@ -1057,6 +1057,16 @@ target_compile_options(glomap_full PRIVATE -w)
 # same glomap_full static lib + host ceres/glog.
 option(AETHER_HOST_GLOMAP_BENCH "Build host full-chain glomap bench exe" OFF)
 if(AETHER_HOST_GLOMAP_BENCH)
+  # [HOST-LINK 2026-09-16] official_aether_sfm_c.cc weak_imports
+  # aether_dsp_sift_extract_gpu_warmup (Darwin weak *import*: ld64 still needs a
+  # definition at static-link time). The only real definitions are the Dawn TUs
+  # (bench/dsp_sift_gpu_c.cc = the iOS carrier's), so every host target below
+  # that links pwofficial_core on the CPU route must compile this no-op stub or
+  # it fails with "Undefined symbols: _aether_dsp_sift_extract_gpu_warmup".
+  # NOT for targets that compile bench/dsp_sift_gpu_c.cc themselves
+  # (archived_refeed_gpuextract_exe) — that would be a duplicate definition.
+  set(AETHER_HOST_WARMUP_STUB_SRC ${V}/bench/host_gpu_extract_warmup_stub.cc)
+
   add_executable(glomap_bench_full_exe ${V}/bench/glomap_bench.cc)
   target_compile_definitions(glomap_bench_full_exe PRIVATE
     GLOMAP_BENCH_MAIN
@@ -1152,7 +1162,8 @@ if(AETHER_HOST_GLOMAP_BENCH)
     # official core's source closure on device; the host bench must link it
     # too now that official_aether_sfm_c.cc references DiscardPending().
     ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
-    ${V}/../../src/crypto/sha256.cpp)
+    ${V}/../../src/crypto/sha256.cpp
+    ${AETHER_HOST_WARMUP_STUB_SRC})
   target_compile_definitions(official_replay_bench_exe PRIVATE
     EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
     GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
@@ -1183,7 +1194,8 @@ if(AETHER_HOST_GLOMAP_BENCH)
   add_executable(sfm_finalize_resume_bench_exe
     ${V}/bench/sfm_finalize_resume_bench.cc
     ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
-    ${V}/../../src/crypto/sha256.cpp)
+    ${V}/../../src/crypto/sha256.cpp
+    ${AETHER_HOST_WARMUP_STUB_SRC})
   target_compile_definitions(sfm_finalize_resume_bench_exe PRIVATE
     EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
     GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
@@ -1210,7 +1222,8 @@ if(AETHER_HOST_GLOMAP_BENCH)
   add_executable(sfm_scale_persist_driver_exe
     ${V}/bench/sfm_scale_persist_driver.cc
     ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
-    ${V}/../../src/crypto/sha256.cpp)
+    ${V}/../../src/crypto/sha256.cpp
+    ${AETHER_HOST_WARMUP_STUB_SRC})
   target_compile_definitions(sfm_scale_persist_driver_exe PRIVATE
     EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
     GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
@@ -1275,7 +1288,8 @@ if(AETHER_HOST_GLOMAP_BENCH)
       ${PWOFFICIAL_IO_DIR}/src/pwofficial_jpeg_decode.mm
       ${PWOFFICIAL_IO_DIR}/src/pwofficial_export_shim.c
       ${PWOFFICIAL_PIPELINE}/src/official_preclamp_instr_v1.cc
-      ${V}/../../src/crypto/sha256.cpp)
+      ${V}/../../src/crypto/sha256.cpp
+      ${AETHER_HOST_WARMUP_STUB_SRC})
     target_compile_definitions(archived_refeed_bench_exe PRIVATE
       EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES
       GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7

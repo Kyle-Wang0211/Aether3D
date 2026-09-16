@@ -50,6 +50,14 @@ extern "C" int aether_dsp_sift_extract_gpu_v2(const uint8_t*, int, int, int,
   return -1;  // unavailable → add_frame stays on the CPU _v2 route
 }
 extern "C" void aether_sed_last_stages(double*, int) {}
+// [HOST-LINK 2026-09-16] official_aether_sfm_c.cc 于 2026-08-10 新增的两个 weak
+// 引用(设备真链、host 需 no-op 桩)。本文件的桩集抄自更早的 replay bench,漏了
+// 它们 ⇒ 链接缺符号("_aether_gpu_match_set_preview_fps30" /
+// "_aether_sed_last_fail_reason");与 sfm_finalize_resume_bench.cc 的
+// 2026-08-13 同款修法。official_gpu_match_host.o 里的同名实现已被 -D 改名成
+// *_hostimpl,所以这里的强定义不会撞车。
+extern "C" void aether_gpu_match_set_preview_fps30(int) {}
+extern "C" const char* aether_sed_last_fail_reason(void) { return nullptr; }
 
 namespace {
 
