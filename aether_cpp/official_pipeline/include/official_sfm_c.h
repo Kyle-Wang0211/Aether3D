@@ -448,6 +448,15 @@ aether_sfm_result_t pwofficial_run(const char* db_path,
                                    aether_sfm_session_t** out_session,   // may be NULL
                                    char* out_json, int out_cap);
 
+// [RS-PARITY 2026-09-08] 见 aether_sfm_c.h 中同名 aether_sfm_* 的说明。
+aether_sfm_result_t pwofficial_write_model(aether_sfm_session_t* s,
+                                           const char* out_dir);
+
+aether_sfm_result_t pwofficial_continue_from_model(
+    const char* db_path, const char* image_path, const char* model_in_path,
+    const char* model_out_path, const aether_sfm_options_t* options,
+    aether_sfm_session_t** out_session, char* out_json, int out_cap);
+
 void pwofficial_set_thermal_state(aether_sfm_session_t* s, int state);
 
 void pwofficial_stream_stats(aether_sfm_session_t* s, int64_t* tvg_pairs,

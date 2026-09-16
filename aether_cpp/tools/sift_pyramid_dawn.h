@@ -84,6 +84,10 @@ public:
     bool keypoint_buffer_ready() const { return kp_buf_ != nullptr; }
     // 金字塔建完后调用:把 [0, keypoint_region_end) 拷进 kp_buf_。
     void sync_keypoint_buffer(DawnKernelHarness& harness);
+    // [WARMUP 2026-09-10] 预编金字塔段四个内核(纯填 load_compute 的记忆化
+    // 缓存:不分配、不派发、不提交 ⇒ 逐字节无损)。见 .cc 里的判词。
+    static void warmup(DawnKernelHarness& harness);
+
     static bool kpbuf_enabled();
 
     // ── [SPLITBUF 2026-09-08] 两缓冲:彻底不用子区间绑定 ──────────────────

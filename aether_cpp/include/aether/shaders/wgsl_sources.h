@@ -68,6 +68,14 @@ extern const char sift_gss_blur_wgsl[];
 extern const char sift_gss_blur_fused_wgsl[];
 extern const char sift_gss_resample_wgsl[];
 extern const char sift_dog_detect_wgsl[];
+// [COMPACT 2026-09-14] detect 压缩刀的三个新核。四处都要登记,少一处就静默失效:
+//   ① shaders/wgsl/ 放文件(烘焙是 GLOB,自动生成 .cpp)
+//   ② CMakeLists 的 pwofficial_gpu_extract 源列表(显式)
+//   ③ 本头的 extern 声明 + sift_extract_dawn.cc 的名字→符号表(**否则被 dead-strip**)
+//   ④ tests/sift/verify_pwofficial_gpu_extract_artifact.sh 的成员清单
+extern const char sift_dog_detect_compact_wgsl[];
+extern const char sift_dog_refine_wgsl[];
+extern const char sift_dog_cand_reset_wgsl[];
 extern const char sift_nonextrema_suppress_wgsl[];
 extern const char sift_suppress_grid_count_wgsl[];
 extern const char sift_suppress_grid_scan_wgsl[];

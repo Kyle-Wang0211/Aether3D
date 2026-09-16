@@ -354,6 +354,20 @@ public:
         uint32_t n_readback = 0;
         uint32_t n_create = 0;      // cache MISSES only
     };
+    // [WARMUP 2026-09-10] 已编译管线条数。预热用它做自报:调用前后的差 =
+    // 这次真正编了几条(缓存未命中数)。HostBreakdown 的 n_create 只在
+    // OFFICIAL_AETHER_HOST_BD=1 时才累加,生产默认不开,所以不能拿它当口径。
+    size_t pipeline_cache_size() const { return pipeline_cache_.size(); }
+
+    // [PIPE-BD 2026-09-11] Dawn 自带分段计时器的读数(名字见 metal 后端源码)。
+    // `n` 是采样次数:0 微秒与「根本没被调用」必须分得开。
+    void dawn_histogram(const char* name, double* out_ms, uint32_t* out_n) const;
+
+    // [MSL-GATE 2026-09-11] 把 Tint 产出的 MSL 文本落盘(需 OFFICIAL_AETHER_DUMP_MSL
+    // 或显式传 dir)。返回落盘条数;**-1 表示开关没开** —— 与"0 条"必须分得开。
+    // 文件名是内容哈希 ⇒ 两个 Dawn 配置的产出比对退化成文件名集合比对。
+    int dump_msl(const char* dir = nullptr) const;
+
     const HostBreakdown& host_breakdown() const { return hb_; }
     void host_breakdown_reset() { hb_ = HostBreakdown{}; }
 
@@ -383,6 +397,7 @@ private:
     // 10 total. wgpu::ComputePipeline is a ref-counted handle (cheap to copy).
     std::unordered_map<std::string, wgpu::ComputePipeline> pipeline_cache_;
 
+    void* hist_sink_ = nullptr;   // [PIPE-BD] 进程级 HistogramSink,见 .cpp
     bool has_f16_ = false;  // ShaderF16 was granted at device creation
     bool has_strict_math_ = false;  // ShaderModuleCompilationOptions granted at device creation
     bool strict_math_ = false;

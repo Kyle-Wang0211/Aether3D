@@ -178,6 +178,20 @@ SiftPyramidDawn::LevelGeom SiftPyramidDawn::level_geom(int octave,
     return g;
 }
 
+// [WARMUP 2026-09-10] 金字塔段的四个内核,提前编。
+//
+// build() 无条件编这四个(fused 那个也是无条件 load_compute,fused_on 只决定
+// 用不用它),所以这里没有分支要猜:名字表就是 build() 的名字表。
+//
+// 无损性:load_compute() 是纯记忆化(dawn_kernel_harness.cpp:1032),这里
+// 不分配缓冲、不编码、不派发、不提交,GPU 上没有任何命令因此执行。
+void SiftPyramidDawn::warmup(DawnKernelHarness& harness) {
+    harness.load_compute(load_wgsl("sift_gray_to_f32.wgsl"));
+    harness.load_compute(load_wgsl("sift_gss_blur.wgsl"));
+    harness.load_compute(load_wgsl("sift_gss_resample.wgsl"));
+    harness.load_compute(load_wgsl("sift_gss_blur_fused.wgsl"));
+}
+
 bool SiftPyramidDawn::build(DawnKernelHarness& harness, const uint8_t* gray,
                             int width, int height) {
     if (width < 2 || height < 2 || gray == nullptr) {

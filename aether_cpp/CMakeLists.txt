@@ -447,7 +447,16 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
             "2a186006dfae77c8adadf8475e6ea6e283786a16a6f0010a9fc4c11316792c6d")
     endif()
 
-    add_library(aether_dawn_kernel_harness STATIC tools/dawn_kernel_harness.cpp)
+# [PIPE-BD 2026-09-11] dawn_histogram_sink.cpp 里唯一一处继承 dawn::platform::Platform。
+# Dawn 以 -fno-rtti 编译:libdawn_platform.a 只有 vtable(_ZTVN4dawn8platform8PlatformE)
+# 没有 typeinfo(_ZTIN4dawn8platform8PlatformE),带 RTTI 编这处继承必然链接失败
+# (实测 "Undefined symbols: typeinfo for dawn::platform::Platform")。
+# 目录级属性:凡在本目录把该源文件加进来的目标都生效。
+set_source_files_properties(tools/dawn_histogram_sink.cpp
+  PROPERTIES COMPILE_OPTIONS "-fno-rtti")
+
+    add_library(aether_dawn_kernel_harness STATIC tools/dawn_kernel_harness.cpp
+                                                  tools/dawn_histogram_sink.cpp)
     target_include_directories(aether_dawn_kernel_harness
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/official_pipeline/src)
@@ -494,11 +503,17 @@ if(AETHER_ENABLE_DAWN AND TARGET dawn::webgpu_dawn)
         tools/sift_extract_dawn.cc
         tools/sift_pyramid_dawn.cc
         tools/dawn_kernel_harness.cpp
+        tools/dawn_histogram_sink.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_gray_to_f32_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_gss_blur_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_gss_blur_fused_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_gss_resample_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_dog_detect_wgsl.cpp
+        # [COMPACT 2026-09-14] detect 压缩刀的三个新核(烘焙是 *.wgsl 的 GLOB,自动生成;
+        #   但载体的源列表是显式的,必须在这里登记,否则生产(不设 EXTRACT_WGSL_DIR)找不到)。
+        ${AETHER_WGSL_GENERATED_DIR}/sift_dog_detect_compact_wgsl.cpp
+        ${AETHER_WGSL_GENERATED_DIR}/sift_dog_refine_wgsl.cpp
+        ${AETHER_WGSL_GENERATED_DIR}/sift_dog_cand_reset_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_nonextrema_suppress_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_suppress_grid_count_wgsl.cpp
         ${AETHER_WGSL_GENERATED_DIR}/sift_suppress_grid_scan_wgsl.cpp

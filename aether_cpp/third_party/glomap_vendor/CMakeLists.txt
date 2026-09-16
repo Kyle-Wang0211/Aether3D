@@ -329,6 +329,16 @@ target_compile_options(colmap_only PRIVATE -w)
 
 # ---- benchmark executable (link test + standalone run) ----
 option(BUILD_BENCH "Build glomap_bench executable" ON)
+# [PIPE-BD 2026-09-11] dawn_histogram_sink.cpp 里唯一一处继承 dawn::platform::Platform。
+# Dawn 以 -fno-rtti 编译,libdawn_platform.a 只有 vtable 没有 typeinfo
+# (`_ZTVN4dawn8platform8PlatformE` 有 / `_ZTIN4dawn8platform8PlatformE` 无),
+# 带 RTTI 编译这处继承会链接失败(实测 "typeinfo for dawn::platform::Platform")。
+# 目录级属性,凡在本目录加入该源文件的目标都生效。
+get_filename_component(AETHER_HIST_SINK_SRC
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/dawn_histogram_sink.cpp" ABSOLUTE)
+set_source_files_properties("${AETHER_HIST_SINK_SRC}"
+  PROPERTIES COMPILE_OPTIONS "-fno-rtti")
+
 if(BUILD_BENCH)
   find_library(ACCELERATE_FW Accelerate)
   # Source-independent executable contract for the shipping COLMAP clamp's
@@ -707,6 +717,78 @@ if(BUILD_BENCH)
 
     # Focused legacy-clamp count contract. Uses the exact gpu_extract_e2e
     # synthetic fixture and extraction calls, then exits before O(N^2) recall.
+    # [WARMUP 2026-09-10] 预热逐字节闸(含阴性对照)。同一 TU/链接集。
+    add_executable(warmup_byte_exact_gate_exe
+      bench/warmup_byte_exact_gate.cc
+      bench/dsp_sift_gpu_c.cc
+      bench/dsp_sift_c.cc
+      ${AT}/../official_pipeline/src/official_preclamp_instr_v1.cc
+      ${AT}/../src/sfm/canonical_feature_selector_v1.cc
+      ${AT}/../tools/dawn_kernel_harness.cpp
+      ${AT}/../src/crypto/sha256.cpp
+      ${AT}/../tools/sift_extract_dawn.cc
+      ${AT}/../tools/sift_pyramid_dawn.cc)
+    set_target_properties(warmup_byte_exact_gate_exe PROPERTIES CXX_STANDARD 20)
+    target_include_directories(warmup_byte_exact_gate_exe PRIVATE
+      ${V}/stubs ${AT}/../tools ${AT}/stb
+      ${AT}/../official_pipeline/src ${AT}/../official_pipeline/include
+      ${_DAWN_INC_STATIC} ${_DAWN_INC_GEN})
+    target_compile_definitions(warmup_byte_exact_gate_exe PRIVATE
+      EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+      # 与生产同一个 env 命名空间(OFFICIAL_),否则闸读的是另一套开关。
+      AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+      AETHER_FEATURE_SELECTION_ENV_OFFICIAL=1
+      AETHER_GPU_TIMESTAMPS_ENV_OFFICIAL=1
+      AETHER_GPU_TIMESTAMP_DAWN_REVISION="host"
+      AETHER_GPU_TIMESTAMP_DAWN_ARTIFACT_SHA256="host"
+      AETHER_WGSL_DIR="${AT}/../shaders/wgsl")
+    target_compile_options(warmup_byte_exact_gate_exe PRIVATE -w)
+    target_link_libraries(warmup_byte_exact_gate_exe PRIVATE
+      glomap_core
+      ${_DAWN_HARNESS_LIB}
+      ${_WEBGPU_DAWN_LIB}
+      /opt/homebrew/lib/libglog.dylib
+      "-lsqlite3"
+      ${ACCELERATE_FW}
+      ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
+      ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
+
+        # [PRICE 2026-09-14] 描述子分段定价台架(三臂交替,同一进程同一热态)。
+    add_executable(desc_price_bench_exe
+      bench/desc_price_bench.cc
+      bench/dsp_sift_gpu_c.cc
+      bench/dsp_sift_c.cc
+      ${AT}/../official_pipeline/src/official_preclamp_instr_v1.cc
+      ${AT}/../src/sfm/canonical_feature_selector_v1.cc
+      ${AT}/../tools/dawn_kernel_harness.cpp
+      ${AT}/../src/crypto/sha256.cpp
+      ${AT}/../tools/sift_extract_dawn.cc
+      ${AT}/../tools/sift_pyramid_dawn.cc)
+    set_target_properties(desc_price_bench_exe PROPERTIES CXX_STANDARD 20)
+    target_include_directories(desc_price_bench_exe PRIVATE
+      ${V}/stubs ${AT}/../tools ${AT}/stb
+      ${AT}/../official_pipeline/src ${AT}/../official_pipeline/include
+      ${_DAWN_INC_STATIC} ${_DAWN_INC_GEN})
+    target_compile_definitions(desc_price_bench_exe PRIVATE
+      EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7
+      # 与生产同一个 env 命名空间(OFFICIAL_),否则闸读的是另一套开关。
+      AETHER_PRECLAMP_INSTR_ENV_OFFICIAL=1
+      AETHER_FEATURE_SELECTION_ENV_OFFICIAL=1
+      AETHER_GPU_TIMESTAMPS_ENV_OFFICIAL=1
+      AETHER_GPU_TIMESTAMP_DAWN_REVISION="host"
+      AETHER_GPU_TIMESTAMP_DAWN_ARTIFACT_SHA256="host"
+      AETHER_WGSL_DIR="${AT}/../shaders/wgsl")
+    target_compile_options(desc_price_bench_exe PRIVATE -w)
+    target_link_libraries(desc_price_bench_exe PRIVATE
+      glomap_core
+      ${_DAWN_HARNESS_LIB}
+      ${_WEBGPU_DAWN_LIB}
+      /opt/homebrew/lib/libglog.dylib
+      "-lsqlite3"
+      ${ACCELERATE_FW}
+      ${COCOA_FW} ${IOKIT_FW} ${IOSURFACE_FW} ${METAL_FW}
+      ${QUARTZCORE_FW} ${FOUNDATION_FW} ${COREFOUNDATION_FW})
+
     add_executable(gpu_extract_count_contract_exe
       bench/gpu_extract_count_contract.cc
       bench/dsp_sift_gpu_c.cc
@@ -1237,6 +1319,7 @@ if(AETHER_HOST_GLOMAP_BENCH)
         ${V}/../../tools/sift_extract_dawn.cc
         ${V}/../../tools/sift_pyramid_dawn.cc
         ${V}/../../tools/dawn_kernel_harness.cpp
+        "${AETHER_HIST_SINK_SRC}"
         ${V}/../../src/sfm/canonical_feature_selector_v1.cc)
       target_compile_definitions(archived_refeed_gpuextract_exe PRIVATE
         EIGEN_MPL2_ONLY GLOG_USE_GLOG_EXPORT GLOG_NO_ABBREVIATED_SEVERITIES

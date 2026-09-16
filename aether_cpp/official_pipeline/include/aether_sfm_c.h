@@ -513,6 +513,23 @@ aether_sfm_result_t aether_sfm_run(const char* db_path,
                                    aether_sfm_session_t** out_session,   // may be NULL
                                    char* out_json, int out_cap);
 
+// [RS-PARITY 2026-09-08] 把 session 当前的重建按 COLMAP 格式落盘
+// (cameras/images/points3D)。补拍的前置件:设备此前只存 PLY(xyz+rgb)+meta,
+// 没有 track,而续跑要靠 2D-3D 对应。
+aether_sfm_result_t aether_sfm_write_model(aether_sfm_session_t* s,
+                                           const char* out_dir);
+
+// [RS-PARITY 2026-09-08] 在已有模型之上继续跑完整增量管线 —— RealityScan
+// 官方文档 "will continue from the previous state" 的精确对应。
+// model_in_path = 上一次的模型目录(必填);model_out_path 可为 NULL。
+// 与 aether_sfm_run 共用同一条 RunIncremental,BA/三角化参数逐字相同。
+aether_sfm_result_t aether_sfm_continue_from_model(
+    const char* db_path, const char* image_path, const char* model_in_path,
+    const char* model_out_path,
+    const aether_sfm_options_t* options,  // may be NULL
+    aether_sfm_session_t** out_session,   // may be NULL
+    char* out_json, int out_cap);
+
 // aether_sfm_run_dir: runs the whole validated pipeline over a directory of
 // JPEGs + a sidecar poses.json, returning poses+points via the getters by
 // leaving the session live. Does extraction+match+db-build in-process instead

@@ -165,6 +165,24 @@ extern "C" __attribute__((weak)) void aether_sed_last_stages(double* out,
 // [EXTRACT-SELFHEAL 2026-08-10] 提取失败原因(sift_extract_dawn.cc 线程本地
 // 存根)—— errExtract 时落逐帧账,根治"失败原因只进 stderr 真机丢失"盲区。
 extern "C" __attribute__((weak)) const char* aether_sed_last_fail_reason(void);
+
+// [WARMUP 2026-09-10] 预编提取器全部 WGSL 管线,不跑任何一帧。返回本次新编
+// 条数(-1 = Dawn 不可用)。弱符号:不链 GPU 提取器的构型里为 nullptr,整条
+// 预热直接跳过。实现与判词见 official_dsp_sift_gpu_c.cc。
+// Mach-O 上 __attribute__((weak)) 加在**声明**上是"弱定义"不是"弱导入",
+// 缺定义仍然链接失败(2026-09-10 实测:archived_refeed_gpuextract 未定义符号)。
+// Darwin 用 weak_import,ELF(Android)上 weak 声明本来就允许未定义。
+#if defined(__APPLE__)
+extern "C" __attribute__((weak_import)) int aether_dsp_sift_extract_gpu_warmup(
+    double* out_init_ms, double* out_compile_ms,
+    double* out_msl_ms, unsigned* out_msl_n,
+    double* out_pso_ms, unsigned* out_pso_n);
+#else
+extern "C" __attribute__((weak)) int aether_dsp_sift_extract_gpu_warmup(
+    double* out_init_ms, double* out_compile_ms,
+    double* out_msl_ms, unsigned* out_msl_n,
+    double* out_pso_ms, unsigned* out_pso_n);
+#endif
 extern "C" int aether_sift_match(const uint8_t* desc1, int n1,
                                  const uint8_t* desc2, int n2, double max_ratio,
                                  int* out_num_matches);
@@ -185,10 +203,14 @@ extern "C" int aether_sift_match_pairs(const uint8_t* desc1, int n1,
 extern "C" __attribute__((weak)) void aether_gpu_match_set_capture_active(int);
 extern "C" __attribute__((weak)) void aether_gpu_match_set_preview_fps30(int);
 // [SPRINT-FIX + YIELD-FPS-LINK 2026-08-10] 见 aether_sfm_c.h 同名声明注释。
+namespace { void KickExtractWarmupOnce(const char* when); int ExtractWarmupMode(); const char* ExtractWarmupQosName(); }
 extern "C" void aether_sfm_match_set_capture_active(int active) {
   if (aether_gpu_match_set_capture_active != nullptr) {
     aether_gpu_match_set_capture_active(active);
   }
+  // [WARMUP-EARLY 2026-09-10] 2 档:开拍那一刻点火(比 aether_sfm_create 早
+  // 3.6 s)。只在 active=1 时点;call_once 保证一进程一次。判词见下面。
+  if (active != 0 && ExtractWarmupMode() >= 2) KickExtractWarmupOnce("capture_active");
 }
 extern "C" void aether_sfm_match_set_preview_fps30(int on) {
   if (aether_gpu_match_set_preview_fps30 != nullptr) {
@@ -1717,10 +1739,14 @@ int64_t EpochMs() {
 // exactly what `devicectl copy` already recovers. Best-effort by design:
 // open-append-close per event (events are rare; a thermal collapse writes a
 // few hundred ~150 B lines), any I/O failure is swallowed.
-void AppendMatchFailJsonl(aether_sfm_session* s, const std::string& line) {
+// [WARMUP 2026-09-10] 只吃 db_path 的版本。预热跑在后台线程上,而 aether_sfm_free
+// 不 join 它(join 会让"拍到一半退出"卡住最多几秒)⇒ 它绝不能 deref s。
+// 把路径按值拷进线程,写文件这一段就与 session 生命期彻底解耦。
+void AppendMatchFailJsonlAtDbPath(const std::string& db_path,
+                                  const std::string& line) {
   try {
     const std::filesystem::path p =
-        std::filesystem::path(s->db_path).parent_path() /
+        std::filesystem::path(db_path).parent_path() /
         "sfm_match_fail.jsonl";
     FILE* f = std::fopen(p.string().c_str(), "a");
     if (!f) return;
@@ -1730,6 +1756,163 @@ void AppendMatchFailJsonl(aether_sfm_session* s, const std::string& line) {
   } catch (...) {
     // telemetry only — never take add_frame down
   }
+}
+
+void AppendMatchFailJsonl(aether_sfm_session* s, const std::string& line) {
+  if (!s) return;
+  AppendMatchFailJsonlAtDbPath(s->db_path, line);
+}
+
+// ── [WARMUP 2026-09-10] 提取器管线预热:把第 0 帧的一次性编译挪到拍摄期间 ──
+//
+// 病灶(真机,未命名(2) cap_1789024293272808,build 133):第 0 帧
+// extract_ms = 9293 ms,而同一帧 GPU 时间戳九段合计只有 438 ms —— 8.9 s 全在
+// 主机侧(Dawn init + WGSL 编译)。生产持有单例 harness,管线缓存让第 1 帧
+// 起全是命中(extract_ms 462 / GPU 373),所以这笔一次性开销**全压在第 0 帧**,
+// 而第 0 帧正是用户按下开始之后盯着的第一秒。35 帧那场墙钟 97.4 s,其中
+// 8.3 s 是这一笔。跨核版首帧 extract_ms:Sep 2 核 995/1028,Sep 8 核
+// 2883/2898/8620,Sep 10 核 5592/9293。
+//
+// 治法:session 一建好就在后台线程里把这批管线编出来。此刻用户还在拍,
+// 第一张照片喂进来之前有 ~9 s 空窗(该场:建会话 +3.9 s,第 0 帧 +13.4 s)。
+//
+// 为什么严格不劣:预热与 extract() 抢的是**同一把 g_gpu_harness_mu**。
+// 预热跑完 ⇒ 第 0 帧全命中,净赚;第 0 帧在预热跑一半时到达 ⇒ 它等锁,
+// 等的正是它自己本来也要付的那段编译,与今天等价。没有第三种情况。
+//
+// 一次性:call_once。管线缓存是进程级的,第二场拍摄不需要再编。
+// [WARMUP-EARLY 2026-09-10] 点火时机变成一个**旗值**,不是布尔。
+//   未设 / 0 = 关
+//   1        = 在 aether_sfm_create 点火(build 135 已上机的那一档)
+//   2        = 在 pwofficial_match_set_capture_active(1) 点火,create 仍做兜底
+//
+// 为什么要提前:135 上机实测(未命名(3))第 0 帧九段从 9107 → 742 ms,但遥测
+// extract_ms 只从 9293 → 3005 —— 差的 2263 ms 是**等锁**:预热 +3.61 s 才点火
+// (aether_sfm_create = 第一次快门那一刻),而第 0 帧几乎同时到,把预热剩下的
+// 部分等完了。把点火挪到「开拍」那一刻就能归零。
+//
+// 富余是量过的,不是估的(七场遥测,开拍 → 第一帧喂入):
+//   2.41 / 5.43 / 7.14 / 7.45 / 10.13 / 13.76 / 17.88 s,全部 ≥ 预热耗时 2.27 s。
+// 「开拍」= `AetherMatchFlags.setCaptureActive(true)`,与 `live_cloud_diag_build_v1`
+// 在同一个同步块里(ar_capture_page.dart:1230-1240),遥测里它落在采集 t0 +0.01 s,
+// 而 aether_sfm_create 落在 +3.61 s ⇒ **净赚 3.6 s,且产品侧一行都不用改**
+// (pwofficial_match_set_capture_active 本来就是导出 ABI、本来就在那一刻被调)。
+//
+// 风险(必须靠上机后的既有埋点判,不能靠猜):这 2.27 s 编译落在相机/ARKit
+// 起来的同一瞬间。要看 `shutter_feedback` 时延、`photocard_photo_in`、
+// `preview_skip` 有没有变差。所以 1 档保留,两档只差 env、**不用重装**即可 A/B。
+int ExtractWarmupMode() {
+  static const int mode = [] {
+    const char* v = std::getenv("OFFICIAL_AETHER_EXTRACT_WARMUP");
+    if (v == nullptr || v[0] == '\0') return 0;
+    if (v[0] == '0' && v[1] == '\0') return 0;
+    if (v[1] != '\0') return 1;              // 多字符值一律按 1 解释
+    if (v[0] == '2') return 2;
+    if (v[0] == '3') return 3;   // [WARMUP-QOS3] 开拍点火 + USER_INITIATED
+    return 1;   // 其余非零单字符都按 1 解释(与 build 135 的行为一致)
+  }();
+  return mode;
+}
+
+// [WARMUP-QOS3 2026-09-10] 加第 3 档:点火时机同 2 档,但线程用 USER_INITIATED。
+//   0/缺省 = 关
+//   1      = aether_sfm_create 点火,UTILITY        (build 135)
+//   2      = 开拍点火,UTILITY                       (build 137,已上生产)
+//   3      = 开拍点火,USER_INITIATED                (本档)
+//
+// 为什么开这一档:未命名(5)(137,2 档)实测预热耗时 **3635 ms**,而 1 档只要
+// 2267 ms —— UTILITY 让它慢了 1.37 s(`init_ms` 也从 43 → 324 ms:相机启动
+// 那一瞬间建 Dawn 设备本来就贵,再被降级排到 E 核就更贵)。那一场用户 2.14 s
+// 就按了第一张快门、+2.18 s 就 create,于是第 0 帧仍要等锁 ~1508 ms
+// (遥测 extract_ms 2017 = 1508 等锁 + 509 真干活)。
+//
+// 为什么现在敢提:UTILITY 当初是为了规避「抢相机 CPU」,而那条风险已被**两场
+// 阴性对照**否掉 —— 预热窗口内 `preview_skip` 都是 **0 条**,且 skip 的原因全部
+// 是业务性的 `already_arkit_gravity_metric`;快门反馈 20/20 全 `captured_signal`;
+// 开拍→第一次快门 2.14 s(比 1 档那场 3.59 s 还快)。
+//
+// 地板不变:USER_INITIATED 与相机/ARKit **同级**而非高于它们,且预热与第 0 帧
+// 抢的仍是同一把 g_gpu_harness_mu ⇒ 最坏仍只是第 0 帧等锁,即今天的行为。
+// 3 档若真伤到采集,**只改 env 回 2 即可**,不用重装。
+const char* ExtractWarmupQosName() {
+  return ExtractWarmupMode() == 3 ? "user_initiated" : "utility";
+}
+
+
+// 预热结果的暂存:开拍那一刻还没有 session,自然也没有 db_path。所以线程把
+// 结果写进这里,谁先拿到 db_path 谁负责落盘;两边都要在锁里判,避免落两行。
+std::mutex g_warmup_mu;
+std::string g_warmup_db_path;      // aether_sfm_create 填
+std::string g_warmup_line;         // 预热线程填
+bool g_warmup_line_written = false;
+
+// 调用者必须持 g_warmup_mu。
+void FlushWarmupLineLocked() {
+  if (g_warmup_line_written) return;
+  if (g_warmup_db_path.empty() || g_warmup_line.empty()) return;
+  g_warmup_line_written = true;
+  const std::string path = g_warmup_db_path;
+  const std::string line = g_warmup_line;
+  AppendMatchFailJsonlAtDbPath(path, line);
+}
+
+// `when` 只进自报,不进判据 —— 但没有它就分不清这一场跑的是 1 档还是 2 档。
+void KickExtractWarmupOnce(const char* when) {
+  if (ExtractWarmupMode() == 0) return;
+  if (aether_dsp_sift_extract_gpu_warmup == nullptr) return;  // 不链 GPU 提取器
+  static std::once_flag once;
+  std::call_once(once, [when] {
+    // detach 而非 join:预热不碰任何 session 字段(结果只进上面那三个全局,
+    // 由锁保护),所以 aether_sfm_free 不必等它;拍到一半退出不会被卡住。
+    std::thread([when] {
+#if defined(__APPLE__)
+      // [WARMUP-QOS 2026-09-10] 预热线程压到 UTILITY。
+      //
+      // 唯一没被代码回答掉的风险是「这 2.27 s 的 Metal 编译会不会跟相机/ARKit
+      // 抢 CPU」——那是调度器的事,读代码读不出来。所以不去猜、也不去拿一场
+      // 拍摄赌:直接让它**结构上抢不到**。相机/ARKit/快门那些线程跑在
+      // USER_INTERACTIVE / USER_INITIATED,UTILITY 在它们之下,内核会优先把
+      // 它放到 E 核、并在 P 核紧张时让路。
+      //
+      // 代价可接受:预热晚几百毫秒不影响正确性(第 0 帧最坏情况仍然只是等锁,
+      // 等的正是它本来也要付的那段),而富余最紧的一场也有 2.41 s。
+      // 仓里同一惯例见 official_aether_sfm_c.cc:8403(stage-1 BA 的 UTILITY 档)。
+      // [WARMUP-QOS3 2026-09-10] 3 档抬到 USER_INITIATED,理由见 ExtractWarmupMode 上方。
+      pthread_set_qos_class_self_np(
+          ExtractWarmupMode() == 3 ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY, 0);
+#endif
+      const double t0 = NowMs();
+      double init_ms = 0.0, compile_ms = 0.0, msl_ms = 0.0, pso_ms = 0.0;
+      unsigned msl_n = 0u, pso_n = 0u;
+      const int n_new = aether_dsp_sift_extract_gpu_warmup(
+          &init_ms, &compile_ms, &msl_ms, &msl_n, &pso_ms, &pso_n);
+      // [PIPE-BD 2026-09-11] ① Tint(WGSL→MSL)= compile − ② − ③。三段可缓存性不同:
+      // ① Dawn 会 EnsureStored(可缓存);②③ Dawn 都不缓存,且 Metal 后端零使用
+      // MTLBinaryArchive ⇒ 谁大谁决定「预编译管线随包出厂」该投哪一级。
+      const double tint_ms = compile_ms - msl_ms - pso_ms;
+      const double ms = NowMs() - t0;
+      // 自报四件事,缺一件这条臂就读不了:
+      //   n_new      = 这一趟真正编出来几条管线(0 = 已经热了;-1 = Dawn 不可用)
+      //   init_ms    = Dawn instance/adapter/device 创建
+      //   compile_ms = 12 条 WGSL 编译
+      //   at         = 这一场实际是在哪个点火的("create" / "capture_active")
+      //   qos        = 线程实际用的档("utility" / "user_initiated")
+      char line[512];
+      std::snprintf(line, sizeof(line),
+                    "{\"t\":%lld,\"type\":\"extract_warmup_v1\","
+                    "\"ms\":%.1f,\"init_ms\":%.1f,\"compile_ms\":%.1f,"
+                    "\"n_new_pipelines\":%d,\"at\":\"%s\",\"mode\":%d,"
+                    "\"qos\":\"%s\","
+                    "\"tint_ms\":%.1f,\"msl_ms\":%.1f,\"msl_n\":%u,"
+                    "\"pso_ms\":%.1f,\"pso_n\":%u}",
+                    static_cast<long long>(EpochMs()), ms, init_ms, compile_ms,
+                    n_new, when != nullptr ? when : "?", ExtractWarmupMode(),
+                    ExtractWarmupQosName(), tint_ms, msl_ms, msl_n, pso_ms, pso_n);
+      std::lock_guard<std::mutex> lk(g_warmup_mu);
+      g_warmup_line = line;
+      FlushWarmupLineLocked();   // db_path 已知就现在落盘,否则等 create 来落
+    }).detach();
+  });
 }
 
 // [LIVE-CLOUD-SNAPSHOT-DIAG V2] Observe the exact native model at a publish
@@ -8860,6 +9043,14 @@ aether_sfm_result_t aether_sfm_create(const char* db_path,
                     static_cast<long long>(EpochMs()), __DATE__, __TIME__);
       AppendMatchFailJsonl(s, bline);
     }
+    // [WARMUP 2026-09-10] 提取器管线预热。1 档在这里点火;2 档此刻通常已经
+    // 跑完(开拍时点的),这里只是登记 db_path 把自报落盘 + 兜底点火。
+    {
+      std::lock_guard<std::mutex> lk(g_warmup_mu);
+      if (g_warmup_db_path.empty()) g_warmup_db_path = s->db_path;
+      FlushWarmupLineLocked();
+    }
+    KickExtractWarmupOnce("create");
     // [GPU-HANG-B1] 启动巡逻线程。回调只读 s->db_path(create 后不变),
     // AppendMatchFailJsonl 本身 open-append-close、异常自吞,巡逻线程安全。
     // s 的生命期由 aether_sfm_free 先 Stop() 后 delete 保证。

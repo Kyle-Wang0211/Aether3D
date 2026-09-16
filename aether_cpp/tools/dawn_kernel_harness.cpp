@@ -2,20 +2,27 @@
 // Copyright (c) 2024-2026 Aether3D. All rights reserved.
 
 #include "dawn_kernel_harness.h"
+
+#include "dawn/native/DawnNative.h"      // [PIPE-BD] DawnInstanceDescriptor
+#include "dawn/platform/DawnPlatform.h"  // [PIPE-BD] Platform*(只转型,不继承)
+#include "dawn_histogram_sink.h"        // [PIPE-BD] 唯一的继承关在那个 -fno-rtti TU 里
 #include "official_gpu_timestamp_diagnostics_v1.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>  // [GPU-HANG-A1] getenv/atoll for wait-timeout overrides
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #if !defined(AETHER_GPU_TIMESTAMP_DAWN_REVISION)
 #error "AETHER_GPU_TIMESTAMP_DAWN_REVISION must pin Dawn's 40-hex revision"
@@ -26,6 +33,65 @@
 
 namespace aether {
 namespace tools {
+
+// ─── [MSL-GATE 2026-09-11] Tint 产出的 MSL 文本捕获 ───
+//
+// 用途:把 iOS Dawn 从 Debug 改成 Release **之前**,必须先证明这么改不会改变
+// Tint 的产出 —— GPU 上跑的是什么,完全由这段 MSL 文本决定。文本逐字节相同
+// ⇒ Apple 的编译器拿到的输入相同 ⇒ 输出的机器码相同 ⇒ 交付逐字节无损。
+//
+// 路子是 Dawn 现成的,不改 Dawn 一行:
+//   · device toggle `dump_shaders`(Toggles.cpp:206)让它把 MSL 发到日志
+//     (metal/ShaderModuleMTL.mm:451-455,走 device->EmitLog(Info, ...))
+//   · 日志回调挂在 DawnInstanceDescriptor::loggingCallbackInfo 上
+//     (native/DawnNative.h:126-142),与 histogram 那个 platform 同一个结构
+//
+// 🔴 回调必须是**非捕获** lambda(DawnNative.h:150 那句 static_assert 写死了),
+// 所以捕获区只能是文件作用域全局。
+namespace {
+std::mutex g_msl_mu;
+std::vector<std::string> g_msl_dumps;
+constexpr char kMslDumpPrefix[] = "/* Dumped generated MSL */";
+
+// 一次性读 env:开关必须让程序自报"实际解析到了什么",见 dump_msl() 的返回值。
+const char* msl_dump_dir() {
+    static const char* dir = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_DUMP_MSL");
+        return (v != nullptr && v[0] != '\0') ? v : nullptr;
+    }();
+    return dir;
+}
+}  // namespace
+
+// [MSL-GATE 2026-09-11] 把捕获到的 MSL 落盘。返回条数。
+// 文件名 = 内容的 FNV-1a 十六进制 ⇒ **两次运行只要文本相同,文件名就相同**,
+// 于是"两个配置产出是否一致"退化成 `ls` 对比,不依赖顺序(Tint 的产出顺序
+// 由管线编译顺序决定,不保证跨运行一致)。
+int DawnKernelHarness::dump_msl(const char* dir) const {
+    if (dir == nullptr) dir = msl_dump_dir();
+    if (dir == nullptr) return -1;                 // -1 = 开关没开(与"0 条"分开)
+    std::lock_guard<std::mutex> lk(g_msl_mu);
+    int n = 0;
+    for (const std::string& m : g_msl_dumps) {
+        uint64_t h = 1469598103934665603ull;
+        for (unsigned char c : m) { h ^= c; h *= 1099511628211ull; }
+        char path[1024];
+        std::snprintf(path, sizeof(path), "%s/msl_%016llx.msl", dir,
+                      static_cast<unsigned long long>(h));
+        FILE* f = std::fopen(path, "wb");
+        if (f == nullptr) continue;
+        std::fwrite(m.data(), 1, m.size(), f);
+        std::fclose(f);
+        ++n;
+    }
+    return n;
+}
+
+void DawnKernelHarness::dawn_histogram(const char* name, double* out_ms,
+                                       uint32_t* out_n) const {
+    dawn_histogram_get(name, out_ms, out_n);   // 判词见 dawn_histogram_sink.h
+}
+
 
 namespace {
 
@@ -628,6 +694,19 @@ bool DawnKernelHarness::init() {
                       "timestamp query not requested", 0, 0);
     }
 
+    // ─── [PIPE-BD 2026-09-11] 接上 Dawn 自带的分段计时器,判词见文件上方 ───
+    hist_sink_ = dawn_histogram_sink_platform();
+    dawn::native::DawnInstanceDescriptor dawn_instance_desc{};
+    dawn_instance_desc.platform =
+        static_cast<dawn::platform::Platform*>(hist_sink_);
+    // [MSL-GATE 2026-09-11] 日志回调**不能挂在 instance 上**:`dump_shaders` 走的是
+    // `DeviceBase::EmitLog` → `mCallbackInfos.CallLoggingCallback`(native/Device.cpp:1850-1852),
+    // 那是 **device 级**的;`DawnInstanceDescriptor::loggingCallbackInfo` 只服务
+    // `InstanceBase::EmitLog`(native/Instance.cpp:564-567),两条路不通。
+    // 实测挂错层的后果:开关正常解析、`dump_msl()` 返回 **0 条**(不是 -1)——
+    // 全靠这个"0 与 -1 分开"的自报才没把静默失败当成"两边一致"。
+    // 正确做法见下面 device_ 创建完之后的 SetLoggingCallback。
+
     // ─── Instance: enable TimedWaitAny so wgpuInstanceWaitAny works
     //                with WaitAnyOnly callback mode (sync bridge).
     static constexpr auto kTimedWaitAny = wgpu::InstanceFeatureName::TimedWaitAny;
@@ -635,6 +714,9 @@ bool DawnKernelHarness::init() {
         .requiredFeatureCount = 1,
         .requiredFeatures = &kTimedWaitAny,
     };
+    // [PIPE-BD] DawnInstanceDescriptor 是链式结构(native/DawnNative.h:117-121)。
+    instance_desc.nextInChain =
+        reinterpret_cast<wgpu::ChainedStruct*>(&dawn_instance_desc);
     instance_ = wgpu::CreateInstance(&instance_desc);
     if (instance_ == nullptr) {
         if (ts_requested_) {
@@ -837,9 +919,15 @@ bool DawnKernelHarness::init() {
             disabled_toggles.push_back(disabled_timestamp_toggle);
         }
         if (no_lazy_clear) disabled_toggles.push_back("lazy_clear_resource_on_first_use");
-        if (!disabled_toggles.empty()) {
+        // [MSL-GATE 2026-09-11] OFFICIAL_AETHER_DUMP_MSL=<dir> ⇒ 开 dump_shaders,
+        // 把 Tint 产出的 MSL 收进 g_msl_dumps(判词见文件上方)。默认关。
+        std::vector<const char*> enabled_toggles;
+        if (msl_dump_dir() != nullptr) enabled_toggles.push_back("dump_shaders");
+        if (!disabled_toggles.empty() || !enabled_toggles.empty()) {
             timestamp_toggles.disabledToggleCount = disabled_toggles.size();
             timestamp_toggles.disabledToggles = disabled_toggles.data();
+            timestamp_toggles.enabledToggleCount = enabled_toggles.size();
+            timestamp_toggles.enabledToggles = enabled_toggles.data();
             device_desc.nextInChain = &timestamp_toggles;
         }
         device_desc.requiredFeatureCount = feats.size();
@@ -906,6 +994,18 @@ bool DawnKernelHarness::init() {
     }
 
     // ─── Queue: sync accessor ───
+    // [MSL-GATE 2026-09-11] device 级日志回调:dump_shaders 的 MSL 从这里出来。
+    // 非捕获 lambda(生成头 webgpu_cpp.h:1848 的 enable_if 要求),所以捕获区是
+    // 文件作用域全局。只收以 kMslDumpPrefix 开头的,别的日志一律不动。
+    if (msl_dump_dir() != nullptr) {
+        device_.SetLoggingCallback(
+            +[](wgpu::LoggingType, wgpu::StringView message) {
+                std::string m(message.data, message.length);
+                if (m.rfind(kMslDumpPrefix, 0) != 0) return;
+                std::lock_guard<std::mutex> lk(g_msl_mu);
+                g_msl_dumps.push_back(std::move(m));
+            });
+    }
     queue_ = device_.GetQueue();
 
     if (queue_ == nullptr) {

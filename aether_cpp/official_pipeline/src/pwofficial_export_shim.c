@@ -90,6 +90,20 @@ PWOFFICIAL_EXPORT aether_sfm_result_t pwofficial_run(const char* db_path,
                         out_cap);
 }
 
+PWOFFICIAL_EXPORT aether_sfm_result_t pwofficial_write_model(
+    aether_sfm_session_t* s, const char* out_dir) {
+  return aether_sfm_write_model(s, out_dir);
+}
+
+PWOFFICIAL_EXPORT aether_sfm_result_t pwofficial_continue_from_model(
+    const char* db_path, const char* image_path, const char* model_in_path,
+    const char* model_out_path, const aether_sfm_options_t* options,
+    aether_sfm_session_t** out_session, char* out_json, int out_cap) {
+  return aether_sfm_continue_from_model(db_path, image_path, model_in_path,
+                                        model_out_path, options, out_session,
+                                        out_json, out_cap);
+}
+
 PWOFFICIAL_EXPORT aether_sfm_result_t pwofficial_create(const char* db_path,
                                               const aether_sfm_options_t* options,
                                               aether_sfm_session_t** out_session) {

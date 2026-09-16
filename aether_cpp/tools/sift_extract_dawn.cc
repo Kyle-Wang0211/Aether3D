@@ -87,6 +87,13 @@ std::string load_wgsl(const char* filename) {
     if (f == "sift_gss_blur.wgsl")            return std::string(sift_gss_blur_wgsl);
     if (f == "sift_gss_resample.wgsl")        return std::string(sift_gss_resample_wgsl);
     if (f == "sift_dog_detect.wgsl")          return std::string(sift_dog_detect_wgsl);
+    // [COMPACT 2026-09-14] 三个新核必须登记在这张**写死的名字→符号表**里。
+    //   只把 .wgsl 放进目录 + 加进 CMake 源列表是不够的:生产不设 EXTRACT_WGSL_DIR,
+    //   走的就是这张表;没登记 ⇒ 符号无人引用 ⇒ **被链接器 dead-strip**,
+    //   框架二进制里连文本都不剩(2026-09-14 出 156 时当场抓到)。
+    if (f == "sift_dog_detect_compact.wgsl")  return std::string(sift_dog_detect_compact_wgsl);
+    if (f == "sift_dog_refine.wgsl")          return std::string(sift_dog_refine_wgsl);
+    if (f == "sift_dog_cand_reset.wgsl")      return std::string(sift_dog_cand_reset_wgsl);
     if (f == "sift_nonextrema_suppress.wgsl") return std::string(sift_nonextrema_suppress_wgsl);
     if (f == "sift_suppress_grid_count.wgsl") return std::string(sift_suppress_grid_count_wgsl);
     if (f == "sift_suppress_grid_scan.wgsl") return std::string(sift_suppress_grid_scan_wgsl);
@@ -142,6 +149,71 @@ static DawnKernelHarness::BufBinding w256_kp(const wgpu::Buffer& b,
     if (!sub) return DawnKernelHarness::BufBinding(b);
     return DawnKernelHarness::BufBinding(
         b, 0u, static_cast<uint64_t>(pyr.keypoint_region_end()) * 4u);
+}
+
+// [WARMUP 2026-09-10] 变体选择抬到文件作用域。
+// 原来这三个 static 各自埋在 extract() 的一个花括号里,只有跑到那一步才求值。
+// 预热要**先于**任何一帧编出同一批管线,就必须能在 extract() 之外问同样的问题;
+// 复制一份谓词 = 两处会漂(隐含契约没抬进类型的老病)。所以抬出来,两边共用。
+// 语义逐字不变:同样的 env 名、同样的"未设=开"缺省、同样的一次性求值。
+bool suppress_grid_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_SUPPRESS_GRID");
+        return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
+bool orient_atomic_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_ORIENT_ATOMIC");
+        return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
+bool desc_atomic_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_DESC_ATOMIC");
+        return v == nullptr || !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
+// [COMPACT 2026-09-14] detect 拆两段(A 检测+压缩追加 / B 密集精化)。
+// 动机(A16 台架实测,真实 12MP 照片):线程 48.8M → 候选(0.8t门) 14.53M → **极值点 56,338**
+//   ⇒ 极值点只占线程的 0.00115%,32-lane 组激活率 3.6%、有效 lane 0.115%,
+//   那一段(refine+打分+发射)的发散浪费约 **31×**。
+// 实测(同一二进制四臂交替,热态漂移 0.8%):detect 66.94 → 39.73 ms(**−40.6%**),
+//   整帧 p50 557.9 → 521.4 ms(**−6.5%**);逐字节闸 n=42418 sum=2c129a14057c2bb6 与基线同。
+// 比较与取值一个不变,只改「谁干哪份活」;原子追加顺序变,而它本来就是非确定的。
+// 默认**关**:收益随 SIMD 宽度变(A16=32 最吃发散,Mali warp 更小、Adreno=64),
+//   而每八度多 2 次 dispatch 的开销是固定的 ⇒ Mate 10 / P50 Pocket 各验过才能当三端默认。
+bool dog_compact_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("OFFICIAL_AETHER_DOG_COMPACT");
+        return v != nullptr && !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
+// [ZFUSE ⚰️ 2026-09-14 判死并拆除] 09-11 我把 detect 的 main 抽成 detect_one + 外套
+// `znn = max(P.zn,1u)` 的循环,并写下「关着时与旧核逐条指令等价」—— **那句是错的**。
+// A16 台架同一二进制实测:关着的重构版 83.10 ms vs 重构前 66.94 ms ⇒ **detect +24.1%、
+// 整帧 p50 +5.3%**,而且从 build 149 起就一直在生产上跑。着色器已退回 pre-ZFUSE 原文,
+// 这里把旋钮一并拆掉 —— 留着它是地雷:原核没有 zn 字段,一旦有人打开,dispatch 的 z 维
+// 会变成 1 而着色器仍按 gid.z 取 zc ⇒ **静默丢掉 2/3 的关键点**。
+// 教训:重构 + 旗标的刀,必须同时比三臂 —— 开 / 关 / **重构之前**。
+
+// 描述子内核三选一(f32 / f16 / f16 定点原子)。依赖 harness 的 ShaderF16 能力,
+// 所以要传 harness——预热与 extract() 拿的是同一个单例,答案必然一致。
+const char* desc_shader_name(const DawnKernelHarness& harness) {
+    const bool want_f16 =
+        (harness.has_f16() && std::getenv("SED_FORCE_F32") == nullptr) ||
+        std::getenv("SED_F16_DESC") != nullptr;
+    if (!want_f16) return "sift_dsp_descriptor.wgsl";
+    return desc_atomic_on() ? "sift_dsp_descriptor_f16_atomic.wgsl"
+                            : "sift_dsp_descriptor_f16.wgsl";
 }
 
 // Read `n` u32 from a Storage|CopySrc buffer to host.
@@ -233,6 +305,50 @@ extern "C" void aether_sed_clear_last_stages() {
 
 
 extern "C" void aether_pyr_persist_end_frame();
+
+// [WARMUP 2026-09-10] 把"第一次用到才编"的 WGSL 管线提前编出来。
+//
+// ── 为什么这一刀值 ──(真机证据,未命名(2) cap_1789024293272808,build 133)
+//   第 0 帧 extract_ms = 9293 ms,而同一帧 GPU 时间戳九段合计只有 438 ms:
+//   8.9 s 全在主机侧。第 1 帧 extract_ms = 462 ms / GPU 373 ms —— 差的就是
+//   这批一次性编译。跨核版首帧 extract_ms:Sep 2 核 995 / 1028,Sep 8 核
+//   2883 / 2898 / 8620,Sep 10 核 5592 / 9293。生产持有单例 harness
+//   (official_dsp_sift_gpu_c.cc:74),pipeline_cache_ 让第二帧起全是命中,
+//   于是这笔钱**全压在第 0 帧**,而第 0 帧正是用户按下开始之后盯着的第一秒。
+//   35 帧那一场墙钟 97.4 s,其中 8.3 s 是这一笔。
+//
+// ── 为什么它绝对无损 ──
+//   load_compute() 是**纯记忆化**(dawn_kernel_harness.cpp:1032,键 =
+//   strict_math 前缀 + entry_point + '\0' + 源码全文)。命中就返回缓存里
+//   那一个 ComputePipeline 句柄,未命中才建。提前调用只把同一对
+//   (源码, entry) 从"未命中"变成"命中",extract() 拿到的是同一个管线对象。
+//   这里**不分配任何缓冲、不建 bind group、不编码、不 dispatch、不 submit**
+//   —— GPU 上没有一条命令因为预热被执行,所以不可能改变任何一个输出字节。
+//   分支若猜错(例如设备能力判定与 extract() 不一致),后果只是缓存里多一条
+//   没人用的管线,依然无损 —— 这是这个形状最好的安全性质:过度预热不伤人。
+//
+// ── 名字表与 extract() 的一致性 ──
+//   四个变体谓词(suppress_grid_on / orient_atomic_on / desc_shader_name)
+//   已抬到本文件作用域,extract() 和这里读的是同一份,不存在"复制一份会漂"。
+//   SED_PARALLEL_DESC 那条 ③ 路默认关且已判为 A16 上慢 44%,不预热;
+//   真开了它也只是回到今天的行为(第一次用到时编),不是回归。
+void SiftExtractDawn::warmup(DawnKernelHarness& harness) {
+    SiftPyramidDawn::warmup(harness);                       // ① 金字塔四个
+    harness.load_compute(load_wgsl("sift_dog_detect.wgsl"));  // ② 检测
+    if (suppress_grid_on()) {                               // ③ 抑制(分桶四个)
+        harness.load_compute(load_wgsl("sift_suppress_grid_count.wgsl"));
+        harness.load_compute(load_wgsl("sift_suppress_grid_scan.wgsl"));
+        harness.load_compute(load_wgsl("sift_suppress_grid_scatter.wgsl"));
+        harness.load_compute(load_wgsl("sift_suppress_grid.wgsl"));
+    } else {
+        harness.load_compute(load_wgsl("sift_nonextrema_suppress.wgsl"));
+    }
+    harness.load_compute(load_wgsl("sift_affine_shape.wgsl"));  // ④ 仿射
+    harness.load_compute(load_wgsl(orient_atomic_on()           // ⑤ 朝向
+                                       ? "sift_orientation_atomic.wgsl"
+                                       : "sift_orientation.wgsl"));
+    harness.load_compute(load_wgsl(desc_shader_name(harness))); // ⑥ 描述子
+}
 
 bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
                               int width, int height, int max_features,
@@ -363,6 +479,17 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     wgpu::Buffer det_buf = harness.upload(
         det_init.data(), det_init.size() * sizeof(uint32_t),
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+    // [COMPACT] 候选表:每八度 A 段压缩追加、B 段密集消费。帽子与 det_buf 同为 kDetectCap
+    // (主机台架在真实 12MP 照片上实测极值点 56,338 < 131,072),同一套溢出/回退语义。
+    const bool compact = dog_compact_on();
+    wgpu::Buffer cand_buf, cand_counter;
+    if (compact) {
+        std::vector<uint32_t> cand_init(static_cast<size_t>(kDetectCap) * 4u, 0u);
+        cand_buf = harness.upload(cand_init.data(), cand_init.size() * sizeof(uint32_t),
+                                  wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+        cand_counter = harness.upload(&zero, 4,
+                                      wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
+    }
 
     struct DetParams {
         uint32_t width, height, cap, octave;
@@ -373,6 +500,12 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
     };
     wgpu::ComputePipeline pipe_detect =
         harness.load_compute(load_wgsl("sift_dog_detect.wgsl"));
+    wgpu::ComputePipeline pipe_detect_c, pipe_refine, pipe_creset;
+    if (compact) {
+        pipe_detect_c = harness.load_compute(load_wgsl("sift_dog_detect_compact.wgsl"));
+        pipe_refine   = harness.load_compute(load_wgsl("sift_dog_refine.wgsl"));
+        pipe_creset   = harness.load_compute(load_wgsl("sift_dog_cand_reset.wgsl"));
+    }
     // Batch all octave detect passes into ONE submit (was one sync wait per
     // octave). Every octave atomic-appends to the shared det_buf/det_counter;
     // the keypoint SET is identical (the append order was already
@@ -444,22 +577,52 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             if (std::getenv("W256_DIAG"))
                 std::fprintf(stderr, "[W256] detect o=%d z0=%d zn=%d bind=%.1fMB\n",
                              o, pt.z0, pt.zn, (hi - lo) * 4.0 / 1048576.0);
-            harness.dispatch_batched(
-                pipe_detect,
-                {(w256 && !split) ? BB(packed, static_cast<uint64_t>(lo) * 4u,
-                                       static_cast<uint64_t>(hi - lo) * 4u)
-                                  : BB(packed),
-                 BB(det_counter), BB(det_buf), BB(p_buf),
-                 // [SPLITBUF 2026-09-08] binding(4) = 高三层的来源。现在还指向
-                 // 同一块同一窗口(纯等价),两缓冲落地后换成 B 缓冲。
-                 // 同缓冲的两个**只读**绑定是合法的。
-                 split ? BB(pyr.packed_hi_buffer())
-                       : (w256 ? BB(packed, static_cast<uint64_t>(lo) * 4u,
-                                    static_cast<uint64_t>(hi - lo) * 4u)
-                               : BB(packed))},
-                static_cast<uint32_t>((ow + 7) / 8),
-                static_cast<uint32_t>((oh + 7) / 8),
-                static_cast<uint32_t>(pt.zn));
+            // binding 0/4 的取法与原来逐字相同,只是抽成变量好被两段共用。
+            const auto bind_gss = [&]() {
+                return (w256 && !split) ? BB(packed, static_cast<uint64_t>(lo) * 4u,
+                                             static_cast<uint64_t>(hi - lo) * 4u)
+                                        : BB(packed);
+            };
+            // [SPLITBUF 2026-09-08] binding(4) = 高三层的来源。现在还指向
+            // 同一块同一窗口(纯等价),两缓冲落地后换成 B 缓冲。
+            // 同缓冲的两个**只读**绑定是合法的。
+            const auto bind_hi = [&]() {
+                return split ? BB(pyr.packed_hi_buffer())
+                             : (w256 ? BB(packed, static_cast<uint64_t>(lo) * 4u,
+                                          static_cast<uint64_t>(hi - lo) * 4u)
+                                     : BB(packed));
+            };
+            const uint32_t gx = static_cast<uint32_t>((ow + 7) / 8);
+            const uint32_t gy = static_cast<uint32_t>((oh + 7) / 8);
+            const uint32_t gz = static_cast<uint32_t>(pt.zn);
+            if (!compact) {
+                harness.dispatch_batched(pipe_detect,
+                    {bind_gss(), BB(det_counter), BB(det_buf), BB(p_buf), bind_hi()},
+                    gx, gy, gz);
+            } else {
+                // [COMPACT] 每八度三次:① 候选计数器清零 ② A 段(检测+压缩追加)
+                // ③ B 段(每线程一个候选,密集精化)。同一 compute pass ⇒ 按序且隐式同步。
+                harness.dispatch_batched(pipe_creset, {BB(cand_counter)}, 1u, 1u, 1u);
+                // ⚠️ A 段只用 5 个绑定(它不再发射关键点,kp_counter/kp_buffer 会被
+                //    WGSL 自动布局剔掉),编号 0..4,与基线核**不同**。
+                harness.dispatch_batched(pipe_detect_c,
+                    {bind_gss(), BB(p_buf), bind_hi(), BB(cand_buf), BB(cand_counter)},
+                    gx, gy, gz);
+                // B 段按帽子发满:多出来的线程第一行就 return,代价可忽略
+                // (131072/64 = 2048 个工作组,相对 A 段的数千万线程是零头)。
+                harness.dispatch_batched(pipe_refine,
+                    {bind_gss(), BB(det_counter), BB(det_buf), BB(p_buf), bind_hi(),
+                     BB(cand_buf), BB(cand_counter)},
+                    (kDetectCap + 63u) / 64u, 1u, 1u);
+                static bool compact_logged = false;
+                if (!compact_logged) {
+                    compact_logged = true;
+                    std::fprintf(stderr,
+                                 "[COMPACT] on=1 cand_cap=%u B段工作组=%u "
+                                 "(A 段 %ux%ux%u)\n",
+                                 kDetectCap, (kDetectCap + 63u) / 64u, gx, gy, gz);
+                }
+            }
         }
     }
     harness.end_batch();
@@ -512,11 +675,7 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
         // 分桶抑制四个 pass 一次提交。谓词逐字符不变,候选集是可能压制者的
         // 超集(证明见 sift_suppress_grid.wgsl)⇒ keep[] 逐位相同;把 O(N²)
         // 对检查降到 O(N·邻域)。kill switch:OFFICIAL_AETHER_SUPPRESS_GRID=0。
-        static const bool grid_on = [] {
-            const char* v = std::getenv("OFFICIAL_AETHER_SUPPRESS_GRID");
-            return v == nullptr || !(v[0] == '0' && v[1] == '\0');
-        }();
-        if (grid_on) {
+        if (suppress_grid_on()) {   // [WARMUP 2026-09-10] 谓词抬到文件作用域,与 warmup() 共用
             constexpr uint32_t kCell = 16u;
             const uint32_t ncx = (static_cast<uint32_t>(width) + kCell - 1u) / kCell;
             const uint32_t ncy = (static_cast<uint32_t>(height) + kCell - 1u) / kCell;
@@ -810,13 +969,9 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             harness.upload(&P, sizeof(P), wgpu::BufferUsage::Uniform);
         // [ORIENT-ATOMIC 2026-08-10 用户签] 36 格定点原子黑板版默认开;
         // kill switch:OFFICIAL_AETHER_ORIENT_ATOMIC=0 回原版。
-        static const bool orient_atomic_on = [] {
-            const char* v = std::getenv("OFFICIAL_AETHER_ORIENT_ATOMIC");
-            return v == nullptr || !(v[0] == '0' && v[1] == '\0');
-        }();
         wgpu::ComputePipeline pipe_ori = harness.load_compute(
-            load_wgsl(orient_atomic_on ? "sift_orientation_atomic.wgsl"
-                                       : "sift_orientation.wgsl"));
+            load_wgsl(orient_atomic_on() ? "sift_orientation_atomic.wgsl"
+                                         : "sift_orientation.wgsl"));
         // [2D-DISPATCH 2026-08-10] 同 affine:二维拆分过 65535 上限。
         {
             using BB = DawnKernelHarness::BufBinding;
@@ -1281,20 +1436,11 @@ bool SiftExtractDawn::extract(DawnKernelHarness& harness, const uint8_t* gray,
             // (no ShaderF16 / f16-crash history) → f32, bit-faithful. Overrides:
             //   SED_FORCE_F32=1 → force the f32 kernel (parity / A-B reference)
             //   SED_F16_DESC=1  → force f16 even if has_f16() misreports
-            const bool want_f16 =
-                (harness.has_f16() && std::getenv("SED_FORCE_F32") == nullptr) ||
-                std::getenv("SED_F16_DESC") != nullptr;
             // [DESC-ATOMIC 2026-08-10 用户签 cosine>=0.998 门] f16 设备默认走
             // 定点共享原子加版(消私有 lh[128]+归约树);kill switch:
             // OFFICIAL_AETHER_DESC_ATOMIC=0 回 _f16 版。非 f16 设备维持 f32 版。
-            static const bool atomic_on = [] {
-                const char* v = std::getenv("OFFICIAL_AETHER_DESC_ATOMIC");
-                return v == nullptr || !(v[0] == '0' && v[1] == '\0');
-            }();
-            const char* desc_shader = want_f16
-                ? (atomic_on ? "sift_dsp_descriptor_f16_atomic.wgsl"
-                             : "sift_dsp_descriptor_f16.wgsl")
-                : "sift_dsp_descriptor.wgsl";
+            // [WARMUP 2026-09-10] 三选一抬到 desc_shader_name(),与 warmup() 共用。
+            const char* desc_shader = desc_shader_name(harness);
             wgpu::ComputePipeline pipe_desc =
                 harness.load_compute(load_wgsl(desc_shader));
             // [2D-DISPATCH 2026-08-10] n_oriented 可超 65535,二维拆分。

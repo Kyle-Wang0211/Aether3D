@@ -28,15 +28,27 @@ if [ "$archs" != "arm64" ]; then
   exit 1
 fi
 
+# [清单补齐 2026-09-14] 又登记三个:detect 压缩刀的 A 段/B 段/计数器清零核。
+# [清单补齐 2026-09-11] 这份清单停在 09-06 17:23,之后进货的四个成员一直没登记:
+#   sift_gss_blur_fused_wgsl.o(09-06 融合 blur)、sift_orientation_atomic_wgsl.o、
+#   sift_dsp_descriptor_f16_atomic_wgsl.o、dawn_histogram_sink.o(09-11 histogram 刀)。
+# 判据不是「我说它们该在」——现役机上的 Runner-146-dawn-release.app 的
+# PWOfficialSfm 二进制里四个符号/字符串全部命中(nm 2/1/1/1)⇒ 它们本来就在出货。
+# 这次补登记,不是放宽:多一个少一个照样报 FAIL。
 expected_members='__.SYMDEF
 sift_affine_shape_wgsl.o
 sift_dog_detect_wgsl.o
+sift_dog_detect_compact_wgsl.o
+sift_dog_refine_wgsl.o
+sift_dog_cand_reset_wgsl.o
+sift_dsp_descriptor_f16_atomic_wgsl.o
 sift_dsp_descriptor_f16_wgsl.o
 sift_dsp_descriptor_par_wgsl.o
 sift_dsp_descriptor_wgsl.o
 sift_dsp_mean_wgsl.o
 sift_gray_to_f32_wgsl.o
 sift_gss_blur_wgsl.o
+sift_gss_blur_fused_wgsl.o
 sift_gss_resample_wgsl.o
 sift_nonextrema_suppress_wgsl.o
 sift_suppress_grid_count_wgsl.o
@@ -44,9 +56,11 @@ sift_suppress_grid_scan_wgsl.o
 sift_suppress_grid_scatter_wgsl.o
 sift_suppress_grid_wgsl.o
 sift_orientation_wgsl.o
+sift_orientation_atomic_wgsl.o
 canonical_feature_selector_v1.o
 dsp_sift_gpu_c.o
 dawn_kernel_harness.o
+dawn_histogram_sink.o
 sift_extract_dawn.o
 sift_pyramid_dawn.o'
 actual_members=$(xcrun -sdk iphoneos ar -t "$artifact")

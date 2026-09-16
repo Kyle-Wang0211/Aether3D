@@ -80,6 +80,14 @@ public:
     // bit-identical (the kernel is deterministic per-keypoint); only the set
     // size shrinks. <=0 means "no clamp" (compute all). The C-ABI passes the
     // production 8192.
+    // [WARMUP 2026-09-10] 预编生产路径用到的全部 WGSL 管线,不跑任何一帧。
+    // 生产第 0 帧 extract_ms 9293 ms 里有 8.9 s 是这批编译(GPU 时间戳同帧
+    // 只有 438 ms)。load_compute() 是纯记忆化,预热只把未命中变成命中:
+    // 不分配缓冲、不派发、不提交 ⇒ 逐字节无损。判词见 .cc。
+    // `harness` 必须已 init(),且必须是 extract() 之后要用的**同一个**实例
+    // (生产是 official_dsp_sift_gpu_c.cc 的单例),否则白编。
+    static void warmup(DawnKernelHarness& harness);
+
     bool extract(DawnKernelHarness& harness,
                  const uint8_t* gray, int width, int height,
                  int max_features,

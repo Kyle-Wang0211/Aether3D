@@ -22,12 +22,14 @@
 #include <cstdio>   // per-frame feature-count telemetry (file append)
 #include <cstdlib>  // getenv
 #include <cstring>
+#include <chrono>
 #include <mutex>
 #include <numeric>
 #include <string>
 #include <vector>
 
 #include "dawn_kernel_harness.h"
+#include "dawn_histogram_sink.h"
 #include "sift_extract_dawn.h"
 #if defined(AETHER_FEATURE_SELECTION_ENV_OFFICIAL)
 #define AETHER_PRECLAMP_INSTR_ENV_OFFICIAL 1
@@ -318,6 +320,67 @@ int aether_dsp_sift_extract_gpu_v2(const uint8_t* gray, int width, int height,
         return 0;
     } catch (...) {
         return fallback();
+    }
+}
+
+// [WARMUP 2026-09-10] 预热:建单例 harness + 预编生产路径全部 WGSL 管线。
+//
+// 真机账(未命名(2) cap_1789024293272808):第 0 帧 extract_ms 9293 ms,同帧
+// GPU 时间戳九段合计 438 ms ⇒ 8.9 s 是主机侧的 Dawn init + 管线编译,全压在
+// 第 0 帧。第 0 帧就是用户按下开始之后盯着的第一秒。这个入口把那笔钱挪到
+// 拍摄期间(见 official_aether_sfm_c.cc 里 aether_sfm_create 的调用点)。
+//
+// 无损:只做两件本来第 0 帧也要做的事 —— acquire_gpu_harness()(幂等)和
+// load_compute()(纯记忆化)。不分配缓冲、不派发、不提交,GPU 上没有一条
+// 命令被执行。拿的是**同一把互斥锁**,所以就算第 0 帧在预热跑一半时到达,
+// 它也只是等锁,最坏情况与今天等价 —— 严格不劣。
+//
+// 幂等:重复调用第二次起全是缓存命中(几十微秒)。Dawn init 失败时
+// acquire_gpu_harness() 返回 nullptr,这里静默返回:预热失败绝不能让
+// 采集路径出错,第 0 帧仍会走它自己的失败/回落逻辑。
+// 返回本次**真正新编**的管线条数;-1 = Dawn 不可用。
+// out_init_ms   = acquire_gpu_harness()(Dawn instance/adapter/device 创建)
+// out_compile_ms= SiftExtractDawn::warmup()(12 条 WGSL 编译)
+//
+// [PIPE-BD 2026-09-11] compile_ms 再拆三段 —— 三段可缓存性完全不同,不拆开就不知道
+// 预编译管线该投哪一级:
+//   ② out_msl_ms  = Metal.newLibraryWithSource.CacheMiss           (MSL→MTLLibrary)
+//   ③ out_pso_ms  = Metal.newComputePipelineStateWithDescriptor.CacheMiss(→GPU 机器码)
+//   ① Tint WGSL→MSL = compile_ms − ② − ③
+// ②③ 是 **Dawn 自己埋的**(metal/ShaderModuleMTL.mm:549 / metal/ComputePipelineMTL.mm:87),
+// 我们只接了个 platform 去收,没改 Dawn 一行。
+// out_msl_n / out_pso_n = 采样次数:**0 毫秒与「回调根本没响」必须分得开**。
+int aether_dsp_sift_extract_gpu_warmup(double* out_init_ms,
+                                       double* out_compile_ms,
+                                       double* out_msl_ms, unsigned* out_msl_n,
+                                       double* out_pso_ms, unsigned* out_pso_n) {
+    if (out_init_ms) *out_init_ms = 0.0;
+    if (out_compile_ms) *out_compile_ms = 0.0;
+    if (out_msl_ms) *out_msl_ms = 0.0;
+    if (out_msl_n) *out_msl_n = 0u;
+    if (out_pso_ms) *out_pso_ms = 0.0;
+    if (out_pso_n) *out_pso_n = 0u;
+    try {
+        std::lock_guard<std::mutex> gpu_lock(g_gpu_harness_mu);
+        const auto t0 = std::chrono::steady_clock::now();
+        aether::tools::DawnKernelHarness* harness_ptr = acquire_gpu_harness();
+        const auto t1 = std::chrono::steady_clock::now();
+        if (out_init_ms) {
+            *out_init_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+        if (harness_ptr == nullptr) return -1;
+        const size_t before = harness_ptr->pipeline_cache_size();
+        aether::tools::SiftExtractDawn::warmup(*harness_ptr);
+        const auto t2 = std::chrono::steady_clock::now();
+        if (out_compile_ms) {
+            *out_compile_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        }
+        harness_ptr->dawn_histogram(aether::tools::kDawnHistMslLibrary, out_msl_ms, out_msl_n);
+        harness_ptr->dawn_histogram(aether::tools::kDawnHistPipelineState, out_pso_ms, out_pso_n);
+        return static_cast<int>(harness_ptr->pipeline_cache_size() - before);
+    } catch (...) {
+        // 预热是纯优化,任何异常都吞掉:第 0 帧照旧自己编。
+        return -1;
     }
 }
 
