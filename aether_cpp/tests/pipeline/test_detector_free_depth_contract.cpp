@@ -1,0 +1,286 @@
+#include "aether_detector_free_depth_c.h"
+
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+namespace {
+
+aether_detector_free_options_t valid_options() {
+    aether_detector_free_options_t options{};
+    aether_detector_free_options_default(&options);
+    options.image_width = 8;
+    options.image_height = 6;
+    options.max_tile_width = 4;
+    options.max_tile_height = 3;
+    options.depth_count = 4;
+    options.source_count = 1;
+    options.patch_n = 3;
+    options.minimum_views = 1;
+    options.exclusion_radius_samples = 1;
+    options.inverse_depth_first = 0.25f;
+    options.inverse_depth_step = 0.1f;
+    options.reference_inverse_k_row_major_3x3[0] = 1.0f;
+    options.reference_inverse_k_row_major_3x3[4] = 1.0f;
+    options.reference_inverse_k_row_major_3x3[8] = 1.0f;
+    return options;
+}
+
+void test_defaults_are_fail_closed() {
+    aether_detector_free_options_t options{};
+    aether_detector_free_options_default(&options);
+    assert(options.depth_count == 48);
+    assert(options.source_count == 7);
+    assert(options.minimum_views == 4);
+    assert(options.ncc_min == 0.75f);
+    assert(options.unique_depth_margin == 0.03f);
+    aether_detector_free_refine_options_t refine{};
+    aether_detector_free_refine_options_default(&refine);
+    assert(refine.fine_depth_count == 17);
+    assert(refine.coarse_step_span == 1.0f);
+    assert(refine.uniqueness_absolute_m == 0.08f);
+    assert(refine.uniqueness_relative == 0.05f);
+}
+
+void test_bad_counts_are_rejected_before_backend_creation() {
+    auto options = valid_options();
+    std::array<float, 8 * 6 * 2> gray{};
+    std::array<float, 12> projection{};
+    aether_detector_free_session_t* session = nullptr;
+    assert(aether_detector_free_session_create(
+               &options, gray.data(), gray.size() - 1,
+               projection.data(), projection.size(), &session) ==
+           AETHER_DETECTOR_FREE_ERR_BAD_ARGS);
+    assert(session == nullptr);
+
+    options.patch_n = 4;
+    assert(aether_detector_free_session_create(
+               &options, gray.data(), gray.size(),
+               projection.data(), projection.size(), &session) ==
+           AETHER_DETECTOR_FREE_ERR_BAD_ARGS);
+    assert(session == nullptr);
+}
+
+void test_backend_is_explicit_without_dawn() {
+#if !defined(AETHER_ENABLE_DAWN)
+    const auto options = valid_options();
+    std::array<float, 8 * 6 * 2> gray{};
+    std::array<float, 12> projection{};
+    aether_detector_free_session_t* session = nullptr;
+    assert(aether_detector_free_session_create(
+               &options, gray.data(), gray.size(),
+               projection.data(), projection.size(), &session) ==
+           AETHER_DETECTOR_FREE_ERR_UNSUPPORTED);
+    assert(session == nullptr);
+#endif
+}
+
+void test_view_aggregation_rejects_missing_session() {
+    assert(aether_detector_free_session_set_view_aggregation(
+               nullptr,
+               AETHER_DETECTOR_FREE_VIEW_AGGREGATION_TOP_MINIMUM) ==
+           AETHER_DETECTOR_FREE_ERR_BAD_ARGS);
+}
+
+void test_jpeg_preprocess_is_bounded_and_scales_intrinsics() {
+    // Pillow-generated 256x144 constant-gray baseline JPEG. Keeping the
+    // compressed fixture inline makes this contract equally runnable in host,
+    // NDK, and Emscripten builds without filesystem assumptions.
+    static constexpr std::uint8_t jpeg[] = {
+        0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08,
+        0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0a, 0x0c, 0x14, 0x0d, 0x0c, 0x0b, 0x0b, 0x0c, 0x19, 0x12,
+        0x13, 0x0f, 0x14, 0x1d, 0x1a, 0x1f, 0x1e, 0x1d, 0x1a, 0x1c, 0x1c, 0x20, 0x24, 0x2e, 0x27, 0x20,
+        0x22, 0x2c, 0x23, 0x1c, 0x1c, 0x28, 0x37, 0x29, 0x2c, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1f, 0x27,
+        0x39, 0x3d, 0x38, 0x32, 0x3c, 0x2e, 0x33, 0x34, 0x32, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x90,
+        0x01, 0x00, 0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x15, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xc4, 0x00,
+        0x14, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x80, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x3f, 0xff, 0xd9,
+    };
+    const float k[9] = {
+        200.0f, 0.0f, 128.0f,
+        0.0f, 180.0f, 72.0f,
+        0.0f, 0.0f, 1.0f,
+    };
+    std::vector<std::uint8_t> rgb(AETHER_DETECTOR_FREE_IMAGE_RGB_BYTES);
+    std::vector<std::uint8_t> gray(AETHER_DETECTOR_FREE_IMAGE_PIXELS);
+    std::vector<float> gray_f32(AETHER_DETECTOR_FREE_IMAGE_PIXELS);
+    aether_detector_free_preprocessed_image_t image{};
+    assert(aether_detector_free_preprocess_jpeg_bytes(
+               jpeg, sizeof(jpeg), k, rgb.data(), rgb.size(), gray.data(),
+               gray.size(), gray_f32.data(), gray_f32.size(), &image) ==
+           AETHER_DETECTOR_FREE_OK);
+    assert(image.source_width == 256);
+    assert(image.source_height == 144);
+    assert(image.output_width == 128);
+    assert(image.output_height == 72);
+    assert(image.scale_x == 0.5f);
+    assert(image.scale_y == 0.5f);
+    assert(image.scaled_k_row_major_3x3[0] == 100.0f);
+    assert(image.scaled_k_row_major_3x3[2] == 64.0f);
+    assert(image.scaled_k_row_major_3x3[4] == 90.0f);
+    assert(image.scaled_k_row_major_3x3[5] == 36.0f);
+    for (std::size_t pixel = 0; pixel < gray.size(); ++pixel) {
+        assert(rgb[pixel * 3] == rgb[pixel * 3 + 1]);
+        assert(rgb[pixel * 3] == rgb[pixel * 3 + 2]);
+        assert(std::abs(static_cast<int>(gray[pixel]) - 127) <= 1);
+        assert(gray_f32[pixel] == static_cast<float>(gray[pixel]));
+    }
+
+    // A saturated blue fixture distinguishes OpenCV's RGB2Gray-specific
+    // 15-bit coefficients from its 14-bit RGB->YUV coefficients: RGB
+    // (0,0,250) must map to 28, not 29. This prevents a one-level gray drift
+    // from silently changing NCC birth decisions.
+    static constexpr std::uint8_t blue_jpeg[] = {
+        0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xff, 0xdb, 0x00, 0x43, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xff, 0xc0,
+        0x00, 0x11, 0x08, 0x00, 0x48, 0x00, 0x80, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11,
+        0x01, 0xff, 0xc4, 0x00, 0x15, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0xff, 0xc4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xc4,
+        0x00, 0x16, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x08, 0x0a, 0xff, 0xc4, 0x00, 0x14, 0x11, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x0c,
+        0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00, 0x8d, 0xf6, 0xfa, 0x12, 0xf8, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xd9,
+    };
+    assert(aether_detector_free_preprocess_jpeg_bytes(
+               blue_jpeg, sizeof(blue_jpeg), k, rgb.data(), rgb.size(),
+               gray.data(), gray.size(), gray_f32.data(), gray_f32.size(),
+               &image) == AETHER_DETECTOR_FREE_OK);
+    for (std::size_t pixel = 0; pixel < gray.size(); ++pixel) {
+        assert(rgb[pixel * 3] == 0);
+        assert(rgb[pixel * 3 + 1] == 0);
+        assert(rgb[pixel * 3 + 2] == 250);
+        assert(gray[pixel] == 28);
+        assert(gray_f32[pixel] == 28.0f);
+    }
+
+    assert(aether_detector_free_preprocess_jpeg_bytes(
+               jpeg, sizeof(jpeg), k, rgb.data(), rgb.size() - 1,
+               gray.data(), gray.size(), gray_f32.data(), gray_f32.size(),
+               &image) == AETHER_DETECTOR_FREE_ERR_BUFFER_TOO_SMALL);
+    const std::uint8_t invalid[] = {0xff, 0xd8, 0xff, 0xd9};
+    assert(aether_detector_free_preprocess_jpeg_bytes(
+               invalid, sizeof(invalid), k, rgb.data(), rgb.size(),
+               gray.data(), gray.size(), gray_f32.data(), gray_f32.size(),
+               &image) == AETHER_DETECTOR_FREE_ERR_BAD_ARGS);
+}
+
+void test_reciprocal_birth_requires_independent_depth_agreement() {
+    constexpr int width = 3;
+    constexpr int height = 3;
+    constexpr int pixels = width * height;
+    std::array<std::uint16_t, pixels> reference_index{};
+    std::array<std::uint8_t, pixels> reference_accepted{};
+    std::array<std::uint16_t, pixels> reciprocal_index{};
+    std::array<std::uint8_t, pixels> reciprocal_accepted{};
+    reference_accepted[4] = 1;
+    reciprocal_accepted[4] = 1;
+    const float inverse_k[9] = {
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f,
+    };
+    // Source camera center is x=0.5 in reference coordinates, so the
+    // corresponding world-to-source translation is -0.5.
+    const float projection[12] = {
+        1.0f, 0.0f, 0.0f, -0.5f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+    };
+    const float source_center[3] = {0.5f, 0.0f, 0.0f};
+    aether_detector_free_reciprocal_options_t options{};
+    aether_detector_free_reciprocal_options_default(&options);
+    options.minimum_reciprocal_views = 1;
+    options.minimum_parallax_deg = 0.0f;
+    std::array<std::uint8_t, pixels> consistent{};
+    std::array<std::uint8_t, pixels> birth{};
+    assert(aether_detector_free_filter_reciprocal_births(
+               width, height, 2, 0.5f, 0.5f, inverse_k,
+               reference_index.data(), reference_accepted.data(), 1,
+               reciprocal_index.data(), reciprocal_accepted.data(),
+               projection, source_center, &options, consistent.data(),
+               birth.data(), pixels) == AETHER_DETECTOR_FREE_OK);
+    assert(consistent[4] == 1);
+    assert(birth[4] == 1);
+    for (int pixel = 0; pixel < pixels; ++pixel) {
+        if (pixel == 4) continue;
+        assert(birth[pixel] == 0);
+    }
+
+    reciprocal_index[4] = 1;  // 1m reciprocal depth vs predicted 2m.
+    assert(aether_detector_free_filter_reciprocal_births(
+               width, height, 2, 0.5f, 0.5f, inverse_k,
+               reference_index.data(), reference_accepted.data(), 1,
+               reciprocal_index.data(), reciprocal_accepted.data(),
+               projection, source_center, &options, consistent.data(),
+               birth.data(), pixels) == AETHER_DETECTOR_FREE_OK);
+    assert(consistent[4] == 0);
+    assert(birth[4] == 0);
+
+    std::array<float, pixels> reference_depth{};
+    std::array<float, pixels> reciprocal_depth{};
+    reference_depth[4] = 2.0f;
+    reciprocal_depth[4] = 2.0f;
+    reciprocal_index[4] = 0;
+    assert(aether_detector_free_filter_reciprocal_depth_births(
+               width, height, inverse_k, reference_depth.data(),
+               reference_accepted.data(), 1, reciprocal_depth.data(),
+               reciprocal_accepted.data(), projection, source_center,
+               &options, consistent.data(), birth.data(), pixels) ==
+           AETHER_DETECTOR_FREE_OK);
+    assert(consistent[4] == 1);
+    assert(birth[4] == 1);
+    reciprocal_depth[4] = 1.0f;
+    assert(aether_detector_free_filter_reciprocal_depth_births(
+               width, height, inverse_k, reference_depth.data(),
+               reference_accepted.data(), 1, reciprocal_depth.data(),
+               reciprocal_accepted.data(), projection, source_center,
+               &options, consistent.data(), birth.data(), pixels) ==
+           AETHER_DETECTOR_FREE_OK);
+    assert(consistent[4] == 0);
+    assert(birth[4] == 0);
+}
+
+}  // namespace
+
+int main() {
+    test_defaults_are_fail_closed();
+    test_bad_counts_are_rejected_before_backend_creation();
+    test_backend_is_explicit_without_dawn();
+    test_view_aggregation_rejects_missing_session();
+    test_jpeg_preprocess_is_bounded_and_scales_intrinsics();
+    test_reciprocal_birth_requires_independent_depth_agreement();
+    return 0;
+}
