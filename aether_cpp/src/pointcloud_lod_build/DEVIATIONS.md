@@ -234,10 +234,19 @@ desktop reference octrees were built through — writes it:
 
 ## Memory knobs and recommended defaults
 
-See the tables in "Verification". Recommended for a phone:
-`numThreads = min(4, cores)`, `writerRingBytes = 64 MiB`, `chunkBacklogMB = 128`,
-`maxPointsPerChunkCap = 1,000,000` (`optionsForBudget`). Every setting in the
-tables produced the identical tree.
+Upstream's desktop constants cost 1.85 GB on the 36M cloud (12 threads) and
+4.45 GB on the 216M cloud (32 threads). The 1 GiB octree ring is touched up to
+the size of octree.bin (652 MB at 36M; one thread drops from 1,056 to 376 MB when
+ring and backlog shrink to 64 MiB / 64 MB), and indexing memory scales with points
+per chunk (10M at 216M). Recommended for a phone
+(`optionsForBudget`): `numThreads = min(4, cores)`, `writerRingBytes = 64 MiB`,
+`chunkBacklogMB = 128`, `maxPointsPerChunkCap = 1,000,000` — measured 519 MB /
+24.3 s on 36M (M3 Pro, 4 threads) and 385 MB on 216M (4 threads, Linux); one
+thread brings it to ~340 MB at about 2.4× the time. The budget function keeps
+dropping threads while `350 MB + 85 MB × (threads − 1)` (a conservative fit of
+the measured numbers) exceeds the budget. Every setting measured produced
+upstream's tree. Not measured: a phone itself (no device install in this
+change), budgets below ~340 MB.
 
 ## Cross-platform self-certification
 
@@ -249,4 +258,94 @@ the C++20 standard library only.
 
 ## Verification
 
-(filled in below by the measurement commits)
+All comparisons (`tests/pointcloud_lod_build/compare_octrees.py`; in C++ inside
+test_build) read `hierarchy.bin` exactly as potree's `OctreeLoader.js:151-232`
+does and never trust `metadata.json`'s self-reported `points`. The comparer
+reports node-name sets, per-node counts, per-node multisets of 18-byte records,
+position-only multisets and the global multiset; its self-test (overwrite one
+record of the largest node with one from another node, count unchanged) must
+report exactly 2 differing records — it does.
+
+### Noise floor (desktop PotreeConverter @8bfad98, 32 cores, run twice on the same LAS)
+
+| cloud | nodes | records differing | time | peak RSS |
+|---|---|---|---|---|
+| 36,232,793 | 16,227 / 16,227 | 0 | 7.1 s, 7.1 s | 3.56 GB |
+| 216,655,968 | 104,751 / 104,751 | 0 | 61.3 s, 66.3 s | 10.7 GB |
+
+### Port vs desktop (same LAS, read by the test-only `LasSource`)
+
+| cloud | port settings | nodes only in one | records differing | metadata.json | time | peak RSS |
+|---|---|---|---|---|---|---|
+| fixture 25,000 | defaults (ctest E1) | 0 | 0 | identical except `name` | 0.24 s | — |
+| fixture 25,000 | 1 thread, 4 KiB ring (ctest E2) | 0 | 0 | — | — | — |
+| 36,232,793 | 32 threads, upstream knobs | 0 | 0 | identical except `name` | 6.3 s | 1.98 GB |
+| 216,655,968 | 32 threads, upstream knobs | 0 | 0 | identical except `name` | 58.3 s | 4.45 GB |
+| 216,655,968 | 4 threads, 64 MiB ring, 256 MB backlog, 1M-point chunks | 0 | 0 | identical except `name` | 197.5 s | 385 MB |
+| 216,655,968 | 1 thread, 64 MiB ring, 128 MB backlog, 1M-point chunks | 0 | 0 | identical except `name` | 488.3 s | 333 MB |
+
+(Linux x86-64, 32 cores, GCC 14, `-O2` + repo strict flags.)
+
+### Product path (PLY) — lossless, and every setting gives the same tree
+
+36,232,793-point PLY on an Apple M3 Pro (12 cores), macOS, clang 17. "Same tree"
+= compared node by node with the 12-thread upstream-knob build; all 0 differences
+and byte-identical metadata.json.
+
+| threads | ring | backlog | chunk cap | time | peak RSS |
+|---|---|---|---|---|---|
+| 12 | 1 GiB | 2000 MB | — (1,811,639) | 16.0 s | 1,853 MB |
+| 1 | 1 GiB | 2000 MB | — | 54.7 s | 1,056 MB |
+| 1 | 64 MiB | 64 MB | — | 55.8 s | 376 MB |
+| 1 | 64 MiB | 128 MB | 250,000 | 90.5 s | 337 MB |
+| 1 | 64 MiB | 128 MB | 1,000,000 | 57.3 s | 345 MB |
+| 2 | 64 MiB | 128 MB | 250,000 | 49.5 s | 405 MB |
+| 2 | 64 MiB | 128 MB | 1,000,000 | 34.2 s | 427 MB |
+| 4 | 64 MiB | 128 MB | — | 24.8 s | 647 MB |
+| 4 | 64 MiB | 128 MB | 250,000 | 34.6 s | 496 MB |
+| **4** | **64 MiB** | **128 MB** | **1,000,000** | **24.3 s** | **519 MB** |
+
+Times include the PLY bounds scan (≈1.3 s). Smaller chunks cost time because
+more of the tree is sampled in the single-threaded merge stage
+(`indexer.cpp:1699-1724`); 1M is the better trade-off than 250K at every thread
+count.
+
+Lossless on the 12-thread output (`tools/pointcloud_lod/verify_lossless.py`,
+`verify_colour.py`): T1 `octree.bin` 652,190,274 B / 18 = 36,232,793 = input
+(Δ 0); T2 per-axis sorted positions ≤ 1.000 LSB (tolerance 2; the int32 grid is
+39.7–59.7× finer than float32's ULP at the cloud's extent); T4 all three colour
+histograms identical. Negative controls — drop one + duplicate one (count kept),
+one point moved 100 LSB, one red value changed — all rejected.
+
+### Reader (PR #98) on the port's output
+
+`test_pointcloud_lod_octree` and `test_pointcloud_lod_select`, unmodified:
+- fixture (ctest, `test_pointcloud_lod_build_then_*`): all pass, octree C2 70
+  ranges tile `[0, 450000)`.
+- 36M: C1 36,232,793 = octree.bin / 18; C2 15,081 ranges tile octree.bin exactly;
+  S2 12,480 / 12,480 leaves reachable; all four negative controls rejected.
+
+### D11 stress: a node that accepts more than 1,000,000 points
+
+16,000,000 points uniform in a 10 m cube (`tests/pointcloud_lod_build/vol_gen.py`, seed 20260923). Premise
+check: the root accepts **2,247,135** points (> 1,000,000, the size of upstream's
+`dbgAccepted`). Desktop PotreeConverter on the same cloud: **killed by SIGSEGV**
+in the merge stage; gdb backtrace: `SamplerPoisson::sample(...)::{lambda(Node*)#1}`
+← `indexer::doMerging`. The port: completes (136 s, 32 threads, 1.37 GB), T1
+Δ 0, positions ≤ 1.000 LSB, colour histograms identical, all negative controls
+rejected.
+
+### Bad input (ctest B1)
+
+16 malformed PLYs (empty, not PLY, no `end_header`, ascii, big-endian, double
+coordinates, wrong property order, a non-vertex element first, 0 points,
+non-numeric count, a count that overflows, truncated by one byte, header claiming
+1M points for 2, NaN, Inf, all points identical), a missing file and an output
+directory under a regular file: every one returns an error, none aborts. Positive
+control: a valid 2-point PLY builds.
+
+### Compilers
+
+Library, CLI and tests compile with 0 diagnostics under the repo's
+`AETHER_STRICT_COMPILE_OPTIONS` with Apple clang 17 (macOS arm64) and GCC 14.2
+(Ubuntu x86-64); the ctest suite passes on both.
