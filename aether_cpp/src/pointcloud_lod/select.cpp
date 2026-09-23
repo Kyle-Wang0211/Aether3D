@@ -51,7 +51,12 @@ Frustum frustumFromViewProjectionWebGPU(const double m[16]) {
   return f;
 }
 
-Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams& p) {
+namespace {
+
+// One walk for both overloads. `res == nullptr` is the original (non-streaming)
+// behaviour: every node counts as a tree node, nothing is promoted or queued.
+Selection selectImpl(const Octree& oct, const Camera& cam, const SelectParams& p,
+                     const Residency* res) {
   Selection out;
   if (oct.nodes.empty()) return out;
 
@@ -60,14 +65,16 @@ Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams
   struct Item {
     int32_t node;
     double weight;
+    bool parentDrawable;   // Potree carries `parent` in the element (:161) for the :299 test
     bool operator<(const Item& o) const { return weight < o.weight; }  // max-heap
   };
   // Potree_update_visibility.js:40 -- ordered by 1/weight, i.e. largest first.
   std::priority_queue<Item> pq;
-  pq.push({0, std::numeric_limits<double>::max()});  // :79 root gets MAX_VALUE
+  pq.push({0, std::numeric_limits<double>::max(), true});  // :79 root gets MAX_VALUE; :299 `!parent`
+  int loadedToGPUThisFrame = 0;                              // :122
 
-  const double fovRad = cam.fovYDegrees * kPi / 180.0;   // :375
-  const double slope = std::tan(fovRad / 2.0);            // :376
+  const double fovRad = cam.fovYDegrees * kPi / 180.0;   // :368
+  const double slope = std::tan(fovRad / 2.0);            // :369
   const double halfH = 0.5 * static_cast<double>(cam.screenHeightPx);
 
   while (!pq.empty()) {
@@ -93,7 +100,23 @@ Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams
     if (node.spacing > 0) out.lowestSpacing = std::min(out.lowestSpacing, node.spacing);
 
     out.numPoints += node.numPoints;
-    if (node.numPoints > 0) out.nodes.push_back(it.node);
+
+    // :299-309 -- which visible nodes are actually drawn this frame.
+    bool drawable = true;
+    if (res) {
+      const NodeState st = res->state(it.node, res->ctx);
+      drawable = (st == NodeState::Drawable);
+      if (!drawable && it.parentDrawable) {                       // :299
+        if (st == NodeState::Loaded && loadedToGPUThisFrame < res->maxPromotionsPerFrame) {  // :300
+          drawable = true;                                        // :301 toTreeNode
+          loadedToGPUThisFrame++;                                 // :302
+          out.promoted.push_back(it.node);
+        } else {
+          out.unloaded.push_back(it.node);                        // :304
+        }
+      }
+    }
+    if (drawable && node.numPoints > 0) out.nodes.push_back(it.node);   // :309-315
 
     // :347-392 -- push children with their screen-space weight.
     for (int c = 0; c < 8; c++) {
@@ -108,18 +131,30 @@ Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams
       const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
       const double radius = child.box.boundingSphereRadius();
 
-      const double projFactor = halfH / (slope * distance);   // :377
-      const double screenPixelRadius = radius * projFactor;   // :378
+      const double projFactor = halfH / (slope * distance);   // :370
+      const double screenPixelRadius = radius * projFactor;   // :371
 
-      if (screenPixelRadius < p.minimumNodePixelSize) continue;  // :380-382
+      if (screenPixelRadius < p.minimumNodePixelSize) continue;  // :373-375
 
-      double weight = screenPixelRadius;                      // :385
-      if (distance - radius < 0) weight = std::numeric_limits<double>::max();  // :387-389
+      double weight = screenPixelRadius;                      // :377
+      if (distance - radius < 0) weight = std::numeric_limits<double>::max();  // :379-381
 
-      pq.push({ci, weight});
+      pq.push({ci, weight, drawable});   // :392 -- pushed whether or not `node` is drawn
     }
   }
   return out;
+}
+
+}  // namespace
+
+Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams& p) {
+  return selectImpl(oct, cam, p, nullptr);
+}
+
+Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams& p,
+                        const Residency& residency) {
+  if (!residency.state) return Selection{};
+  return selectImpl(oct, cam, p, &residency);
 }
 
 // CesiumJS Cesium3DTileset.js:3005-3037, with frame time as the error signal

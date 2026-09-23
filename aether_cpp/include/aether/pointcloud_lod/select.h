@@ -55,9 +55,50 @@ struct Selection {
   int64_t nodesConsidered = 0;
   double lowestSpacing = std::numeric_limits<double>::infinity();
   bool hitBudget = false;       // true if the budget break stopped the walk
+
+  // Filled only by the streaming overload below (empty otherwise).
+  // `nodes` then holds only nodes that are drawable this frame.
+  std::vector<int32_t> promoted;  // Loaded -> Drawable this frame (<= maxPromotionsPerFrame), also in `nodes`
+  std::vector<int32_t> unloaded;  // Potree's unloadedGeometry, priority order: hand to AsyncNodeLoader::request
 };
 
 Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams& p);
+
+// ---------------------------------------------------------------------------
+// Streaming selection: Potree's updateVisibility with its node states.
+//
+//   potree/src/Potree_update_visibility.js @ 5636cd471d9eb464969e758be45c44d7613d3859
+//     :122      loadedToGPUThisFrame = 0
+//     :299-307  a geometry node whose parent is a tree node is promoted to a
+//               tree node if it is loaded and fewer than 2 were promoted this
+//               frame; otherwise it goes to unloadedGeometry
+//     :309-315  only tree nodes are drawn (visibleNodes)
+//     :347-393  children are pushed for EVERY visible node, loaded or not, so
+//               the point budget accounts for the whole visible cut
+//
+// Why nothing is ever a hole: a node can only become drawable while its parent
+// is drawable (:299), and Potree's octree is additive -- a parent's points are
+// a subsample of its whole subtree, drawn alongside the children. While a child
+// is still loading, its region is covered by the parent's (coarser) points that
+// are already on screen; the frame loses density there, never coverage.
+enum class NodeState : uint8_t {
+  Unloaded = 0,  // !isLoaded()                        (OctreeGeometry.js:44-46)
+  Loaded = 1,    // isGeometryNode() && isLoaded()     -- decoded, not yet on the GPU
+  Drawable = 2,  // isTreeNode()                       -- on the GPU (PointCloudOctree.js:205 toTreeNode)
+};
+
+using NodeStateFn = NodeState (*)(int32_t node, void* ctx);
+
+struct Residency {
+  NodeStateFn state = nullptr;     // required
+  void* ctx = nullptr;
+  int maxPromotionsPerFrame = 2;   // Potree_update_visibility.js:300 `loadedToGPUThisFrame < 2`
+};
+
+// The caller must actually upload `promoted` this frame: the returned `nodes`
+// already treat them as drawable, exactly as Potree does after toTreeNode (:301).
+Selection selectVisible(const Octree& oct, const Camera& cam, const SelectParams& p,
+                        const Residency& residency);
 
 // ---------------------------------------------------------------------------
 // Adaptive quality. CesiumJS's controller shape with frame time as the signal.

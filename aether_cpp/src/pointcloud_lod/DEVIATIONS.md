@@ -74,12 +74,12 @@ because we render through Dawn, where clip z is `[0,1]`. Taking the WebGL branch
 would silently mis-place the near plane.
 
 **D6 no clip boxes** *(Potree port)*
-`Potree_update_visibility.js:184-268` handles user clip volumes. We have no such
+`Potree_update_visibility.js:184-271` handles user clip volumes. We have no such
 feature, so that block is omitted. It cannot change which nodes are selected when
 no clip box exists.
 
 **D7 no orthographic path** *(Potree port)*
-`Potree_update_visibility.js:381-390`'s ortho branch is `// TODO ortho visibility`
+`Potree_update_visibility.js:382-390`'s ortho branch is `// TODO ortho visibility`
 upstream and uses the box diagonal, ignoring distance. Omitted rather than
 copied; the viewer is perspective.
 

@@ -1248,12 +1248,15 @@ target_include_directories(aether_pointcloud_lod
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_compile_options(aether_pointcloud_lod PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+# AsyncNodeLoader decodes on std::thread workers (Potree's WorkerPool).
+find_package(Threads REQUIRED)
+target_link_libraries(aether_pointcloud_lod PUBLIC Threads::Threads)
 
 # Host tests against a committed 25,000-point fixture cut from a real capture
 # (tests/pointcloud_lod/fixture). Checks whose premise needs a full-size cloud
 # report SKIP here with the reason; run the same binaries against a real octree
 # directory to exercise them.
-foreach(pwlod_test octree select stream corrupt)
+foreach(pwlod_test octree select stream corrupt async)
     add_executable(test_pointcloud_lod_${pwlod_test}
         tests/pointcloud_lod/test_${pwlod_test}.cpp)
     target_link_libraries(test_pointcloud_lod_${pwlod_test} PRIVATE aether_pointcloud_lod)
