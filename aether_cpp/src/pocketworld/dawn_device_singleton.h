@@ -29,6 +29,27 @@ namespace pocketworld {
 /// Decrements refcount; releases the device when count reaches 0.
 void dawn_singleton_release();
 
+/// A callback run immediately BEFORE the device is destroyed.
+using DawnSingletonTeardownHook = void (*)();
+
+/// Registers `fn` to run just before the refcount-zero teardown destroys
+/// the GPUDevice. This exists because the device is refcounted by LIVE
+/// RENDERER count, while process-lifetime caches can outlive every
+/// renderer while still holding GPU buffer handles and a raw GPUDevice*
+/// — see SplatDataCache in scene_iosurface_renderer.cpp. Anything in
+/// that position MUST drop its device-owned resources here; otherwise
+/// the handles dangle and the next acquire() hands the same ids out
+/// again on a different device.
+///
+/// Contract: hooks run with the singleton's internal mutex HELD, so a
+/// hook must not call dawn_singleton_acquire/release (non-recursive
+/// mutex → deadlock). Freeing device resources is fine: the device is
+/// still alive and GPUDevice has its own independent lock.
+///
+/// Registration is idempotent (re-registering the same function pointer
+/// is a no-op) and capped; at most 8 hooks are stored.
+void dawn_singleton_add_teardown_hook(DawnSingletonTeardownHook fn);
+
 }  // namespace pocketworld
 }  // namespace aether
 

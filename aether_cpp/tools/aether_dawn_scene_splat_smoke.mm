@@ -209,30 +209,358 @@ std::vector<std::uint8_t> read_iosurface_pixels(IOSurfaceRef surface,
     return out;
 }
 
+// Zero the IOSurface so a session that renders NOTHING cannot inherit
+// the previous session's pixels and pass by accident. render_full's
+// colour attachment uses LoadOp::Clear today, but the phase-2 judge
+// below is the only thing standing between us and a silent
+// use-after-free regression — it must not depend on that staying true.
+void zero_iosurface(IOSurfaceRef surface, std::uint32_t w, std::uint32_t h) {
+    IOSurfaceLock(surface, 0, nullptr);
+    auto* base = static_cast<std::uint8_t*>(IOSurfaceGetBaseAddress(surface));
+    const std::size_t row_bytes = IOSurfaceGetBytesPerRow(surface);
+    for (std::uint32_t y = 0; y < h; ++y) {
+        std::memset(base + y * row_bytes, 0, w * kBytesPerPixel);
+    }
+    IOSurfaceUnlock(surface, 0, nullptr);
+}
+
+// ─── Per-frame measurements, shared by both renderer sessions ──────────
+struct FrameStats {
+    std::uint32_t opaque_count{0};
+    std::uint32_t max_alpha{0};
+    std::uint64_t sum_r{0}, sum_g{0}, sum_b{0};
+    double        coverage_pct{0.0};
+    double        centroid_x{0.0}, centroid_y{0.0};
+    std::uint32_t bbox_w{0}, bbox_h{0};
+};
+
+// Threshold "non-empty" pixel = alpha >= 4 (very permissive —
+// premultiplied splats with alpha < 4/255 may still be visually present
+// but we need a clear pass/fail).
+FrameStats analyze_pixels(const std::vector<std::uint8_t>& pixels) {
+    FrameStats s;
+    std::uint64_t sum_x = 0, sum_y = 0;
+    std::uint32_t min_x = kWidth, max_x = 0, min_y = kHeight, max_y = 0;
+    for (std::uint32_t y = 0; y < kHeight; ++y) {
+        for (std::uint32_t x = 0; x < kWidth; ++x) {
+            const std::uint8_t* p = pixels.data() + (y * kWidth + x) * 4;
+            const std::uint8_t b = p[0], g = p[1], rr = p[2], a = p[3];
+            if (a >= 4) {
+                ++s.opaque_count;
+                s.sum_b += b; s.sum_g += g; s.sum_r += rr;
+                sum_x += x;   sum_y += y;
+                if (x < min_x) min_x = x;
+                if (x > max_x) max_x = x;
+                if (y < min_y) min_y = y;
+                if (y > max_y) max_y = y;
+            }
+            if (a > s.max_alpha) s.max_alpha = a;
+        }
+    }
+    s.coverage_pct = 100.0 * static_cast<double>(s.opaque_count) /
+                     (static_cast<double>(kWidth) * kHeight);
+    if (s.opaque_count > 0) {
+        s.centroid_x = static_cast<double>(sum_x) / s.opaque_count;
+        s.centroid_y = static_cast<double>(sum_y) / s.opaque_count;
+        s.bbox_w = max_x - min_x + 1;
+        s.bbox_h = max_y - min_y + 1;
+    }
+    return s;
+}
+
+void print_stats(const char* phase, const FrameStats& s) {
+    std::printf("[%s] opaque pixels: %u / %u (%.2f%%), max alpha = %u\n",
+                phase, s.opaque_count, kWidth * kHeight, s.coverage_pct,
+                s.max_alpha);
+    std::printf("[%s] sum RGB = %llu (R=%llu G=%llu B=%llu)\n", phase,
+                static_cast<unsigned long long>(s.sum_r + s.sum_g + s.sum_b),
+                static_cast<unsigned long long>(s.sum_r),
+                static_cast<unsigned long long>(s.sum_g),
+                static_cast<unsigned long long>(s.sum_b));
+    std::printf("[%s] silhouette: centroid=(%.1f, %.1f) bbox=%ux%u "
+                "coverage=%.2f%%\n", phase, s.centroid_x, s.centroid_y,
+                s.bbox_w, s.bbox_h, s.coverage_pct);
+}
+
+// ─── Judges ────────────────────────────────────────────────────────────
+//
+// `synthetic` gates the geometry-shape judges: they encode the built-in
+// Fibonacci-sphere fixture (centred, viewed down its own axis). A
+// caller-supplied PLY has arbitrary geometry, so for that path we can
+// only assert "something rendered".
+bool judge(const char* phase, const FrameStats& s, bool synthetic, bool sh1) {
+    bool ok = true;
+    if (s.opaque_count < 16) {
+        std::fprintf(stderr,
+            "FAIL[%s]: only %u opaque pixels — splats did not render\n",
+            phase, s.opaque_count);
+        return false;  // every judge below divides by opaque_count
+    }
+    if (s.max_alpha < 16) {
+        std::fprintf(stderr, "FAIL[%s]: max alpha %u — alpha output near zero\n",
+                     phase, s.max_alpha);
+        ok = false;
+    }
+    if (s.sum_r + s.sum_g + s.sum_b == 0) {
+        std::fprintf(stderr, "FAIL[%s]: zero RGB output across the image\n", phase);
+        ok = false;
+    }
+    if (!synthetic) return ok;
+
+    // ─── Silhouette judge (Phase 6.4f.8) ───────────────────────────────
+    //
+    // WHY: "opaque_count >= 16" only knows whether ANYTHING rendered. The
+    // failure this smoke actually has to catch is a view-convention
+    // mismatch, and that family has a partial form: ad28ce94's own commit
+    // message describes the pre-hotfix bug as "we accidentally render
+    // only the outlier tail behind the camera". A handful of tail splats
+    // in a corner clears `>= 16` easily. So assert the SHAPE too.
+    //
+    // The fixture is 1024 splats on a Fibonacci sphere, centred, viewed
+    // down its own axis at 60° FOV with a 1.5× pull-back — it must
+    // project to a disc that is centred and roughly as wide as it is
+    // tall. Measured 2026-09-23 (macOS/Metal, Dawn): coverage 15.23%,
+    // centroid (127.6, 127.7), bbox 112 × 112. The bands below are wide
+    // enough to survive rasteriser and LOD-knob drift and still two
+    // orders of magnitude away from "a blob in the corner".
+    constexpr double kCentroidTolPx  = 16.0;
+    constexpr double kCoverageMinPct = 4.0;
+    constexpr double kCoverageMaxPct = 60.0;
+    constexpr double kAspectTol      = 0.25;   // |w-h| / max(w,h)
+    const double img_cx = 0.5 * (kWidth  - 1);
+    const double img_cy = 0.5 * (kHeight - 1);
+
+    if (std::fabs(s.centroid_x - img_cx) > kCentroidTolPx ||
+        std::fabs(s.centroid_y - img_cy) > kCentroidTolPx) {
+        std::fprintf(stderr,
+            "FAIL[%s]: rendered centroid (%.1f, %.1f) is more than %.0f px "
+            "from the image centre (%.1f, %.1f) — the scene is centred, "
+            "so this means the camera/view convention is wrong or only "
+            "part of the cloud survived the frustum cull\n",
+            phase, s.centroid_x, s.centroid_y, kCentroidTolPx, img_cx, img_cy);
+        ok = false;
+    }
+    if (s.coverage_pct < kCoverageMinPct || s.coverage_pct > kCoverageMaxPct) {
+        std::fprintf(stderr,
+            "FAIL[%s]: coverage %.2f%% outside [%.1f%%, %.1f%%] — a centred "
+            "sphere at this FOV should fill roughly 15%% of the frame\n",
+            phase, s.coverage_pct, kCoverageMinPct, kCoverageMaxPct);
+        ok = false;
+    }
+    const double bw = static_cast<double>(s.bbox_w);
+    const double bh = static_cast<double>(s.bbox_h);
+    const double aspect_err = std::fabs(bw - bh) / (bw > bh ? bw : bh);
+    if (aspect_err > kAspectTol) {
+        std::fprintf(stderr,
+            "FAIL[%s]: opaque bbox %ux%u is not roughly square "
+            "(|w-h|/max = %.3f > %.3f) — a sphere must project to a disc\n",
+            phase, s.bbox_w, s.bbox_h, aspect_err, kAspectTol);
+        ok = false;
+    }
+
+    // SH-1 dominance check: camera is at world (0, 0, -distance) looking
+    // along +z. project_visible computes viewdir = normalize(mean -
+    // camera_position). The visible side of the sphere has mean.z < 0
+    // (closer to camera) so mean - camera ≈ (0,0, mean.z + distance). For
+    // points near the +z hemisphere of the sphere, viewdir.z is positive
+    // → b1c1 (blue) basis dominates. For points on the front hemisphere
+    // facing the camera (−z side of sphere), viewdir is closer to (0,0,
+    // distance), making viewdir.z LARGER positive → BLUE strongest. So
+    // the rendered image should have B as the dominant channel.
+    if (sh1) {
+        if (s.sum_b <= s.sum_r || s.sum_b <= s.sum_g) {
+            std::fprintf(stderr,
+                "FAIL[%s]: SH-1 expected blue-dominant (R=%llu G=%llu B=%llu)\n",
+                phase,
+                static_cast<unsigned long long>(s.sum_r),
+                static_cast<unsigned long long>(s.sum_g),
+                static_cast<unsigned long long>(s.sum_b));
+            ok = false;
+        } else {
+            std::printf("[%s] SH-1 dominance check OK: B=%llu > R=%llu, G=%llu\n",
+                        phase,
+                        static_cast<unsigned long long>(s.sum_b),
+                        static_cast<unsigned long long>(s.sum_r),
+                        static_cast<unsigned long long>(s.sum_g));
+        }
+    }
+    if (ok) std::printf("[%s] silhouette judge OK — centred disc\n", phase);
+    return ok;
+}
+
+// ─── One full renderer lifecycle ───────────────────────────────────────
+//
+// create → load_ply → get_bounds → render_full ×2 → read pixels →
+// destroy. Factored out of main() so the smoke can run it TWICE against
+// the same process; see the phase-2 rationale in main().
+struct SessionResult {
+    bool       ok{false};
+    FrameStats stats;
+    float      bmin[3]{0.0f, 0.0f, 0.0f};
+    float      bmax[3]{0.0f, 0.0f, 0.0f};
+};
+
+SessionResult run_session(IOSurfaceRef surface, const std::string& ply_path,
+                          const char* phase) {
+    SessionResult res;
+
+    AetherSceneRenderer* r = aether_scene_renderer_create(
+        const_cast<void*>(reinterpret_cast<const void*>(surface)),
+        kWidth, kHeight);
+    if (!r) {
+        std::fprintf(stderr, "FAIL[%s]: aether_scene_renderer_create\n", phase);
+        return res;
+    }
+
+    if (!aether_scene_renderer_load_ply(r, ply_path.c_str())) {
+        std::fprintf(stderr, "FAIL[%s]: aether_scene_renderer_load_ply\n", phase);
+        aether_scene_renderer_destroy(r);
+        return res;
+    }
+
+    if (!aether_scene_renderer_get_bounds(r, res.bmin, res.bmax)) {
+        std::fprintf(stderr, "FAIL[%s]: aether_scene_renderer_get_bounds\n", phase);
+        aether_scene_renderer_destroy(r);
+        return res;
+    }
+    std::printf("[%s] bounds: min=(%.3f, %.3f, %.3f) max=(%.3f, %.3f, %.3f)\n",
+                phase, res.bmin[0], res.bmin[1], res.bmin[2],
+                res.bmax[0], res.bmax[1], res.bmax[2]);
+    const float span = std::sqrt(
+        (res.bmax[0]-res.bmin[0])*(res.bmax[0]-res.bmin[0]) +
+        (res.bmax[1]-res.bmin[1])*(res.bmax[1]-res.bmin[1]) +
+        (res.bmax[2]-res.bmin[2])*(res.bmax[2]-res.bmin[2]));
+    if (span < 1e-4f) {
+        std::fprintf(stderr, "FAIL[%s]: bounds AABB is degenerate (span=%g)\n",
+                     phase, span);
+        aether_scene_renderer_destroy(r);
+        return res;
+    }
+
+    // ─── Camera ────────────────────────────────────────────────────────
+    //
+    // CONTRACT: aether_scene_renderer_render_full takes an OPENGL-
+    // convention view matrix — the same thing the Dart caller produces
+    // with vector_math.makeViewMatrix, i.e. the camera looks down view
+    // -Z and in-front geometry has NEGATIVE view-space z. The renderer
+    // converts it to the Brush splat convention itself by left-
+    // multiplying with diag(1, -1, -1, 1) (see the "Phase 6.4f hotfix"
+    // block in scene_iosurface_renderer.cpp's render_full).
+    //
+    // Eye sits at world -Z of the scene centre and looks toward +Z,
+    // which keeps the SH-1 mode's view-direction expectation exactly as
+    // it was originally derived.
+    //
+    //   f = normalize(center - eye) = (0, 0, 1)
+    //   s = normalize(cross(f, up)) = (-1, 0, 0)   [up = +Y]
+    //   u = cross(s, f)             = (0, 1, 0)
+    //   view (column-major) = [ s.x u.x -f.x 0 | s.y u.y -f.y 0 |
+    //                           s.z u.z -f.z 0 | -s·eye -u·eye f·eye 1 ]
+    // which is a 180° rotation about Y plus the translation — NOT the
+    // identity rotation a Brush-convention fixture would use.
+    const float center_x = 0.5f * (res.bmin[0] + res.bmax[0]);
+    const float center_y = 0.5f * (res.bmin[1] + res.bmax[1]);
+    const float center_z = 0.5f * (res.bmin[2] + res.bmax[2]);
+    const float radius = 0.5f * span;
+    const float fov_y_rad = 60.0f * 3.14159265f / 180.0f;
+    const float distance = (radius / std::sin(fov_y_rad * 0.5f)) * 1.5f;
+    // eye = (center_x, center_y, center_z - distance)
+    float view[16] = {
+        -1.0f, 0.0f,  0.0f, 0.0f,
+         0.0f, 1.0f,  0.0f, 0.0f,
+         0.0f, 0.0f, -1.0f, 0.0f,
+         center_x, -center_y, center_z - distance, 1.0f,
+    };
+    float model[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    };
+
+    // Render twice — first frame primes any lazy state, second is the
+    // one we measure. (Catches "first frame is blank because num_visible
+    // wasn't reset" type bugs.)
+    aether_scene_renderer_render_full(r, view, model);
+    aether_scene_renderer_render_full(r, view, model);
+
+    res.stats = analyze_pixels(read_iosurface_pixels(surface, kWidth, kHeight));
+    res.ok = true;
+
+    // Destroying the LAST live renderer drops the dawn_singleton
+    // refcount to zero, which tears the GPUDevice down. Phase 2 in
+    // main() then builds a new one on purpose.
+    aether_scene_renderer_destroy(r);
+    return res;
+}
+
+void print_usage(std::FILE* out) {
+    std::fprintf(out,
+        "usage: aether_dawn_scene_splat_smoke [--mode=sort|--mode=sh1] [<ply_path>]\n"
+        "\n"
+        "End-to-end gate for the SHIPPING splat path: PLY ->\n"
+        "AetherSceneRenderer (scene_iosurface_renderer.cpp) -> IOSurface.\n"
+        "This is the only smoke that compiles and exercises the production\n"
+        "render_full() splat branch and its draw call.\n"
+        "\n"
+        "  --mode=sort   (default) amber Fibonacci sphere; exercises the\n"
+        "                5-kernel radix sort and back-to-front draw order.\n"
+        "  --mode=sh1    gray sphere with degree-1 SH tuned so the\n"
+        "                camera-facing hemisphere must come out\n"
+        "                blue-dominant. Catches a flipped SH view-direction.\n"
+        "  <ply_path>    render a caller-supplied binary 3DGS PLY instead of\n"
+        "                the synthetic fixture. The shape judges (centred\n"
+        "                disc, coverage, SH dominance) assume the built-in\n"
+        "                geometry, so they are SKIPPED for this path — only\n"
+        "                the 'something rendered' judges apply.\n"
+        "  -h, --help    print this and exit 0.\n"
+        "\n"
+        "exit status: 0 = PASS, 1 = a judge failed, 2 = bad usage.\n");
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    // Modes:
-    //   (no args)               → synthetic Fibonacci sphere, sort path.
-    //   <ply_path>              → caller-supplied PLY.
-    //   --mode=sort | --mode=sh1 → built-in synth variants.
-    //   --mode=sh1 [<out_path>] → emits a deg-1 SH ball; pass an output
-    //                             path to keep the temp PLY around.
+    // Argument handling is strict on purpose. The previous loop silently
+    // ignored anything starting with '-' and treated every other token as
+    // a PLY path, so `--help` quietly ran the default mode and a typo'd
+    // flag was indistinguishable from a pass.
     std::string ply_path = "/tmp/aether_scene_splat_smoke.ply";
     bool use_synth = true;
     bool synth_with_sh1 = false;
+    bool have_positional = false;
     for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--mode=sort") {
-            // default; explicit form for symmetry
-            synth_with_sh1 = false;
+        const std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_usage(stdout);
+            return EXIT_SUCCESS;
+        } else if (arg == "--mode=sort") {
+            synth_with_sh1 = false;                 // default; explicit form
         } else if (arg == "--mode=sh1") {
             synth_with_sh1 = true;
             ply_path = "/tmp/aether_scene_splat_smoke_sh1.ply";
-        } else if (!arg.empty() && arg[0] != '-') {
+        } else if (!arg.empty() && arg[0] == '-') {
+            std::fprintf(stderr, "error: unknown option '%s'\n\n", arg.c_str());
+            print_usage(stderr);
+            return 2;
+        } else if (have_positional) {
+            std::fprintf(stderr,
+                "error: more than one PLY path given ('%s' after '%s')\n\n",
+                arg.c_str(), ply_path.c_str());
+            print_usage(stderr);
+            return 2;
+        } else {
             ply_path = arg;
             use_synth = false;
+            have_positional = true;
         }
+    }
+    if (have_positional && synth_with_sh1) {
+        std::fprintf(stderr,
+            "error: --mode=sh1 synthesizes its own fixture; it cannot be "
+            "combined with a PLY path\n\n");
+        print_usage(stderr);
+        return 2;
     }
 
     if (use_synth) {
@@ -263,282 +591,97 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    AetherSceneRenderer* r = aether_scene_renderer_create(
-        const_cast<void*>(reinterpret_cast<const void*>(surface)),
-        kWidth, kHeight);
-    if (!r) {
-        std::fprintf(stderr, "FAIL: aether_scene_renderer_create\n");
-        CFRelease(surface);
-        return EXIT_FAILURE;
-    }
+    // ─── Phase 1: first renderer ───────────────────────────────────────
+    const SessionResult first = run_session(surface, ply_path, "phase1");
+    if (!first.ok) { CFRelease(surface); return EXIT_FAILURE; }
+    print_stats("phase1", first.stats);
+    bool ok = judge("phase1", first.stats, use_synth, synth_with_sh1);
 
-    if (!aether_scene_renderer_load_ply(r, ply_path.c_str())) {
-        std::fprintf(stderr, "FAIL: aether_scene_renderer_load_ply\n");
-        aether_scene_renderer_destroy(r);
-        CFRelease(surface);
-        return EXIT_FAILURE;
-    }
-
-    float bmin[3] = {0}, bmax[3] = {0};
-    if (!aether_scene_renderer_get_bounds(r, bmin, bmax)) {
-        std::fprintf(stderr, "FAIL: aether_scene_renderer_get_bounds\n");
-        aether_scene_renderer_destroy(r);
-        CFRelease(surface);
-        return EXIT_FAILURE;
-    }
-    std::printf("bounds: min=(%.3f, %.3f, %.3f) max=(%.3f, %.3f, %.3f)\n",
-                bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
-    const float span = std::sqrt(
-        (bmax[0]-bmin[0])*(bmax[0]-bmin[0]) +
-        (bmax[1]-bmin[1])*(bmax[1]-bmin[1]) +
-        (bmax[2]-bmin[2])*(bmax[2]-bmin[2]));
-    if (span < 1e-4f) {
-        std::fprintf(stderr, "FAIL: bounds AABB is degenerate (span=%g)\n", span);
-        aether_scene_renderer_destroy(r);
-        CFRelease(surface);
-        return EXIT_FAILURE;
-    }
-
-    // ─── Camera ────────────────────────────────────────────────────────
+    // ─── Phase 2: device teardown → rebuild → SplatDataCache hit ───────
     //
-    // CONTRACT: aether_scene_renderer_render_full takes an OPENGL-
-    // convention view matrix — the same thing the Dart caller produces
-    // with vector_math.makeViewMatrix, i.e. the camera looks down view
-    // -Z and in-front geometry has NEGATIVE view-space z. The renderer
-    // converts it to the Brush splat convention itself by left-
-    // multiplying with diag(1, -1, -1, 1) (see the "Phase 6.4f hotfix"
-    // block in scene_iosurface_renderer.cpp's render_full).
+    // WHY THIS PHASE EXISTS. `SplatData` (scene_iosurface_renderer.cpp)
+    // owns GPU buffer handles plus a RAW `GPUDevice*`, and
+    // `SplatDataCache` pins up to 3 of them strongly in a
+    // process-lifetime static. The device, meanwhile, is refcounted by
+    // LIVE RENDERER COUNT: run_session's destroy above dropped it to
+    // zero, so the GPUDevice was torn down while the cache kept holding
+    // SplatData that points at it.
     //
-    // This fixture used to hand in a BRUSH-convention matrix (identity
-    // rotation, eye at world -Z, in-front = +z) because it predates that
-    // conversion: the tool was last touched by 35bd1f0f (2026-05-02) and
-    // the conversion landed the next day in ad28ce94 (2026-05-03,
-    // "Phase 6.4f.5 hotfix bundle"). The renderer then flipped an
-    // already-Brush matrix a second time, every splat ended up behind
-    // the camera, project_forward's `mean_c.z < 0.01` cull dropped all
-    // 1024 of them, and this smoke has reported
-    //   "FAIL: only 0 opaque pixels"
-    // ever since. Measured 2026-09-23: the ONLY change needed to go from
-    // 0 to 9983 opaque pixels is this matrix — no production code.
+    // That dangling pointer had two reachable ends:
+    //   (a) process exit — ~SplatDataCache → ~SplatData → the VIRTUAL
+    //       call device->destroy_buffer(). Measured 2026-09-23: SIGSEGV
+    //       in __shared_ptr_emplace<SplatData>::__on_zero_shared(), 10
+    //       runs out of 11. Note the fault is the vtable load on the
+    //       freed GPUDevice (`ldr x8,[x8,#0x30]; blr x8`) — it dies
+    //       before entering destroy_buffer, so this is a plain
+    //       use-after-free, NOT a double free: destroy_buffer's own
+    //       `buffers_.find(id) == end() → return` and ~DawnGPUDevice's
+    //       buffers_.clear() (dawn_gpu_device.cpp:548-558) mean a stale
+    //       id could never have reached a second wgpuBufferRelease.
+    //       Because the static destructors run BEFORE stdio's atexit
+    //       flush, the crash also ate every line of buffered stdout —
+    //       the verdict this tool prints was invisible whenever stdout
+    //       was a pipe or a file, i.e. always in CI.
+    //   (b) right here — create a second renderer (fresh device) and
+    //       load the same asset. The cache key is unchanged, so the hit
+    //       hands back buffer handles that belong to the DESTROYED
+    //       device, and the render binds them on the new one. The new
+    //       device has meanwhile reissued those ids to unrelated
+    //       buffers, so this surfaces as a Dawn validation error
+    //       (measured: [Buffer "splat.global_from_compact_gid"] usage …
+    //       includes writable usage and another usage in the same
+    //       synchronization scope) — i.e. silently rendering the wrong
+    //       buffer on any build without the device error gate.
     //
-    // So: emit a real GL lookAt. Eye sits at world -Z of the scene centre
-    // and looks toward +Z, which keeps the SH-1 mode's view-direction
-    // expectation (below) exactly as it was originally derived.
+    // SCOPE — what (b) does and does not prove. It proves the mechanism
+    // fires WITHOUT waiting for process exit: any code path that reaches
+    // build_splat_scene_from_gaussians, then drops to zero live
+    // renderers, then re-enters it with the same key, gets another
+    // device's buffers. It does NOT prove the shipping app takes that
+    // path — the feed publishes GLB meshes, and whether any shipped work
+    // is classified plyGsplat rather than plyMesh was still open when
+    // this landed (see docs/SPLAT_DATA_CACHE_DEVICE_UAF_CN.md). Do not
+    // cite this phase as "the feed crashes". The reason it is gated
+    // anyway is (a): the exit crash blocks the ONLY smoke covering the
+    // production splat draw call from ever being trustworthy in CI.
     //
-    //   f = normalize(center - eye) = (0, 0, 1)
-    //   s = normalize(cross(f, up)) = (-1, 0, 0)   [up = +Y]
-    //   u = cross(s, f)             = (0, 1, 0)
-    //   view (column-major) = [ s.x u.x -f.x 0 | s.y u.y -f.y 0 |
-    //                           s.z u.z -f.z 0 | -s·eye -u·eye f·eye 1 ]
-    // which is a 180° rotation about Y plus the translation — NOT the
-    // identity rotation the old fixture used.
-    const float center_x = 0.5f * (bmin[0] + bmax[0]);
-    const float center_y = 0.5f * (bmin[1] + bmax[1]);
-    const float center_z = 0.5f * (bmin[2] + bmax[2]);
-    const float radius = 0.5f * span;
-    const float fov_y_rad = 60.0f * 3.14159265f / 180.0f;
-    const float distance = (radius / std::sin(fov_y_rad * 0.5f)) * 1.5f;
-    // eye = (center_x, center_y, center_z - distance)
-    float view[16] = {
-        -1.0f, 0.0f,  0.0f, 0.0f,
-         0.0f, 1.0f,  0.0f, 0.0f,
-         0.0f, 0.0f, -1.0f, 0.0f,
-         center_x, -center_y, center_z - distance, 1.0f,
-    };
-    float model[16] = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-    };
+    // Log-reading note: phase 2 prints "build_splat_scene: cache MISS"
+    // and that is the FIXED behaviour, not a weakened test — the
+    // teardown hook evicts the GPU cache with the device, so the rebuild
+    // re-uploads. It should still print "[DECODED CACHE HIT]": the
+    // CPU-side decode cache holds no device resources and correctly
+    // survives, which is what keeps the re-upload cheap. A phase-2
+    // "cache HIT" here means the eviction hook stopped running.
+    std::printf("--- phase2: device was torn down; rebuilding + cache hit ---\n");
+    zero_iosurface(surface, kWidth, kHeight);
+    const SessionResult second = run_session(surface, ply_path, "phase2");
+    if (!second.ok) { CFRelease(surface); return EXIT_FAILURE; }
+    print_stats("phase2", second.stats);
+    ok = judge("phase2", second.stats, use_synth, synth_with_sh1) && ok;
 
-    // Render twice — first frame primes any lazy state, second is the
-    // one we measure. (Catches "first frame is blank because num_visible
-    // wasn't reset" type bugs.)
-    aether_scene_renderer_render_full(r, view, model);
-    aether_scene_renderer_render_full(r, view, model);
-
-    auto pixels = read_iosurface_pixels(surface, kWidth, kHeight);
-
-    // Walk the pixels. We expect SOME pixels to be non-transparent (the
-    // splats rendered). Threshold "non-empty" pixel = alpha >= 4 (very
-    // permissive — premultiplied splats with alpha < 4/255 may still be
-    // visually present but we need a clear pass/fail).
-    std::uint32_t opaque_count = 0;
-    std::uint32_t max_alpha = 0;
-    std::uint64_t sum_b = 0, sum_g = 0, sum_r = 0;
-    // Phase 6.4f.8 — placement statistics for the silhouette judge below.
-    std::uint64_t sum_x = 0, sum_y = 0;
-    std::uint32_t min_x = kWidth, max_x = 0, min_y = kHeight, max_y = 0;
-    for (std::uint32_t y = 0; y < kHeight; ++y) {
-        for (std::uint32_t x = 0; x < kWidth; ++x) {
-            const std::uint8_t* p = pixels.data() + (y * kWidth + x) * 4;
-            const std::uint8_t b = p[0];
-            const std::uint8_t g = p[1];
-            const std::uint8_t rr = p[2];
-            const std::uint8_t a = p[3];
-            if (a >= 4) {
-                ++opaque_count;
-                sum_b += b;
-                sum_g += g;
-                sum_r += rr;
-                sum_x += x;
-                sum_y += y;
-                if (x < min_x) min_x = x;
-                if (x > max_x) max_x = x;
-                if (y < min_y) min_y = y;
-                if (y > max_y) max_y = y;
-            }
-            if (a > max_alpha) max_alpha = a;
+    // The two phases render the identical fixture from the identical
+    // camera, so they must agree. Tolerance covers rasteriser
+    // nondeterminism in the radix sort's tie-breaking only.
+    if (first.stats.opaque_count > 0) {
+        const double drift =
+            std::fabs(static_cast<double>(second.stats.opaque_count) -
+                      static_cast<double>(first.stats.opaque_count)) /
+            static_cast<double>(first.stats.opaque_count);
+        std::printf("phase1 vs phase2 opaque drift: %.4f%%\n", 100.0 * drift);
+        if (drift > 0.02) {
+            std::fprintf(stderr,
+                "FAIL: phase2 rendered %u opaque pixels vs phase1's %u "
+                "(%.2f%% drift) — same fixture, same camera, so this means "
+                "the rebuilt device did not get equivalent splat buffers\n",
+                second.stats.opaque_count, first.stats.opaque_count,
+                100.0 * drift);
+            ok = false;
         }
     }
-    const std::uint64_t sum_rgb = sum_b + sum_g + sum_r;
-    const double opaque_pct = 100.0 * static_cast<double>(opaque_count) /
-                                (static_cast<double>(kWidth) * kHeight);
-    std::printf("opaque pixels: %u / %u (%.2f%%), max alpha = %u\n",
-                opaque_count, kWidth * kHeight, opaque_pct, max_alpha);
-    std::printf("sum RGB = %llu (R=%llu G=%llu B=%llu)\n",
-                static_cast<unsigned long long>(sum_rgb),
-                static_cast<unsigned long long>(sum_r),
-                static_cast<unsigned long long>(sum_g),
-                static_cast<unsigned long long>(sum_b));
 
-    aether_scene_renderer_destroy(r);
     CFRelease(surface);
 
-    // KNOWN PRODUCTION BUG — this process will SIGSEGV during static
-    // destruction, AFTER main() returns, so the shell sees 139 (or signal
-    // 11) no matter what verdict we print below.
-    //
-    // Mechanism: scene_iosurface_renderer.cpp's SplatDataCache::instance()
-    // is a function-local static that strongly holds up to 3
-    // shared_ptr<SplatData>, and every SplatData keeps a RAW
-    // GPUDevice* plus GPU buffer handles. aether_scene_renderer_destroy()
-    // above drops the last dawn_singleton reference, which destroys the
-    // GPUDevice; the cache still holds the SplatData. At exit
-    // ~SplatData calls device->destroy_buffer() on the freed device —
-    // use-after-free, crash in __shared_ptr_emplace<SplatData>::
-    // __on_zero_shared().
-    //
-    // The same dangling pointer is reachable WITHOUT exiting: destroy the
-    // last renderer (device torn down), then create a new one (device
-    // recreated) and load the same asset — the cache hit hands back
-    // buffers that belong to the destroyed device.
-    //
-    // Deliberately NOT worked around here: the fix belongs in the
-    // renderer (pin the device from SplatData, or clear the cache on
-    // singleton release), which is production code and needs its own
-    // gate. Leaving the crash visible is what keeps that honest.
-    std::fprintf(stderr,
-        "[NOTE] a SIGSEGV after this point is the known SplatDataCache / "
-        "device-singleton teardown use-after-free in "
-        "scene_iosurface_renderer.cpp, not a render failure — read the "
-        "verdict printed above, not the process exit code\n");
-
-    if (opaque_count < 16) {
-        std::fprintf(stderr,
-            "FAIL: only %u opaque pixels — splats did not render\n",
-            opaque_count);
-        return EXIT_FAILURE;
-    }
-    if (max_alpha < 16) {
-        std::fprintf(stderr, "FAIL: max alpha %u — alpha output near zero\n",
-                     max_alpha);
-        return EXIT_FAILURE;
-    }
-    if (sum_rgb == 0) {
-        std::fprintf(stderr, "FAIL: zero RGB output across the image\n");
-        return EXIT_FAILURE;
-    }
-
-    // ─── Silhouette judge (Phase 6.4f.8) ───────────────────────────────
-    //
-    // WHY: "opaque_count >= 16" only knows whether ANYTHING rendered. The
-    // failure this smoke actually has to catch is a view-convention
-    // mismatch, and that family has a partial form: ad28ce94's own commit
-    // message describes the pre-hotfix bug as "we accidentally render
-    // only the outlier tail behind the camera". A handful of tail splats
-    // in a corner clears `>= 16` easily. So assert the SHAPE too.
-    //
-    // The fixture is 1024 splats on a Fibonacci sphere, centred, viewed
-    // down its own axis at 60° FOV with a 1.5× pull-back — it must
-    // project to a disc that is centred and roughly as wide as it is
-    // tall. Measured 2026-09-23 (macOS/Metal, Dawn): coverage 15.23%,
-    // centroid (127.6, 127.7), bbox 112 × 112. The bands below are wide
-    // enough to survive rasteriser and LOD-knob drift and still two
-    // orders of magnitude away from "a blob in the corner".
-    {
-        const double cx_px = static_cast<double>(sum_x) / opaque_count;
-        const double cy_px = static_cast<double>(sum_y) / opaque_count;
-        const std::uint32_t bbox_w = max_x - min_x + 1;
-        const std::uint32_t bbox_h = max_y - min_y + 1;
-        const double img_cx = 0.5 * (kWidth  - 1);
-        const double img_cy = 0.5 * (kHeight - 1);
-        std::printf("silhouette: centroid=(%.1f, %.1f) bbox=%ux%u "
-                    "coverage=%.2f%%\n",
-                    cx_px, cy_px, bbox_w, bbox_h, opaque_pct);
-
-        constexpr double kCentroidTolPx = 16.0;
-        constexpr double kCoverageMinPct = 4.0;
-        constexpr double kCoverageMaxPct = 60.0;
-        constexpr double kAspectTol = 0.25;   // |w-h| / max(w,h)
-
-        bool shape_ok = true;
-        if (std::fabs(cx_px - img_cx) > kCentroidTolPx ||
-            std::fabs(cy_px - img_cy) > kCentroidTolPx) {
-            std::fprintf(stderr,
-                "FAIL: rendered centroid (%.1f, %.1f) is more than %.0f px "
-                "from the image centre (%.1f, %.1f) — the scene is centred, "
-                "so this means the camera/view convention is wrong or only "
-                "part of the cloud survived the frustum cull\n",
-                cx_px, cy_px, kCentroidTolPx, img_cx, img_cy);
-            shape_ok = false;
-        }
-        if (opaque_pct < kCoverageMinPct || opaque_pct > kCoverageMaxPct) {
-            std::fprintf(stderr,
-                "FAIL: coverage %.2f%% outside [%.1f%%, %.1f%%] — a centred "
-                "sphere at this FOV should fill roughly 15%% of the frame\n",
-                opaque_pct, kCoverageMinPct, kCoverageMaxPct);
-            shape_ok = false;
-        }
-        const double bw = static_cast<double>(bbox_w);
-        const double bh = static_cast<double>(bbox_h);
-        const double aspect_err = std::fabs(bw - bh) / (bw > bh ? bw : bh);
-        if (aspect_err > kAspectTol) {
-            std::fprintf(stderr,
-                "FAIL: opaque bbox %ux%u is not roughly square "
-                "(|w-h|/max = %.3f > %.3f) — a sphere must project to a "
-                "disc\n", bbox_w, bbox_h, aspect_err, kAspectTol);
-            shape_ok = false;
-        }
-        if (!shape_ok) return EXIT_FAILURE;
-        std::printf("silhouette judge OK — centred disc\n");
-    }
-
-    // SH-1 dominance check: camera is at world (0, 0, -distance) looking
-    // along +z. project_visible computes viewdir = normalize(mean -
-    // camera_position). The visible side of the sphere has mean.z < 0
-    // (closer to camera) so mean - camera ≈ (0,0, mean.z + distance). For
-    // points near the +z hemisphere of the sphere, viewdir.z is positive
-    // → b1c1 (blue) basis dominates. For points on the front hemisphere
-    // facing the camera (−z side of sphere), viewdir is closer to (0,0,
-    // distance), making viewdir.z LARGER positive → BLUE strongest. So
-    // the rendered image should have B as the dominant channel.
-    if (use_synth && synth_with_sh1) {
-        if (sum_b <= sum_r || sum_b <= sum_g) {
-            std::fprintf(stderr,
-                "FAIL: SH-1 expected blue-dominant (R=%llu G=%llu B=%llu)\n",
-                static_cast<unsigned long long>(sum_r),
-                static_cast<unsigned long long>(sum_g),
-                static_cast<unsigned long long>(sum_b));
-            return EXIT_FAILURE;
-        }
-        std::printf("SH-1 dominance check OK: B=%llu > R=%llu, G=%llu\n",
-                    static_cast<unsigned long long>(sum_b),
-                    static_cast<unsigned long long>(sum_r),
-                    static_cast<unsigned long long>(sum_g));
-    }
-
+    if (!ok) return EXIT_FAILURE;
     std::printf("PASS\n");
     return EXIT_SUCCESS;
 }

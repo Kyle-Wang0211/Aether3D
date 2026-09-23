@@ -738,6 +738,35 @@ public:
             }
         }
     }
+    // Phase 6.4f.9 — drop every entry, strong and weak.
+    //
+    // MUST be called before the GPUDevice these buffers belong to is
+    // destroyed; wired to dawn_singleton_add_teardown_hook() in
+    // aether_scene_renderer_create so it runs at refcount-zero with the
+    // device still alive. Without it, `lru_`'s strong refs outlive the
+    // device and `SplatData::device` dangles — reachable both at process
+    // exit (~SplatDataCache → ~SplatData → destroy_buffer on freed
+    // memory) and at runtime (next renderer recreates the device, the
+    // cache hit hands its stale handle ids to a DIFFERENT device, which
+    // has since reissued those ids to unrelated buffers).
+    //
+    // Cost: the strong LRU cannot survive a window with zero live
+    // renderers, so a Flutter feed that unmounts every card and remounts
+    // re-uploads. That is the documented intent of releasing the device
+    // in the first place — the buffers die with it either way; until now
+    // they just died incorrectly.
+    void clear() {
+        std::list<std::pair<std::string, std::shared_ptr<SplatData>>> dying;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            dying.swap(lru_);
+            lru_iter_.clear();
+            entries_.clear();
+        }
+        // `dying` unwinds here, outside mu_: ~SplatData reaches into the
+        // GPU device, never back into this cache, but keeping the mutex a
+        // leaf lock costs nothing and removes the question.
+    }
     static SplatDataCache& instance() {
         static SplatDataCache s;
         return s;
@@ -1468,6 +1497,18 @@ extern "C" AetherSceneRenderer* aether_scene_renderer_create(
         ::aether::pocketworld::dawn_singleton_release();
         return nullptr;
     }
+
+    // Phase 6.4f.9 — the SplatDataCache pins GPU buffers owned by THIS
+    // device in a process-lifetime static, but the device only lives as
+    // long as the renderer refcount. Teach the singleton to evict the
+    // cache before it tears the device down. Registered here (after the
+    // first successful acquire, before any release can happen) and
+    // idempotent, so every later create is a no-op.
+    static std::once_flag splat_cache_teardown_once;
+    std::call_once(splat_cache_teardown_once, [] {
+        ::aether::pocketworld::dawn_singleton_add_teardown_hook(
+            [] { SplatDataCache::instance().clear(); });
+    });
 
     auto* r = new AetherSceneRenderer();
     r->device = device;
