@@ -13,6 +13,7 @@ struct ChunkerConfig {
   int numChunkerThreads = 1;         // chunker_countsort_laszip.cpp:50
   int numFlushThreads = 1;           // chunker_countsort_laszip.cpp:51
   int64_t backlogWatermarkMB = 2000; // chunker_countsort_laszip.cpp:906
+  int64_t maxPointsPerChunkCap = 0;  // D4; 0 = upstream formula only
 };
 
 // What upstream writes to <chunkdir>/chunks/metadata.json (writeMetadata,

@@ -1,7 +1,7 @@
 // Command-line driver for measurements and cross-checks (not a pass/fail test).
 //
 //   pwlod_build_cli <input.ply|input.las> <outdir> [--chunkdir D] [--threads N]
-//                   [--backlog-mb M] [--ring-mb M] [--budget-mb M] [--name S]
+//                   [--backlog-mb M] [--ring-mb M|--ring-bytes B] [--budget-mb M] [--chunk-cap N] [--name S]
 //                   [--virtual-las]      (PLY -> in-memory ply2las.py values)
 //
 // .las inputs go through the TEST-ONLY LasSource so the port sees exactly what
@@ -33,8 +33,10 @@ int main(int argc, char** argv) {
     if (a == "--chunkdir") o.chunkDir = next();
     else if (a == "--threads") o.numThreads = std::atoi(next().c_str());
     else if (a == "--backlog-mb") o.chunkBacklogMB = std::atoll(next().c_str());
-    else if (a == "--ring-mb") o.writerRingMB = std::atoll(next().c_str());
+    else if (a == "--ring-mb") o.writerRingBytes = std::atoll(next().c_str()) << 20;
+    else if (a == "--ring-bytes") o.writerRingBytes = std::atoll(next().c_str());
     else if (a == "--budget-mb") budget = std::atoll(next().c_str());
+    else if (a == "--chunk-cap") o.maxPointsPerChunkCap = std::atoll(next().c_str());
     else if (a == "--name") o.name = next();
     else if (a == "--virtual-las") virtualLas = true;
     else {

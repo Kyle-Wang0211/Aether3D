@@ -600,7 +600,9 @@ bool doChunking(const PointSource& source, const string& targetDir, Vector3 min,
   Chunker chunker(source, config, error);
 
   int64_t tmp = state.pointsTotal / 20;
-  chunker.maxPointsPerChunk = int(std::min(tmp, int64_t(10'000'000)));
+  int64_t maxPointsPerChunk = std::min(tmp, int64_t(10'000'000));
+  if (config.maxPointsPerChunkCap > 0) maxPointsPerChunk = std::min(maxPointsPerChunk, config.maxPointsPerChunkCap);  // D4
+  chunker.maxPointsPerChunk = int(maxPointsPerChunk);
 
   if (state.pointsTotal < 100'000'000) {
     chunker.gridSize = 128;

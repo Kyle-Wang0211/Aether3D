@@ -69,7 +69,7 @@ BuildResult build(const PointSource& source, const BuildOptions& options) {
 
   if (options.outDir.empty()) return fail("outDir is empty");
   if (source.numPoints() <= 0) return fail("input has no points");
-  if (options.writerRingMB <= 0 || options.chunkBacklogMB <= 0) return fail("memory knobs must be positive");
+  if (options.writerRingBytes <= 0 || options.chunkBacklogMB <= 0) return fail("memory knobs must be positive");
 
   // getCpuData().numProcessors (unsuck_platform_specific.cpp) -> option (D14)
   int numProcessors = options.numThreads;
@@ -132,6 +132,7 @@ BuildResult build(const PointSource& source, const BuildOptions& options) {
   chunkerConfig.numChunkerThreads = numProcessors;
   chunkerConfig.numFlushThreads = numProcessors;
   chunkerConfig.backlogWatermarkMB = options.chunkBacklogMB;
+  chunkerConfig.maxPointsPerChunkCap = options.maxPointsPerChunkCap;
   pc::ChunkedMetadata chunked;
   if (!pc::doChunking(source, chunkDir, min, max, state, outputAttributes, chunkerConfig, &error, &chunked)) {
     return fail(error.failed() ? error.message : "chunking failed");
@@ -142,7 +143,7 @@ BuildResult build(const PointSource& source, const BuildOptions& options) {
   pc::indexer::IndexingConfig indexingConfig;
   // indexer.cpp:1476 numSampleThreads() / 3 + 2, never more than asked for (D14)
   indexingConfig.numThreads = std::min(numProcessors / 3 + 2, numProcessors);
-  indexingConfig.writerCapacity = options.writerRingMB * 1024 * 1024;
+  indexingConfig.writerCapacity = options.writerRingBytes;
   indexingConfig.keepChunks = options.keepChunks;
   indexingConfig.name = options.name;
   if (!pc::indexer::doIndexingAndMerging(targetDir, chunkDir, chunked, state.pointsTotal, indexingConfig, &error)) {
@@ -175,7 +176,7 @@ BuildOptions optionsForBudget(const std::string& outDir, const std::string& chun
   o.numThreads = numThreads;
   // Placeholder split; replaced by the measured split (DEVIATIONS.md "Memory knobs").
   o.chunkBacklogMB = std::max<int64_t>(16, memoryBudgetMB / 8);
-  o.writerRingMB = std::max<int64_t>(16, memoryBudgetMB / 16);
+  o.writerRingBytes = std::max<int64_t>(16, memoryBudgetMB / 16) << 20;
   return o;
 }
 

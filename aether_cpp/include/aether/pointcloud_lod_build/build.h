@@ -45,7 +45,10 @@ struct BuildOptions {
   int numThreads = 0;       // replaces upstream's getCpuData().numProcessors; 0 => hardware_concurrency
   // Memory knobs. Defaults are upstream's desktop constants.
   int64_t chunkBacklogMB = 2000;  // chunker_countsort_laszip.cpp:906 waitUntilMemoryBelow(2'000)
-  int64_t writerRingMB = 1024;    // Writer.h:26 capacity = 1 GiB
+  int64_t writerRingBytes = int64_t(1) << 30;  // Writer.h:26 capacity = 1 GiB
+  // Upper bound on points per chunk; 0 keeps upstream's min(N / 20, 10'000'000)
+  // (chunker_countsort_laszip.cpp:1390-1391). Indexing memory scales with it.
+  int64_t maxPointsPerChunkCap = 0;
   bool keepChunks = false;        // upstream --keep-chunks
 };
 
