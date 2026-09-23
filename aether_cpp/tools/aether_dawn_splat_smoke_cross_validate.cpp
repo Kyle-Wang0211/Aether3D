@@ -201,6 +201,13 @@ int main(int /*argc*/, char* argv[]) {
         return 1;
     }
 
+    // A recorded device error means every readback above is Dawn's
+    // zero-fill, not the kernels' output. Check BEFORE asserting.
+    if (aether::tools::dawn_smoke_check_device_error(
+            "aether_dawn_splat_smoke_cross_validate")) {
+        return 1;
+    }
+
     // ─── Compare pixel-by-pixel ────────────────────────────────────────
     int max_dr = 0, max_dg = 0, max_db = 0, max_da = 0;
     uint64_t sum_diff = 0;

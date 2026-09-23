@@ -146,6 +146,13 @@ int main(int /*argc*/, char* argv[]) {
                             /*vertex_count=*/6 * kNumSplats,
                             /*instance_count=*/1);
 
+    // A recorded device error means every readback below is Dawn's
+    // zero-fill, not the kernel's output. Check BEFORE asserting.
+    if (aether::tools::dawn_smoke_check_device_error(
+            "aether_dawn_splat_smoke_render")) {
+        return EXIT_FAILURE;
+    }
+
     // ─── Readback ─────────────────────────────────────────────────────
     auto pixels = h.readback_texture(target, kImgW, kImgH, kBpp);
     if (pixels.size() != static_cast<size_t>(kImgW) * kImgH * kBpp) {

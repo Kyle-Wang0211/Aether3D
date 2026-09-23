@@ -40,6 +40,8 @@ namespace {
 using aether::tools::splat_test_data::RenderArgsStorage;
 using aether::tools::splat_test_data::PackedVec3;
 using aether::tools::splat_test_data::make_identity_camera_args;
+using aether::tools::splat_test_data::make_axis_packed_splats;
+using aether::tools::splat_test_data::verify_axis_depths;
 
 constexpr uint32_t kNumSplats = 4;
 
@@ -93,41 +95,20 @@ int main(int /*argc*/, char* argv[]) {
     // (project_forward atomically increments it as splats project).
     RenderArgsStorage u = make_identity_camera_args(kNumSplats, /*num_visible=*/0);
 
-    // 4 splats at z = 2, 4, 6, 8 in front of camera (camera at z=0 looking
-    // down -z means "in front" = positive z in view space).
-    PackedVec3 means[kNumSplats] = {
-        {0.0f, 0.0f, 2.0f},
-        {0.0f, 0.0f, 4.0f},
-        {0.0f, 0.0f, 6.0f},
-        {0.0f, 0.0f, 8.0f},
-    };
-    // Identity quaternion (w=1) per WGSL convention (vec4f with w last).
-    float quats[kNumSplats * 4] = {
-        0.0f, 0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-    };
-    // log_scale = log(0.1) ≈ -2.302585 → small spheres
-    PackedVec3 log_scales[kNumSplats] = {
-        {-2.3f, -2.3f, -2.3f},
-        {-2.3f, -2.3f, -2.3f},
-        {-2.3f, -2.3f, -2.3f},
-        {-2.3f, -2.3f, -2.3f},
-    };
-    // raw_opacities = 1.0 (sigmoid → 0.73)
-    float raw_opacities[kNumSplats] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // 4 splats at z = 2, 4, 6, 8 in front of camera. Phase 6.4f replaced
+    // the five unpacked per-Gaussian buffers with a single packed one —
+    // see make_axis_packed_splats() in aether_dawn_splat_test_data.h.
+    ::aether::splat::PackedSplat packed[kNumSplats];
+    make_axis_packed_splats(packed);
 
     // ─── 4. Upload + alloc buffers (binding order matches WGSL @binding) ─
+    //   0 uniforms                 (read_write storage)
+    //   1 packed_splats            (read-only storage, 16 B/splat)
+    //   2 global_from_compact_gid  (output)
+    //   3 depths                   (output)
     auto buf_uniforms = h.upload(&u, sizeof(u),
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
-    auto buf_means = h.upload(means, sizeof(means),
-        wgpu::BufferUsage::Storage);
-    auto buf_quats = h.upload(quats, sizeof(quats),
-        wgpu::BufferUsage::Storage);
-    auto buf_log_scales = h.upload(log_scales, sizeof(log_scales),
-        wgpu::BufferUsage::Storage);
-    auto buf_opacities = h.upload(raw_opacities, sizeof(raw_opacities),
+    auto buf_packed = h.upload(packed, sizeof(packed),
         wgpu::BufferUsage::Storage);
     // Output buffers (zero-initialized by Dawn).
     constexpr size_t kOutGidBytes = kNumSplats * sizeof(uint32_t);
@@ -146,9 +127,15 @@ int main(int /*argc*/, char* argv[]) {
     // Workgroup size in WGSL = 256, dispatch ceil(4 / 256) = 1.
     const uint32_t wg_x = (kNumSplats + 255) / 256;
     h.dispatch(pipeline,
-               { buf_uniforms, buf_means, buf_quats, buf_log_scales,
-                 buf_opacities, buf_gid, buf_depths },
+               { buf_uniforms, buf_packed, buf_gid, buf_depths },
                wg_x, 1, 1);
+
+    // A recorded device error means every readback below is Dawn's
+    // zero-fill, not the kernel's output. Check BEFORE asserting.
+    if (aether::tools::dawn_smoke_check_device_error(
+            "aether_dawn_splat_smoke_project_forward")) {
+        return EXIT_FAILURE;
+    }
 
     // ─── 6. Readback + verify ─────────────────────────────────────────
     auto staging_uniforms = h.alloc_staging_for_readback(sizeof(u));
@@ -184,16 +171,25 @@ int main(int /*argc*/, char* argv[]) {
         std::cerr << "FAIL: NaN/inf in depths buffer\n";
         return EXIT_FAILURE;
     }
-    // Sanity: with 4 in-frustum splats at positive view-space z, the kernel
-    // should mark all 4 as visible (atomic increments to num_visible).
+    // All 4 fixture splats are in front of the camera and inside the
+    // frustum, so the kernel must compact all 4.
+    //
+    // This used to be a WARN that still returned PASS ("Phase 6.3a goal is
+    // compiles + runs without NaN"). That made the tool unable to fail on
+    // an all-zero readback, which is precisely what it did for the ~4
+    // months the bind group was being rejected: num_visible=0, depths
+    // 0,0,0,0, exit code 0. It is a hard judge now.
     if (out_u.num_visible != kNumSplats) {
-        std::cerr << "WARN: num_visible=" << out_u.num_visible
+        std::cerr << "FAIL: num_visible=" << out_u.num_visible
                   << " (expected " << kNumSplats
-                  << " — kernel may have a frustum / NaN-rejection bug,"
-                  << " OR view-space z convention differs from assumption)\n";
-        // Don't fail — Phase 6.3a goal is "compiles + runs without NaN",
-        // not "renders correctly". MetalSplatter cross-val (Phase 6.5)
-        // catches semantic divergence.
+                  << ") — all four fixture splats are in-frustum at "
+                     "positive view-space z, so this is a frustum / cull / "
+                     "binding bug, or nothing ran at all\n";
+        return EXIT_FAILURE;
+    }
+    if (!verify_axis_depths(depth_arr,
+                            "aether_dawn_splat_smoke_project_forward")) {
+        return EXIT_FAILURE;
     }
 
     std::cout << "PASS\n";

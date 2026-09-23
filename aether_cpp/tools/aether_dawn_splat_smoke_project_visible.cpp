@@ -38,6 +38,7 @@ using aether::tools::splat_test_data::RenderArgsStorage;
 using aether::tools::splat_test_data::PackedVec3;
 using aether::tools::splat_test_data::ProjectedSplat;
 using aether::tools::splat_test_data::make_identity_camera_args;
+using aether::tools::splat_test_data::make_axis_packed_splats;
 
 constexpr uint32_t kNumSplats = 4;
 
@@ -85,46 +86,31 @@ int main(int /*argc*/, char* argv[]) {
     RenderArgsStorage u = make_identity_camera_args(kNumSplats,
                                                      /*num_visible=*/kNumSplats);
 
-    // ─── Per-Gaussian primitive arrays (same layout as project_forward) ─
-    PackedVec3 means[kNumSplats] = {
-        {0.0f, 0.0f, 2.0f},
-        {0.0f, 0.0f, 4.0f},
-        {0.0f, 0.0f, 6.0f},
-        {0.0f, 0.0f, 8.0f},
+    // Phase 6.4f packed input — one 16-byte PackedSplat per Gaussian,
+    // replacing the old means/log_scales/quats/coeffs/opacities buffers.
+    // Single-sourced with project_forward's fixture.
+    ::aether::splat::PackedSplat packed[kNumSplats];
+    make_axis_packed_splats(packed);
+    // sh_degree is 0 for this fixture, so no non-DC coefficients are read.
+    // The binding still has to exist and satisfy minBindingSize.
+    PackedVec3 coeffs_non_dc[kNumSplats] = {
+        {0.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f},
     };
-    PackedVec3 log_scales[kNumSplats] = {
-        {-2.3f, -2.3f, -2.3f},
-        {-2.3f, -2.3f, -2.3f},
-        {-2.3f, -2.3f, -2.3f},
-        {-2.3f, -2.3f, -2.3f},
-    };
-    float quats[kNumSplats * 4] = {
-        0.0f, 0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
-    };
-    // SH degree 0 → 1 PackedVec3 (DC term) per splat. Mid-gray DC.
-    PackedVec3 coeffs[kNumSplats] = {
-        {0.5f, 0.5f, 0.5f},
-        {0.5f, 0.5f, 0.5f},
-        {0.5f, 0.5f, 0.5f},
-        {0.5f, 0.5f, 0.5f},
-    };
-    float raw_opacities[kNumSplats] = {1.0f, 1.0f, 1.0f, 1.0f};
     // global_from_compact_gid: identity mapping (compact[i] → global[i])
     // since we pretend project_forward's output put all 4 splats visible.
     uint32_t gid_map[kNumSplats] = {0, 1, 2, 3};
 
     // ─── Upload buffers in @binding order ──────────────────────────────
+    //   0 uniforms   1 packed_splats   2 coeffs_non_dc
+    //   3 global_from_compact_gid      4 projected (output)
     auto buf_uniforms = h.upload(&u, sizeof(u),
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
-    auto buf_means        = h.upload(means,         sizeof(means),         wgpu::BufferUsage::Storage);
-    auto buf_log_scales   = h.upload(log_scales,    sizeof(log_scales),    wgpu::BufferUsage::Storage);
-    auto buf_quats        = h.upload(quats,         sizeof(quats),         wgpu::BufferUsage::Storage);
-    auto buf_coeffs       = h.upload(coeffs,        sizeof(coeffs),        wgpu::BufferUsage::Storage);
-    auto buf_opacities    = h.upload(raw_opacities, sizeof(raw_opacities), wgpu::BufferUsage::Storage);
-    auto buf_gid          = h.upload(gid_map,       sizeof(gid_map),       wgpu::BufferUsage::Storage);
+    auto buf_packed  = h.upload(packed, sizeof(packed), wgpu::BufferUsage::Storage);
+    auto buf_coeffs  = h.upload(coeffs_non_dc, sizeof(coeffs_non_dc), wgpu::BufferUsage::Storage);
+    auto buf_gid     = h.upload(gid_map, sizeof(gid_map), wgpu::BufferUsage::Storage);
     constexpr size_t kProjectedBytes = kNumSplats * sizeof(ProjectedSplat);
     auto buf_projected = h.alloc(kProjectedBytes,
         wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc);
@@ -137,9 +123,16 @@ int main(int /*argc*/, char* argv[]) {
     }
     const uint32_t wg_x = (kNumSplats + 255) / 256;
     h.dispatch(pipeline,
-               { buf_uniforms, buf_means, buf_log_scales, buf_quats,
-                 buf_coeffs, buf_opacities, buf_gid, buf_projected },
+               { buf_uniforms, buf_packed, buf_coeffs, buf_gid,
+                 buf_projected },
                wg_x, 1, 1);
+
+    // A recorded device error means every readback below is Dawn's
+    // zero-fill, not the kernel's output. Check BEFORE asserting.
+    if (aether::tools::dawn_smoke_check_device_error(
+            "aether_dawn_splat_smoke_project_visible")) {
+        return EXIT_FAILURE;
+    }
 
     // ─── Readback ProjectedSplat[] ────────────────────────────────────
     auto staging = h.alloc_staging_for_readback(kProjectedBytes);
@@ -170,18 +163,40 @@ int main(int /*argc*/, char* argv[]) {
         std::cerr << "FAIL: NaN/Inf in ProjectedSplat output\n";
         return EXIT_FAILURE;
     }
-    // Sanity bounds check — projection should land all 4 splats inside
-    // a 256×256 image (since means are at z=2..8 along the optical axis,
-    // they project to image center at (128,128) regardless of depth).
+    // All 4 fixture splats sit on the optical axis at z = 2..8, so each
+    // must project to the image centre (128, 128) with a non-zero alpha
+    // and a positive conic.
+    //
+    // This used to be a WARN that still returned PASS. An all-zero
+    // readback — what a rejected bind group leaves behind — satisfies
+    // "xy inside [-1, 257]" trivially, so the old form could not fail on
+    // the very thing that was wrong with this tool for ~4 months. Hard
+    // judge now.
+    bool proj_ok = true;
     for (uint32_t i = 0; i < kNumSplats; ++i) {
-        if (ps[i].xy_x < -1.0f || ps[i].xy_x > 257.0f ||
-            ps[i].xy_y < -1.0f || ps[i].xy_y > 257.0f) {
-            std::cerr << "WARN: splat " << i << " projected outside image: ("
-                      << ps[i].xy_x << "," << ps[i].xy_y
-                      << ") — math may differ from assumption, MetalSplatter "
-                      << "cross-val (Phase 6.5) catches semantic divergence\n";
+        const float cx = 0.5f * static_cast<float>(u.img_size[0]);
+        const float cy = 0.5f * static_cast<float>(u.img_size[1]);
+        if (std::fabs(ps[i].xy_x - cx) > 1.0f ||
+            std::fabs(ps[i].xy_y - cy) > 1.0f) {
+            std::cerr << "FAIL: splat " << i << " projected to ("
+                      << ps[i].xy_x << ", " << ps[i].xy_y
+                      << "), expected the optical-axis centre ("
+                      << cx << ", " << cy << ")\n";
+            proj_ok = false;
+        }
+        if (!(ps[i].color_a > 0.0f)) {
+            std::cerr << "FAIL: splat " << i << " has alpha "
+                      << ps[i].color_a << " — nothing was projected\n";
+            proj_ok = false;
+        }
+        if (!(ps[i].conic_x > 0.0f) || !(ps[i].conic_z > 0.0f)) {
+            std::cerr << "FAIL: splat " << i << " conic ("
+                      << ps[i].conic_x << ", " << ps[i].conic_y << ", "
+                      << ps[i].conic_z << ") is not positive-definite\n";
+            proj_ok = false;
         }
     }
+    if (!proj_ok) return EXIT_FAILURE;
 
     std::cout << "PASS\n";
     return EXIT_SUCCESS;

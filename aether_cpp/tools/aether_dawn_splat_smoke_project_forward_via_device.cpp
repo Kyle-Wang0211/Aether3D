@@ -32,6 +32,7 @@
 using aether::tools::splat_test_data::RenderArgsStorage;
 using aether::tools::splat_test_data::PackedVec3;
 using aether::tools::splat_test_data::make_identity_camera_args;
+using aether::tools::splat_test_data::make_axis_packed_splats;
 
 int main() {
     using namespace aether::render;
@@ -46,30 +47,15 @@ int main() {
     constexpr std::uint32_t kNumSplats = 4;
     RenderArgsStorage uniforms = make_identity_camera_args(kNumSplats);
 
-    PackedVec3 means[kNumSplats] = {
-        {0.0f, 0.0f, 2.0f},
-        {0.0f, 0.0f, 4.0f},
-        {0.0f, 0.0f, 6.0f},
-        {0.0f, 0.0f, 8.0f},
-    };
-
-    // Buffer setup. project_forward.wgsl bindings (7 total, all storage):
-    //   0 uniforms       (read_write — atomicAdd to num_visible)
-    //   1 means          (PackedVec3 array)
-    //   2 quats          (vec4 array)
-    //   3 log_scales     (PackedVec3 array)
-    //   4 raw_opacities  (f32 array)
-    //   5 global_from_compact_gid (output)
-    //   6 depths         (output)
-
-    PackedVec3 log_scales[kNumSplats] = {{0,0,0},{0,0,0},{0,0,0},{0,0,0}};
-    float quats[kNumSplats][4] = {
-        {1.0f, 0.0f, 0.0f, 0.0f},
-        {1.0f, 0.0f, 0.0f, 0.0f},
-        {1.0f, 0.0f, 0.0f, 0.0f},
-        {1.0f, 0.0f, 0.0f, 0.0f},
-    };
-    float raw_opacities[kNumSplats] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Buffer setup. project_forward.wgsl bindings (4 total, all storage)
+    // since Phase 6.4f collapsed the five unpacked per-Gaussian buffers
+    // into one packed array:
+    //   0 uniforms                 (read_write — atomicAdd to num_visible)
+    //   1 packed_splats            (array<vec4<u32>>, 16 B/splat)
+    //   2 global_from_compact_gid  (output)
+    //   3 depths                   (output)
+    ::aether::splat::PackedSplat packed[kNumSplats];
+    make_axis_packed_splats(packed);
 
     auto make_storage = [&](std::size_t bytes, const char* label) {
         GPUBufferDesc desc{};
@@ -91,24 +77,18 @@ int main() {
     // The DawnGPUDevice's create_buffer maps kStorage → CopySrc|CopyDst|Storage,
     // so update_buffer (queue.WriteBuffer) is allowed for input buffers.
     GPUBufferHandle h_uniforms = make_storage(sizeof(uniforms), "uniforms");
-    GPUBufferHandle h_means    = make_storage(sizeof(means),    "means");
-    GPUBufferHandle h_quats    = make_storage(sizeof(quats),    "quats");
-    GPUBufferHandle h_logsc    = make_storage(sizeof(log_scales), "log_scales");
-    GPUBufferHandle h_opac     = make_storage(sizeof(raw_opacities), "raw_opacities");
+    GPUBufferHandle h_packed   = make_storage(sizeof(packed),   "packed_splats");
     GPUBufferHandle h_gid_out  = make_storage(kNumSplats * sizeof(std::uint32_t), "gid_out");
     GPUBufferHandle h_depth_out= make_storage(kNumSplats * sizeof(float),         "depth_out");
 
-    if (!h_uniforms.valid() || !h_means.valid() || !h_gid_out.valid() ||
+    if (!h_uniforms.valid() || !h_packed.valid() || !h_gid_out.valid() ||
         !h_depth_out.valid()) {
         std::fprintf(stderr, "FAIL: create_buffer\n");
         return EXIT_FAILURE;
     }
 
     device->update_buffer(h_uniforms, &uniforms, 0, sizeof(uniforms));
-    device->update_buffer(h_means,    means,     0, sizeof(means));
-    device->update_buffer(h_quats,    quats,     0, sizeof(quats));
-    device->update_buffer(h_logsc,    log_scales,0, sizeof(log_scales));
-    device->update_buffer(h_opac,     raw_opacities, 0, sizeof(raw_opacities));
+    device->update_buffer(h_packed,   packed,    0, sizeof(packed));
 
     // ─── Shader + pipeline ─────────────────────────────────────────────
     if (!register_wgsl_from_file(*device, "project_forward",
@@ -130,13 +110,10 @@ int main() {
     if (!ce) { std::fprintf(stderr, "FAIL: make_compute_encoder\n"); return EXIT_FAILURE; }
 
     ce->set_pipeline(pipeline);
-    ce->set_buffer(h_uniforms, 0, 0);
-    ce->set_buffer(h_means,    0, 1);
-    ce->set_buffer(h_quats,    0, 2);
-    ce->set_buffer(h_logsc,    0, 3);
-    ce->set_buffer(h_opac,     0, 4);
-    ce->set_buffer(h_gid_out,  0, 5);
-    ce->set_buffer(h_depth_out,0, 6);
+    ce->set_buffer(h_uniforms,  0, 0);
+    ce->set_buffer(h_packed,    0, 1);
+    ce->set_buffer(h_gid_out,   0, 2);
+    ce->set_buffer(h_depth_out, 0, 3);
 
     // workgroup_size(256) → 1 workgroup covers up to 256 splats.
     const std::uint32_t wg_x = (kNumSplats + 255) / 256;
@@ -207,10 +184,7 @@ int main() {
     device->destroy_compute_pipeline(pipeline);
     device->destroy_shader(shader);
     device->destroy_buffer(h_uniforms);
-    device->destroy_buffer(h_means);
-    device->destroy_buffer(h_quats);
-    device->destroy_buffer(h_logsc);
-    device->destroy_buffer(h_opac);
+    device->destroy_buffer(h_packed);
     device->destroy_buffer(h_gid_out);
     device->destroy_buffer(h_depth_out);
     std::printf("teardown clean (memory_stats.buffer_count = %u)\n",

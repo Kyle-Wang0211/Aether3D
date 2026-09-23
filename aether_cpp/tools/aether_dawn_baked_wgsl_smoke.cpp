@@ -35,6 +35,7 @@
 using aether::tools::splat_test_data::RenderArgsStorage;
 using aether::tools::splat_test_data::PackedVec3;
 using aether::tools::splat_test_data::make_identity_camera_args;
+using aether::tools::splat_test_data::make_axis_packed_splats;
 
 namespace {
 constexpr std::uint32_t kNumSplats = 4;
@@ -46,18 +47,10 @@ std::vector<float> run_project_forward(aether::render::GPUDevice& device,
     using namespace aether::render;
 
     RenderArgsStorage uniforms = make_identity_camera_args(kNumSplats);
-    PackedVec3 means[kNumSplats] = {
-        {0.0f, 0.0f, 2.0f},
-        {0.0f, 0.0f, 4.0f},
-        {0.0f, 0.0f, 6.0f},
-        {0.0f, 0.0f, 8.0f},
-    };
-    PackedVec3 log_scales[kNumSplats] = {{0,0,0},{0,0,0},{0,0,0},{0,0,0}};
-    float quats[kNumSplats][4] = {
-        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
-        {1.0f, 0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 0.0f},
-    };
-    float raw_opacities[kNumSplats] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Phase 6.4f packed input — bindings are now
+    //   0 uniforms  1 packed_splats  2 global_from_compact_gid  3 depths
+    ::aether::splat::PackedSplat packed[kNumSplats];
+    make_axis_packed_splats(packed);
 
     auto make_storage = [&](std::size_t bytes, const char* label) {
         GPUBufferDesc desc{};
@@ -77,18 +70,12 @@ std::vector<float> run_project_forward(aether::render::GPUDevice& device,
     };
 
     GPUBufferHandle h_uniforms = make_storage(sizeof(uniforms), "uniforms");
-    GPUBufferHandle h_means    = make_storage(sizeof(means),    "means");
-    GPUBufferHandle h_quats    = make_storage(sizeof(quats),    "quats");
-    GPUBufferHandle h_logsc    = make_storage(sizeof(log_scales), "log_scales");
-    GPUBufferHandle h_opac     = make_storage(sizeof(raw_opacities), "opac");
+    GPUBufferHandle h_packed   = make_storage(sizeof(packed),   "packed_splats");
     GPUBufferHandle h_gid_out  = make_storage(kNumSplats * sizeof(std::uint32_t), "gid");
     GPUBufferHandle h_depth_out= make_storage(kNumSplats * sizeof(float), "depth");
 
     device.update_buffer(h_uniforms, &uniforms, 0, sizeof(uniforms));
-    device.update_buffer(h_means,    means,     0, sizeof(means));
-    device.update_buffer(h_quats,    quats,     0, sizeof(quats));
-    device.update_buffer(h_logsc,    log_scales,0, sizeof(log_scales));
-    device.update_buffer(h_opac,     raw_opacities, 0, sizeof(raw_opacities));
+    device.update_buffer(h_packed,   packed,    0, sizeof(packed));
 
     GPUShaderHandle shader = device.load_shader(shader_name, GPUShaderStage::kCompute);
     if (!shader.valid()) return {};
@@ -98,13 +85,10 @@ std::vector<float> run_project_forward(aether::render::GPUDevice& device,
     auto cb = device.create_command_buffer();
     auto* ce = cb->make_compute_encoder();
     ce->set_pipeline(pipeline);
-    ce->set_buffer(h_uniforms, 0, 0);
-    ce->set_buffer(h_means,    0, 1);
-    ce->set_buffer(h_quats,    0, 2);
-    ce->set_buffer(h_logsc,    0, 3);
-    ce->set_buffer(h_opac,     0, 4);
-    ce->set_buffer(h_gid_out,  0, 5);
-    ce->set_buffer(h_depth_out,0, 6);
+    ce->set_buffer(h_uniforms,  0, 0);
+    ce->set_buffer(h_packed,    0, 1);
+    ce->set_buffer(h_gid_out,   0, 2);
+    ce->set_buffer(h_depth_out, 0, 3);
     ce->dispatch((kNumSplats + 255) / 256, 1, 1, 256, 1, 1);
     ce->end_encoding();
     cb->commit();
@@ -126,10 +110,7 @@ std::vector<float> run_project_forward(aether::render::GPUDevice& device,
     device.destroy_shader(shader);
     device.destroy_buffer(h_depth_out);
     device.destroy_buffer(h_gid_out);
-    device.destroy_buffer(h_opac);
-    device.destroy_buffer(h_logsc);
-    device.destroy_buffer(h_quats);
-    device.destroy_buffer(h_means);
+    device.destroy_buffer(h_packed);
     device.destroy_buffer(h_uniforms);
     return result;
 }

@@ -17,16 +17,43 @@
 // the WGSL name stays as Brush wrote it.
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+
+#include "aether/splat/packed_splats.h"
 
 namespace aether {
 namespace tools {
 namespace splat_test_data {
 
-// ─── RenderArgsStorage — WGSL `RenderUniforms` (144 bytes) ──────────────
+// ─── RenderArgsStorage — WGSL `RenderUniforms` (160 bytes) ──────────────
+//
+// 2026-09-23: this mirror was 144 bytes and had been WRONG since Phase
+// 6.4f. project_forward.wgsl / project_visible.wgsl grew three trailing
+// f32 (lod_extent_min, splat_scale_multiplier, max_3d_scale) and the
+// struct went to 160; the production renderer's own copy in
+// scene_iosurface_renderer.cpp was updated, this one was not. Dawn
+// therefore rejected the bind group of every smoke that binds it to
+// those two shaders:
+//
+//   Binding size (144) of [Buffer "uniforms"] is smaller than the
+//   minimum binding size (160).
+//
+// aether_dawn_splat_smoke_project_forward_via_device and
+// aether_dawn_baked_wgsl_smoke aborted on it; the two harness-path
+// tools kept printing PASS on an all-zero readback (see
+// dawn_smoke_check_device_error() in dawn_kernel_harness.h, which is
+// the guard that now stops that).
+//
+// splat_render.wgsl's own RenderUniforms is still 144. That is fine:
+// WebGPU requires binding size >= minBindingSize, so a 160-byte buffer
+// satisfies a 144-byte minimum. The four splat_render smokes keep
+// working unchanged.
+//
 // Layout offsets per WGSL storage rules:
 //   0..64    viewmat (mat4x4f)
 //   64..72   focal (vec2f)
@@ -39,6 +66,10 @@ namespace splat_test_data {
 //   120..124 total_splats (u32)
 //   124..128 max_intersects (u32)
 //   128..144 background (vec4f, 16-aligned)
+//   144..148 lod_extent_min (f32)          ← Phase 6.4f.4.b
+//   148..152 splat_scale_multiplier (f32)  ← Phase 6.4f hotfix
+//   152..156 max_3d_scale (f32)            ← Phase 6.4f hotfix
+//   156..160 tail padding to the struct's 16-byte alignment
 struct RenderArgsStorage {
     float viewmat[16];
     float focal[2];
@@ -51,9 +82,47 @@ struct RenderArgsStorage {
     uint32_t total_splats;
     uint32_t max_intersects;
     float background[4];
+    // 0 disables the projected-extent LOD cull.
+    float lod_extent_min;
+    // Global display-side scale tweak. The shader itself substitutes 1.0
+    // when this is <= 0, so zero-init is safe, but set it explicitly.
+    float splat_scale_multiplier;
+    // 0 disables the "drop splats bigger than this in 3D" filter.
+    float max_3d_scale;
+    // Explicit tail padding. WGSL rounds the struct up to its 16-byte
+    // alignment (mat4x4f / vec4f members); naming the padding keeps
+    // sizeof() from depending on the C++ compiler agreeing with that.
+    float _pad_to_160;
 };
-static_assert(sizeof(RenderArgsStorage) == 144,
-              "RenderArgsStorage byte layout must match WGSL RenderUniforms");
+static_assert(sizeof(RenderArgsStorage) == 160,
+              "RenderArgsStorage byte layout must match WGSL RenderUniforms "
+              "(project_forward.wgsl / project_visible.wgsl)");
+// Per-field offsets, so a REORDER is caught at compile time too — the
+// size assert alone would happily accept two swapped f32.
+static_assert(offsetof(RenderArgsStorage, viewmat)                ==   0, "");
+static_assert(offsetof(RenderArgsStorage, focal)                  ==  64, "");
+static_assert(offsetof(RenderArgsStorage, img_size)               ==  72, "");
+static_assert(offsetof(RenderArgsStorage, tile_bounds)            ==  80, "");
+static_assert(offsetof(RenderArgsStorage, pixel_center)           ==  88, "");
+static_assert(offsetof(RenderArgsStorage, camera_position)        ==  96, "");
+static_assert(offsetof(RenderArgsStorage, sh_degree)              == 112, "");
+static_assert(offsetof(RenderArgsStorage, num_visible)            == 116, "");
+static_assert(offsetof(RenderArgsStorage, total_splats)           == 120, "");
+static_assert(offsetof(RenderArgsStorage, max_intersects)         == 124, "");
+static_assert(offsetof(RenderArgsStorage, background)             == 128, "");
+static_assert(offsetof(RenderArgsStorage, lod_extent_min)         == 144, "");
+static_assert(offsetof(RenderArgsStorage, splat_scale_multiplier) == 148, "");
+static_assert(offsetof(RenderArgsStorage, max_3d_scale)           == 152, "");
+//
+// NOTE on what these asserts can and cannot do. They pin the C++ side
+// only. Nothing in C++ can see the WGSL, so the guard for "the SHADER
+// grew a field" is not a static_assert — it is Dawn's own
+// minBindingSize, which is derived from the WGSL at pipeline creation
+// and is exactly what produced the message quoted above. That check is
+// free and always current; it only ever failed to protect us because
+// the harness recorded the error instead of failing the test. Calling
+// dawn_smoke_check_device_error() is therefore the load-bearing half of
+// this fix, not these asserts.
 
 // ─── PackedVec3 — WGSL same name (12 bytes, no padding) ─────────────────
 struct PackedVec3 {
@@ -91,7 +160,84 @@ inline RenderArgsStorage make_identity_camera_args(uint32_t total_splats,
     u.total_splats = total_splats;
     u.max_intersects = 1024;
     u.background[3] = 1.0f;
+    u.lod_extent_min = 0.0f;          // LOD cull disabled
+    u.splat_scale_multiplier = 1.0f;  // no display-side rescale
+    u.max_3d_scale = 0.0f;            // 3D-scale filter disabled
+    u._pad_to_160 = 0.0f;
     return u;
+}
+
+// ─── Axis fixture for project_forward / project_visible ────────────────
+//
+// WHY THIS EXISTS. Both kernels used to take five unpacked per-Gaussian
+// buffers (means, quats, log_scales, coeffs, raw_opacities). Phase 6.4f
+// replaced all of them with ONE `array<vec4<u32>> packed_splats` — the
+// 16-byte PackedSplat from aether/splat/packed_splats.h — and the smoke
+// tools were never converted. Measured 2026-09-23: they bound 7-8
+// buffers to a 4- or 5-binding layout and Dawn refused every dispatch
+//   In entries[4], binding index 4 not present in the bind group layout.
+// on top of the separate 144-vs-160 uniform-size refusal.
+//
+// Single-sourcing the fixture here means the next shader-side change
+// breaks one function, not four copies. The packing itself comes from
+// the production encoder, so this fixture cannot drift from what the
+// renderer uploads.
+//
+// The four splats sit on the optical axis at view-space z = 2, 4, 6, 8
+// (identity view matrix ⇒ world z == view z). Those are exact in the
+// float16 centre encoding, so `depths` must read back exactly.
+
+constexpr uint32_t kAxisSplats = 4;
+
+/// View-space depths the four axis splats must produce, in ascending
+/// order. project_forward compacts with an atomicAdd, so the output
+/// order is not deterministic — compare as a sorted multiset.
+inline const float* axis_expected_depths() {
+    static const float d[kAxisSplats] = {2.0f, 4.0f, 6.0f, 8.0f};
+    return d;
+}
+
+/// Fill `out` with the packed form of the four axis splats.
+inline void make_axis_packed_splats(
+        ::aether::splat::PackedSplat out[kAxisSplats]) {
+    for (uint32_t i = 0; i < kAxisSplats; ++i) {
+        ::aether::splat::GaussianParams g{};
+        g.position[0] = 0.0f;
+        g.position[1] = 0.0f;
+        g.position[2] = axis_expected_depths()[i];
+        g.color[0] = g.color[1] = g.color[2] = 0.5f;   // mid-gray DC
+        g.opacity = 0.731f;                            // sigmoid(1.0)
+        g.scale[0] = g.scale[1] = g.scale[2] = 0.1f;   // exp(-2.3)
+        g.rotation[0] = 1.0f;                          // identity (w,x,y,z)
+        g.rotation[1] = g.rotation[2] = g.rotation[3] = 0.0f;
+        // sh1 stays zero — these fixtures run at sh_degree 0.
+        out[i] = ::aether::splat::pack_gaussian(g);
+    }
+}
+
+/// True iff `got` (length kAxisSplats, any order) is the expected depth
+/// multiset. Prints the comparison; `label` names the calling tool.
+inline bool verify_axis_depths(const float* got, const char* label) {
+    float sorted[kAxisSplats];
+    for (uint32_t i = 0; i < kAxisSplats; ++i) sorted[i] = got[i];
+    std::sort(sorted, sorted + kAxisSplats);
+    const float* want = axis_expected_depths();
+    bool ok = true;
+    std::printf("  depths (sorted): ");
+    for (uint32_t i = 0; i < kAxisSplats; ++i) {
+        std::printf("%g%s", static_cast<double>(sorted[i]),
+                    i + 1 < kAxisSplats ? ", " : "");
+        if (std::fabs(sorted[i] - want[i]) > 1e-3f) ok = false;
+    }
+    std::printf("  want: 2, 4, 6, 8\n");
+    if (!ok) {
+        std::fprintf(stderr,
+            "FAIL [%s]: view-space depths are not {2, 4, 6, 8} — the "
+            "kernel did not project the fixture (an all-zero readback "
+            "lands here too, which is exactly the silent PASS this "
+            "replaces)\n", label);
+    }
+    return ok;
 }
 
 // ─── §2.2c coverage probe — one distinct splat per image quadrant ───────

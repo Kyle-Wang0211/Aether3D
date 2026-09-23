@@ -458,7 +458,12 @@ set_source_files_properties(tools/dawn_histogram_sink.cpp
     add_library(aether_dawn_kernel_harness STATIC tools/dawn_kernel_harness.cpp
                                                   tools/dawn_histogram_sink.cpp)
     target_include_directories(aether_dawn_kernel_harness
+        # `include` is PUBLIC so the splat smoke fixtures can single-source
+        # the packed-splat encoder (aether/splat/packed_splats.h) that the
+        # project_forward / project_visible kernels actually consume,
+        # instead of each tool hand-rolling a stale unpacked layout.
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools
+               ${CMAKE_CURRENT_SOURCE_DIR}/include
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/official_pipeline/src)
     target_compile_definitions(aether_dawn_kernel_harness PRIVATE
         AETHER_GPU_TIMESTAMPS_ENV_SELFTEST=1

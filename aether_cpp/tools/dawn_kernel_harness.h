@@ -31,6 +31,7 @@
 #include <webgpu/webgpu_cpp.h>
 
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -436,6 +437,39 @@ private:
     wgpu::Buffer ts_readback_;   // MapRead | CopyDst
     HostBreakdown hb_;           // [HOST-BD] accumulated while ts_enabled_
 };
+
+// ─── Fail-loud guard for smoke binaries (2026-09-23) ───────────────────
+//
+// take_device_error() above RECORDS Dawn's validation / OOM / internal
+// errors instead of aborting, because this harness is linked into the
+// shipping binary and an abort there would kill the user's app. The
+// cost of that choice is that an offline smoke test which never asks
+// gets a zero-filled readback and happily asserts on it.
+//
+// That is not hypothetical. On 2026-09-23 both
+// aether_dawn_splat_smoke_project_forward and ..._project_visible
+// printed PASS with rc=0 while Dawn had rejected their bind group three
+// times over ("Binding size (144) ... minimum binding size (160)") and
+// every value they read back was zero.
+//
+// Any smoke binary must call this between the last dispatch and the
+// first assertion on a readback. It is a no-op for shipping callers —
+// they simply never call it.
+//
+// It is also the ONLY guard that tracks the WGSL: minBindingSize,
+// binding counts and buffer usages are all derived from the shader by
+// Dawn at pipeline-creation time, so this catches shader-side drift
+// that no C++ static_assert can see.
+inline bool dawn_smoke_check_device_error(const char* label) {
+    std::string msg;
+    if (!DawnKernelHarness::take_device_error(&msg)) return false;
+    std::fprintf(stderr,
+        "FAIL [%s]: the GPU device recorded an error — every readback "
+        "after it is meaningless (Dawn zero-fills / skips the work). "
+        "Dawn said: %s\n",
+        label, msg.empty() ? "(no message captured)" : msg.c_str());
+    return true;
+}
 
 }  // namespace tools
 }  // namespace aether
