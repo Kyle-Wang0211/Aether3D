@@ -22,3 +22,40 @@ swift-asn1 (transitive dependency via swift-crypto)
 Copyright (c) 2019-2025 Apple Inc. and the SwiftASN1 project authors
 Licensed under the Apache License, Version 2.0
 https://github.com/apple/swift-asn1
+
+-------------------------------------------------------------------------------
+nlohmann/json v3.11.3 (vendored, aether_cpp/third_party/nlohmann/)
+-------------------------------------------------------------------------------
+Copyright (c) 2013-2022 Niels Lohmann
+Licensed under the MIT License
+https://github.com/nlohmann/json
+Full text: aether_cpp/third_party/nlohmann/LICENSE
+
+-------------------------------------------------------------------------------
+Point-cloud LOD core (aether_cpp/src/pointcloud_lod/)
+-------------------------------------------------------------------------------
+Algorithms and constants in this module are transliterated from the upstreams
+below; no upstream source file is vendored. Each formula is cited to a file and
+line in aether_cpp/src/pointcloud_lod/DEVIATIONS.md, and each licence text is
+kept verbatim in aether_cpp/src/pointcloud_lod/upstream_licenses/ at the pinned
+revision listed in REVISIONS.txt there.
+
+  Potree (octree reader, node selection)
+    Copyright (c) 2011-2020, Markus Schütz
+    BSD 2-Clause License
+    https://github.com/potree/potree
+
+  PotreeConverter (octree on-disk format)
+    Copyright 2020 Markus Schütz
+    BSD 2-Clause License
+    https://github.com/potree/PotreeConverter
+
+  three.js (view-frustum extraction and box test)
+    Copyright © 2010-2026 three.js authors
+    MIT License
+    https://github.com/mrdoob/three.js
+
+  CesiumJS (multiplicative screen-space-error controller)
+    Copyright 2011-2026 CesiumJS Contributors
+    Licensed under the Apache License, Version 2.0
+    https://github.com/CesiumGS/cesium
