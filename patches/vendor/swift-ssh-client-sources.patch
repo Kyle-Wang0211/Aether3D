@@ -1,0 +1,296 @@
+diff --git a/Sources/SSHClient/Internal/SSH/IOSSHConnection.swift b/Sources/SSHClient/Internal/SSH/IOSSHConnection.swift
+index 1d42c33..0159ccf 100644
+--- a/Sources/SSHClient/Internal/SSH/IOSSHConnection.swift
++++ b/Sources/SSHClient/Internal/SSH/IOSSHConnection.swift
+@@ -158,22 +158,26 @@ class IOSSHConnection {
+                     }
+                     .map { channel }
+                     .flatMapError { error in
+-                        // we close the created channel and spread the error
+-                        channel
+-                            .close()
++                        Self
++                            .closeIgnoringFailure(channel)
+                             .flatMapThrowing {
+                                 throw error
+                             }
+                     }
+             }
+         channel.whenSuccess { [weak self] channel in
+-            channel.closeFuture.whenComplete { _ in
+-                self?.trigger(.disconnected)
++            channel.closeFuture.whenComplete { result in
++                switch result {
++                case .success:
++                    self?.trigger(.disconnected(nil))
++                case .failure(let error):
++                    self?.trigger(.disconnected(Self.wrapConnectionError(error)))
++                }
+             }
+             self?.trigger(.authenticated(channel))
+         }
+-        channel.whenFailure { [weak self] _ in
+-            self?.trigger(.disconnected)
++        channel.whenFailure { [weak self] error in
++            self?.trigger(.disconnected(Self.wrapConnectionError(error)))
+         }
+     }
+ 
+@@ -213,9 +217,8 @@ class IOSSHConnection {
+                         return createSession.futureResult
+                     }
+                     .flatMapError { error in
+-                        // we close the created channel and spread the error
+-                        channel
+-                            .close()
++                        Self
++                            .closeIgnoringFailure(channel)
+                             .flatMapThrowing {
+                                 throw error
+                             }
+@@ -226,4 +229,36 @@ class IOSSHConnection {
+         }
+         promise.completeWith(result)
+     }
++
++    private static func wrapConnectionError(_ error: Error) -> SSHConnectionError {
++        if let connectionError = error as? SSHConnectionError {
++            return connectionError
++        }
++
++        let nsError = error as NSError
++        let typeName = String(reflecting: type(of: error))
++        let brief = String(describing: error).trimmingCharacters(in: .whitespacesAndNewlines)
++        let reflected = String(reflecting: error).trimmingCharacters(in: .whitespacesAndNewlines)
++
++        var parts: [String] = ["type=\(typeName)"]
++        if !nsError.domain.isEmpty || nsError.code != 0 {
++            parts.append("ns=\(nsError.domain)(\(nsError.code))")
++        }
++        if !brief.isEmpty, brief.lowercased() != "unknown" {
++            parts.append("desc=\(brief)")
++        }
++        if !reflected.isEmpty, reflected != brief {
++            parts.append("reflect=\(reflected)")
++        }
++
++        return .transport(parts.joined(separator: " | "))
++    }
++
++    private static func closeIgnoringFailure(_ channel: Channel) -> EventLoopFuture<Void> {
++        channel
++            .close(mode: .all)
++            .flatMapError { _ in
++                channel.eventLoop.makeSucceededFuture(())
++            }
++    }
+ }
+diff --git a/Sources/SSHClient/Internal/SSH/SSHAuthenticationHandler.swift b/Sources/SSHClient/Internal/SSH/SSHAuthenticationHandler.swift
+index 3bb0837..48f352f 100644
+--- a/Sources/SSHClient/Internal/SSH/SSHAuthenticationHandler.swift
++++ b/Sources/SSHClient/Internal/SSH/SSHAuthenticationHandler.swift
+@@ -71,6 +71,7 @@ class SSHAuthenticationHandler: ChannelInboundHandler {
+     }
+ 
+     private let task: Scheduled<Void>
++    private var didResolveAuthentication = false
+ 
+     init(eventLoop: EventLoop, timeout: TimeAmount) {
+         let promise = eventLoop.makePromise(of: Void.self)
+@@ -82,13 +83,41 @@ class SSHAuthenticationHandler: ChannelInboundHandler {
+ 
+     deinit {
+         task.cancel()
+-        promise.fail(AuthenticationError.endedChannel)
++        failIfNeeded(AuthenticationError.endedChannel)
+     }
+ 
+     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+         if event is UserAuthSuccessEvent {
+-            promise.succeed(())
++            succeedIfNeeded()
+         }
+         context.fireUserInboundEventTriggered(event)
+     }
++
++    func errorCaught(context: ChannelHandlerContext, error: Error) {
++        failIfNeeded(error)
++        context.fireErrorCaught(error)
++    }
++
++    func channelInactive(context: ChannelHandlerContext) {
++        failIfNeeded(AuthenticationError.endedChannel)
++        context.fireChannelInactive()
++    }
++
++    private func succeedIfNeeded() {
++        guard didResolveAuthentication == false else {
++            return
++        }
++        didResolveAuthentication = true
++        task.cancel()
++        promise.succeed(())
++    }
++
++    private func failIfNeeded(_ error: Error) {
++        guard didResolveAuthentication == false else {
++            return
++        }
++        didResolveAuthentication = true
++        task.cancel()
++        promise.fail(error)
++    }
+ }
+diff --git a/Sources/SSHClient/Internal/SSH/SSHConnectionStateMachine.swift b/Sources/SSHClient/Internal/SSH/SSHConnectionStateMachine.swift
+index 43791b0..557e031 100644
+--- a/Sources/SSHClient/Internal/SSH/SSHConnectionStateMachine.swift
++++ b/Sources/SSHClient/Internal/SSH/SSHConnectionStateMachine.swift
+@@ -9,7 +9,7 @@ enum SSHConnectionEvent {
+     case requestSession(SSHSessionStartingTask, TimeInterval, Promise<Void>)
+     case connected(Channel)
+     case authenticated(Channel)
+-    case disconnected
++    case disconnected(SSHConnectionError?)
+ }
+ 
+ enum SSHConnectionAction {
+@@ -84,8 +84,8 @@ struct SSHConnectionStateMachine {
+                 return .callPromise(promise, .success(()))
+             case .requestSession(let session, let timeout, let promise):
+                 return .requestSession(channel, session, timeout, promise)
+-            case .disconnected:
+-                internalState = .failed(.unknown)
++            case .disconnected(let error):
++                internalState = .failed(error ?? .unknown)
+                 return .none
+             case .authenticated:
+                 assertionFailure("Invalid transition")
+@@ -107,9 +107,10 @@ struct SSHConnectionStateMachine {
+             case .requestConnection(_, let new):
+                 new.completeWith(promise.futureResult)
+                 return .none
+-            case .disconnected:
+-                internalState = .failed(.unknown)
+-                return .callPromise(promise, .failure(.unknown))
++            case .disconnected(let error):
++                let failure = error ?? .unknown
++                internalState = .failed(failure)
++                return .callPromise(promise, .failure(failure))
+             case .authenticated:
+                 assertionFailure("Invalid transition")
+                 return .none
+@@ -138,9 +139,10 @@ struct SSHConnectionStateMachine {
+             case .connected:
+                 assertionFailure("Invalid transition")
+                 return .none
+-            case .disconnected:
+-                internalState = .failed(.unknown)
+-                return .callPromise(promise, .failure(.unknown))
++            case .disconnected(let error):
++                let failure = error ?? .unknown
++                internalState = .failed(failure)
++                return .callPromise(promise, .failure(failure))
+             }
+         case .disconnecting(_, let promise, let error):
+             switch event {
+diff --git a/Sources/SSHClient/SFTPFile.swift b/Sources/SSHClient/SFTPFile.swift
+index 993d086..18f1411 100644
+--- a/Sources/SSHClient/SFTPFile.swift
++++ b/Sources/SSHClient/SFTPFile.swift
+@@ -60,9 +60,11 @@ public final class SFTPFile: @unchecked Sendable {
+                       completion: @escaping (Result<Void, Error>) -> Void) {
+         let data = ByteBuffer(data: data)
+         let sliceLength = 32000
+-        let promise = writeSlice(
++        let maxInFlightWrites = 64
++        let promise = writeSlices(
+             data: data,
+             sliceLength: sliceLength,
++            maxInFlightWrites: maxInFlightWrites,
+             offset: offset
+         )
+         if let promise = promise {
+@@ -88,31 +90,45 @@ public final class SFTPFile: @unchecked Sendable {
+ 
+     // MARK: - Private
+ 
+-    private func writeSlice(data: ByteBuffer,
+-                            sliceLength: Int,
+-                            offset: UInt64) -> EventLoopFuture<Void>? {
++    private func writeSlices(data: ByteBuffer,
++                             sliceLength: Int,
++                             maxInFlightWrites: Int,
++                             offset: UInt64) -> EventLoopFuture<Void>? {
+         var data = data
+-        guard data.readableBytes > 0,
+-              let slice = data.readSlice(length: Swift.min(sliceLength, data.readableBytes))
+-        else {
++        guard data.readableBytes > 0 else {
+             return nil
+         }
+-        let message = SFTPMessage.WriteFile.Payload(
+-            handle: handle,
+-            offset: offset + UInt64(data.readerIndex) - UInt64(slice.readableBytes),
+-            data: slice
+-        )
+-        let future = channel.writeFile(message)
+-        return future
+-            .flatMap { _ in
+-                if let promise = self.writeSlice(
+-                    data: data,
+-                    sliceLength: sliceLength,
+-                    offset: offset
+-                ) {
+-                    return promise
++
++        var currentOffset = offset
++        var allWrites: [EventLoopFuture<Void>] = []
++
++        while data.readableBytes > 0 {
++            var batch: [EventLoopFuture<Void>] = []
++            batch.reserveCapacity(maxInFlightWrites)
++
++            while data.readableBytes > 0, batch.count < maxInFlightWrites {
++                guard let slice = data.readSlice(length: Swift.min(sliceLength, data.readableBytes)) else {
++                    break
+                 }
+-                return future.map { _ in }
++                let message = SFTPMessage.WriteFile.Payload(
++                    handle: handle,
++                    offset: currentOffset,
++                    data: slice
++                )
++                currentOffset += UInt64(slice.readableBytes)
++                batch.append(channel.writeFile(message).map { _ in })
++            }
++
++            if batch.isEmpty {
++                break
+             }
++
++            allWrites.append(EventLoopFuture.andAllSucceed(batch, on: batch[0].eventLoop))
++        }
++
++        guard let first = allWrites.first else {
++            return nil
++        }
++        return EventLoopFuture.andAllSucceed(allWrites, on: first.eventLoop)
+     }
+ }
+diff --git a/Sources/SSHClient/SSHConnection.swift b/Sources/SSHClient/SSHConnection.swift
+index 6b8b374..e01c25b 100644
+--- a/Sources/SSHClient/SSHConnection.swift
++++ b/Sources/SSHClient/SSHConnection.swift
+@@ -2,10 +2,11 @@ import Foundation
+ import NIO
+ import NIOSSH
+ 
+-public enum SSHConnectionError: Error {
++public enum SSHConnectionError: Error, Equatable, Sendable {
+     case requireActiveConnection
+     case unknown
+     case timeout
++    case transport(String)
+ }
+ 
+ public class SSHConnection: @unchecked Sendable {
