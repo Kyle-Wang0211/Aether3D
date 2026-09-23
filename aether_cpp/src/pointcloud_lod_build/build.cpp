@@ -170,13 +170,23 @@ BuildResult build(const PointSource& source, const BuildOptions& options) {
 
 BuildOptions optionsForBudget(const std::string& outDir, const std::string& chunkDir,
                               int64_t memoryBudgetMB, int numThreads) {
+  // Product defaults, chosen from measurements (DEVIATIONS.md "Memory knobs"):
+  // with a 64 MiB ring, a 128 MB chunk backlog and 1M-point chunks, peak RSS was
+  // 345 / 427 / 519 MB at 1 / 2 / 4 threads on the 36M cloud (macOS) and 333 / 385 MB
+  // at 1 / 4 threads on the 216M cloud (Linux), every run producing upstream's tree.
+  // Threads are then dropped until a conservative fit of those numbers,
+  // 350 MB + 85 MB per extra thread, stays within the budget. Below ~350 MB the
+  // build still runs with one thread but nothing was measured that low.
   BuildOptions o;
   o.outDir = outDir;
   o.chunkDir = chunkDir;
-  o.numThreads = numThreads;
-  // Placeholder split; replaced by the measured split (DEVIATIONS.md "Memory knobs").
-  o.chunkBacklogMB = std::max<int64_t>(16, memoryBudgetMB / 8);
-  o.writerRingBytes = std::max<int64_t>(16, memoryBudgetMB / 16) << 20;
+  o.writerRingBytes = int64_t(64) << 20;
+  o.chunkBacklogMB = 128;
+  o.maxPointsPerChunkCap = 1'000'000;
+  int hw = int(std::max(1u, std::thread::hardware_concurrency()));
+  int threads = numThreads > 0 ? numThreads : std::min(4, hw);
+  while (threads > 1 && 350 + 85 * int64_t(threads - 1) > memoryBudgetMB) threads--;
+  o.numThreads = threads;
   return o;
 }
 

@@ -54,8 +54,10 @@ struct BuildOptions {
   bool keepChunks = false;        // upstream --keep-chunks
 };
 
-// Budgeted options for a phone: see DEVIATIONS.md "Memory knobs" for how the
-// numbers were chosen and measured.
+// Options for a phone: 64 MiB ring, 128 MB chunk backlog, 1M-point chunks, and as
+// many threads (default min(4, cores)) as fit the budget by a conservative fit of
+// measured peak RSS (350 MB + 85 MB per extra thread). See DEVIATIONS.md
+// "Memory knobs" for the measurements. The tree is upstream's for every setting.
 BuildOptions optionsForBudget(const std::string& outDir, const std::string& chunkDir,
                               int64_t memoryBudgetMB, int numThreads);
 

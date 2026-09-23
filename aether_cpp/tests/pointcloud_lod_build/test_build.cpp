@@ -214,7 +214,8 @@ int main(int argc, char** argv) {
   } else if (desktop.size() < 50) {
     skip("E1 port == desktop, node by node", "premise: fixture tree has < 50 nodes");
   } else {
-    report("E1 port == desktop, node by node", sameTree(desktop, port, &d), d);
+    const bool e1 = sameTree(desktop, port, &d);  // evaluate before reading d (argument order is unspecified)
+    report("E1 port == desktop, node by node", e1, d);
     report("E1 metadata.json identical except \"name\"", metadataWithoutName(fx) == metadataWithoutName(o.outDir),
            "compared line by line");
     // negative controls on the comparator itself
@@ -228,10 +229,12 @@ int main(int argc, char** argv) {
     auto& second = moved[bySize[1]].records;
     second[0] = big[0];  // count-preserving: node 2 loses one of its points, gains one of node 1's
     std::sort(second.begin(), second.end());
-    report("E1-neg one record overwritten by another node's -> rejected", !sameTree(desktop, moved, &d), d);
+    const bool n1 = !sameTree(desktop, moved, &d);
+    report("E1-neg one record overwritten by another node's -> rejected", n1, d);
     Tree dropped = port;
     dropped.erase(std::prev(dropped.end()));
-    report("E1-neg one node removed -> rejected", !sameTree(desktop, dropped, &d), d);
+    const bool n2 = !sameTree(desktop, dropped, &d);
+    report("E1-neg one node removed -> rejected", n2, d);
   }
 
   // ---- E2 -----------------------------------------------------------------
@@ -257,7 +260,8 @@ int main(int argc, char** argv) {
       if (!r2.ok || !loadTree(t.outDir, &p2, &why)) {
         report("E2 1 thread + 4 KiB ring == desktop", false, r2.ok ? why : r2.error);
       } else {
-        report("E2 1 thread + 4 KiB ring == desktop", sameTree(desktop, p2, &d),
+        const bool e2 = sameTree(desktop, p2, &d);
+        report("E2 1 thread + 4 KiB ring == desktop", e2,
                d + "; biggest node " + std::to_string(biggest) + " B > ring 4096 B");
       }
     }
@@ -299,7 +303,8 @@ int main(int argc, char** argv) {
       char buf[128];
       std::snprintf(buf, sizeof buf, "worst %.3f LSB (tolerance 2)", worst);
       report("L2 per-axis sorted positions within 2 LSB", l2, buf);
-      report("L3 colour histograms identical", coloursIdentical(in, out, &d), d);
+      const bool l3 = coloursIdentical(in, out, &d);
+      report("L3 colour histograms identical", l3, d);
 
       std::printf("\n  negative controls (each must be rejected):\n");
       Decoded c = out;  // drop one, duplicate another: count unchanged
@@ -311,7 +316,8 @@ int main(int argc, char** argv) {
       report("L2-neg one point moved 100 LSB -> rejected", !positionsWithin(in, s, 2.0, &worst), "");
       Decoded col = out;
       col.rgb[0] = uint16_t(col.rgb[0] == 0 ? 257 : col.rgb[0] - 257);
-      report("L3-neg one red value changed -> rejected", !coloursIdentical(in, col, &d), d);
+      const bool n5 = !coloursIdentical(in, col, &d);
+      report("L3-neg one red value changed -> rejected", n5, d);
       std::printf("\n");
     }
   }
