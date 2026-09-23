@@ -48,6 +48,8 @@ struct BuildOptions {
   int64_t writerRingBytes = int64_t(1) << 30;  // Writer.h:26 capacity = 1 GiB
   // Upper bound on points per chunk; 0 keeps upstream's min(N / 20, 10'000'000)
   // (chunker_countsort_laszip.cpp:1390-1391). Indexing memory scales with it.
+  // Values below 10'000 are raised to 10'000: from there down the tree would
+  // differ from upstream's (see DEVIATIONS.md D4).
   int64_t maxPointsPerChunkCap = 0;
   bool keepChunks = false;        // upstream --keep-chunks
 };

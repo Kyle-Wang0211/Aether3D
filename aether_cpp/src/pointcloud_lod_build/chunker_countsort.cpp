@@ -601,7 +601,13 @@ bool doChunking(const PointSource& source, const string& targetDir, Vector3 min,
 
   int64_t tmp = state.pointsTotal / 20;
   int64_t maxPointsPerChunk = std::min(tmp, int64_t(10'000'000));
-  if (config.maxPointsPerChunkCap > 0) maxPointsPerChunk = std::min(maxPointsPerChunk, config.maxPointsPerChunkCap);  // D4
+  // D4: optional cap. It never goes below indexer::maxPointsPerChunk (10'000,
+  // indexer.h:49): a chunk root then always has a parent the indexer would have
+  // split anyway, so the tree is the one upstream builds. Below that floor the
+  // tree changes (test_build E2 showed 82 -> 1,009 nodes at 100 points/chunk).
+  if (config.maxPointsPerChunkCap > 0) {
+    maxPointsPerChunk = std::min(maxPointsPerChunk, std::max(config.maxPointsPerChunkCap, int64_t(10'000)));
+  }
   chunker.maxPointsPerChunk = int(maxPointsPerChunk);
 
   if (state.pointsTotal < 100'000'000) {
