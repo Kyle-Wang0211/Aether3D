@@ -299,29 +299,51 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Camera: pull back so the scene fits in view. Brush convention is
-    // "+Z = in front of camera" (view-space z must be > 0.01 to pass
-    // project_forward's frustum check). Place the eye at world
-    // (center_x, center_y, center_z - distance) — i.e. BEHIND the scene
-    // along world -z — so identity-rotation world-to-camera maps the
-    // scene center to view (0, 0, +distance).
+    // ─── Camera ────────────────────────────────────────────────────────
     //
-    // View matrix is column-major. For identity rotation + translation:
-    //   view = T(-eye) so world_point gets mapped to (world - eye).
-    //   eye = (center_x, center_y, center_z - distance)
-    //   →  translation column = -eye = (-center_x, -center_y,
-    //                                    distance - center_z)
+    // CONTRACT: aether_scene_renderer_render_full takes an OPENGL-
+    // convention view matrix — the same thing the Dart caller produces
+    // with vector_math.makeViewMatrix, i.e. the camera looks down view
+    // -Z and in-front geometry has NEGATIVE view-space z. The renderer
+    // converts it to the Brush splat convention itself by left-
+    // multiplying with diag(1, -1, -1, 1) (see the "Phase 6.4f hotfix"
+    // block in scene_iosurface_renderer.cpp's render_full).
+    //
+    // This fixture used to hand in a BRUSH-convention matrix (identity
+    // rotation, eye at world -Z, in-front = +z) because it predates that
+    // conversion: the tool was last touched by 35bd1f0f (2026-05-02) and
+    // the conversion landed the next day in ad28ce94 (2026-05-03,
+    // "Phase 6.4f.5 hotfix bundle"). The renderer then flipped an
+    // already-Brush matrix a second time, every splat ended up behind
+    // the camera, project_forward's `mean_c.z < 0.01` cull dropped all
+    // 1024 of them, and this smoke has reported
+    //   "FAIL: only 0 opaque pixels"
+    // ever since. Measured 2026-09-23: the ONLY change needed to go from
+    // 0 to 9983 opaque pixels is this matrix — no production code.
+    //
+    // So: emit a real GL lookAt. Eye sits at world -Z of the scene centre
+    // and looks toward +Z, which keeps the SH-1 mode's view-direction
+    // expectation (below) exactly as it was originally derived.
+    //
+    //   f = normalize(center - eye) = (0, 0, 1)
+    //   s = normalize(cross(f, up)) = (-1, 0, 0)   [up = +Y]
+    //   u = cross(s, f)             = (0, 1, 0)
+    //   view (column-major) = [ s.x u.x -f.x 0 | s.y u.y -f.y 0 |
+    //                           s.z u.z -f.z 0 | -s·eye -u·eye f·eye 1 ]
+    // which is a 180° rotation about Y plus the translation — NOT the
+    // identity rotation the old fixture used.
     const float center_x = 0.5f * (bmin[0] + bmax[0]);
     const float center_y = 0.5f * (bmin[1] + bmax[1]);
     const float center_z = 0.5f * (bmin[2] + bmax[2]);
     const float radius = 0.5f * span;
     const float fov_y_rad = 60.0f * 3.14159265f / 180.0f;
     const float distance = (radius / std::sin(fov_y_rad * 0.5f)) * 1.5f;
+    // eye = (center_x, center_y, center_z - distance)
     float view[16] = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f,
-        -center_x, -center_y, distance - center_z, 1.0f,
+        -1.0f, 0.0f,  0.0f, 0.0f,
+         0.0f, 1.0f,  0.0f, 0.0f,
+         0.0f, 0.0f, -1.0f, 0.0f,
+         center_x, -center_y, center_z - distance, 1.0f,
     };
     float model[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
@@ -345,6 +367,9 @@ int main(int argc, char* argv[]) {
     std::uint32_t opaque_count = 0;
     std::uint32_t max_alpha = 0;
     std::uint64_t sum_b = 0, sum_g = 0, sum_r = 0;
+    // Phase 6.4f.8 — placement statistics for the silhouette judge below.
+    std::uint64_t sum_x = 0, sum_y = 0;
+    std::uint32_t min_x = kWidth, max_x = 0, min_y = kHeight, max_y = 0;
     for (std::uint32_t y = 0; y < kHeight; ++y) {
         for (std::uint32_t x = 0; x < kWidth; ++x) {
             const std::uint8_t* p = pixels.data() + (y * kWidth + x) * 4;
@@ -357,6 +382,12 @@ int main(int argc, char* argv[]) {
                 sum_b += b;
                 sum_g += g;
                 sum_r += rr;
+                sum_x += x;
+                sum_y += y;
+                if (x < min_x) min_x = x;
+                if (x > max_x) max_x = x;
+                if (y < min_y) min_y = y;
+                if (y > max_y) max_y = y;
             }
             if (a > max_alpha) max_alpha = a;
         }
@@ -375,6 +406,35 @@ int main(int argc, char* argv[]) {
     aether_scene_renderer_destroy(r);
     CFRelease(surface);
 
+    // KNOWN PRODUCTION BUG — this process will SIGSEGV during static
+    // destruction, AFTER main() returns, so the shell sees 139 (or signal
+    // 11) no matter what verdict we print below.
+    //
+    // Mechanism: scene_iosurface_renderer.cpp's SplatDataCache::instance()
+    // is a function-local static that strongly holds up to 3
+    // shared_ptr<SplatData>, and every SplatData keeps a RAW
+    // GPUDevice* plus GPU buffer handles. aether_scene_renderer_destroy()
+    // above drops the last dawn_singleton reference, which destroys the
+    // GPUDevice; the cache still holds the SplatData. At exit
+    // ~SplatData calls device->destroy_buffer() on the freed device —
+    // use-after-free, crash in __shared_ptr_emplace<SplatData>::
+    // __on_zero_shared().
+    //
+    // The same dangling pointer is reachable WITHOUT exiting: destroy the
+    // last renderer (device torn down), then create a new one (device
+    // recreated) and load the same asset — the cache hit hands back
+    // buffers that belong to the destroyed device.
+    //
+    // Deliberately NOT worked around here: the fix belongs in the
+    // renderer (pin the device from SplatData, or clear the cache on
+    // singleton release), which is production code and needs its own
+    // gate. Leaving the crash visible is what keeps that honest.
+    std::fprintf(stderr,
+        "[NOTE] a SIGSEGV after this point is the known SplatDataCache / "
+        "device-singleton teardown use-after-free in "
+        "scene_iosurface_renderer.cpp, not a render failure — read the "
+        "verdict printed above, not the process exit code\n");
+
     if (opaque_count < 16) {
         std::fprintf(stderr,
             "FAIL: only %u opaque pixels — splats did not render\n",
@@ -389,6 +449,70 @@ int main(int argc, char* argv[]) {
     if (sum_rgb == 0) {
         std::fprintf(stderr, "FAIL: zero RGB output across the image\n");
         return EXIT_FAILURE;
+    }
+
+    // ─── Silhouette judge (Phase 6.4f.8) ───────────────────────────────
+    //
+    // WHY: "opaque_count >= 16" only knows whether ANYTHING rendered. The
+    // failure this smoke actually has to catch is a view-convention
+    // mismatch, and that family has a partial form: ad28ce94's own commit
+    // message describes the pre-hotfix bug as "we accidentally render
+    // only the outlier tail behind the camera". A handful of tail splats
+    // in a corner clears `>= 16` easily. So assert the SHAPE too.
+    //
+    // The fixture is 1024 splats on a Fibonacci sphere, centred, viewed
+    // down its own axis at 60° FOV with a 1.5× pull-back — it must
+    // project to a disc that is centred and roughly as wide as it is
+    // tall. Measured 2026-09-23 (macOS/Metal, Dawn): coverage 15.23%,
+    // centroid (127.6, 127.7), bbox 112 × 112. The bands below are wide
+    // enough to survive rasteriser and LOD-knob drift and still two
+    // orders of magnitude away from "a blob in the corner".
+    {
+        const double cx_px = static_cast<double>(sum_x) / opaque_count;
+        const double cy_px = static_cast<double>(sum_y) / opaque_count;
+        const std::uint32_t bbox_w = max_x - min_x + 1;
+        const std::uint32_t bbox_h = max_y - min_y + 1;
+        const double img_cx = 0.5 * (kWidth  - 1);
+        const double img_cy = 0.5 * (kHeight - 1);
+        std::printf("silhouette: centroid=(%.1f, %.1f) bbox=%ux%u "
+                    "coverage=%.2f%%\n",
+                    cx_px, cy_px, bbox_w, bbox_h, opaque_pct);
+
+        constexpr double kCentroidTolPx = 16.0;
+        constexpr double kCoverageMinPct = 4.0;
+        constexpr double kCoverageMaxPct = 60.0;
+        constexpr double kAspectTol = 0.25;   // |w-h| / max(w,h)
+
+        bool shape_ok = true;
+        if (std::fabs(cx_px - img_cx) > kCentroidTolPx ||
+            std::fabs(cy_px - img_cy) > kCentroidTolPx) {
+            std::fprintf(stderr,
+                "FAIL: rendered centroid (%.1f, %.1f) is more than %.0f px "
+                "from the image centre (%.1f, %.1f) — the scene is centred, "
+                "so this means the camera/view convention is wrong or only "
+                "part of the cloud survived the frustum cull\n",
+                cx_px, cy_px, kCentroidTolPx, img_cx, img_cy);
+            shape_ok = false;
+        }
+        if (opaque_pct < kCoverageMinPct || opaque_pct > kCoverageMaxPct) {
+            std::fprintf(stderr,
+                "FAIL: coverage %.2f%% outside [%.1f%%, %.1f%%] — a centred "
+                "sphere at this FOV should fill roughly 15%% of the frame\n",
+                opaque_pct, kCoverageMinPct, kCoverageMaxPct);
+            shape_ok = false;
+        }
+        const double bw = static_cast<double>(bbox_w);
+        const double bh = static_cast<double>(bbox_h);
+        const double aspect_err = std::fabs(bw - bh) / (bw > bh ? bw : bh);
+        if (aspect_err > kAspectTol) {
+            std::fprintf(stderr,
+                "FAIL: opaque bbox %ux%u is not roughly square "
+                "(|w-h|/max = %.3f > %.3f) — a sphere must project to a "
+                "disc\n", bbox_w, bbox_h, aspect_err, kAspectTol);
+            shape_ok = false;
+        }
+        if (!shape_ok) return EXIT_FAILURE;
+        std::printf("silhouette judge OK — centred disc\n");
     }
 
     // SH-1 dominance check: camera is at world (0, 0, -distance) looking
