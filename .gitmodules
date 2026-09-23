@@ -1,3 +1,6 @@
 [submodule "aether_cpp/third_party/dawn"]
 	path = aether_cpp/third_party/dawn
 	url = https://github.com/google/dawn.git
+[submodule "aether_cpp/third_party/libjpeg-turbo"]
+	path = aether_cpp/third_party/libjpeg-turbo
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
