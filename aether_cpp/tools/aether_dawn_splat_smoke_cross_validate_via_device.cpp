@@ -30,12 +30,17 @@
 using aether::tools::splat_test_data::RenderArgsStorage;
 using aether::tools::splat_test_data::ProjectedSplat;
 using aether::tools::splat_test_data::make_identity_camera_args;
+using aether::tools::splat_test_data::make_coverage_probe_splats;
+using aether::tools::splat_test_data::verify_coverage_probe;
+using aether::tools::splat_test_data::kProbeSplats;
 
 namespace {
 constexpr std::uint32_t kImgW = 256;
 constexpr std::uint32_t kImgH = 256;
 constexpr std::uint32_t kBpp = 4;
 constexpr std::uint32_t kNumSplats = 4;
+static_assert(kNumSplats == kProbeSplats,
+              "the coverage probe reuses this tool's `order` array");
 constexpr std::uint32_t kTileW = 16;
 constexpr std::uint32_t kNumTiles = (kImgW / kTileW) * (kImgH / kTileW);
 
@@ -135,8 +140,15 @@ int main() {
     // ─── Path 2: Aether3D splat_render.wgsl (vert+frag) ────────────────
     GPUBufferHandle h_uniforms_v = make_storage(sizeof(uniforms), "uniforms_v");
     GPUBufferHandle h_proj_v     = make_storage(sizeof(splats), "proj_v");
+    // @binding(2) `order` — back-to-front sort permutation (Phase 6.4f.2).
+    // No depth sort here, so identity. Dawn rejects a 2-entry bind group
+    // against this 3-binding layout.
+    std::uint32_t order[kNumSplats];
+    for (std::uint32_t i = 0; i < kNumSplats; ++i) order[i] = i;
+    GPUBufferHandle h_order      = make_storage(sizeof(order), "order_v");
     device->update_buffer(h_uniforms_v, &uniforms, 0, sizeof(uniforms));
     device->update_buffer(h_proj_v, splats, 0, sizeof(splats));
+    device->update_buffer(h_order, order, 0, sizeof(order));
 
     if (!register_wgsl_from_file(*device, "splat_render_vs",
                                  "aether_cpp/shaders/wgsl/splat_render.wgsl",
@@ -179,6 +191,7 @@ int main() {
         re->set_pipeline(render_pipe);
         re->set_vertex_buffer(h_uniforms_v, 0, 0);
         re->set_vertex_buffer(h_proj_v,     0, 1);
+        re->set_vertex_buffer(h_order,      0, 2);
         // §2.2c vertex expansion — see aether_dawn_splat_smoke_render.cpp.
         re->draw_instanced(GPUPrimitiveType::kTriangle, 6 * kNumSplats, 1);
         re->end_encoding();
@@ -189,6 +202,80 @@ int main() {
     auto pixels_render = device->readback_texture(target, kImgW, kImgH, kBpp);
     if (pixels_render.empty()) {
         std::fprintf(stderr, "FAIL: readback_texture\n"); return EXIT_FAILURE;
+    }
+
+    // ─── §2.2c coverage probe — every point must reach the framebuffer ──
+    // The concentric fixture above cannot tell "4 splats drawn once each"
+    // from "splat 0 drawn 4 times". Re-run the same pipeline on the
+    // non-concentric probe fixture and assert all 4 points by position
+    // AND colour. See make_coverage_probe_splats() in
+    // aether_dawn_splat_test_data.h for the measured motivation.
+    {
+        ProjectedSplat probe_splats[kProbeSplats];
+        make_coverage_probe_splats(probe_splats);
+        RenderArgsStorage probe_u =
+            make_identity_camera_args(kProbeSplats, kProbeSplats);
+
+        GPUBufferHandle h_pu = make_storage(sizeof(probe_u),      "probe_uniforms");
+        GPUBufferHandle h_ps = make_storage(sizeof(probe_splats), "probe_splats");
+        GPUBufferHandle h_po = make_storage(sizeof(order),        "probe_order");
+        if (!h_pu.valid() || !h_ps.valid() || !h_po.valid()) {
+            std::fprintf(stderr, "FAIL: probe create_buffer\n");
+            return EXIT_FAILURE;
+        }
+        device->update_buffer(h_pu, &probe_u,     0, sizeof(probe_u));
+        device->update_buffer(h_ps, probe_splats, 0, sizeof(probe_splats));
+        device->update_buffer(h_po, order,        0, sizeof(order));
+
+        GPUTextureDesc probe_tex{};
+        probe_tex.width = kImgW; probe_tex.height = kImgH;
+        probe_tex.depth = 1; probe_tex.mip_levels = 1;
+        probe_tex.format = GPUTextureFormat::kRGBA8Unorm;
+        probe_tex.usage_mask =
+            static_cast<std::uint8_t>(GPUTextureUsage::kRenderTarget);
+        probe_tex.label = "splat_coverage_probe_target";
+        GPUTextureHandle probe_target = device->create_texture(probe_tex);
+        if (!probe_target.valid()) {
+            std::fprintf(stderr, "FAIL: probe target\n"); return EXIT_FAILURE;
+        }
+
+        GPURenderPassDesc probe_pass{};
+        probe_pass.width = kImgW; probe_pass.height = kImgH;
+        probe_pass.sample_count = 1;
+        probe_pass.color_attachment_count = 1;
+        probe_pass.color_attachments[0].texture = probe_target;
+        probe_pass.color_attachments[0].load  = GPULoadAction::kClear;
+        probe_pass.color_attachments[0].store = GPUStoreAction::kStore;
+        probe_pass.color_attachments[0].clear_color[0] = 0.0f;
+        probe_pass.color_attachments[0].clear_color[1] = 0.0f;
+        probe_pass.color_attachments[0].clear_color[2] = 0.0f;
+        probe_pass.color_attachments[0].clear_color[3] = 0.0f;
+
+        auto probe_cb = device->create_command_buffer();
+        auto* probe_re = probe_cb->make_render_encoder(probe_pass);
+        if (!probe_re) {
+            std::fprintf(stderr, "FAIL: probe render encoder\n");
+            return EXIT_FAILURE;
+        }
+        probe_re->set_pipeline(render_pipe);
+        probe_re->set_vertex_buffer(h_pu, 0, 0);
+        probe_re->set_vertex_buffer(h_ps, 0, 1);
+        probe_re->set_vertex_buffer(h_po, 0, 2);
+        probe_re->draw_instanced(GPUPrimitiveType::kTriangle,
+                                 /*vertex_count=*/6 * kProbeSplats,
+                                 /*instance_count=*/1);
+        probe_re->end_encoding();
+        probe_cb->commit();
+        probe_cb->wait_until_completed();
+
+        auto probe_px = device->readback_texture(probe_target, kImgW, kImgH, kBpp);
+        const bool probe_ok = verify_coverage_probe(
+            probe_px.data(), probe_px.size(), "aether_dawn_splat_smoke_cross_validate_via_device");
+        device->destroy_texture(probe_target);
+        device->destroy_buffer(h_po);
+        device->destroy_buffer(h_ps);
+        device->destroy_buffer(h_pu);
+        if (!probe_ok) return EXIT_FAILURE;
     }
 
     // ─── Compare ───────────────────────────────────────────────────────
@@ -268,6 +355,7 @@ int main() {
     device->destroy_render_pipeline(render_pipe);
     device->destroy_shader(fs);
     device->destroy_shader(vs);
+    device->destroy_buffer(h_order);
     device->destroy_buffer(h_proj_v);
     device->destroy_buffer(h_uniforms_v);
     device->destroy_buffer(h_compute_staging);

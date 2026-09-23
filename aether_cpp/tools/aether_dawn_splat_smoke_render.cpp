@@ -48,8 +48,13 @@ namespace {
 using aether::tools::splat_test_data::RenderArgsStorage;
 using aether::tools::splat_test_data::ProjectedSplat;
 using aether::tools::splat_test_data::make_identity_camera_args;
+using aether::tools::splat_test_data::make_coverage_probe_splats;
+using aether::tools::splat_test_data::verify_coverage_probe;
+using aether::tools::splat_test_data::kProbeSplats;
 
 constexpr uint32_t kNumSplats = 4;
+static_assert(kNumSplats == kProbeSplats,
+              "the coverage probe reuses this tool's `order` array");
 constexpr uint32_t kImgW = 256;
 constexpr uint32_t kImgH = 256;
 constexpr uint32_t kBpp = 4;  // RGBA8Unorm
@@ -109,6 +114,15 @@ int main(int /*argc*/, char* argv[]) {
     auto buf_splats = h.upload(splats, sizeof(splats),
         wgpu::BufferUsage::Storage);
 
+    // @binding(2) `order` — the back-to-front sort permutation added by
+    // Phase 6.4f.2. There is no depth sort in this smoke test, so the
+    // identity permutation renders the splats in array order.
+    // (Without this third binding the bind group is rejected by Dawn:
+    //  "Number of entries (2) did not match the expected number (3)".)
+    uint32_t order[kNumSplats];
+    for (uint32_t i = 0; i < kNumSplats; ++i) order[i] = i;
+    auto buf_order = h.upload(order, sizeof(order), wgpu::BufferUsage::Storage);
+
     auto target = h.alloc_render_target(kImgW, kImgH,
                                          wgpu::TextureFormat::RGBA8Unorm);
 
@@ -121,13 +135,14 @@ int main(int /*argc*/, char* argv[]) {
     }
 
     // §2.2c vertex expansion: ONE instance of 6 × kNumSplats vertices.
-    // NOTE: with the expanded shader, draw(6, kNumSplats) would render only
-    // splat 0 (vertex_index 0..5 ⇒ vi/6 == 0) — and because all four test
-    // splats share the same centre, the centre-pixel assertion would still
-    // pass. Silent 3/4 coverage loss; hence this must move together with
-    // the shader.
+    // NOTE: with the expanded shader, draw(6, kNumSplats) renders splat 0
+    // kNumSplats times and splats 1..3 never — and because all four splats
+    // in THIS fixture share a centre and an α, every assertion below still
+    // passes (measured 2026-09-23). The coverage probe at the end of main()
+    // is what actually catches it; this draw and the shader must move
+    // together.
     h.dispatch_render_pass(pipeline, target,
-                            { buf_uniforms, buf_splats },
+                            { buf_uniforms, buf_splats, buf_order },
                             /*vertex_count=*/6 * kNumSplats,
                             /*instance_count=*/1);
 
@@ -201,6 +216,37 @@ int main(int /*argc*/, char* argv[]) {
               << " b=" << int(mid.b) << " a=" << int(mid.a) << '\n';
     if (mid.a >= center.a) {
         std::cerr << "FAIL: Gaussian falloff inverted — center should be brightest\n";
+        return EXIT_FAILURE;
+    }
+
+    // ─── (5) §2.2c coverage probe — every point must reach the FB ─────
+    // The fixture above cannot tell "4 splats drawn once each" from
+    // "splat 0 drawn 4 times" (all four share a centre and an α). Re-run
+    // the same pipeline on the non-concentric probe fixture and assert
+    // each of the 4 points by position AND colour. See the long comment
+    // on make_coverage_probe_splats() in aether_dawn_splat_test_data.h.
+    ProjectedSplat probe_splats[kProbeSplats];
+    make_coverage_probe_splats(probe_splats);
+    RenderArgsStorage probe_u =
+        make_identity_camera_args(kProbeSplats, /*num_visible=*/kProbeSplats);
+
+    auto buf_probe_uniforms = h.upload(&probe_u, sizeof(probe_u),
+        wgpu::BufferUsage::Storage);
+    auto buf_probe_splats = h.upload(probe_splats, sizeof(probe_splats),
+        wgpu::BufferUsage::Storage);
+    auto buf_probe_order = h.upload(order, sizeof(order),
+        wgpu::BufferUsage::Storage);
+    auto probe_target = h.alloc_render_target(kImgW, kImgH,
+        wgpu::TextureFormat::RGBA8Unorm);
+
+    h.dispatch_render_pass(pipeline, probe_target,
+                            { buf_probe_uniforms, buf_probe_splats,
+                              buf_probe_order },
+                            /*vertex_count=*/6 * kProbeSplats,
+                            /*instance_count=*/1);
+    auto probe_pixels = h.readback_texture(probe_target, kImgW, kImgH, kBpp);
+    if (!verify_coverage_probe(probe_pixels.data(), probe_pixels.size(),
+                               "aether_dawn_splat_smoke_render")) {
         return EXIT_FAILURE;
     }
 
