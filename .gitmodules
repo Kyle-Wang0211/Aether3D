@@ -4,3 +4,17 @@
 [submodule "aether_cpp/third_party/libjpeg-turbo"]
 	path = aether_cpp/third_party/libjpeg-turbo
 	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+[submodule ".deps/MetalSplatter"]
+	path = .deps/MetalSplatter
+	url = https://github.com/scier/MetalSplatter.git
+[submodule ".deps/swift-crypto"]
+	path = .deps/swift-crypto
+	url = https://github.com/apple/swift-crypto.git
+	ignore = dirty
+[submodule ".deps/swift-nio-ssh"]
+	path = .deps/swift-nio-ssh
+	url = https://github.com/apple/swift-nio-ssh.git
+[submodule ".deps/swift-ssh-client"]
+	path = .deps/swift-ssh-client
+	url = https://github.com/gaetanzanella/swift-ssh-client.git
+	ignore = dirty
