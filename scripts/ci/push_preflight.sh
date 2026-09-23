@@ -49,7 +49,7 @@ echo "--- End Diagnostic Header ---"
 echo ""
 
 # Step 0: SSOT declaration check
-echo "[0/6] SSOT declaration check"
+echo "[0/3] SSOT declaration check"
 bash scripts/ci/ssot_declaration_check.sh || {
     echo "❌ SSOT declaration check FAILED"
     exit 1
@@ -58,7 +58,7 @@ echo "✅ SSOT declaration check passed"
 echo ""
 
 # Step 1: YAML static parsing
-echo "[1/6] YAML static parsing"
+echo "[1/3] YAML static parsing"
 python3 <<'PY'
 import yaml
 import sys
@@ -78,34 +78,30 @@ PY
 echo ""
 
 # Step 2: SwiftPM checks
-echo "[2/6] SwiftPM: package resolve"
+echo "[2/3] SwiftPM: package resolve"
 swift package resolve
 echo "✅ swift package resolve passed"
 echo ""
 
-echo "[3/6] SwiftPM: build"
-swift build
-echo "✅ swift build passed"
-echo ""
+# Retired steps (previously [3/6] build, [4/6] test, [5/6] PIZ gate):
+# - `swift build`: the Aether3DCore Swift package cannot compile on any
+#   platform. Since the initial commit a500df5, Core/Pipeline/PipelineRunner.swift
+#   has referenced types that are defined nowhere in the repository history
+#   (WhiteboxFileDescriptor, WhiteboxArtifactManifest, ...), and the target
+#   has never excluded that file. On macOS it additionally fails on ARKit
+#   and Firebase PhoneAuthProvider, and MetalSplatter 1.0.1 requires
+#   macOS 15 while Package.swift declares macOS 13. The product now ships
+#   through aether_cpp; `swift package resolve` above still guards the
+#   .deps submodules and vendor patches.
+# - `swift test --filter PIZ` (x2) and scripts/ci/piz_local_gate.sh: commit
+#   d5f5646 (2026-04-01) deleted the PIZ subsystem they check (Core/PIZ/,
+#   Core/Evidence/PIZ/, Core/Constants/PIZ*.swift) along with its
+#   Package.swift targets: the only remaining test target
+#   (Tests/Aether3DCoreTests) has no PIZ tests, and PIZFixtureDumper /
+#   PIZSealingEvidence are no longer SwiftPM products.
 
-echo "[4/6] SwiftPM: test (first run)"
-swift test --filter PIZ
-echo "✅ swift test --filter PIZ (first run) passed"
-echo ""
-
-echo "[4/6] SwiftPM: test (second run - stability check)"
-swift test --filter PIZ
-echo "✅ swift test --filter PIZ (second run) passed"
-echo ""
-
-# Step 5: PIZ local gate
-echo "[5/6] PIZ local gate"
-bash scripts/ci/piz_local_gate.sh
-echo "✅ PIZ local gate passed"
-echo ""
-
-# Step 6: SSOT integrity verification
-echo "[6/6] SSOT integrity verification"
+# Step 3: SSOT integrity verification
+echo "[3/3] SSOT integrity verification"
 bash scripts/ci/ssot_integrity_verify.sh || {
     echo "❌ SSOT integrity check FAILED"
     exit 1
