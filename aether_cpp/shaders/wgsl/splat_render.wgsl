@@ -3,7 +3,7 @@
 //
 // ─── Phase 6.3a v3 — splat_render.wgsl (Aether3D-original) ─────────────
 //
-// Vertex+fragment + instanced quads viewer rasterizer. Replaces Brush's
+// Vertex+fragment + vertex-expanded quads viewer rasterizer. Replaces Brush's
 // rasterize.wgsl compute path for the VIEWER flow only — Brush's compute
 // rasterizer is retained for the TRAINING flow (gradient backprop on the
 // per-tile bin layout). See PHASE6_PLAN.md v3 §3 "Viewer 数据流".
@@ -16,8 +16,8 @@
 //   - Compute path broken cross-platform: Brush #77 Adreno crash,
 //     Flutter #157811 Maleoon Vulkan disabled, neither affects vert+frag
 //
-// Per-instance: one ProjectedSplat (output of project_visible.wgsl).
-// Each instance emits 6 vertices forming a quad (TriangleList). Quad size
+// Per point: one ProjectedSplat (output of project_visible.wgsl).
+// Each group of 6 consecutive vertices forms a quad (TriangleList). Quad size
 // = 3-sigma radius from the conic; fragment shader discards low-α pixels
 // outside the Gaussian's effective support.
 //
@@ -69,8 +69,15 @@ struct VsOut {
 }
 
 @vertex
-fn vs_main(@builtin(vertex_index) vi: u32,
-           @builtin(instance_index) ii: u32) -> VsOut {
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    // §2.2c vertex expansion (was: instancing). The host now issues
+    // draw(6 * num_splats, 1) instead of draw(6, num_splats); one instance
+    // of 6N vertices instead of N instances of 6 vertices. Rationale:
+    // instances smaller than a warp/SIMD group leave the vertex stage at
+    // terrible occupancy (gpuweb/gpuweb#332). rerun's sphere_quad.wgsl and
+    // Potree-Next's octree.wgsl both derive the point id the same way.
+    let ii = vi / 6u;
+    let corner = vi % 6u;
     // Phase 6.4f.2: back-to-front depth sort. order[ii] is the
     // ProjectedSplat slot to render at instance ii. For ii < num_visible
     // this gives farthest-to-nearest; for ii in [num_visible, total) the
@@ -116,7 +123,7 @@ fn vs_main(@builtin(vertex_index) vi: u32,
         vec2f( 1.0,  1.0),
         vec2f(-1.0,  1.0),
     );
-    let off = offsets[vi];
+    let off = offsets[corner];
     let pixel_pos = center + off * r;
 
     // Pixel → clip space. Y flipped (pixel origin top-left, NDC y-up).

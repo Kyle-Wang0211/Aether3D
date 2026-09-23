@@ -141,8 +141,9 @@ int main() {
     re->set_vertex_buffer(h_uniforms, 0, 0);
     re->set_vertex_buffer(h_splats,   0, 1);
 
+    // §2.2c vertex expansion — see aether_dawn_splat_smoke_render.cpp.
     re->draw_instanced(GPUPrimitiveType::kTriangle,
-                       /*vertex_count=*/6, /*instance_count=*/kNumSplats);
+                       /*vertex_count=*/6 * kNumSplats, /*instance_count=*/1);
     re->end_encoding();
     cb->commit();
     cb->wait_until_completed();

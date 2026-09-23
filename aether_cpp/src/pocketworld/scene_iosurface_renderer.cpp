@@ -2024,9 +2024,10 @@ extern "C" bool aether_scene_renderer_load_glb(AetherSceneRenderer* r,
 // Per-frame: render_full's `if (has_splats)` branch dispatches the 2
 // compute kernels then the splat_render render pass. CPU-side num_visible
 // readback is avoided by clearing the projected_splats buffer at frame
-// start and dispatching splat_render with instance_count = num_splats —
+// start and dispatching splat_render over all num_splats quads (§2.2c
+// vertex expansion: vertex_count = 6 * num_splats, instance_count = 1) —
 // the fragment shader's discard threshold (`alpha < 1/255`) drops any
-// instances where project_visible never wrote (alpha stays 0 from the
+// quads where project_visible never wrote (alpha stays 0 from the
 // frame-start clear).
 //
 // Limitations of this first cut (PHASE_BACKLOG.md Phase 6.4f.2):
@@ -3798,7 +3799,7 @@ extern "C" void aether_scene_renderer_render_full(
         wgpuRenderPassEncoderRelease(pass);
     }
 
-    // Phase 6.4f: splat render pass — instanced quads, premultiplied OVER
+    // Phase 6.4f: splat render pass — vertex-expanded quads, premultiplied OVER
     // blend, depth-readonly (so splats hidden behind opaque mesh fragments
     // are clipped). Loads color + depth from the prior pass so it composes
     // on top.
@@ -3832,12 +3833,15 @@ extern "C" void aether_scene_renderer_render_full(
             encoder, &pass_desc);
         wgpuRenderPassEncoderSetPipeline(pass, r->splat_pipe);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, s.splat_render_bg, 0, nullptr);
-        // 6 vertices/quad × num_splats instances. Vertex shader reads
-        // splats[ii] from the projected_splats buffer; instances where
-        // project_visible never wrote (alpha = 0 from frame-start clear)
-        // get discarded in the fragment shader.
-        wgpuRenderPassEncoderDraw(pass, /*vertex_count=*/6,
-                                   /*instance_count=*/s.num_splats,
+        // §2.2c vertex expansion: ONE instance of 6 × num_splats vertices,
+        // not num_splats instances of 6 vertices. The vertex shader derives
+        // the point id as vertex_index / 6 and the quad corner as
+        // vertex_index % 6. Quads whose ProjectedSplat was never written by
+        // project_visible (alpha = 0 from the frame-start clear) still
+        // collapse to the clip-culled degenerate point in vs_main.
+        wgpuRenderPassEncoderDraw(pass,
+                                   /*vertex_count=*/6u * s.num_splats,
+                                   /*instance_count=*/1,
                                    /*first_vertex=*/0, /*first_instance=*/0);
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);

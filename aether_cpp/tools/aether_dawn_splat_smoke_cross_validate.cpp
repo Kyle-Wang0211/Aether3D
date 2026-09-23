@@ -152,9 +152,11 @@ int main(int /*argc*/, char* argv[]) {
     auto pipe_render = h.load_render_pipeline(render_wgsl, "vs_main", "fs_main",
                                                wgpu::TextureFormat::RGBA8Unorm);
     if (pipe_render == nullptr) { std::cerr << "splat_render compile failed\n"; return 1; }
+    // §2.2c vertex expansion — see aether_dawn_splat_smoke_render.cpp.
     h.dispatch_render_pass(pipe_render, target,
                            { buf_uniforms_v, buf_projected_v },
-                           /*vertex_count=*/6, /*instance_count=*/kNumSplats);
+                           /*vertex_count=*/6 * kNumSplats,
+                           /*instance_count=*/1);
 
     auto pixels_render = h.readback_texture(target, kImgW, kImgH, /*bpp=*/4);
 

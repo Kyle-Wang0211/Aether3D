@@ -179,7 +179,8 @@ int main() {
         re->set_pipeline(render_pipe);
         re->set_vertex_buffer(h_uniforms_v, 0, 0);
         re->set_vertex_buffer(h_proj_v,     0, 1);
-        re->draw_instanced(GPUPrimitiveType::kTriangle, 6, kNumSplats);
+        // §2.2c vertex expansion — see aether_dawn_splat_smoke_render.cpp.
+        re->draw_instanced(GPUPrimitiveType::kTriangle, 6 * kNumSplats, 1);
         re->end_encoding();
         cb->commit();
         cb->wait_until_completed();

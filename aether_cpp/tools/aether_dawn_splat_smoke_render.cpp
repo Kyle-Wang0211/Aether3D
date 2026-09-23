@@ -120,11 +120,16 @@ int main(int /*argc*/, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // 6 vertices per quad × kNumSplats instances.
+    // §2.2c vertex expansion: ONE instance of 6 × kNumSplats vertices.
+    // NOTE: with the expanded shader, draw(6, kNumSplats) would render only
+    // splat 0 (vertex_index 0..5 ⇒ vi/6 == 0) — and because all four test
+    // splats share the same centre, the centre-pixel assertion would still
+    // pass. Silent 3/4 coverage loss; hence this must move together with
+    // the shader.
     h.dispatch_render_pass(pipeline, target,
                             { buf_uniforms, buf_splats },
-                            /*vertex_count=*/6,
-                            /*instance_count=*/kNumSplats);
+                            /*vertex_count=*/6 * kNumSplats,
+                            /*instance_count=*/1);
 
     // ─── Readback ─────────────────────────────────────────────────────
     auto pixels = h.readback_texture(target, kImgW, kImgH, kBpp);
