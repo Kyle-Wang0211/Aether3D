@@ -1229,3 +1229,50 @@ if(APPLE AND EXISTS ${PW_OPENCV401_MAC}/lib/libopencv_imgproc.a AND EXISTS ${PW_
     target_link_libraries(aether_dense_progressive_test PRIVATE aether_dense_fuse)
     target_compile_options(aether_dense_progressive_test PRIVATE -ffp-contract=off -fno-fast-math)
 endif()
+
+# [2026-09-23] Point-cloud LOD core: stream a 50M-100M+ point cloud at a stable
+# frame rate without dropping a single point from disk.
+#   format  Potree 2.0 octree       (PotreeConverter, BSD-2-Clause)
+#   select  Potree updateVisibility (potree, BSD-2-Clause)
+#   frustum three.js Frustum, WebGPU clip space (MIT)
+#   control CesiumJS's multiplicative controller, frame time as the signal (Apache-2.0)
+# Every constant is pinned to an upstream line in src/pointcloud_lod/DEVIATIONS.md.
+# Pure C++: no graphics API, no vendor API, no per-OS branch. It is its own
+# library rather than part of aether3d_core so that adding it cannot break any
+# existing target; the renderer links it when it is wired in.
+add_library(aether_pointcloud_lod STATIC
+    src/pointcloud_lod/octree.cpp
+    src/pointcloud_lod/select.cpp
+    src/pointcloud_lod/stream.cpp)
+target_include_directories(aether_pointcloud_lod
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_compile_options(aether_pointcloud_lod PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+
+# Host tests against a committed 25,000-point fixture cut from a real capture
+# (tests/pointcloud_lod/fixture). Checks whose premise needs a full-size cloud
+# report SKIP here with the reason; run the same binaries against a real octree
+# directory to exercise them.
+foreach(pwlod_test octree select stream corrupt)
+    add_executable(test_pointcloud_lod_${pwlod_test}
+        tests/pointcloud_lod/test_${pwlod_test}.cpp)
+    target_link_libraries(test_pointcloud_lod_${pwlod_test} PRIVATE aether_pointcloud_lod)
+    target_compile_options(test_pointcloud_lod_${pwlod_test} PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set_target_properties(test_pointcloud_lod_${pwlod_test} PROPERTIES
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER
+                "com.aether.tests.pointcloud-lod-${pwlod_test}"
+            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+            XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO")
+    endif()
+    add_test(NAME test_pointcloud_lod_${pwlod_test}
+        COMMAND test_pointcloud_lod_${pwlod_test}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/pointcloud_lod/fixture)
+endforeach()
+
+# Not a pass/fail test: the A/B that decided which knob the controller turns
+# (see DEVIATIONS.md, withdrawn D11). Kept buildable so the decision is
+# reproducible; run it against a full-size octree directory.
+add_executable(pointcloud_lod_ab_knob tests/pointcloud_lod/test_ab_knob.cpp)
+target_link_libraries(pointcloud_lod_ab_knob PRIVATE aether_pointcloud_lod)
+target_compile_options(pointcloud_lod_ab_knob PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
