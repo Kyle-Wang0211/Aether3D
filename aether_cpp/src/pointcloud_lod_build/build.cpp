@@ -77,7 +77,7 @@ BuildResult build(const PointSource& source, const BuildOptions& options) {
 
   // main.cpp:175-228 curateSources + PotreeConverter.h:200-320 computeOutputAttributes
   // with requestedAttributes = {"rgb"}: position is always prepended (:266), so the
-  // list is exactly [position, rgb]. Never [position, position, rgb] (D19).
+  // list is exactly [position, rgb]. Never [position, position, rgb] (D18).
   Vector3 headerMin, headerMax, headerScale;
   {
     double mn[3], mx[3], sc[3];

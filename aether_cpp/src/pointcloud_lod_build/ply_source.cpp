@@ -9,10 +9,10 @@
 //  * bounds = min/max of the float32 coordinates, as doubles. This is what
 //    tools/pointcloud_lod/ply2las.py writes into the LAS header the desktop
 //    reference was built from.
-//  * targetScale = max(extent / 2e9, 1e-9) on every axis, ply2las.py:33. Upstream
+//  * targetScale = max(extent / 2e9, 1e-9) on every axis, ply2las.py:34. Upstream
 //    takes targetScale from the LAS header, so with this value the product path
 //    gets exactly the scale/offset the desktop reference got through the bridge.
-//  * colour: 8-bit -> 16-bit as v * 257 (0 -> 0, 255 -> 65535), ply2las.py:78-80.
+//  * colour: 8-bit -> 16-bit as v * 257 (0 -> 0, 255 -> 65535), ply2las.py:72-74.
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -48,7 +48,7 @@ class PlySource final : public PointSource {
 
   void targetScale(double scale[3]) const override {
     double ext = std::max(hi[0] - lo[0], std::max(hi[1] - lo[1], hi[2] - lo[2]));
-    double s = std::max(ext / 2.0e9, 1e-9);  // ply2las.py:33
+    double s = std::max(ext / 2.0e9, 1e-9);  // ply2las.py:34
     scale[0] = scale[1] = scale[2] = s;
   }
 
@@ -77,7 +77,7 @@ class PlySource final : public PointSource {
       xyz[3 * i + 2] = double(v[2]);
       for (int c = 0; c < 3; c++) {
         uint8_t u = uint8_t(p[12 + c]);
-        rgb[3 * i + c] = uint16_t(u * 257);  // ply2las.py:78-80
+        rgb[3 * i + c] = uint16_t(u * 257);  // ply2las.py:72-74
       }
     }
     return true;
