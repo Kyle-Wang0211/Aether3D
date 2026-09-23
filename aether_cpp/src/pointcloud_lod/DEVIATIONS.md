@@ -83,10 +83,35 @@ no clip box exists.
 upstream and uses the box diagonal, ignoring distance. Omitted rather than
 copied; the viewer is perspective.
 
-**D8 no GPU-upload throttle** *(Potree port)*
-`Potree_update_visibility.js:300+` limits loads to 2 nodes per frame
-(`loadedToGPUThisFrame < 2`). Selection and loading are separated here; the
-throttle belongs to the loader, not to this module.
+**D8 (RESOLVED 2026-09-23) GPU-upload throttle and asynchronous loading**
+The first version said "the throttle belongs to the loader" and then never put
+it anywhere: `NodeLoader::load` read and decoded every missing node of the frame
+synchronously, with no limit, inside the frame. Measured on the bench, that is
+where the 33 ms misses during camera motion came from. Now ported as-is from
+potree @ `5636cd471d9eb464969e758be45c44d7613d3859`:
+
+| Potree | here |
+|---|---|
+| `Potree_update_visibility.js:122` `loadedToGPUThisFrame = 0` | `selectImpl` local |
+| `:299-307` promote a loaded geometry node whose parent is a tree node, `< 2` per frame, else push to `unloadedGeometry` | `selectVisible(..., Residency)`: `Selection::promoted` / `Selection::unloaded` |
+| `:309-315` only tree nodes are drawn | `Selection::nodes` holds only drawable nodes |
+| `:347-393` children pushed for every visible node | unchanged walk (`parentDrawable` carried per queue item) |
+| `:406-408` start at most `maxNodesLoading` loads, in priority order | `AsyncNodeLoader::request` |
+| `Potree.js:103-104` `numNodesLoading`, `maxNodesLoading = 4` | `AsyncNodeLoader::Config::maxNodesLoading = 4` |
+| `OctreeGeometry.js:72-79`, `OctreeLoader.js:14-21` early returns | same checks in `request` |
+| `OctreeLoader.js:35-57` one byte range per node; `:66-114` decode in a worker, flags set on the main thread | worker `std::thread`s read + decode; `poll()` (main thread) marks loaded |
+| `OctreeLoader.js:140-148` failed load resets flags and is retried | failed read is dropped, requested again next frame |
+| `LRU.js:138-170` evict least-recently-used + all loaded descendants | cache eviction callback + `disposeDescendants` in `poll()` |
+| `:310` drawn nodes are LRU-touched | `AsyncNodeLoader::touch` |
+| `viewer.js:1628` `pointLoadLimit = pointBudget * 2` | recommended `cacheBytes = 2 x 15 B x pointBudget` |
+
+"Parent instead of a missing child": Potree never draws a hole. A node becomes
+drawable only while its parent is drawable (`:299`), and the octree is
+additive — a parent's points are a subsample of its whole subtree and are drawn
+alongside the children — so while a child is loading its region is already
+covered by the parent's coarser points. The streaming selection keeps exactly
+that; `test_async` A4 checks it every frame and N4 shows the check can fail.
+The synchronous `selectVisible(oct, cam, p)` and `NodeLoader` are unchanged.
 
 **D9 `inf` in metadata.json is reported, not tolerated**
 PotreeConverter writes bare `inf` for an attribute that received no data, which
@@ -125,6 +150,39 @@ and the point budget is only a hard ceiling — **which is exactly Cesium's own
 arrangement** (`Cesium3DTileset.js:3005-3037` adjusts the error threshold and
 treats memory as the ceiling). This deviation is withdrawn, not replaced: the
 code now matches upstream's shape more closely than it did.
+
+**D12 a node's CPU and GPU copies are two states, not one** *(Potree port)*
+In Potree the decoded `geometry` is the GPU buffer, so "loaded" and "tree node"
+differ only by `toTreeNode`. Here the library owns decoded points (CPU) and the
+renderer owns GPU buffers, so `NodeState` has three values (`Unloaded`,
+`Loaded`, `Drawable`) and the renderer reports `Drawable`. The 2-per-frame limit
+applies to the Loaded → Drawable step, i.e. to GPU uploads, as in Potree.
+
+**D13 the cache limit is bytes, Potree's is points** *(Potree port)*
+`LRU.js:143` compares `numPoints` with `pointLoadLimit`; `NodeCache` (PR #98)
+counts bytes. Decoded points are a fixed 15 B, so this is a constant factor;
+`2 x 15 B x pointBudget` reproduces `viewer.js:1628`.
+
+**D14 density grid index clamped at 0** *(Potree port)*
+`DecoderWorker.js:45-51` clamps only the upper end; a point a rounding error
+below the node minimum would index below 0 and be dropped from the count by
+JavaScript. Clamped to `[0, 31]` here. Points are inside their node box by
+construction (`test_octree` C3), so this changes no density on real data.
+
+**D15 eviction happens when a node arrives, and covers loaded-but-undrawn nodes** *(Potree port)*
+Potree runs `lru.freeMemory()` once per frame after the walk
+(`Potree_update_visibility.js:30`), and only drawn (touched) nodes are in its
+LRU (`LRU.js:38-40`), so a node that finished loading but was never drawn is
+not memory-bounded. Here a node enters the byte-bounded cache as soon as
+`poll()` receives it, and eviction happens there. Both evict least recently
+used first; ours is the stricter memory bound. Evicted nodes and their disposed
+descendants are reported by `drainEvicted()` so the renderer frees GPU copies.
+
+**D16 worker count is fixed** *(Potree port)*
+Potree's `WorkerPool.js` creates a worker per concurrent request on demand;
+concurrency is capped by `maxNodesLoading` anyway. Here `Config::workers`
+threads are started once; with `workers >= maxNodesLoading` the behaviour is
+the same.
 
 ## Operating notes found by testing, not by reading
 

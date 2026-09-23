@@ -171,7 +171,7 @@ NodePoints decodeNode(const Octree& oct, int32_t node, const uint8_t* data, int6
 //
 // Threads: `workers` std::threads read and decode (Potree's WorkerPool). Only
 // the calling ("main") thread touches the cache, exactly as only Potree's main
-// thread touches node.geometry. Deviations are D12-D15 in DEVIATIONS.md.
+// thread touches node.geometry. Deviations: D8 table, D12-D16 in DEVIATIONS.md.
 class AsyncNodeLoader {
  public:
   struct Config {
