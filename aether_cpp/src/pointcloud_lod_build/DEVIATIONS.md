@@ -324,6 +324,8 @@ one point moved 100 LSB, one red value changed — all rejected.
   ranges tile `[0, 450000)`.
 - 36M: C1 36,232,793 = octree.bin / 18; C2 15,081 ranges tile octree.bin exactly;
   S2 12,480 / 12,480 leaves reachable; all four negative controls rejected.
+- 216M: C1 216,655,968 = octree.bin / 18; C2 95,514 ranges tile octree.bin
+  exactly; S2 80,372 / 80,372 leaves reachable; all negative controls rejected.
 
 ### D11 stress: a node that accepts more than 1,000,000 points
 
