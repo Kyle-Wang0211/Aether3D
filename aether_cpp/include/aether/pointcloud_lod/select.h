@@ -55,12 +55,20 @@ struct SelectParams {
   int64_t pointBudget = 1000 * 1000;   // Potree.js:101
   double minimumNodePixelSize = 150.0; // PointCloudOctree.js:113
   int maxLevel = std::numeric_limits<int>::max();
+  // Test instrumentation only (nullptr in every product path, D18): called once
+  // for every node popped from the priority queue, before any test
+  // (Potree_update_visibility.js:159 `priorityQueue.pop()`).
+  void (*onPop)(int32_t node, void* ctx) = nullptr;
+  void* onPopCtx = nullptr;
 };
 
 struct Selection {
   std::vector<int32_t> nodes;   // accepted nodes, most important first
   int64_t numPoints = 0;
   int64_t nodesConsidered = 0;
+  // Potree_update_visibility.js :114, :276-280, :413 (D18): min spacing over EVERY
+  // node popped this call, taken before the budget break and the visibility
+  // test. +infinity only if nothing was popped.
   double lowestSpacing = std::numeric_limits<double>::infinity();
   bool hitBudget = false;       // true if the budget break stopped the walk
 

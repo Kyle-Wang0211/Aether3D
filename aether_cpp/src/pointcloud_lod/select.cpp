@@ -88,6 +88,7 @@ Selection selectImpl(const Octree& oct, const Camera& cam, const SelectParams& p
     pq.pop();
     const Node& node = oct.nodes[static_cast<size_t>(it.node)];
     out.nodesConsidered++;
+    if (p.onPop) p.onPop(it.node, p.onPopCtx);   // D18 test instrumentation (:159 pop)
 
     // Potree_update_visibility.js:175-182
     const bool insideFrustum = frustum.intersectsBox(node.box);
@@ -96,14 +97,19 @@ Selection selectImpl(const Octree& oct, const Camera& cam, const SelectParams& p
     visible = visible && node.level < p.maxLevel;
     visible = visible || node.level <= 2;   // :182 -- the first three levels are pinned
 
+    // :276-280 -- lowestSpacing over EVERY popped node: before the budget break
+    // (:282) and the visibility test (:286), so frustum-culled nodes and the node
+    // that trips the budget count too (D18).
+    if (node.spacing != 0.0 && !std::isnan(node.spacing)) {         // :276 `if (node.spacing)` (JS truthiness)
+      out.lowestSpacing = std::min(out.lowestSpacing, node.spacing);  // :277
+    }  // :278-280 `else if (node.geometryNode.spacing)`: our Node has one spacing, the geometry node's
+
     // :282-283 -- hard stop, before the visibility test.
     if (out.numPoints + node.numPoints > p.pointBudget) {
       out.hitBudget = true;
       break;
     }
     if (!visible) continue;
-
-    if (node.spacing > 0) out.lowestSpacing = std::min(out.lowestSpacing, node.spacing);
 
     out.numPoints += node.numPoints;
 

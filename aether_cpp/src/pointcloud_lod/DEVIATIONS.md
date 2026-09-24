@@ -227,6 +227,41 @@ returned node list, `numPoints`, `nodesConsidered`, `lowestSpacing`,
 `hitBudget`, `promoted`, `unloaded`: identical hashes on the fixture, the 36M
 and the 216M trees (9,600 calls each).
 
+**D18 lowestSpacing is Potree's: over every popped node** *(Potree port)* — 2026-09-24
+Before: `select.cpp` took `min(spacing)` only for nodes that passed both the
+budget break and the visibility test. Potree
+(`src/Potree_update_visibility.js` @ `5636cd471d9e`) does it for EVERY node
+popped from the queue, **before** both tests:
+
+| Potree | here (`selectImpl`) |
+|---|---|
+| `:114` `let lowestSpacing = Infinity;` | `Selection::lowestSpacing = +infinity` |
+| `:159` `priorityQueue.pop()` | `pq.pop()` (+ the test hook below) |
+| `:175-182` visibility | unchanged |
+| `:184-271` clip boxes | omitted (D6) |
+| `:276` `if (node.spacing) {` | `if (node.spacing != 0.0 && !std::isnan(node.spacing))` — JS truthiness of a number |
+| `:277` `lowestSpacing = Math.min(lowestSpacing, node.spacing);` | `out.lowestSpacing = std::min(out.lowestSpacing, node.spacing)` |
+| `:278-280` `else if (node.geometryNode && node.geometryNode.spacing)` | not needed: Potree's tree node has no `spacing` of its own (`PointCloudOctree.js` `PointCloudOctreeNode`), the geometry node's is `OctreeLoader.js:221, :431`; our `Node` has one spacing, loaded the same way |
+| `:282-284` budget break | unchanged, now AFTER the spacing update |
+| `:286-288` `if (!visible) continue;` | unchanged, now AFTER the spacing update |
+| `:413` `lowestSpacing: lowestSpacing` | returned in `Selection` |
+
+So frustum-culled nodes and the node that trips the budget count. Only this
+output changed: the selection (node list and order, numPoints,
+nodesConsidered, hitBudget, promoted, unloaded) over the 9,600-call sweep of
+`tests/pointcloud_lod/selection_sweep.h` is bit-identical to the code before
+(golden hashes from engine `740c1dd`: fixture `d75d302eccc381b1`, 36M
+`88ca7530b246fb1b`, 216M `9007c0d55aa9cdb0`), checked by `test_spacing` G1.
+The new value equals an independent reference (min over every node recorded by
+the pop hook) in all 9,600 calls on all three trees (L1). The old definition,
+reconstructed exactly (0 differences against the old code's own output in
+9,600 calls x 3 trees), differs in 3 / 32 / 240 of 4,800 plain calls on the
+fixture / 36M / 216M; e.g. 36M, sweep pose 48 (perspective, 150 px, budget 1M):
+old 0.018300574272871017, new 0.0091502871364355087 (103 popped, 77 accepted).
+
+Test instrumentation (part of D18): `SelectParams::onPop(node, ctx)` is
+called once per pop when non-null; every product path leaves it null.
+
 ## Operating notes found by testing, not by reading
 
 - `PotreeConverter --attributes` **must not be given `position`**:
