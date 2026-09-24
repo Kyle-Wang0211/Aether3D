@@ -25,3 +25,10 @@ int32_t pwdense_run2(const pwdense_frame_t* frames, int32_t n_frames, const floa
     (void)chunk;
     return pwdense_run(frames, n_frames, points_xyz, n_points, opts, progress, user, out_stats);
 }
+/* [v3 2026-09-16] NV12-capable frames: same stub answer (the simulator never runs the dense stage). */
+int32_t pwdense_run3(const pwdense_frame_v3_t* frames, int32_t n_frames, const float* points_xyz, int32_t n_points,
+                     const pwdense_options_t* opts, pwdense_progress_fn progress, pwdense_chunk_fn chunk, void* user,
+                     pwdense_stats_t* out_stats) {
+    (void)frames; (void)n_frames; (void)chunk;
+    return pwdense_run(NULL, 0, points_xyz, n_points, opts, progress, user, out_stats);
+}

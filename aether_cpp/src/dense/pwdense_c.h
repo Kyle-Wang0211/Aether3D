@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define PWDENSE_API __attribute__((visibility("default")))
-#define PWDENSE_ABI_VERSION 2
+#define PWDENSE_ABI_VERSION 3
 
 typedef struct pwdense_frame_t {
     int32_t frame_id;          /* refined-pose frame id (official_sfm_sparse_meta.json poses[].frame_id) */
@@ -72,8 +72,34 @@ PWDENSE_API int32_t pwdense_run(const pwdense_frame_t* frames, int32_t n_frames,
                                 const pwdense_options_t* opts,
                                 pwdense_progress_fn progress, void* user,
                                 pwdense_stats_t* out_stats);
+/* [v3 2026-09-16] Frame with an optional raw NV12 source. When nv12_path != NULL it takes precedence over
+   jpeg_path (which may then be NULL): the frame is a FULL-RANGE 4:2:0 bi-planar file exactly as the PWVA/HEVC
+   decoder hands it out — Y plane (nv12_height*nv12_width bytes) then the interleaved CbCr plane
+   ((nv12_height/2)*nv12_width bytes), both tightly packed. nv12_matrix selects the YUV->RGB constants:
+   0 = BT.601 full range, 1 = BT.709 full range (see dense_images.h). The archived-photo path is not promised
+   byte-identical to the fresh-JPEG path (user decision 2026-09-16); the JPEG path is unchanged and identical to v2.
+   The layout of the first 11 members is exactly pwdense_frame_t. */
+typedef struct pwdense_frame_v3_t {
+    int32_t frame_id;
+    double fx, fy, cx, cy;
+    double image_w, image_h;
+    double q_wxyz[4];
+    double t[3];
+    const char* jpeg_path;     /* v2 field; NULL allowed when nv12_path is set */
+    const char* nv12_path;     /* NULL -> use jpeg_path */
+    int32_t nv12_width, nv12_height;
+    int32_t nv12_matrix;
+    int32_t reserved0;         /* must be 0 */
+} pwdense_frame_v3_t;
+
 /* v2: same as pwdense_run plus the per-frame chunk callback (chunk may be NULL == pwdense_run). */
 PWDENSE_API int32_t pwdense_run2(const pwdense_frame_t* frames, int32_t n_frames,
+                                 const float* points_xyz, int32_t n_points,
+                                 const pwdense_options_t* opts,
+                                 pwdense_progress_fn progress, pwdense_chunk_fn chunk, void* user,
+                                 pwdense_stats_t* out_stats);
+/* v3: same as pwdense_run2 over pwdense_frame_v3_t frames (JPEG or raw NV12 sources per frame). */
+PWDENSE_API int32_t pwdense_run3(const pwdense_frame_v3_t* frames, int32_t n_frames,
                                  const float* points_xyz, int32_t n_points,
                                  const pwdense_options_t* opts,
                                  pwdense_progress_fn progress, pwdense_chunk_fn chunk, void* user,

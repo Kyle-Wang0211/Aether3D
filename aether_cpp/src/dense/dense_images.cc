@@ -11,6 +11,12 @@ extern "C" {
 #include <jpeglib.h>
 }
 
+// libyuv (BSD-3-Clause), vendored at aether_cpp/third_party/libyuv (see PW_VENDORED.md for the pinned commit):
+// Chromium/Android's canonical YUV library, cross-platform with NEON/SSE kernels and runtime dispatch. Used ONLY
+// for the NV12 -> RGB step of the archived-photo path; nothing here re-implements colour conversion.
+#include "libyuv/convert_argb.h"
+#include "libyuv/cpu_id.h"
+
 namespace aether::dense {
 
 // ------------------------------------------------------------------ JPEG (libjpeg-turbo, defaults)
@@ -170,6 +176,103 @@ void pil_rgb_to_l(const RgbImage& rgb, std::vector<uint8_t>& gray) {
 void gray_to_f16(const std::vector<uint8_t>& gray, std::vector<uint16_t>& f16) {
     f16.resize(gray.size());
     for (size_t i = 0; i < gray.size(); ++i) f16[i] = fp32_to_fp16((float)gray[i] / 255.0f);
+}
+
+// [2026-09-16 lossless-speedup v1] ---------------------------------------------- NV12 (libyuv) + dispatch
+namespace {
+
+// Whole-file read. Returns false (with *err) when the file cannot be opened or is short.
+bool read_whole_file(const std::string& path, std::vector<uint8_t>& buf, std::string* err) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) { if (err) *err = "cannot open: " + path; return false; }
+    std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+    if (n < 0) { std::fclose(f); if (err) *err = "cannot size: " + path; return false; }
+    buf.resize((size_t)n);
+    const bool ok = n == 0 || std::fread(buf.data(), 1, (size_t)n, f) == (size_t)n;
+    std::fclose(f);
+    if (!ok) { if (err) *err = "short read: " + path; buf.clear(); return false; }
+    return true;
+}
+
+// The YUV -> RGB matrix, chosen by FrameSource::nv12_matrix. Both are libyuv's OWN full-range constants; the
+// "Yvu" (mirrored) spelling is what libyuv itself passes when the destination is RAW = R,G,B (see nv12_to_rgb).
+//   third_party/libyuv/source/row_common.cc:1478-1482  MAKEYUVCONSTANTS(name,...) defines kYuv<name>Constants
+//                                                      AND the UV-mirrored kYvu<name>Constants from one body.
+//   third_party/libyuv/source/row_common.cc:1613-1629  "BT.601 full range YUV to RGB reference (aka JPEG)"
+//                                                      R = Y + V*1.40200 / G = Y - U*0.34414 - V*0.71414 /
+//                                                      B = Y + U*1.77200  -> MAKEYUVCONSTANTS(JPEG, ...)
+//   third_party/libyuv/source/row_common.cc:1667-1683  "BT.709 full range YUV to RGB reference"
+//                                                      R = Y + V*1.5748 / G = Y - U*0.18732 - V*0.46812 /
+//                                                      B = Y + U*1.8556   -> MAKEYUVCONSTANTS(F709, ...)
+// Full range == no 16..235 headroom (YG = 1.000*..., YB = 64/2) which is exactly what
+// kCVPixelFormatType_420YpCbCr8BiPlanarFullRange / AMediaCodec's full-range NV12 carry.
+const struct libyuv::YuvConstants* nv12_constants(int matrix) {
+    switch (matrix) {
+        case 0: return &libyuv::kYvuJPEGConstants;   // BT.601 full range
+        case 1: return &libyuv::kYvuF709Constants;   // BT.709 full range
+        default: return nullptr;
+    }
+}
+
+// NV12 (Y plane + interleaved CbCr, tightly packed) -> R,G,B bytes, via libyuv's public API.
+//
+// CAREFUL, and this is why the call looks "swapped": in libyuv "RGB24" means B,G,R in memory and "RAW" means
+// R,G,B in memory (upstream docs/formats.md:174 "RAW is R,G,B in memory"). RgbImage::rgb is R,G,B, so the
+// function we want is NV12 -> RAW *with a matrix*. libyuv provides that as a macro, not a function:
+//   third_party/libyuv/include/libyuv/convert_argb.h:57-58
+//       #define NV12ToRAWMatrix(a, b, c, d, e, f, g, h, i) \
+//         NV21ToRGB24Matrix(a, b, c, d, e, f, g##VU, h, i)
+// i.e. NV12->RAW *is* NV21ToRGB24Matrix fed the UV-mirrored constants. The macro pastes "VU" onto the constant
+// NAME, so it cannot take a matrix chosen at run time; we therefore call the underlying public function with the
+// already-mirrored constant, which is the identical expansion. libyuv's own fixed-matrix entry point does exactly
+// the same thing: third_party/libyuv/source/convert_argb.cc:4768-4778
+//       int NV12ToRAW(...) { return NV21ToRGB24Matrix(src_y, ..., src_uv, ..., &kYvuI601Constants, ...); }
+// (we pass kYvuJPEGConstants / kYvuF709Constants instead of the limited-range kYvuI601Constants).
+// Implementation: third_party/libyuv/source/convert_argb.cc:4661 (runtime NEON/SVE2/SSSE3/AVX2 dispatch).
+bool nv12_to_rgb(const uint8_t* y, const uint8_t* uv, int w, int h, int matrix, RgbImage& out, std::string* err) {
+    const struct libyuv::YuvConstants* k = nv12_constants(matrix);
+    if (!k) {
+        if (err) *err = "nv12_matrix must be 0 (BT.601 full range) or 1 (BT.709 full range), got " + std::to_string(matrix);
+        return false;
+    }
+    // One-shot CPU feature detection. libyuv's TestCpuFlag auto-inits (include/libyuv/cpu_id.h:80) with a relaxed
+    // atomic load and an idempotent init, so the race is benign; doing it once here keeps concurrent
+    // load_frame_rgb calls from repeating it. The conversion itself keeps no state -> thread-safe.
+    static const int kCpuInit = libyuv::InitCpuFlags();
+    (void)kCpuInit;
+    out.w = w; out.h = h; out.rgb.resize((size_t)w * h * 3);
+    const int rc = libyuv::NV21ToRGB24Matrix(y, w, uv, w, out.rgb.data(), w * 3, k, w, h);
+    if (rc != 0) { out = RgbImage{}; if (err) *err = "libyuv NV21ToRGB24Matrix failed: rc=" + std::to_string(rc); return false; }
+    return true;
+}
+
+}  // namespace
+
+bool load_frame_rgb(const FrameSource& src, RgbImage& out, std::string* err) {
+    out = RgbImage{};
+    if (src.kind == FrameSourceKind::Jpeg) {
+        if (decode_jpeg_rgb_file(src.path, out)) return true;
+        if (err) *err = "jpeg decode failed: " + src.path;
+        return false;
+    }
+    // Nv12: FULL-RANGE 4:2:0 bi-planar, tightly packed (stride == width), Y plane then interleaved CbCr.
+    const int w = src.width, h = src.height;
+    if (w <= 0 || h <= 0 || (w & 1) != 0 || (h & 1) != 0) {
+        if (err) *err = "nv12 needs positive even width/height, got " + std::to_string(w) + "x" + std::to_string(h) + ": " + src.path;
+        return false;
+    }
+    const size_t y_bytes = (size_t)h * (size_t)w;
+    const size_t uv_bytes = (size_t)(h / 2) * (size_t)w;
+    const size_t want = y_bytes + uv_bytes;                 // == w*h*3/2
+    std::vector<uint8_t> buf;
+    if (!read_whole_file(src.path, buf, err)) return false;
+    if (buf.size() != want) {
+        if (err) *err = "nv12 size mismatch: " + src.path + " is " + std::to_string(buf.size()) +
+                        " bytes, expected " + std::to_string(want) + " (" + std::to_string(w) + "x" +
+                        std::to_string(h) + " 4:2:0 bi-planar = w*h*3/2)";
+        return false;
+    }
+    return nv12_to_rgb(buf.data(), buf.data() + y_bytes, w, h, src.nv12_matrix, out, err);
 }
 
 }  // namespace aether::dense

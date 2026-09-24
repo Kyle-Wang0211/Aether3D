@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 #include "dense_fuse.h"
+#include "dense_images.h"
 #include "dense_fuse_pack.h"
 #include "dense_session.h"
 
@@ -23,10 +24,19 @@ namespace aether::dense {
 struct DenseJob {
     std::vector<SessionFrame> frames;      // registered poses sorted by frame_id
     std::vector<std::string> jpeg_paths;   // per frame, same order (materialised JPEGs)
+    // [2026-09-16 lossless-speedup v1] Per-frame sources (dense_images.h FrameSource), same order as `frames`.
+    // When non-empty it REPLACES jpeg_paths (which is then ignored); when empty every frame is a Jpeg source
+    // taken from jpeg_paths, so every pre-v3 caller behaves exactly as before.
+    std::vector<FrameSource> sources;
     std::vector<float> points;             // sparse points N*3 (official_sfm_sparse.ply xyz)
     SessionParams session;
     FuseParams fuse;
     std::string model_path;                // fused CasDiffMVS ONNX
+    // [2026-09-16 dense-lossless-speedup-v1 §7] Feature-reuse (split) mode. BOTH empty (the default) = the fused
+    // model_path path, bit-for-bit what shipped. Both set = the graph is run as two sessions and every image's
+    // FeatureNet is computed ONCE for the whole job instead of once per (reference, source) use; see
+    // dense_runner.h for the cut, the prior art (hloc / FADEC) and the tool that produced the two files.
+    std::string feat_model_path, rest_model_path;
     bool webgpu = true;
     std::string work_dir;                  // pack files (depth/conf/rgb/cams/neighbors/meta) are written here
     std::string out_ply;
@@ -47,6 +57,14 @@ struct DenseStats {
     int NF = 0, inferred = 0, images = 0;
     int frames_selected = 0; bool box_fallback = false;   // selection subset size / fell back to all frames
     double session_ms = 0, images_ms = 0, ort_session_ms = 0, infer_ms_median = 0, infer_ms_total = 0, fuse_ms = 0;
+    // [2026-09-16 dense-lossless-speedup-v1] Overlap diagnostics, additive only. images_ms is now the WALL time
+    // of the parallel decode stage (image_threads workers, which also overlaps ort_session_ms); fuse_ms is the
+    // fusion worker's busy time plus the frame-order assembly; fuse_wait_ms is how long the calling thread had
+    // to wait for the worker after the last inference (0 => fusion was fully hidden behind inference).
+    int image_threads = 0; double fuse_wait_ms = 0;
+    // [2026-09-16 feature reuse] Split mode only (0 in fused mode): wall time of the "features" phase and how
+    // many images went through the F session (== DenseStats::images, one run per image, never per view use).
+    double feat_ms_total = 0; int feat_count = 0;
     // parity vs ref_depth over inferred views: bench_main.cc criteria
     size_t parity_pixels = 0, parity_bad1 = 0, parity_nonfinite = 0; double parity_worst_rel = 0;
     FusePackStats fuse;
