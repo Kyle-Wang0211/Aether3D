@@ -1351,6 +1351,17 @@ set(AETHER_PWLOD_REAL_OCTREE "" CACHE PATH
     "Optional full-size octree directory: also run the LOD viewer render judges on it")
 set(AETHER_PWLOD_REAL_PLY "" CACHE FILEPATH
     "Optional full-size PLY: also run the LOD viewer on-device build judges on it")
+set(AETHER_PWLOD_IOS_ARTIFACT_DIR "" CACHE PATH
+    "Optional vendor/aether_lod directory: run the iOS archive judges (build_ios_lod.sh --verify-only + negative controls)")
+set(AETHER_PWLOD_IOS_DAWN_MEMBER "" CACHE FILEPATH
+    "Optional iOS Dawn object that defines wgpu* (negative control for the iOS archive judges)")
+if(AETHER_PWLOD_IOS_ARTIFACT_DIR)
+    add_test(NAME test_pointcloud_lod_render_ios_artifact
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/pointcloud_lod_render/test_ios_artifact.sh
+                ${AETHER_PWLOD_IOS_ARTIFACT_DIR}
+                ${CMAKE_CURRENT_BINARY_DIR}/pointcloud_lod_render_out/ios_artifact
+                ${AETHER_PWLOD_IOS_DAWN_MEMBER})
+endif()
 if(TARGET dawn::webgpu_dawn OR AETHER_PWLOD_DAWN_INCLUDE_DIRS)
     add_library(aether_pointcloud_lod_render STATIC
         src/pointcloud_lod_render/lod_render.cpp
