@@ -1365,6 +1365,7 @@ endif()
 if(TARGET dawn::webgpu_dawn OR AETHER_PWLOD_DAWN_INCLUDE_DIRS)
     add_library(aether_pointcloud_lod_render STATIC
         src/pointcloud_lod_render/lod_render.cpp
+        src/pointcloud_lod_render/viewer_look.cpp
         src/pointcloud_lod_render/pwlod_viewer.cpp
         src/pointcloud_lod_render/pwlod_build.cpp
         src/pointcloud_lod_render/m1_bench/pw_lod_bench.cpp)
@@ -1387,12 +1388,13 @@ if(TARGET dawn::webgpu_dawn OR AETHER_PWLOD_DAWN_INCLUDE_DIRS)
         set(_pwlod_dawn_link ${AETHER_PWLOD_DAWN_LINK})
     endif()
     if(_pwlod_dawn_link)
-        add_library(pwlod_render_judges STATIC tests/pointcloud_lod_render/judges.cpp)
+        add_library(pwlod_render_judges STATIC tests/pointcloud_lod_render/judges.cpp
+                                               tests/pointcloud_lod_render/painter_ref.cpp)
         target_link_libraries(pwlod_render_judges PUBLIC aether_pointcloud_lod_render)
         target_compile_options(pwlod_render_judges PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
         # Same list idiom as the reader/builder tests above; each takes the fixture
         # octree (or PLY) and a scratch directory.
-        foreach(pwlod_test render capi ring build)
+        foreach(pwlod_test render capi ring build viewer)
             add_executable(test_pointcloud_lod_render_${pwlod_test}
                 tests/pointcloud_lod_render/test_${pwlod_test}.cpp)
             target_link_libraries(test_pointcloud_lod_render_${pwlod_test}

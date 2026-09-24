@@ -58,6 +58,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -271,8 +272,24 @@ struct FrameU {
     mode: u32,
     pad2: f32,
 }
-struct NodeU { mvp: mat4x4f, level: f32, vn_start: f32, half_size: f32, pad: f32 }
+struct NodeU { mvp: mat4x4f, level: f32, vn_start: f32, half_size: f32, pad: f32, sel_off: vec3f, pad2: f32 }
 struct CPoint { x: f32, y: f32, z: f32, rgba: u32 }
+// R14: the product viewer's look (sparse_cloud_view.dart @ 86a45cf, see viewer_look.h)
+struct ViewerU {
+    rot0: vec4f,
+    rot1: vec4f,
+    rot2: vec4f,
+    half: vec4f,
+    out_color: vec4f,
+    base_scale: f32,
+    max_scale: f32,
+    disc_radius: f32,
+    sprite_half: f32,
+    orbit_distance: f32,
+    sel_mode: u32,
+    ortho_end: u32,
+    pad: f32,
+}
 
 // pointcloud.vs:158-175
 fn numberOfOnes(number_in: i32, index: i32) -> i32 {
@@ -333,10 +350,12 @@ const char* kWgslRender = R"LODWGSL(
 @group(0) @binding(1) var<uniform> nu: NodeU;
 @group(0) @binding(2) var<storage, read> pts: array<CPoint>;
 @group(0) @binding(3) var<storage, read> vn: array<vec4u>;
+@group(0) @binding(4) var<uniform> vu: ViewerU;
 
 struct VsOut {
     @builtin(position) clip: vec4f,
     @location(0) @interpolate(flat) color: vec4f,
+    @location(1) uv: vec2f,
 }
 
 @vertex fn vs_quad(@builtin(vertex_index) vi: u32) -> VsOut {
@@ -350,6 +369,19 @@ struct VsOut {
     );
     let ii = vi / 6u;
     let off = offsets[vi % 6u];
+    if (fu.mode == 2u) {                                  // R14: the product viewer
+        let v = viewerPoint(ii);
+        var ov: VsOut;
+        ov.uv = off * vu.sprite_half;                     // sprite texels from the disc centre
+        ov.color = v.color;
+        if (v.culled == 1u) {                             // CULL_OUTSIDE (:1610)
+            ov.clip = vec4f(2.0, 2.0, 2.0, 1.0);          // outside the clip volume: dropped
+            return ov;
+        }
+        let half_px = vu.sprite_half * v.scale;           // the atlas anchor, scale * 8 (:1702)
+        ov.clip = vec4f(v.clip.xy + off * half_px * 2.0 / fu.img_size * v.clip.w, v.clip.z, v.clip.w);
+        return ov;
+    }
     let p = pts[ii];
     var clip = nu.mvp * vec4f(p.x, p.y, p.z, 1.0);
     let depth = max(clip.w, 1.0e-4);
@@ -376,11 +408,88 @@ struct VsOut {
     var o: VsOut;
     o.clip = clip;
     o.color = unpack4x8unorm(p.rgba);
+    o.uv = vec2f(0.0, 0.0);
     return o;
 }
 
 @fragment fn fs_opaque(in: VsOut) -> @location(0) vec4f {
     return in.color;
+}
+
+// R14: the painter's sprite, a disc of radius 7 texels with a 1-texel
+// anti-aliased rim (drawCircle(Offset(8, 8), 7, isAntiAlias), :819-825), drawn
+// through BlendMode.modulate (:1720): white disc x the point's colour,
+// premultiplied. Coverage is evaluated at the fragment's sprite position.
+fn discCoverage(uv: vec2f) -> f32 {
+    return clamp(vu.disc_radius + 0.5 - length(uv), 0.0, 1.0);
+}
+@fragment fn fs_viewer_core(in: VsOut) -> @location(0) vec4f {
+    if (discCoverage(in.uv) < 1.0) { discard; }
+    return vec4f(in.color.rgb * in.color.a, in.color.a);
+}
+@fragment fn fs_viewer_rim(in: VsOut) -> @location(0) vec4f {
+    let cov = discCoverage(in.uv);
+    if (cov <= 0.0 || cov >= 1.0) { discard; }
+    let a = cov * in.color.a;
+    return vec4f(in.color.rgb * a, a);
+}
+)LODWGSL";
+
+// R14: one point of the painter's loop (sparse_cloud_view.dart @ 86a45cf
+// :1601-1687) on the GPU: projection (the shell's view_proj IS CloudProjection),
+// SelectionBox.contains (selection_box.dart:119-126: |rot^T (p - c)| <= size/2),
+// TINT / CULL outside (:1608-1610, :1680-1682), sprite scale (:1669-1677). The
+// display colour is already baked (viewer_look.cpp).
+const char* kWgslViewerFn = R"LODWGSL(
+struct ViewerPoint { clip: vec4f, color: vec4f, scale: f32, culled: u32 }
+fn viewerPoint(ii: u32) -> ViewerPoint {
+    let p = pts[ii];
+    var r: ViewerPoint;
+    r.clip = nu.mvp * vec4f(p.x, p.y, p.z, 1.0);
+    r.color = unpack4x8unorm(p.rgba);
+    r.culled = 0u;
+    if (vu.sel_mode != 0u) {
+        let d = vec3f(p.x, p.y, p.z) + nu.sel_off;
+        let l = vec3f(dot(vu.rot0.xyz, d), dot(vu.rot1.xyz, d), dot(vu.rot2.xyz, d));
+        let inside = abs(l.x) <= vu.half.x && abs(l.y) <= vu.half.y && abs(l.z) <= vu.half.z;
+        if (!inside) {
+            if (vu.sel_mode == 2u) { r.culled = 1u; } else { r.color = vu.out_color; }
+        }
+    }
+    if (vu.ortho_end == 1u) {
+        r.scale = vu.base_scale;                                       // :1669-1670
+    } else {
+        let sc = vu.base_scale * (vu.orbit_distance / r.clip.w);       // :1675 camDist / dd
+        r.scale = select(sc, vu.max_scale, sc > vu.max_scale);         // :1676
+    }
+    return r;
+}
+)LODWGSL";
+
+// R14: the parity probe -- viewerPoint() for every point of one node, read back.
+const char* kWgslViewerProbe = R"LODWGSL(
+@group(0) @binding(0) var<uniform> fu: FrameU;
+@group(0) @binding(1) var<uniform> nu: NodeU;
+@group(0) @binding(2) var<storage, read> pts: array<CPoint>;
+@group(0) @binding(3) var<storage, read> vn: array<vec4u>;
+@group(0) @binding(4) var<uniform> vu: ViewerU;
+struct ProbeOut { x: f32, y: f32, scale: f32, rgba: u32, culled: u32, w: f32, p0: f32, p1: f32 }
+@group(0) @binding(5) var<storage, read_write> outP: array<ProbeOut>;
+
+@compute @workgroup_size(64) fn cs_viewer_probe(@builtin(global_invocation_id) gid: vec3u) {
+    let i = gid.x;
+    if (i >= arrayLength(&outP)) { return; }
+    let v = viewerPoint(i);
+    var o: ProbeOut;
+    o.x = (v.clip.x / v.clip.w * 0.5 + 0.5) * fu.img_size.x;
+    o.y = (0.5 - v.clip.y / v.clip.w * 0.5) * fu.img_size.y;
+    o.scale = v.scale;
+    o.rgba = pack4x8unorm(v.color);
+    o.culled = v.culled;
+    o.w = v.clip.w;
+    o.p0 = 0.0;
+    o.p1 = 0.0;
+    outP[i] = o;
 }
 )LODWGSL";
 
@@ -410,14 +519,14 @@ bool MakePipe(const GpuCtx& g, Pipe* P, WGPUTextureFormat color_format, uint32_t
   P->w = w; P->h = h;
   P->color_format = color_format;   // R2
   const uint64_t errors0 = GpuErrorCount();
-  const std::string render_src = std::string(kWgslCommon) + kWgslRender;
+  const std::string render_src = std::string(kWgslCommon) + kWgslRender + kWgslViewerFn;   // R14
   WGPUShaderSourceWGSL src = WGPU_SHADER_SOURCE_WGSL_INIT;
   src.code = SV(render_src.c_str());
   WGPUShaderModuleDescriptor md = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
   md.nextInChain = reinterpret_cast<WGPUChainedStruct*>(&src);
   WGPUShaderModule mod = wgpuDeviceCreateShaderModule(g.device, &md);
 
-  WGPUBindGroupLayoutEntry e[4];
+  WGPUBindGroupLayoutEntry e[5];
   for (auto& x : e) x = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
   e[0].binding = 0; e[0].visibility = WGPUShaderStage_Vertex;
   e[0].buffer.type = WGPUBufferBindingType_Uniform;
@@ -432,8 +541,11 @@ bool MakePipe(const GpuCtx& g, Pipe* P, WGPUTextureFormat color_format, uint32_t
   e[3].binding = 3; e[3].visibility = WGPUShaderStage_Vertex;
   e[3].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
   e[3].buffer.minBindingSize = 16;
+  e[4].binding = 4; e[4].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;   // R14
+  e[4].buffer.type = WGPUBufferBindingType_Uniform;
+  e[4].buffer.minBindingSize = sizeof(ViewerU);
   WGPUBindGroupLayoutDescriptor bld = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
-  bld.entryCount = 4; bld.entries = e;
+  bld.entryCount = 5; bld.entries = e;
   P->bgl = wgpuDeviceCreateBindGroupLayout(g.device, &bld);
   WGPUPipelineLayoutDescriptor pld = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
   pld.bindGroupLayoutCount = 1; pld.bindGroupLayouts = &P->bgl;
@@ -462,9 +574,46 @@ bool MakePipe(const GpuCtx& g, Pipe* P, WGPUTextureFormat color_format, uint32_t
   pd.multisample.count = 1;
   pd.multisample.mask = 0xFFFFFFFFu;
   P->pipe = wgpuDeviceCreateRenderPipeline(g.device, &pd);
+  {   // R14: the VIEWER look -- covered texels (depth write), then the AA rim
+      // (premultiplied source-over, depth test only). BlendMode.modulate of a
+      // white sprite = the colour times the sprite's coverage (:1715-1723).
+    WGPUBlendState over = WGPU_BLEND_STATE_INIT;
+    over.color.operation = WGPUBlendOperation_Add;
+    over.color.srcFactor = WGPUBlendFactor_One;
+    over.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+    over.alpha = over.color;
+    WGPUColorTargetState ctv = ct;
+    WGPUFragmentState fsv = fs;
+    fsv.targets = &ctv;
+    WGPURenderPipelineDescriptor pdv = pd;
+    pdv.fragment = &fsv;
+    WGPUDepthStencilState dsv = ds;
+    pdv.depthStencil = &dsv;
+    fsv.entryPoint = SV("fs_viewer_core");
+    P->viewer_core = wgpuDeviceCreateRenderPipeline(g.device, &pdv);
+    fsv.entryPoint = SV("fs_viewer_rim");
+    ctv.blend = &over;
+    dsv.depthWriteEnabled = WGPUOptionalBool_False;
+    P->viewer_rim = wgpuDeviceCreateRenderPipeline(g.device, &pdv);
+  }
   wgpuPipelineLayoutRelease(pl);
   wgpuShaderModuleRelease(mod);
-  if (!P->pipe) { *err = "pipeline failed\n" + GpuErrorLog(); return false; }
+  if (!P->pipe || !P->viewer_core || !P->viewer_rim) { *err = "pipeline failed\n" + GpuErrorLog(); return false; }
+  {   // R14: the parity probe (auto layout)
+    const std::string psrc = std::string(kWgslCommon) + kWgslViewerProbe + kWgslViewerFn;
+    WGPUShaderSourceWGSL ps = WGPU_SHADER_SOURCE_WGSL_INIT;
+    ps.code = SV(psrc.c_str());
+    WGPUShaderModuleDescriptor pmd = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+    pmd.nextInChain = reinterpret_cast<WGPUChainedStruct*>(&ps);
+    WGPUShaderModule pmod = wgpuDeviceCreateShaderModule(g.device, &pmd);
+    WGPUComputePipelineDescriptor ppd = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+    ppd.compute.module = pmod;
+    ppd.compute.entryPoint = SV("cs_viewer_probe");
+    P->viewer_probe = wgpuDeviceCreateComputePipeline(g.device, &ppd);
+    wgpuShaderModuleRelease(pmod);
+  }
+  P->viewer_u = MakeBuffer(g, sizeof(ViewerU),
+      (WGPUBufferUsage)(WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst));
 
   {   // compute check pipeline (auto layout)
     const std::string csrc = std::string(kWgslCommon) + kWgslLodCheck;
@@ -516,11 +665,36 @@ bool MakePipe(const GpuCtx& g, Pipe* P, WGPUTextureFormat color_format, uint32_t
   return true;
 }
 
+// R17: a new colour format / target size without invalidating the GPU nodes.
+// Their bind groups hold P's bind-group layout and uniform buffers, which stay;
+// only the render pipelines and the depth buffer are swapped in from a fresh
+// Pipe (a bind group is valid with any group-equivalent layout, WebGPU spec
+// "group-equivalent").
+bool RetargetPipe(const GpuCtx& g, Pipe* P, WGPUTextureFormat color_format, uint32_t w, uint32_t h,
+                  std::string* err) {
+  if (P->color_format == color_format && P->w == w && P->h == h) return true;
+  Pipe Q;
+  if (!MakePipe(g, &Q, color_format, w, h, 0, err)) { ReleasePipe(&Q); return false; }
+  std::swap(P->pipe, Q.pipe);
+  std::swap(P->viewer_core, Q.viewer_core);
+  std::swap(P->viewer_rim, Q.viewer_rim);
+  std::swap(P->depth, Q.depth);
+  std::swap(P->depth_v, Q.depth_v);
+  P->color_format = color_format;
+  P->w = w;
+  P->h = h;
+  ReleasePipe(&Q);   // Q's own layout / buffers and P's old pipelines + depth
+  return true;
+}
+
 void ReleasePipe(Pipe* P) {   // R8
   if (P->bgl) wgpuBindGroupLayoutRelease(P->bgl);
   if (P->pipe) wgpuRenderPipelineRelease(P->pipe);
   if (P->lodcheck) wgpuComputePipelineRelease(P->lodcheck);
-  for (WGPUBuffer b : {P->frame_u, P->node_u, P->vn, P->resolve, P->qstage})
+  if (P->viewer_core) wgpuRenderPipelineRelease(P->viewer_core);
+  if (P->viewer_rim) wgpuRenderPipelineRelease(P->viewer_rim);
+  if (P->viewer_probe) wgpuComputePipelineRelease(P->viewer_probe);
+  for (WGPUBuffer b : {P->frame_u, P->node_u, P->vn, P->resolve, P->qstage, P->viewer_u})
     if (b) { wgpuBufferDestroy(b); wgpuBufferRelease(b); }
   if (P->depth_v) wgpuTextureViewRelease(P->depth_v);
   if (P->depth) { wgpuTextureDestroy(P->depth); wgpuTextureRelease(P->depth); }
@@ -573,31 +747,50 @@ void ResetLod(Lod* L, size_t cache_bytes, LoadMode mode) {
 namespace {
 
 // Plumbing only: turn one decoded node into a 16-B/point storage buffer.
-GpuNode Upload(const GpuCtx& g, const Pipe& P, const NodePoints& np) {
+// R15: buffer + bind group for one node's (or flat chunk's) CPoint records.
+GpuNode MakeGpuNode(const GpuCtx& g, const Pipe& P, const std::vector<CPoint>& tmp, uint32_t count,
+                    const Vec3& origin, double density) {
   GpuNode gn;
-  const size_t n = np.count();
-  gn.count = (uint32_t)n;
-  gn.origin = np.origin;
-  gn.density = np.density;
-  std::vector<CPoint> tmp(std::max<size_t>(n, 1));
-  for (size_t i = 0; i < n; ++i) {
-    tmp[i].x = np.xyz[i*3+0]; tmp[i].y = np.xyz[i*3+1]; tmp[i].z = np.xyz[i*3+2];
-    tmp[i].rgba = (uint32_t)np.rgb[i*3+0] | ((uint32_t)np.rgb[i*3+1] << 8) |
-                  ((uint32_t)np.rgb[i*3+2] << 16) | (255u << 24);
-  }
+  gn.count = count;
+  gn.origin = origin;
+  gn.density = density;
   gn.bytes = (uint64_t)tmp.size() * sizeof(CPoint);
   gn.buf = MakeBuffer(g, gn.bytes, (WGPUBufferUsage)(WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst));
   wgpuQueueWriteBuffer(g.queue, gn.buf, 0, tmp.data(), gn.bytes);
-  WGPUBindGroupEntry be[4];
+  WGPUBindGroupEntry be[5];
   for (auto& x : be) x = WGPU_BIND_GROUP_ENTRY_INIT;
   be[0].binding = 0; be[0].buffer = P.frame_u; be[0].size = sizeof(FrameU);
   be[1].binding = 1; be[1].buffer = P.node_u;  be[1].size = sizeof(NodeU);
   be[2].binding = 2; be[2].buffer = gn.buf;    be[2].size = gn.bytes;
   be[3].binding = 3; be[3].buffer = P.vn;      be[3].size = (uint64_t)kMaxVN * 16;
+  be[4].binding = 4; be[4].buffer = P.viewer_u; be[4].size = sizeof(ViewerU);   // R14
   WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
-  bd.layout = P.bgl; bd.entryCount = 4; bd.entries = be;
+  bd.layout = P.bgl; bd.entryCount = 5; bd.entries = be;
   gn.bg = wgpuDeviceCreateBindGroup(g.device, &bd);
   return gn;
+}
+
+uint32_t PackRgba(uint32_t argb) {   // 0xAARRGGBB -> unpack4x8unorm order r | g<<8 | b<<16 | a<<24
+  return ((argb >> 16) & 0xFFu) | (((argb >> 8) & 0xFFu) << 8) | ((argb & 0xFFu) << 16) |
+         (((argb >> 24) & 0xFFu) << 24);
+}
+
+// Plumbing only: turn one decoded node into a 16-B/point storage buffer.
+// R14: with a viewer style the painter's display colour is baked in.
+GpuNode Upload(const GpuCtx& g, const Pipe& P, const NodePoints& np, const ViewerStyle* viewer) {
+  const size_t n = np.count();
+  std::vector<CPoint> tmp(std::max<size_t>(n, 1));
+  for (size_t i = 0; i < n; ++i) {
+    tmp[i].x = np.xyz[i*3+0]; tmp[i].y = np.xyz[i*3+1]; tmp[i].z = np.xyz[i*3+2];
+    if (!viewer) {
+      tmp[i].rgba = (uint32_t)np.rgb[i*3+0] | ((uint32_t)np.rgb[i*3+1] << 8) |
+                    ((uint32_t)np.rgb[i*3+2] << 16) | (255u << 24);
+    } else {
+      tmp[i].rgba = PackRgba(DisplayArgb(*viewer, true, np.rgb[i*3+0], np.rgb[i*3+1], np.rgb[i*3+2],
+                                         np.origin.y + (double)np.xyz[i*3+1]));
+    }
+  }
+  return MakeGpuNode(g, P, tmp, (uint32_t)n, np.origin, np.density);
 }
 
 // Sync mode only: evict GPU nodes least-recently drawn first, never one drawn
@@ -745,6 +938,158 @@ float CpuGetLOD(const VNTable& t, float octreeSize, float uLevel, int uVNStart, 
   return depth;
 }
 
+namespace {
+
+// R14: per-frame ViewerU from the style + the v3 camera.
+ViewerU MakeViewerU(const DrawParams& dp, const CamState& cs) {
+  ViewerU u{};
+  const ViewerStyle st = dp.viewer ? *dp.viewer : ViewerStyle();
+  for (int k = 0; k < 3; ++k) {
+    u.rot0[k] = (float)st.selection_rot[k * 3 + 0];   // column 0 = row 0 of rot^T
+    u.rot1[k] = (float)st.selection_rot[k * 3 + 1];
+    u.rot2[k] = (float)st.selection_rot[k * 3 + 2];
+    u.half[k] = (float)(st.selection_size[k] / 2);
+  }
+  const uint32_t c = st.selection_out_argb;
+  u.out_color[0] = (float)((c >> 16) & 0xFFu) / 255.0f;
+  u.out_color[1] = (float)((c >> 8) & 0xFFu) / 255.0f;
+  u.out_color[2] = (float)(c & 0xFFu) / 255.0f;
+  u.out_color[3] = (float)((c >> 24) & 0xFFu) / 255.0f;
+  u.base_scale = (float)(st.point_size / st.sprite_px);             // :1598 pointSize / 16
+  u.max_scale = (float)st.max_sprite_scale;
+  u.disc_radius = (float)st.disc_radius;
+  u.sprite_half = (float)(st.sprite_px / 2);                          // anchor = scale * 8
+  u.orbit_distance = (float)cs.cam.orbitDistance;
+  u.sel_mode = (uint32_t)st.selection_mode;
+  u.ortho_end = (cs.cam.cloudProjection && cs.cam.orthoMix == 1.0) ? 1u : 0u;
+  return u;
+}
+
+}  // namespace
+
+// R15: the second half of the bench's LodFrame (uniforms -> encode -> submit ->
+// hook -> EndAccess), unchanged line for line except where marked, so the flat
+// source (FlatFrame) runs the identical draw path.
+struct DrawItem {
+  int32_t node;          // octree node id (-1: a flat chunk)
+  GpuNode* gn;
+  Vec3 origin;
+  float level, half_size;
+};
+
+bool EncodeDraws(const GpuCtx& g, Pipe* P, const Target& rt, const CamState& cs, const DrawParams& dp,
+                 const DrawOpts& opt, const std::vector<DrawItem>& items, const VNTable& vt,
+                 uint32_t qslot, double t0, FrameRec& fr, const SubmitHook& hook) {
+  // per-frame uniforms
+  FrameU fu{};
+  fu.img_size[0] = (float)P->w; fu.img_size[1] = (float)P->h;
+  fu.base_scale = (float)dp.base_scale; fu.cam_dist = (float)cs.cam_dist;
+  fu.r_min = (float)dp.r_min; fu.r_max = (float)dp.r_max;                     // R7
+  // R6: Potree's orthographic uniforms (PotreeRenderer.js:1237-1240). The
+  // perspective factor is not used then; tan_half_fov = 1 keeps it finite.
+  if (!cs.cam.cloudProjection) {
+    fu.ortho = cs.cam.orthographic ? 1u : 0u;
+    fu.ortho_width = (float)cs.cam.orthoWidth;
+    fu.tan_half_fov = cs.cam.orthographic ? 1.0f
+                                          : (float)std::tan(cs.cam.fovYDegrees * kPi / 180.0 / 2.0);
+  } else {
+    // R16: the v3 camera. Potree's adaptive size needs focal / depth (perspective)
+    // or width / orthoWidth (orthographic); with the product projection clip.w is
+    // the divisor, so 0.5 H / tan_half_fov / clip.w = f / divisor at every orthoMix.
+    const bool oe = cs.cam.orthoMix == 1.0;
+    fu.ortho = oe ? 1u : 0u;
+    fu.ortho_width = oe ? (float)(double(P->w) * cs.cam.orbitDistance / cs.cam.focalPx) : 0.0f;
+    fu.tan_half_fov = oe ? 1.0f : (float)(0.5 * double(P->h) / cs.cam.focalPx);
+  }
+  fu.octree_size = (float)dp.octree_size;
+  fu.octree_spacing = (float)dp.octree_spacing;
+  fu.psize = 1.0f; fu.min_size = 2.0f; fu.max_size = 50.0f;   // PointCloudMaterial.js:32-34
+  fu.mode = (uint32_t)opt.psize_mode;
+  wgpuQueueWriteBuffer(g.queue, P->frame_u, 0, &fu, sizeof fu);
+  if (opt.psize_mode == 2) {
+    const ViewerU vu = MakeViewerU(dp, cs);
+    wgpuQueueWriteBuffer(g.queue, P->viewer_u, 0, &vu, sizeof vu);
+  }
+  if (!items.empty()) {
+    std::vector<uint8_t> slots(items.size() * kSlotBytes, 0);
+    for (size_t i = 0; i < items.size(); ++i) {
+      const int32_t n = items[i].node;
+      const Vec3 o = items[i].origin;
+      const double T[16] = {1, 0, 0, o.x,  0, 1, 0, o.y,  0, 0, 1, o.z,  0, 0, 0, 1};
+      double M[16];
+      Mul(cs.vp, T, M);                     // double precision, then cast
+      NodeU nu{};
+      for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) nu.mvp[c*4 + r] = (float)M[r*4 + c];   // WGSL is column-major
+      nu.level = items[i].level;                                           // PotreeRenderer.js:815
+      const auto vit = vt.offset.find(n);
+      nu.vn_start = vit != vt.offset.end() ? (float)vit->second : 0.0f;    // PotreeRenderer.js:729-730
+      nu.half_size = items[i].half_size;
+      if (dp.viewer) {                                                     // R14
+        for (int k = 0; k < 3; ++k)
+          nu.sel_off[k] = (float)((&o.x)[k] - dp.viewer->selection_center[k]);
+      }
+      std::memcpy(slots.data() + i * kSlotBytes, &nu, sizeof nu);
+    }
+    wgpuQueueWriteBuffer(g.queue, P->node_u, 0, slots.data(), slots.size());
+  }
+
+  // R4: the target is ours from BeginAccess until EndAccess after the hook.
+  if (!BeginAccess(rt)) {
+    fr.access_failed = true;
+    fr.nodes_drawn = 0;
+    return false;
+  }
+  WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
+  WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g.device, &ed);
+  WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+  ca.view = rt.view;                                                           // R2
+  ca.loadOp = WGPULoadOp_Clear; ca.storeOp = WGPUStoreOp_Store;
+  ca.clearValue = WGPUColor{dp.clear_rgba[0], dp.clear_rgba[1], dp.clear_rgba[2],
+                            dp.clear_rgba[3]};                                 // R5
+  ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+  WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
+  da.view = P->depth_v;
+  da.depthLoadOp = WGPULoadOp_Clear;
+  da.depthStoreOp = opt.keep_depth ? WGPUStoreOp_Store : WGPUStoreOp_Discard;
+  da.depthClearValue = 1.0f;
+  da.depthReadOnly = 0;
+  const bool timed = P->qs && qslot < P->qslots;
+  WGPUPassTimestampWrites tw = WGPU_PASS_TIMESTAMP_WRITES_INIT;
+  if (timed) { tw.querySet = P->qs; tw.beginningOfPassWriteIndex = 0; tw.endOfPassWriteIndex = 1; }
+  WGPURenderPassDescriptor pd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+  pd.colorAttachmentCount = 1; pd.colorAttachments = &ca;
+  pd.depthStencilAttachment = &da;
+  pd.timestampWrites = timed ? &tw : nullptr;
+  WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &pd);
+  // R14: the VIEWER look draws every node twice -- covered texels with depth
+  // write, then the anti-aliased rim blended over what is nearer-or-equal.
+  const bool viewer = opt.psize_mode == 2;
+  for (int passNo = 0; passNo < (viewer ? 2 : 1); ++passNo) {
+    wgpuRenderPassEncoderSetPipeline(pass, !viewer ? P->pipe : (passNo == 0 ? P->viewer_core : P->viewer_rim));
+    for (size_t i = 0; i < items.size(); ++i) {
+      const uint32_t off = (uint32_t)(i * kSlotBytes);
+      wgpuRenderPassEncoderSetBindGroup(pass, 0, items[i].gn->bg, 1, &off);
+      wgpuRenderPassEncoderDraw(pass, 6u * items[i].gn->count, 1, 0, 0);
+      if (passNo == 0) fr.pts_drawn += items[i].gn->count;
+    }
+  }
+  fr.nodes_drawn = (int)items.size();
+  wgpuRenderPassEncoderEnd(pass);
+  wgpuRenderPassEncoderRelease(pass);
+  if (timed) wgpuCommandEncoderResolveQuerySet(enc, P->qs, 0, 2, P->resolve, (uint64_t)qslot * 256ull);
+  WGPUCommandBufferDescriptor cbd = WGPU_COMMAND_BUFFER_DESCRIPTOR_INIT;
+  WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, &cbd);
+  wgpuCommandEncoderRelease(enc);
+  wgpuQueueSubmit(g.queue, 1, &cb);
+  wgpuCommandBufferRelease(cb);
+  fr.submit_ms = NowMs() - t0;
+  // R3: the bench waited for the queue here; the hook does (or publishes first).
+  if (hook.fn) hook.fn(hook.ctx, fr); else WaitQueueIdle(g);
+  EndAccess(rt);
+  return true;
+}
+
 // One LOD frame: select -> load -> upload -> draw. Every stage timed.
 FrameRec LodFrame(const GpuCtx& g, Lod* L, Pipe* P, const Target& rt, const CamState& cs,
                   const SelectParams& sp, const DrawParams& dp, int32_t target, uint32_t qslot,
@@ -776,7 +1121,7 @@ FrameRec LodFrame(const GpuCtx& g, Lod* L, Pipe* P, const Target& rt, const CamS
     for (const NodePoints* np : nodes) {
       auto it = L->gpu.find(np->node);
       if (it == L->gpu.end()) {
-        GpuNode gn = Upload(g, *P, *np);
+        GpuNode gn = Upload(g, *P, *np, dp.viewer);
         L->gpu_bytes += gn.bytes;
         it = L->gpu.emplace(np->node, gn).first;
         fr.uploads++; L->uploads++;
@@ -810,7 +1155,7 @@ FrameRec LodFrame(const GpuCtx& g, Lod* L, Pipe* P, const Target& rt, const CamS
     for (int32_t n : sel.promoted) {               // <= 2 per frame
       const NodePoints* np = L->aloader->touch(n);
       if (!np) continue;
-      GpuNode gn = Upload(g, *P, *np);
+      GpuNode gn = Upload(g, *P, *np, dp.viewer);
       L->gpu_bytes += gn.bytes;
       L->gpu.emplace(n, gn);
       fr.uploads++; L->uploads++;
@@ -859,92 +1204,18 @@ FrameRec LodFrame(const GpuCtx& g, Lod* L, Pipe* P, const Target& rt, const CamS
     if (!vt.data.empty()) wgpuQueueWriteBuffer(g.queue, P->vn, 0, vt.data.data(), vt.data.size() * 4);
   }
 
-  // per-frame uniforms
-  FrameU fu{};
-  fu.img_size[0] = (float)P->w; fu.img_size[1] = (float)P->h;
-  fu.base_scale = (float)dp.base_scale; fu.cam_dist = (float)cs.cam_dist;
-  fu.r_min = (float)dp.r_min; fu.r_max = (float)dp.r_max;                     // R7
-  // R6: Potree's orthographic uniforms (PotreeRenderer.js:1237-1240). The
-  // perspective factor is not used then; tan_half_fov = 1 keeps it finite.
-  fu.ortho = cs.cam.orthographic ? 1u : 0u;
-  fu.ortho_width = (float)cs.cam.orthoWidth;
-  fu.tan_half_fov = cs.cam.orthographic ? 1.0f
-                                        : (float)std::tan(cs.cam.fovYDegrees * kPi / 180.0 / 2.0);
-  fu.octree_size = (float)dp.octree_size;
-  fu.octree_spacing = (float)dp.octree_spacing;
-  fu.psize = 1.0f; fu.min_size = 2.0f; fu.max_size = 50.0f;   // PointCloudMaterial.js:32-34
-  fu.mode = (uint32_t)opt.psize_mode;
-  wgpuQueueWriteBuffer(g.queue, P->frame_u, 0, &fu, sizeof fu);
-  if (!draw.empty()) {
-    std::vector<uint8_t> slots(draw.size() * kSlotBytes, 0);
-    for (size_t i = 0; i < draw.size(); ++i) {
-      const int32_t n = draw[i].first;
-      const Node& nd = L->oct->nodes[(size_t)n];
-      const Vec3 o = opt.no_origin ? Vec3{0, 0, 0} : draw[i].second->origin;
-      const double T[16] = {1, 0, 0, o.x,  0, 1, 0, o.y,  0, 0, 1, o.z,  0, 0, 0, 1};
-      double M[16];
-      Mul(cs.vp, T, M);                     // double precision, then cast
-      NodeU nu{};
-      for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c) nu.mvp[c*4 + r] = (float)M[r*4 + c];   // WGSL is column-major
-      nu.level = (float)nd.level;                                          // PotreeRenderer.js:815
-      const auto vit = vt.offset.find(n);
-      nu.vn_start = vit != vt.offset.end() ? (float)vit->second : 0.0f;    // PotreeRenderer.js:729-730
-      nu.half_size = (float)(0.5 * nd.box.size().x);
-      std::memcpy(slots.data() + i * kSlotBytes, &nu, sizeof nu);
-    }
-    wgpuQueueWriteBuffer(g.queue, P->node_u, 0, slots.data(), slots.size());
+  // R15: uniforms, encode, submit, hook, EndAccess -- shared with FlatFrame.
+  std::vector<DrawItem> items;
+  items.reserve(draw.size());
+  for (auto& d : draw) {
+    const Node& nd = L->oct->nodes[(size_t)d.first];
+    items.push_back({d.first, d.second, opt.no_origin ? Vec3{0, 0, 0} : d.second->origin,
+                     (float)nd.level, (float)(0.5 * nd.box.size().x)});
   }
-
-  // R4: the target is ours from BeginAccess until EndAccess after the hook.
-  if (!BeginAccess(rt)) {
-    fr.access_failed = true;
-    fr.nodes_drawn = 0;
+  if (!EncodeDraws(g, P, rt, cs, dp, opt, items, vt, qslot, t0, fr, hook)) {
     fr.wall = NowMs() - t0;
     return fr;
   }
-  WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
-  WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g.device, &ed);
-  WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
-  ca.view = rt.view;                                                           // R2
-  ca.loadOp = WGPULoadOp_Clear; ca.storeOp = WGPUStoreOp_Store;
-  ca.clearValue = WGPUColor{dp.clear_rgba[0], dp.clear_rgba[1], dp.clear_rgba[2],
-                            dp.clear_rgba[3]};                                 // R5
-  ca.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
-  WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
-  da.view = P->depth_v;
-  da.depthLoadOp = WGPULoadOp_Clear;
-  da.depthStoreOp = opt.keep_depth ? WGPUStoreOp_Store : WGPUStoreOp_Discard;
-  da.depthClearValue = 1.0f;
-  da.depthReadOnly = 0;
-  const bool timed = P->qs && qslot < P->qslots;
-  WGPUPassTimestampWrites tw = WGPU_PASS_TIMESTAMP_WRITES_INIT;
-  if (timed) { tw.querySet = P->qs; tw.beginningOfPassWriteIndex = 0; tw.endOfPassWriteIndex = 1; }
-  WGPURenderPassDescriptor pd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
-  pd.colorAttachmentCount = 1; pd.colorAttachments = &ca;
-  pd.depthStencilAttachment = &da;
-  pd.timestampWrites = timed ? &tw : nullptr;
-  WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &pd);
-  wgpuRenderPassEncoderSetPipeline(pass, P->pipe);
-  for (size_t i = 0; i < draw.size(); ++i) {
-    const uint32_t off = (uint32_t)(i * kSlotBytes);
-    wgpuRenderPassEncoderSetBindGroup(pass, 0, draw[i].second->bg, 1, &off);
-    wgpuRenderPassEncoderDraw(pass, 6u * draw[i].second->count, 1, 0, 0);
-    fr.pts_drawn += draw[i].second->count;
-  }
-  fr.nodes_drawn = (int)draw.size();
-  wgpuRenderPassEncoderEnd(pass);
-  wgpuRenderPassEncoderRelease(pass);
-  if (timed) wgpuCommandEncoderResolveQuerySet(enc, P->qs, 0, 2, P->resolve, (uint64_t)qslot * 256ull);
-  WGPUCommandBufferDescriptor cbd = WGPU_COMMAND_BUFFER_DESCRIPTOR_INIT;
-  WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, &cbd);
-  wgpuCommandEncoderRelease(enc);
-  wgpuQueueSubmit(g.queue, 1, &cb);
-  wgpuCommandBufferRelease(cb);
-  fr.submit_ms = NowMs() - t0;
-  // R3: the bench waited for the queue here; the hook does (or publishes first).
-  if (hook.fn) hook.fn(hook.ctx, fr); else WaitQueueIdle(g);
-  EndAccess(rt);
   const double t4 = NowMs();
 
   if (L->mode == LoadMode::Sync) EvictGpu(L);
@@ -954,6 +1225,152 @@ FrameRec LodFrame(const GpuCtx& g, Lod* L, Pipe* P, const Target& rt, const CamS
   if (L->mode == LoadMode::Async) { fr.load = t1 - t0; fr.sel = t2 - t1; }   // load = poll + dispose
   fr.wall = t5 - t0;
   return fr;
+}
+
+// ─── R15: flat point sets (ABI v3 pwlod_viewer_set_points) ────────────────
+void ReleaseFlat(FlatSet* f) {
+  for (GpuNode& n : f->chunks) ReleaseNode(n);
+  f->chunks.clear();
+  f->points = 0;
+}
+
+void UploadFlat(const GpuCtx& g, const Pipe& P, const float* xyz, const uint8_t* rgb,
+                const uint8_t* visibility, uint64_t count, bool colored, const ViewerStyle* viewer,
+                FlatSet* out) {
+  ReleaseFlat(out);
+  // origin: the box centre of the drawn points (positions stored relative to
+  // it, like a node's, so float32 keeps the precision of the input floats).
+  double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
+  uint64_t drawn = 0;
+  auto keep = [&](uint64_t i) {
+    if (visibility && visibility[i] == 0) return false;   // the L2 render gate (:1602)
+    // A non-finite point cannot be drawn (the painter's own arithmetic makes it
+    // NaN and the canvas drops it); leaving it out keeps the origin finite.
+    return std::isfinite(xyz[i * 3]) && std::isfinite(xyz[i * 3 + 1]) && std::isfinite(xyz[i * 3 + 2]);
+  };
+  for (uint64_t i = 0; i < count; ++i) {
+    if (!keep(i)) continue;
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], (double)xyz[i * 3 + k]);
+      hi[k] = std::max(hi[k], (double)xyz[i * 3 + k]);
+    }
+    drawn++;
+  }
+  out->origin = drawn ? Vec3{(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2} : Vec3{0, 0, 0};
+  std::vector<CPoint> tmp;
+  tmp.reserve(std::min<uint64_t>(drawn, kFlatChunkPoints));
+  auto flush = [&] {
+    if (tmp.empty()) return;
+    const uint32_t n = (uint32_t)tmp.size();
+    out->chunks.push_back(MakeGpuNode(g, P, tmp, n, out->origin, 0.0));
+    out->points += n;
+    tmp.clear();
+  };
+  for (uint64_t i = 0; i < count; ++i) {
+    if (!keep(i)) continue;
+    CPoint c;
+    c.x = (float)((double)xyz[i * 3 + 0] - out->origin.x);
+    c.y = (float)((double)xyz[i * 3 + 1] - out->origin.y);
+    c.z = (float)((double)xyz[i * 3 + 2] - out->origin.z);
+    const uint8_t r = rgb ? rgb[i * 3 + 0] : 0, gg = rgb ? rgb[i * 3 + 1] : 0, b = rgb ? rgb[i * 3 + 2] : 0;
+    c.rgba = viewer ? PackRgba(DisplayArgb(*viewer, colored, r, gg, b, (double)xyz[i * 3 + 1]))
+                    : ((uint32_t)r | ((uint32_t)gg << 8) | ((uint32_t)b << 16) | (255u << 24));
+    tmp.push_back(c);
+    if (tmp.size() == kFlatChunkPoints) flush();
+  }
+  flush();
+}
+
+FrameRec FlatFrame(const GpuCtx& g, const FlatSet& F, Pipe* P, const Target& rt, const CamState& cs,
+                   const DrawParams& dp, const DrawOpts& opt, const SubmitHook& hook) {
+  FrameRec fr;
+  const double t0 = NowMs();
+  std::vector<DrawItem> items;
+  for (const GpuNode& c : F.chunks)
+    items.push_back({-1, const_cast<GpuNode*>(&c), opt.no_origin ? Vec3{0, 0, 0} : F.origin, 0.0f, 0.0f});
+  if (items.size() > kMaxDrawNodes) { items.resize(kMaxDrawNodes); fr.truncated = true; }
+  fr.nodes_sel = (int)items.size();
+  fr.pts_sel = F.points;
+  fr.lowest_spacing = std::numeric_limits<double>::infinity();   // no queue (ABI: <= 0 reported)
+  const VNTable vt;
+  if (!EncodeDraws(g, P, rt, cs, dp, opt, items, vt, 0, t0, fr, hook)) {
+    fr.wall = NowMs() - t0;
+    return fr;
+  }
+  fr.render = NowMs() - t0;
+  fr.wall = fr.render;
+  return fr;
+}
+
+std::vector<ViewerProbePoint> ProbeViewerPoints(const GpuCtx& g, Pipe* P, const GpuNode& gn,
+                                                const Vec3& origin, const CamState& cs,
+                                                const DrawParams& dp) {
+  std::vector<ViewerProbePoint> out;
+  if (gn.count == 0) return out;
+  FrameU fu{};
+  fu.img_size[0] = (float)P->w; fu.img_size[1] = (float)P->h;
+  fu.mode = 2u;
+  wgpuQueueWriteBuffer(g.queue, P->frame_u, 0, &fu, sizeof fu);
+  const ViewerU vu = MakeViewerU(dp, cs);
+  wgpuQueueWriteBuffer(g.queue, P->viewer_u, 0, &vu, sizeof vu);
+  NodeU nu{};
+  {
+    const double T[16] = {1, 0, 0, origin.x, 0, 1, 0, origin.y, 0, 0, 1, origin.z, 0, 0, 0, 1};
+    double M[16];
+    Mul(cs.vp, T, M);
+    for (int r = 0; r < 4; ++r)
+      for (int c = 0; c < 4; ++c) nu.mvp[c * 4 + r] = (float)M[r * 4 + c];
+    if (dp.viewer)
+      for (int k = 0; k < 3; ++k) nu.sel_off[k] = (float)((&origin.x)[k] - dp.viewer->selection_center[k]);
+  }
+  WGPUBuffer nub = MakeBuffer(g, sizeof(NodeU), (WGPUBufferUsage)(WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst));
+  wgpuQueueWriteBuffer(g.queue, nub, 0, &nu, sizeof nu);
+  const uint64_t ob = (uint64_t)gn.count * sizeof(ViewerProbePoint);
+  WGPUBuffer outb = MakeBuffer(g, ob, (WGPUBufferUsage)(WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc));
+  WGPUBuffer stg = MakeBuffer(g, ob, (WGPUBufferUsage)(WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst));
+  WGPUBindGroupEntry be[5];
+  for (auto& x : be) x = WGPU_BIND_GROUP_ENTRY_INIT;
+  be[0].binding = 0; be[0].buffer = P->frame_u;  be[0].size = sizeof(FrameU);
+  be[1].binding = 1; be[1].buffer = nub;         be[1].size = sizeof(NodeU);
+  be[2].binding = 2; be[2].buffer = gn.buf;      be[2].size = gn.bytes;
+  be[3].binding = 4; be[3].buffer = P->viewer_u; be[3].size = sizeof(ViewerU);
+  be[4].binding = 5; be[4].buffer = outb;        be[4].size = ob;
+  WGPUBindGroupLayout bgl = wgpuComputePipelineGetBindGroupLayout(P->viewer_probe, 0);
+  WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+  bd.layout = bgl; bd.entryCount = 5; bd.entries = be;
+  WGPUBindGroup bg = wgpuDeviceCreateBindGroup(g.device, &bd);
+  WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
+  WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g.device, &ed);
+  WGPUComputePassDescriptor cpd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
+  WGPUComputePassEncoder cp = wgpuCommandEncoderBeginComputePass(enc, &cpd);
+  wgpuComputePassEncoderSetPipeline(cp, P->viewer_probe);
+  wgpuComputePassEncoderSetBindGroup(cp, 0, bg, 0, nullptr);
+  wgpuComputePassEncoderDispatchWorkgroups(cp, (gn.count + 63) / 64, 1, 1);
+  wgpuComputePassEncoderEnd(cp);
+  wgpuComputePassEncoderRelease(cp);
+  wgpuCommandEncoderCopyBufferToBuffer(enc, outb, 0, stg, 0, ob);
+  WGPUCommandBufferDescriptor cbd = WGPU_COMMAND_BUFFER_DESCRIPTOR_INIT;
+  WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, &cbd);
+  wgpuCommandEncoderRelease(enc);
+  wgpuQueueSubmit(g.queue, 1, &cb);
+  wgpuCommandBufferRelease(cb);
+  bool ok = false;
+  WGPUBufferMapCallbackInfo mi = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+  mi.mode = WGPUCallbackMode_WaitAnyOnly;
+  mi.callback = [](WGPUMapAsyncStatus st, WGPUStringView, void* u, void*) {
+    *static_cast<bool*>(u) = (st == WGPUMapAsyncStatus_Success);
+  };
+  mi.userdata1 = &ok;
+  WaitFuture(g, wgpuBufferMapAsync(stg, WGPUMapMode_Read, 0, ob, mi));
+  if (ok) {
+    const auto* p = static_cast<const ViewerProbePoint*>(wgpuBufferGetConstMappedRange(stg, 0, ob));
+    if (p) out.assign(p, p + gn.count);
+    wgpuBufferUnmap(stg);
+  }
+  wgpuBindGroupRelease(bg);
+  wgpuBindGroupLayoutRelease(bgl);
+  for (WGPUBuffer b : {nub, outb, stg}) { wgpuBufferDestroy(b); wgpuBufferRelease(b); }
+  return out;
 }
 
 }  // namespace aether::pointcloud_lod_render

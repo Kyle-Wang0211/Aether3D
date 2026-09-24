@@ -23,6 +23,7 @@
 #include "aether/pointcloud_lod/octree.h"
 #include "aether/pointcloud_lod/select.h"
 #include "aether/pointcloud_lod/stream.h"
+#include "aether/pointcloud_lod_render/viewer_look.h"
 
 namespace aether::pointcloud_lod_render {
 
@@ -75,8 +76,34 @@ static_assert(sizeof(FrameU) == 64, "FrameU must be 64 bytes");
 struct NodeU {
   float mvp[16];
   float level, vn_start, half_size, pad;
+  float sel_off[3];   // R14: node origin - selection centre (double, then cast)
+  float pad2;
 };
-static_assert(sizeof(NodeU) == 80, "NodeU must be 80 bytes");
+static_assert(sizeof(NodeU) == 96, "NodeU must be 96 bytes");
+
+// R14: the product viewer's look, per frame (WGSL ViewerU, binding 4).
+struct ViewerU {
+  float rot0[4], rot1[4], rot2[4];   // COLUMNS of the row-major selection rot (= rows of rot^T)
+  float half[4];                     // selection size / 2
+  float out_color[4];                // selection_out_argb as unorm rgba
+  float base_scale, max_scale, disc_radius, sprite_half;
+  float orbit_distance;
+  uint32_t sel_mode;                 // 0 none, 1 tint, 2 cull
+  uint32_t ortho_end;                // 1 iff orthoMix == 1 exactly
+  float pad;
+};
+static_assert(sizeof(ViewerU) == 112, "ViewerU must be 112 bytes");
+
+// R14: one point as the viewer shader computed it (the parity probe's output).
+struct ViewerProbePoint {
+  float x, y;          // screen px, origin top-left (the painter's canvas convention)
+  float scale;         // sprite scale
+  uint32_t rgba;       // pack4x8unorm of the drawn colour (r | g<<8 | b<<16 | a<<24)
+  uint32_t culled;     // 1 = CULL_OUTSIDE removed it
+  float w;             // clip.w (= the projection divisor)
+  float pad[2];
+};
+static_assert(sizeof(ViewerProbePoint) == 32, "ViewerProbePoint must be 32 bytes");
 
 struct CPoint { float x, y, z; uint32_t rgba; };
 static_assert(sizeof(CPoint) == 16, "CPoint must be 16 bytes");
@@ -92,7 +119,11 @@ const char* WgslLodCheck();
 struct Pipe {
   WGPUBindGroupLayout bgl = nullptr;
   WGPURenderPipeline pipe = nullptr;
+  WGPURenderPipeline viewer_core = nullptr;   // R14: VIEWER discs, covered texels, depth write
+  WGPURenderPipeline viewer_rim = nullptr;    // R14: VIEWER discs, the AA rim, blended, no depth write
   WGPUComputePipeline lodcheck = nullptr;
+  WGPUComputePipeline viewer_probe = nullptr; // R14: per-point parity probe
+  WGPUBuffer viewer_u = nullptr;              // R14: ViewerU
   WGPUBuffer frame_u = nullptr;
   WGPUBuffer node_u = nullptr;   // kMaxDrawNodes * 256 B, dynamic offset
   WGPUBuffer vn = nullptr;       // visible-node table, kMaxVN * 16 B
@@ -108,6 +139,9 @@ struct Pipe {
 bool MakePipe(const GpuCtx& g, Pipe* P, WGPUTextureFormat color_format, uint32_t w, uint32_t h,
               uint32_t qslots, std::string* err);
 void ReleasePipe(Pipe* P);
+// R17: change the colour format / size, keeping every GPU node valid.
+bool RetargetPipe(const GpuCtx& g, Pipe* P, WGPUTextureFormat color_format, uint32_t w, uint32_t h,
+                  std::string* err);
 
 // One colour target (R2/R4). `memory` non-null => every use is bracketed by
 // wgpuSharedTextureMemoryBeginAccess / EndAccess.
@@ -174,7 +208,7 @@ struct DrawOpts {
   int32_t only_node = -1;     // leaf-only render
   bool no_origin = false;     // negative control: forget to add the origin back
   bool keep_depth = false;    // store the depth attachment (for readback)
-  int psize_mode = 0;         // 0 production formula, 1 Potree ADAPTIVE
+  int psize_mode = 0;         // 0 production formula, 1 Potree ADAPTIVE, 2 product VIEWER (R14)
   std::vector<int32_t>* out_drawn = nullptr;   // receives the drawn node ids
 };
 
@@ -209,6 +243,10 @@ struct DrawParams {
   double r_min = 0.0, r_max = 64.0;
   // R5: the bench cleared to (0,0,0,0).
   double clear_rgba[4] = {0, 0, 0, 0};
+  // R14: non-null = the product viewer's look. Colours are baked with it at
+  // upload (so the caller resets the GPU copies when its colour key changes,
+  // ColourKeyDiffers), the selection box is applied per frame.
+  const ViewerStyle* viewer = nullptr;
 };
 
 // R3: what happens between wgpuQueueSubmit and the sync-mode GPU eviction.
@@ -220,6 +258,32 @@ struct SubmitHook {
   void (*fn)(void* ctx, const FrameRec& fr) = nullptr;
   void* ctx = nullptr;
 };
+
+// R15: a point set drawn whole (ABI v3 pwlod_viewer_set_points): no octree, no
+// budget. Chunks of <= kFlatChunkPoints points, positions relative to one
+// origin (the set's box centre), colours baked like octree nodes.
+constexpr uint32_t kFlatChunkPoints = 1u << 20;
+struct FlatSet {
+  lod::Vec3 origin;
+  std::vector<GpuNode> chunks;
+  int64_t points = 0;
+};
+// Uploads xyz / rgb (count points; visibility may be null; a visibility array
+// of the wrong length is the caller's to drop) into `out` (released first).
+void UploadFlat(const GpuCtx& g, const Pipe& P, const float* xyz, const uint8_t* rgb,
+                const uint8_t* visibility, uint64_t count, bool colored, const ViewerStyle* viewer,
+                FlatSet* out);
+void ReleaseFlat(FlatSet* f);
+
+// Draws a FlatSet (every chunk) with the same encoder / shaders as LodFrame.
+FrameRec FlatFrame(const GpuCtx& g, const FlatSet& F, Pipe* P, const Target& rt, const CamState& cs,
+                   const DrawParams& dp, const DrawOpts& opt, const SubmitHook& hook);
+
+// Runs the VIEWER vertex math of every point of one GPU node / chunk in a
+// compute pass and reads it back (the parity probe). mvp / sel_off as drawn.
+std::vector<ViewerProbePoint> ProbeViewerPoints(const GpuCtx& g, Pipe* P, const GpuNode& gn,
+                                                const lod::Vec3& origin, const CamState& cs,
+                                                const DrawParams& dp);
 
 // One LOD frame: select -> load -> upload -> draw -> submit -> hook. Every
 // stage timed. `target` is the leaf the bench's probes watch (-1 = none).

@@ -61,10 +61,21 @@ revision listed in REVISIONS.txt there.
     BSD 2-Clause License
     https://github.com/potree/PotreeConverter
 
-  three.js (view-frustum extraction and box test)
+  three.js (view-frustum extraction and box test; the LOD viewer's AgX and
+  ACESFilmic tone mapping, r160 tonemapping_pars_fragment.glsl.js, as carried
+  by the product viewer it reproduces -- aether_cpp/src/pointcloud_lod_render/
+  viewer_look.cpp)
     Copyright © 2010-2026 three.js authors
     MIT License
     https://github.com/mrdoob/three.js
+
+  Khronos PBR Neutral tone mapper (the LOD viewer's default tone map,
+  aether_cpp/src/pointcloud_lod_render/viewer_look.cpp; transliterated from
+  PBR_Neutral/pbrNeutral.glsl, licence text in
+  aether_cpp/src/pointcloud_lod/upstream_licenses/khronos_tonemapping.LICENSE)
+    Copyright 2024 The Khronos Group, Inc.
+    Licensed under the Apache License, Version 2.0
+    https://github.com/KhronosGroup/ToneMapping
 
   CesiumJS (multiplicative screen-space-error controller; orthographic node
   screen size from Cesium3DTile.js, DEVIATIONS.md D17)

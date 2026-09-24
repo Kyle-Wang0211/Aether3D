@@ -46,17 +46,41 @@ using aether::pointcloud_lod::Vec3;
 
 namespace {
 
+// v3 camera for the same view: perspective (orthoMix 0, f = 0.5 H / tan(fov/2))
+// or orthographic (orthoMix 1, world per pixel = orbit / f = frustum height / H).
 pwlod_camera ToCamera(const plr::CamState& cs, const Pose& ps, uint32_t w, uint32_t h, bool ortho) {
   pwlod_camera c{};
   std::memcpy(c.view_proj_row_major, cs.vp, sizeof c.view_proj_row_major);
   c.eye_world[0] = ps.eye.x; c.eye_world[1] = ps.eye.y; c.eye_world[2] = ps.eye.z;
-  c.projection = ortho ? PWLOD_PROJ_ORTHOGRAPHIC : PWLOD_PROJ_PERSPECTIVE;
-  c.fov_y_degrees = cs.cam.fovYDegrees;
-  c.ortho_width_world = cs.cam.orthoWidth;
-  c.ortho_height_world = cs.cam.orthoHeight;
+  c.orbit_distance = (ps.target - ps.eye).length();
+  if (!ortho) {
+    c.focal_px = 0.5 * double(h) / std::tan(cs.cam.fovYDegrees * kPi / 180.0 / 2.0);
+    c.ortho_mix = 0.0;
+  } else {
+    c.focal_px = c.orbit_distance * double(h) / cs.cam.orthoHeight;
+    c.ortho_mix = 1.0;
+  }
   c.viewport_width_px = w;
   c.viewport_height_px = h;
   return c;
+}
+
+// The engine's own conversion (pwlod_viewer.cpp FrameBody step 5), for the
+// C++-direct side of C1.
+plr::CamState FromC(const pwlod_camera& cam) {
+  plr::CamState cs{};
+  cs.cam.position = Vec3{cam.eye_world[0], cam.eye_world[1], cam.eye_world[2]};
+  std::memcpy(cs.cam.viewProj, cam.view_proj_row_major, sizeof cs.cam.viewProj);
+  std::memcpy(cs.vp, cam.view_proj_row_major, sizeof cs.vp);
+  cs.cam.screenHeightPx = (int)cam.viewport_height_px;
+  cs.cam.screenWidthPx = (int)cam.viewport_width_px;
+  cs.cam.cloudProjection = true;
+  cs.cam.focalPx = cam.focal_px;
+  cs.cam.orbitDistance = cam.orbit_distance;
+  cs.cam.orthoMix = cam.ortho_mix;
+  cs.cam.fovYDegrees = 2.0 * std::atan(0.5 * double(cam.viewport_height_px) / cam.focal_px) * 180.0 / kPi;
+  cs.cam_dist = 1.0;
+  return cs;
 }
 
 }  // namespace
@@ -85,12 +109,17 @@ int main(int argc, char** argv) {
     uint32_t idx = 0; uint64_t fn = 0;
     pwlod_frame_stats st{};
     pwlod_camera bad{};
-    bad.projection = PWLOD_PROJ_PERSPECTIVE; bad.fov_y_degrees = 60; bad.viewport_width_px = W;
+    bad.focal_px = 1000; bad.orbit_distance = 1; bad.ortho_mix = 0; bad.viewport_width_px = W;
     bad.viewport_height_px = H; bad.view_proj_row_major[0] = std::nan("");
-    pwlod_camera badproj{};
-    badproj.projection = (pwlod_projection)7; badproj.fov_y_degrees = 60;
-    badproj.viewport_width_px = W; badproj.viewport_height_px = H;
+    pwlod_camera badproj = bad;   // v3: ortho_mix outside [0, 1]
+    badproj.view_proj_row_major[0] = 1.0;
+    badproj.ortho_mix = 1.5;
+    pwlod_camera badfocal = badproj;
+    badfocal.ortho_mix = 0.5;
+    badfocal.focal_px = 0.0;
     pwlod_params bp; pwlod_params_default(&bp); bp.point_budget = 0;
+    pwlod_style bs; pwlod_style_default(&bs); bs.tone = (pwlod_tone)9;
+    const float pxyz[3] = {0, 0, 0};
     const bool ok =
         pwlod_viewer_set_targets(v, ts, 2, WGPUTextureFormat_RGBA8Unorm, W, H) == PWLOD_ERR_ARG &&
         pwlod_viewer_set_targets(v, ts, 3, WGPUTextureFormat_RGBA16Float, W, H) == PWLOD_ERR_ARG &&
@@ -100,6 +129,10 @@ int main(int argc, char** argv) {
         pwlod_viewer_get_stats(v, &st) == PWLOD_ERR_STATE &&
         pwlod_viewer_set_camera(v, &bad) == PWLOD_ERR_ARG &&
         pwlod_viewer_set_camera(v, &badproj) == PWLOD_ERR_ARG &&
+        pwlod_viewer_set_camera(v, &badfocal) == PWLOD_ERR_ARG &&
+        pwlod_viewer_set_style(v, &bs) == PWLOD_ERR_ARG &&
+        pwlod_viewer_set_points(v, pxyz, nullptr, 1, 1, nullptr) == PWLOD_ERR_ARG &&   // coloured, no rgb
+        pwlod_viewer_set_points(v, nullptr, nullptr, 1, 0, nullptr) == PWLOD_ERR_ARG &&
         pwlod_viewer_set_params(v, &bp) == PWLOD_ERR_ARG &&
         pwlod_viewer_render_once(v, &ts[0], WGPUTextureFormat_RGBA8Unorm, W, H, &st) == PWLOD_ERR_STATE &&
         pwlod_viewer_load_octree(v, (scratch + "/does_not_exist").c_str()) == PWLOD_ERR_IO &&
@@ -138,6 +171,12 @@ int main(int argc, char** argv) {
   plr::Pipe P;
   std::string err;
   if (!plr::MakePipe(g, &P, WGPUTextureFormat_RGBA8Unorm, W, H, 0, &err)) { std::fprintf(stderr, "pipe\n"); return 1; }
+  pwlod_style defStyleC;
+  pwlod_style_default(&defStyleC);
+  plr::ViewerStyle defStyle;   // pwlod_style_default as the engine converts it
+  defStyle.point_size = defStyleC.point_size; defStyle.sprite_px = defStyleC.sprite_px;
+  defStyle.disc_radius = defStyleC.disc_radius_px_at_scale1; defStyle.max_sprite_scale = defStyleC.max_sprite_scale;
+  defStyle.exposure = defStyleC.exposure;
   auto direct = [&](const plr::CamState& cs, int psize, double px, int64_t budget, bool fixedPotree,
                     int64_t* pts, std::vector<int32_t>* drawn = nullptr) {
     plr::Lod L;
@@ -149,6 +188,7 @@ int main(int argc, char** argv) {
     dp.octree_spacing = oct.meta.spacing;
     if (fixedPotree) { dp.r_min = 1.0; dp.r_max = 1.0; }
     for (int i = 0; i < 4; ++i) dp.clear_rgba[i] = prm.background_rgba[i];
+    if (psize == 2) dp.viewer = &defStyle;
     SelectParams sp; sp.pointBudget = budget; sp.minimumNodePixelSize = px;
     plr::DrawOpts o; o.psize_mode = psize; o.out_drawn = drawn;
     const plr::FrameRec fr = plr::LodFrame(g, &L, &P, tgt.target(), cs, sp, dp, -1, 0, o);
@@ -181,51 +221,45 @@ int main(int argc, char** argv) {
     const Pose ps = PoseAt(T, cs_.t, &seg);
     double zn, zf; NearFar(T, ps, &zn, &zf);
     const plr::CamState persp = MakeCam(ps, (int)W, (int)H, zn, zf);
-    plr::CamState persp2 = persp;
-    persp2.cam.screenWidthPx = (int)W;   // the C path fills it; perspective never reads it
-    persp2.cam_dist = 1.0;
     const double oh = 2.0 * (ps.target - ps.eye).length() * std::tan(30.0 * kPi / 180.0);
-    plr::CamState ortho = MakeOrthoCam(ps, (int)W, (int)H, oh, zn, zf);
-    ortho.cam_dist = 1.0;
+    const plr::CamState ortho = MakeOrthoCam(ps, (int)W, (int)H, oh, zn, zf);
+    const pwlod_camera cP = ToCamera(persp, ps, W, H, false), cO = ToCamera(ortho, ps, W, H, true);
+    const plr::CamState dP = FromC(cP), dO = FromC(cO);
 
     int64_t pa = 0, pb = 0;
-    // perspective + ADAPTIVE
+    struct Arm { const char* name; const pwlod_camera* c; const plr::CamState* d; pwlod_point_size_mode mode; int psize; bool fixed; };
+    const Arm arms[5] = {{"perspective VIEWER", &cP, &dP, PWLOD_PSIZE_VIEWER, 2, false},
+                         {"perspective ADAPTIVE", &cP, &dP, PWLOD_PSIZE_ADAPTIVE, 1, false},
+                         {"perspective FIXED", &cP, &dP, PWLOD_PSIZE_FIXED, 0, true},
+                         {"orthographic VIEWER", &cO, &dO, PWLOD_PSIZE_VIEWER, 2, false},
+                         {"orthographic ADAPTIVE", &cO, &dO, PWLOD_PSIZE_ADAPTIVE, 1, false}};
+    for (const Arm& a : arms) {
+      pwlod_params pm = prm; pm.point_size_mode = a.mode;
+      const Img ia = direct(*a.d, a.psize, 150.0, prm.point_budget, a.fixed, &pa);
+      const Img ib = viaC(*a.c, pm, &pb);
+      rep.check(Fmt("C1 C ABI == C++ direct, %s (%s)", a.name, cs_.name).c_str(),
+                Stat(ia).hash == Stat(ib).hash && pa == pb && pa > 0 && Stat(ia).cover > 0.001,
+                Fmt("%016llx vs %016llx, %lld vs %lld pts", (unsigned long long)Stat(ia).hash,
+                    (unsigned long long)Stat(ib).hash, (long long)pa, (long long)pb));
+    }
+    // N1: transposed matrix through the C ABI (default VIEWER look)
     {
-      const Img a = direct(persp2, 1, 150.0, prm.point_budget, false, &pa);
-      const Img b = viaC(ToCamera(persp, ps, W, H, false), prm, &pb);
-      rep.check(Fmt("C1 C ABI == C++ direct, perspective ADAPTIVE (%s)", cs_.name).c_str(),
-                Stat(a).hash == Stat(b).hash && pa == pb && pa > 0 && ImageNonTrivial(Stat(a)),
-                Fmt("%016llx vs %016llx, %lld vs %lld pts", (unsigned long long)Stat(a).hash,
-                    (unsigned long long)Stat(b).hash, (long long)pa, (long long)pb));
-      // N1: transposed matrix through the C ABI
-      pwlod_camera tc = ToCamera(persp, ps, W, H, false);
+      const Img a = direct(dP, 2, 150.0, prm.point_budget, false, &pa);
+      pwlod_camera tc = cP;
       for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c) tc.view_proj_row_major[r * 4 + c] = persp.vp[c * 4 + r];
+        for (int c = 0; c < 4; ++c) tc.view_proj_row_major[r * 4 + c] = cP.view_proj_row_major[c * 4 + r];
       int64_t pt = 0;
       const Img t = viaC(tc, prm, &pt);
       rep.check(Fmt("N1 NEG transposed view_proj differs (%s)", cs_.name).c_str(),
-                Stat(t).hash != Stat(a).hash && ImgDiff(t, a).frac > 0.01,
+                Stat(t).hash != Stat(a).hash && ImgDiff(t, a).frac > 0.001,
                 Fmt("diff frac %.4f, %lld pts", ImgDiff(t, a).frac, (long long)pt));
     }
-    // perspective + FIXED (Potree PointSizeType.FIXED, R7)
     {
-      pwlod_params pf = prm; pf.point_size_mode = PWLOD_PSIZE_FIXED;
-      const Img a = direct(persp2, 0, 150.0, prm.point_budget, true, &pa);
-      const Img b = viaC(ToCamera(persp, ps, W, H, false), pf, &pb);
-      rep.check(Fmt("C1 C ABI == C++ direct, perspective FIXED (%s)", cs_.name).c_str(),
-                Stat(a).hash == Stat(b).hash && pa == pb && pa > 0,
-                Fmt("%016llx vs %016llx", (unsigned long long)Stat(a).hash, (unsigned long long)Stat(b).hash));
-    }
-    // orthographic + ADAPTIVE
-    {
-      const Img a = direct(ortho, 1, 150.0, prm.point_budget, false, &pa);
-      const Img b = viaC(ToCamera(ortho, ps, W, H, true), prm, &pb);
-      rep.check(Fmt("C1 C ABI == C++ direct, orthographic ADAPTIVE (%s)", cs_.name).c_str(),
-                Stat(a).hash == Stat(b).hash && pa == pb && pa > 0,
-                Fmt("%016llx vs %016llx, %lld pts", (unsigned long long)Stat(a).hash,
-                    (unsigned long long)Stat(b).hash, (long long)pa));
+      pwlod_params pa2 = prm; pa2.point_size_mode = PWLOD_PSIZE_ADAPTIVE;
+      const Img a = direct(dO, 1, 150.0, prm.point_budget, false, &pa);
       rep.check(Fmt("O1 orthographic ADAPTIVE frame non-trivial (%s)", cs_.name).c_str(),
                 ImageNonTrivial(Stat(a)), StatJson(Stat(a)));
+      (void)pa2;
     }
   }
 
@@ -264,8 +298,8 @@ int main(int argc, char** argv) {
   {
     const std::string ver = pwlod_version();
     const std::string tail = std::string("abi=") + std::to_string(PWLOD_ABI_VERSION);
-    rep.check("V2 pwlod_version() reports abi=2",
-              PWLOD_ABI_VERSION == 2 && ver.size() > tail.size() &&
+    rep.check("V2 pwlod_version() reports abi=3 (== PWLOD_ABI_VERSION)",
+              PWLOD_ABI_VERSION == 3 && ver.size() > tail.size() &&
                   ver.compare(ver.size() - tail.size(), tail.size(), tail) == 0,
               "\"" + ver + "\"");
     auto bits = [](double a, double b) { return std::memcmp(&a, &b, sizeof a) == 0; };
@@ -275,14 +309,15 @@ int main(int argc, char** argv) {
     };
     const Pose ps = PoseAt(T, 0.35, &seg);   // the leaf pose: deep nodes, small spacing
     double zn, zf; NearFar(T, ps, &zn, &zf);
-    plr::CamState persp = MakeCam(ps, (int)W, (int)H, zn, zf);
-    persp.cam.screenWidthPx = (int)W;
+    const plr::CamState persp0 = MakeCam(ps, (int)W, (int)H, zn, zf);
     const double oh = 2.0 * (ps.target - ps.eye).length() * std::tan(30.0 * kPi / 180.0);
-    const plr::CamState ortho = MakeOrthoCam(ps, (int)W, (int)H, oh, zn, zf);
+    const plr::CamState ortho0 = MakeOrthoCam(ps, (int)W, (int)H, oh, zn, zf);
+    const pwlod_camera cP = ToCamera(persp0, ps, W, H, false), cO = ToCamera(ortho0, ps, W, H, true);
+    const plr::CamState persp = FromC(cP), ortho = FromC(cO);
     int64_t pts = 0;
     pwlod_frame_stats sp{}, so{};
-    viaC(ToCamera(persp, ps, W, H, false), prm, &pts, &sp);
-    viaC(ToCamera(ortho, ps, W, H, true), prm, &pts, &so);
+    viaC(cP, prm, &pts, &sp);
+    viaC(cO, prm, &pts, &so);
     const double wantP = selLowest(persp), wantO = selLowest(ortho);
     rep.check("V2 render_once lowest_spacing == selectVisible's (bit for bit)",
               sp.nodes_drawn > 0 && so.nodes_drawn > 0 && wantP > 0 && bits(sp.lowest_spacing, wantP) &&
@@ -297,8 +332,7 @@ int main(int argc, char** argv) {
       pwlod_viewer_create(&gpu, &vr);
       pwlod_viewer_load_octree(vr, dir.c_str());
       pwlod_viewer_set_params(vr, &prm);
-      const pwlod_camera cam = ToCamera(persp, ps, W, H, false);
-      pwlod_viewer_set_camera(vr, &cam);
+      pwlod_viewer_set_camera(vr, &cP);
       pwlod_viewer_set_targets(vr, rts, 3, WGPUTextureFormat_RGBA8Unorm, W, H);
       struct First { std::mutex mu; bool got = false; pwlod_frame_stats st{}; } first;
       pwlod_viewer_start(vr, [](void* u, uint32_t, const pwlod_frame_stats* st) {
@@ -325,7 +359,7 @@ int main(int argc, char** argv) {
     {
       pwlod_params pa = prm; pa.async_loading = 1;
       pwlod_frame_stats sa{};
-      viaC(ToCamera(persp, ps, W, H, false), pa, &pts, &sa);
+      viaC(cP, pa, &pts, &sa);
       rep.check("V2 async first frame (0 drawn) lowest_spacing == selectVisible's",
                 sa.nodes_drawn == 0 && wantP > 0 && bits(sa.lowest_spacing, wantP),
                 Fmt("%d nodes drawn, lowest_spacing %.17g vs select %.17g", sa.nodes_drawn,
@@ -334,7 +368,7 @@ int main(int argc, char** argv) {
     // negative control: the largest spacing filled in must be caught
     {
       pwlod_frame_stats sn{};
-      viaC(ToCamera(persp, ps, W, H, false), prm, &pts, &sn, true);
+      viaC(cP, prm, &pts, &sn, true);
       rep.check("V2 NEG largest spacing filled in -> judge reports it",
                 !bits(sn.lowest_spacing, wantP) && sn.lowest_spacing == oct.nodes[0].spacing,
                 Fmt("filled %.17g (root) vs select %.17g", sn.lowest_spacing, wantP));

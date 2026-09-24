@@ -2,3 +2,5 @@ potree            5636cd471d9eb464969e758be45c44d7613d3859
 PotreeConverter   8bfad98d2a6b2111cdcb3840cb508b59408d0721
 three.js          6101189ee28be14fe3a433a16712f9dd614972c6
 CesiumJS          113c068e9af33dba22e5cc54f5a762b593ca3829
+three.js r160     643680ed5fc73ba27e32a6529d59cae8c8b3825c  (AgX / ACESFilmic tone mapping carried by the product painter; LICENSE text identical to the copy above but for the year range)
+KhronosGroup/ToneMapping b5a2eed5ddf6c2227090449399de9c7affb9e4c9  (PBR_Neutral/pbrNeutral.glsl, Apache-2.0 per .reuse/dep5; licence text: khronos_tonemapping.LICENSE)

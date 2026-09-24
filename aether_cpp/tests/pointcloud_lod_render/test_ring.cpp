@@ -85,8 +85,9 @@ RunResult Run(pwlod_viewer* v, const Traj& T, uint32_t W, uint32_t H, double sec
       pwlod_camera c{};
       std::memcpy(c.view_proj_row_major, cs.vp, sizeof c.view_proj_row_major);
       c.eye_world[0] = ps.eye.x; c.eye_world[1] = ps.eye.y; c.eye_world[2] = ps.eye.z;
-      c.projection = PWLOD_PROJ_PERSPECTIVE;
-      c.fov_y_degrees = 60.0;
+      c.focal_px = 0.5 * double(H) / std::tan(30.0 * kPi / 180.0);   // v3: fov 60 as a focal length
+      c.orbit_distance = (ps.target - ps.eye).length();
+      c.ortho_mix = 0.0;
       c.viewport_width_px = W; c.viewport_height_px = H;
       pwlod_viewer_set_camera(v, &c);
       ++k;

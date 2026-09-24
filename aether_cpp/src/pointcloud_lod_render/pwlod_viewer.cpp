@@ -40,6 +40,7 @@
 #include "aether/pointcloud_lod/octree.h"
 #include "aether/pointcloud_lod/select.h"
 #include "aether/pointcloud_lod_render/lod_render.h"
+#include "aether/pointcloud_lod_render/viewer_look.h"
 #include "aether/pointcloud_lod_render/viewer_probe.h"
 
 #ifndef PWLOD_ENGINE_SHA8
@@ -65,21 +66,59 @@ bool ValidFormat(WGPUTextureFormat f) {
   return f == WGPUTextureFormat_RGBA8Unorm || f == WGPUTextureFormat_BGRA8Unorm;
 }
 
+// v3: a flat point set as the caller handed it (copied in set_points).
+struct FlatData {
+  std::vector<float> xyz;
+  std::vector<uint8_t> rgb;   // empty when not coloured
+  std::vector<uint8_t> vis;   // empty = every point visible
+  uint64_t count = 0;
+  bool colored = true;
+};
+
+enum SourceKind { kSourceNone = 0, kSourceFlat = 1, kSourceOctree = 2 };   // = pwlod_frame_stats.source
+
 // Render state: owned by the render thread while it runs, by the caller while
 // stopped (render_once, destroy).
 struct RenderState {
   std::shared_ptr<const lod::Octree> oct;
   plr::Lod L;
+  std::shared_ptr<const FlatData> flat_data;
+  plr::FlatSet flat;
+  int source = kSourceNone;
   plr::Pipe P;
   bool pipe_ok = false;
   lod::QualityController qc;
   pwlod_params params{};
   pwlod_camera cam{};
-  uint64_t params_gen = 0, camera_gen = 0, octree_gen = 0;   // applied
+  plr::ViewerStyle style;
+  uint64_t params_gen = 0, camera_gen = 0, source_gen = 0, style_gen = 0;   // applied
   size_t applied_cache = 0;
   int applied_async = -1;
   double applied_target_ms = -1;
+  // the colour key the GPU copies were baked with (A11)
+  int baked_viewer = -1;       // 1 = the viewer's display colours, 0 = raw rgb
+  plr::ViewerStyle baked_style;
 };
+
+plr::ViewerStyle ToStyle(const pwlod_style& s) {
+  plr::ViewerStyle v;
+  v.point_size = s.point_size;
+  v.sprite_px = s.sprite_px;
+  v.disc_radius = s.disc_radius_px_at_scale1;
+  v.max_sprite_scale = s.max_sprite_scale;
+  v.tone = (int)s.tone;
+  v.exposure = s.exposure;
+  v.uncolored_min_y = s.uncolored_min_y;
+  v.uncolored_inv_y_span = s.uncolored_inv_y_span;
+  v.selection_mode = (int)s.selection_mode;
+  for (int k = 0; k < 3; ++k) {
+    v.selection_center[k] = s.selection_center[k];
+    v.selection_size[k] = s.selection_size[k];
+  }
+  for (int k = 0; k < 9; ++k) v.selection_rot[k] = s.selection_rot_row_major[k];
+  v.selection_out_argb = s.selection_out_argb;
+  return v;
+}
 
 void ReleaseLodAll(plr::Lod* L) {
   L->aloader.reset();   // joins its workers first
@@ -106,9 +145,14 @@ struct pwlod_viewer {
   uint64_t params_gen = 1;
   pwlod_camera camera{};
   uint64_t camera_gen = 0;     // 0 = never set
+  pwlod_style style{};
+  uint64_t style_gen = 1;
+  // v3: the current source is whichever of set_points / load_octree came last
+  int pending_kind = kSourceNone;
   std::shared_ptr<const lod::Octree> pending_oct;
   std::string pending_bin;
-  uint64_t octree_gen = 0;     // 0 = never loaded
+  std::shared_ptr<const FlatData> pending_flat;
+  uint64_t source_gen = 0;     // 0 = nothing loaded
   bool stop_req = false;
 
   // ---- ring, guarded by ring_mu (DefaultCamera.swift:28-31's one lock) ----
@@ -135,8 +179,6 @@ struct pwlod_viewer {
   bool running = false;        // caller-side only
   pwlod_frame_ready_fn cb = nullptr;
   void* user = nullptr;
-  std::string bin_path_applied;
-  std::string pending_bin_applied;
 
   // ---- frame counters ----
   std::atomic<uint64_t> frame_counter{0};
@@ -233,31 +275,59 @@ pwlod_status FrameBody(pwlod_viewer* v, const plr::Target& rt, WGPUTextureFormat
   RenderState& rs = v->rs;
   *more_work = false;
   // 1. snapshot what callers set
+  int new_kind = kSourceNone;
   std::shared_ptr<const lod::Octree> new_oct;
   std::string new_bin;
-  uint64_t pgen, cgen, ogen;
+  std::shared_ptr<const FlatData> new_flat;
+  uint64_t pgen, cgen, sgen, stgen;
   pwlod_params params;
   pwlod_camera cam;
+  pwlod_style style;
   {
     std::lock_guard<std::mutex> lk(v->mu);
-    pgen = v->params_gen; cgen = v->camera_gen; ogen = v->octree_gen;
-    params = v->params; cam = v->camera;
-    if (ogen != rs.octree_gen) { new_oct = v->pending_oct; new_bin = v->pending_bin; }
+    pgen = v->params_gen; cgen = v->camera_gen; sgen = v->source_gen; stgen = v->style_gen;
+    params = v->params; cam = v->camera; style = v->style;
+    if (sgen != rs.source_gen) {
+      new_kind = v->pending_kind;
+      new_oct = v->pending_oct; new_bin = v->pending_bin; new_flat = v->pending_flat;
+    }
   }
-  if (ogen == 0 || cgen == 0) return PWLOD_ERR_STATE;          // no octree / no camera yet
+  if (sgen == 0 || cgen == 0) return PWLOD_ERR_STATE;          // no source / no camera yet
   if (cam.viewport_width_px != w || cam.viewport_height_px != h) return PWLOD_ERR_ARG;
 
-  // 2. apply an octree switch at this frame boundary
-  bool reset_lod = false;
-  if (ogen != rs.octree_gen) {
-    ReleaseLodAll(&rs.L);
-    rs.oct = new_oct;
-    rs.L.oct = rs.oct.get();
-    rs.L.bin_path = new_bin;
-    rs.octree_gen = ogen;
-    reset_lod = true;
+  // 2. pipeline for this target format / size (R17: GPU copies stay valid)
+  {
+    std::string err;
+    if (!rs.pipe_ok) rs.pipe_ok = plr::MakePipe(v->g, &rs.P, fmt, w, h, 0, &err);
+    else if (!plr::RetargetPipe(v->g, &rs.P, fmt, w, h, &err)) rs.pipe_ok = false;
+    if (!rs.pipe_ok) {
+      std::fprintf(stderr, "pwlod: %s\n", err.c_str());
+      plr::ReleasePipe(&rs.P);
+      return PWLOD_ERR_GPU;
+    }
   }
-  // 3. apply params
+
+  // 3. apply a source switch at this frame boundary (camera and style untouched)
+  bool reset_lod = false, upload_flat = false;
+  if (sgen != rs.source_gen) {
+    ReleaseLodAll(&rs.L);
+    plr::ReleaseFlat(&rs.flat);
+    rs.oct.reset();
+    rs.flat_data.reset();
+    rs.L.oct = nullptr;
+    if (new_kind == kSourceOctree) {
+      rs.oct = new_oct;
+      rs.L.oct = rs.oct.get();
+      rs.L.bin_path = new_bin;
+      reset_lod = true;
+    } else {
+      rs.flat_data = new_flat;
+      upload_flat = true;
+    }
+    rs.source = new_kind;
+    rs.source_gen = sgen;
+  }
+  // 4. apply params and style
   const size_t cache = CacheBytesFor(params);
   if (pgen != rs.params_gen) {
     if (cache != rs.applied_cache || params.async_loading != rs.applied_async) reset_lod = true;
@@ -270,60 +340,82 @@ pwlod_status FrameBody(pwlod_viewer* v, const plr::Target& rt, WGPUTextureFormat
     rs.params = params;
     rs.params_gen = pgen;
   }
-  if (reset_lod) {
+  if (stgen != rs.style_gen) {
+    rs.style = ToStyle(style);
+    rs.style_gen = stgen;
+  }
+  // The point-size rule actually used (A9: a flat set has no octree, so
+  // ADAPTIVE falls back to the viewer's own rule; FIXED stays FIXED).
+  int psize = params.point_size_mode == PWLOD_PSIZE_FIXED ? 0
+            : params.point_size_mode == PWLOD_PSIZE_ADAPTIVE ? 1 : 2;
+  if (rs.source == kSourceFlat && psize == 1) psize = 2;
+  // A11: colours are baked into the GPU copies (the painter caches them per
+  // (cloud, exposure, tone), :1197-1213); a new colour key re-bakes.
+  const int want_viewer = psize == 2 ? 1 : 0;
+  if (want_viewer != rs.baked_viewer ||
+      (want_viewer == 1 && plr::ColourKeyDiffers(rs.style, rs.baked_style))) {
+    if (rs.source == kSourceOctree) reset_lod = true;
+    if (rs.source == kSourceFlat) upload_flat = true;
+    rs.baked_viewer = want_viewer;
+    rs.baked_style = rs.style;
+  }
+  if (reset_lod && rs.source == kSourceOctree) {
     ReleaseLodAll(&rs.L);
     plr::ResetLod(&rs.L, cache, params.async_loading ? plr::LoadMode::Async : plr::LoadMode::Sync);
     rs.applied_cache = cache;
     rs.applied_async = params.async_loading;
   }
+  int flat_uploads = 0;
+  if (upload_flat && rs.source == kSourceFlat && rs.flat_data) {
+    const FlatData& fd = *rs.flat_data;
+    plr::UploadFlat(v->g, rs.P, fd.xyz.data(), fd.rgb.empty() ? nullptr : fd.rgb.data(),
+                    fd.vis.empty() ? nullptr : fd.vis.data(), fd.count, fd.colored,
+                    want_viewer ? &rs.style : nullptr, &rs.flat);
+    flat_uploads = (int)rs.flat.chunks.size();
+  }
   rs.cam = cam;
   rs.camera_gen = cgen;
 
-  // 4. pipeline for this target format / size
-  if (!rs.pipe_ok || rs.P.color_format != fmt || rs.P.w != w || rs.P.h != h) {
-    plr::ReleasePipe(&rs.P);
-    std::string err;
-    rs.pipe_ok = plr::MakePipe(v->g, &rs.P, fmt, w, h, 0, &err);
-    if (!rs.pipe_ok) {
-      std::fprintf(stderr, "pwlod: %s\n", err.c_str());
-      return PWLOD_ERR_GPU;
-    }
-  }
-
-  // 5. camera -> CamState (row-major, WebGPU clip z in [0,1])
+  // 5. v3 camera -> CamState (the product's CloudProjection; D19, R16)
   plr::CamState cs{};
   cs.cam.position = lod::Vec3{cam.eye_world[0], cam.eye_world[1], cam.eye_world[2]};
   std::memcpy(cs.cam.viewProj, cam.view_proj_row_major, sizeof cs.cam.viewProj);
   std::memcpy(cs.vp, cam.view_proj_row_major, sizeof cs.vp);
-  cs.cam.fovYDegrees = cam.projection == PWLOD_PROJ_PERSPECTIVE ? cam.fov_y_degrees : 60.0;
   cs.cam.screenHeightPx = (int)cam.viewport_height_px;
   cs.cam.screenWidthPx = (int)cam.viewport_width_px;
-  cs.cam.orthographic = cam.projection == PWLOD_PROJ_ORTHOGRAPHIC;
-  cs.cam.orthoWidth = cam.ortho_width_world;
-  cs.cam.orthoHeight = cam.ortho_height_world;
+  cs.cam.cloudProjection = true;
+  cs.cam.focalPx = cam.focal_px;
+  cs.cam.orbitDistance = cam.orbit_distance;
+  cs.cam.orthoMix = cam.ortho_mix;
+  cs.cam.fovYDegrees = 2.0 * std::atan(0.5 * double(cam.viewport_height_px) / cam.focal_px) * 180.0 /
+                       3.14159265358979323846;   // informational; D19 uses focalPx
   cs.cam_dist = 1.0;   // only the bench's production formula reads it (R7)
 
   plr::DrawParams dp;
-  dp.octree_size = rs.oct->nodes[0].box.size().x;    // PointCloudOctree.js:318
-  dp.octree_spacing = rs.oct->meta.spacing;           // PointCloudOctree.js:315
-  if (params.point_size_mode == PWLOD_PSIZE_FIXED) {
+  if (rs.oct) {
+    dp.octree_size = rs.oct->nodes[0].box.size().x;    // PointCloudOctree.js:318
+    dp.octree_spacing = rs.oct->meta.spacing;           // PointCloudOctree.js:315
+  }
+  if (psize == 0) {
     // R7: Potree PointSizeType.FIXED, pointcloud.vs:680-681 + :699-700 with
     // PointCloudMaterial.js:32-34 (size 1, minSize 2) -> 2 px diameter -> r = 1 (P4).
     dp.r_min = 1.0;
     dp.r_max = 1.0;
   }
   for (int i = 0; i < 4; ++i) dp.clear_rgba[i] = params.background_rgba[i];
+  dp.viewer = want_viewer ? &rs.style : nullptr;
 
   lod::SelectParams sp;
   sp.pointBudget = params.point_budget;
   sp.minimumNodePixelSize = rs.qc.pixelSize();
 
   plr::DrawOpts opt;
-  opt.psize_mode = params.point_size_mode == PWLOD_PSIZE_ADAPTIVE ? 1 : 0;
+  opt.psize_mode = psize;
 
   // 6. one frame, same code path for the ring and render_once
   const uint64_t frame_number = v->frame_counter.fetch_add(1) + 1;
   pwlod_frame_stats early{};
+  early.source = rs.source;
   HookCtx hc;
   hc.v = v;
   hc.frame_number = frame_number;
@@ -337,11 +429,18 @@ pwlod_status FrameBody(pwlod_viewer* v, const plr::Target& rt, WGPUTextureFormat
   hook.fn = &SubmitHookFn;
   hook.ctx = &hc;
   const double px_before = rs.qc.pixelSize();
-  const plr::FrameRec fr =
-      plr::LodFrame(v->g, &rs.L, &rs.P, rt, cs, sp, dp, -1, 0, opt, hook);
-  if (fr.access_failed) return PWLOD_ERR_GPU;
-  // The bench fed the controller the frame's measured wall time (fr.wall).
-  rs.qc.onFrame(fr.wall);
+  plr::FrameRec fr;
+  if (rs.source == kSourceOctree) {
+    fr = plr::LodFrame(v->g, &rs.L, &rs.P, rt, cs, sp, dp, -1, 0, opt, hook);
+    if (fr.access_failed) return PWLOD_ERR_GPU;
+    // The bench fed the controller the frame's measured wall time (fr.wall).
+    rs.qc.onFrame(fr.wall);
+  } else {
+    // A10: a flat set is drawn whole; the controller is not fed (no px to choose).
+    fr = plr::FlatFrame(v->g, rs.flat, &rs.P, rt, cs, dp, opt, hook);
+    if (fr.access_failed) return PWLOD_ERR_GPU;
+    fr.uploads = flat_uploads;
+  }
 
   pwlod_frame_stats st{};
   FillStats(fr, frame_number, &st);
@@ -349,12 +448,14 @@ pwlod_status FrameBody(pwlod_viewer* v, const plr::Target& rt, WGPUTextureFormat
   st.min_node_pixel_size = rs.qc.pixelSize();
   st.gpu_ms = hc.t_done >= 0 ? hc.t_done - hc.t_submit : -1.0;
   st.lowest_spacing = LowestSpacingFor(fr, rs.oct.get(), hc.fill_max_spacing);
+  st.source = rs.source;
   if (out) *out = st;
 
   // Something may still change without a new input: loads in flight or
   // queued, nodes promoted this frame, or the controller still moving.
-  *more_work = fr.in_flight > 0 || fr.pending_nodes > 0 || fr.uploads > 0 ||
-               rs.qc.pixelSize() != px_before;
+  if (rs.source == kSourceOctree)
+    *more_work = fr.in_flight > 0 || fr.pending_nodes > 0 || fr.uploads > 0 ||
+                 rs.qc.pixelSize() != px_before;
 
   if (ring_index >= 0 && !hc.publish_early) Publish(v, ring_index, st);
   if (plr::GpuDeviceLost(v->g.device)) return PWLOD_ERR_GPU;
@@ -383,11 +484,13 @@ int ChooseTarget(pwlod_viewer* v) {
 // could not run (no octree / camera yet, viewport mismatch) does not make the
 // loop spin on the same unchanged inputs.
 struct SeenGens {
-  uint64_t p = 0, c = 0, o = 0;
+  uint64_t p = 0, c = 0, o = 0, st = 0;
   bool differs(const pwlod_viewer* v) const {   // caller holds v->mu
-    return v->params_gen != p || v->camera_gen != c || v->octree_gen != o;
+    return v->params_gen != p || v->camera_gen != c || v->source_gen != o || v->style_gen != st;
   }
-  void take(const pwlod_viewer* v) { p = v->params_gen; c = v->camera_gen; o = v->octree_gen; }
+  void take(const pwlod_viewer* v) {
+    p = v->params_gen; c = v->camera_gen; o = v->source_gen; st = v->style_gen;
+  }
 };
 
 void RenderLoop(pwlod_viewer* v) {
@@ -432,7 +535,9 @@ bool ValidParams(const pwlod_params* p) {
   if (!p) return false;
   if (p->point_budget <= 0) return false;
   if (!Finite(p->target_frame_ms) || p->target_frame_ms <= 0) return false;
-  if (p->point_size_mode != PWLOD_PSIZE_FIXED && p->point_size_mode != PWLOD_PSIZE_ADAPTIVE) return false;
+  if (p->point_size_mode != PWLOD_PSIZE_FIXED && p->point_size_mode != PWLOD_PSIZE_ADAPTIVE &&
+      p->point_size_mode != PWLOD_PSIZE_VIEWER)
+    return false;
   if (p->async_loading != 0 && p->async_loading != 1) return false;
   for (float c : p->background_rgba)
     if (!std::isfinite(c)) return false;
@@ -449,15 +554,30 @@ bool ValidCamera(const pwlod_camera* c) {
   for (double x : c->eye_world)
     if (!Finite(x)) return false;
   if (c->viewport_width_px == 0 || c->viewport_height_px == 0) return false;
-  if (c->projection == PWLOD_PROJ_PERSPECTIVE) {
-    if (!Finite(c->fov_y_degrees) || c->fov_y_degrees <= 0 || c->fov_y_degrees >= 180) return false;
-  } else if (c->projection == PWLOD_PROJ_ORTHOGRAPHIC) {
-    if (!Finite(c->ortho_width_world) || !Finite(c->ortho_height_world) ||
-        c->ortho_width_world <= 0 || c->ortho_height_world <= 0)
-      return false;
-  } else {
+  // v3: CloudProjection (focal_px, orbit_distance, ortho_mix in [0, 1])
+  if (!Finite(c->focal_px) || c->focal_px <= 0) return false;
+  if (!Finite(c->orbit_distance) || c->orbit_distance <= 0) return false;
+  if (!Finite(c->ortho_mix) || c->ortho_mix < 0 || c->ortho_mix > 1) return false;
+  return true;
+}
+
+bool ValidStyle(const pwlod_style* s) {
+  if (!s) return false;
+  for (double x : {(double)s->point_size, (double)s->sprite_px, (double)s->disc_radius_px_at_scale1,
+                   (double)s->max_sprite_scale, (double)s->exposure, (double)s->uncolored_min_y,
+                   (double)s->uncolored_inv_y_span})
+    if (!Finite(x)) return false;
+  if (s->point_size <= 0 || s->sprite_px <= 0 || s->disc_radius_px_at_scale1 < 0 ||
+      s->max_sprite_scale <= 0 || s->exposure < 0)
     return false;
-  }
+  if ((int)s->tone < PWLOD_TONE_AGX || (int)s->tone > PWLOD_TONE_NONE) return false;
+  if ((int)s->selection_mode < PWLOD_SEL_NONE || (int)s->selection_mode > PWLOD_SEL_CULL_OUTSIDE) return false;
+  for (double x : s->selection_center)
+    if (!Finite(x)) return false;
+  for (double x : s->selection_size)
+    if (!Finite(x) || x < 0) return false;
+  for (double x : s->selection_rot_row_major)
+    if (!Finite(x)) return false;
   return true;
 }
 
@@ -533,7 +653,7 @@ void pwlod_params_default(pwlod_params* out) {
   std::memset(out, 0, sizeof *out);
   out->point_budget = 3630000;               // (33.3 - 0.20) / 9.12 ms per M on A16
   out->target_frame_ms = 1000.0 / 30.0;      // QualityController::Config default
-  out->point_size_mode = PWLOD_PSIZE_ADAPTIVE;
+  out->point_size_mode = PWLOD_PSIZE_VIEWER;   // v3 default
   out->async_loading = 1;
   out->cache_bytes = 15ull * (uint64_t)out->point_budget;
   out->background_rgba[0] = 0.0f;
@@ -556,6 +676,7 @@ pwlod_status pwlod_viewer_create(const pwlod_gpu* gpu, pwlod_viewer** out_viewer
   v->g.has_timestamp = wgpuDeviceHasFeature(gpu->device, WGPUFeatureName_TimestampQuery);
   v->g.backend = (int)gpu->backend;
   pwlod_params_default(&v->params);
+  pwlod_style_default(&v->style);
   *out_viewer = v;
   return PWLOD_OK;
 }
@@ -574,9 +695,11 @@ pwlod_status pwlod_viewer_load_octree(pwlod_viewer* v, const char* octree_dir) {
   if (oct->nodes.empty()) return PWLOD_ERR_FORMAT;
   {
     std::lock_guard<std::mutex> lk(v->mu);
+    v->pending_kind = kSourceOctree;
     v->pending_oct = oct;
     v->pending_bin = dir + "/octree.bin";
-    v->octree_gen++;
+    v->pending_flat.reset();
+    v->source_gen++;
   }
   v->cv.notify_all();
   return PWLOD_OK;
@@ -588,6 +711,56 @@ pwlod_status pwlod_viewer_set_params(pwlod_viewer* v, const pwlod_params* params
     std::lock_guard<std::mutex> lk(v->mu);
     v->params = *params;
     v->params_gen++;
+  }
+  v->cv.notify_all();
+  return PWLOD_OK;
+}
+
+void pwlod_style_default(pwlod_style* out) {
+  if (!out) return;
+  std::memset(out, 0, sizeof *out);
+  out->point_size = 3.0f;              // SparseCloudView._pointSize (:382)
+  out->sprite_px = 16.0f;              // the painter's 16x16 sprite (:826)
+  out->disc_radius_px_at_scale1 = 7.0f;  // drawCircle(Offset(8, 8), 7) (:819-825)
+  out->max_sprite_scale = 50.0f / 16.0f;  // kMaxPointSpriteScale (:235)
+  out->tone = PWLOD_TONE_PBR_NEUTRAL;  // _tone = 2 (:384)
+  out->exposure = 1.0f;                // _exposure (:383)
+  out->uncolored_min_y = 0.0f;         // the painter's initial _minY / _invYSpan (:1262)
+  out->uncolored_inv_y_span = 1.0f;
+  out->selection_mode = PWLOD_SEL_NONE;
+  for (int k = 0; k < 3; ++k) out->selection_size[k] = 1.0;
+  out->selection_rot_row_major[0] = out->selection_rot_row_major[4] = out->selection_rot_row_major[8] = 1.0;
+  out->selection_out_argb = 0xFFE05252u;   // kSelectionOutColor (:27)
+}
+
+pwlod_status pwlod_viewer_set_style(pwlod_viewer* v, const pwlod_style* style) {
+  if (!v || !ValidStyle(style)) return PWLOD_ERR_ARG;
+  {
+    std::lock_guard<std::mutex> lk(v->mu);
+    v->style = *style;
+    v->style_gen++;
+  }
+  v->cv.notify_all();
+  return PWLOD_OK;
+}
+
+pwlod_status pwlod_viewer_set_points(pwlod_viewer* v, const float* xyz, const uint8_t* rgb, uint64_t count,
+                                     int32_t colored, const uint8_t* visibility) {
+  if (!v || (count > 0 && !xyz) || (colored != 0 && colored != 1) || (colored == 1 && count > 0 && !rgb))
+    return PWLOD_ERR_ARG;
+  auto fd = std::make_shared<FlatData>();
+  if (!fd) return PWLOD_ERR_NOMEM;
+  fd->count = count;
+  fd->colored = colored == 1;
+  fd->xyz.assign(xyz, xyz + 3 * count);                     // copied before return
+  if (rgb) fd->rgb.assign(rgb, rgb + 3 * count);
+  if (visibility) fd->vis.assign(visibility, visibility + count);
+  {
+    std::lock_guard<std::mutex> lk(v->mu);
+    v->pending_kind = kSourceFlat;
+    v->pending_flat = std::move(fd);
+    v->pending_oct.reset();
+    v->source_gen++;
   }
   v->cv.notify_all();
   return PWLOD_OK;
@@ -697,6 +870,7 @@ void pwlod_viewer_destroy(pwlod_viewer* v) {
   if (!v) return;
   pwlod_viewer_stop(v);
   ReleaseLodAll(&v->rs.L);
+  plr::ReleaseFlat(&v->rs.flat);
   plr::ReleasePipe(&v->rs.P);
   for (auto& vw : v->views)
     if (vw) wgpuTextureViewRelease(vw);

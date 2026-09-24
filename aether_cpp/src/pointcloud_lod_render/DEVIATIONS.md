@@ -14,6 +14,9 @@ This module is **moved code plus interface glue**. Nothing algorithmic is new.
 | Shared-texture access bracket | house: `src/render/dawn_gpu_device.cpp` `iosurface_begin_access` / `iosurface_end_access` (initialized = true, no fences in, fences freed) | this repo | ours |
 | On-device build / verify | PR #100 `buildFromPly` + `optionsForBudget` (`include/aether/pointcloud_lod_build/build.h:85-119`) unchanged; judges C1/C2 from `tests/pointcloud_lod/test_octree.cpp` `checkCount` / `checkTiling`, S2 and its camera helpers from `tests/pointcloud_lod/test_select.cpp` :34-84, :110-143 | this repo | ours / BSD-2 (PotreeConverter port) |
 | M1 measurement entry `pwlod_run` (`m1_bench/`) | `pw_lod_bench.{cpp,h}` **byte-identical** | `b792d57` | ours + Potree notice in `m1_bench/NOTICE` |
+| **v3 look** (`viewer_look.{h,cpp}`, the VIEWER WGSL): display colour, tone maps, height ramp, sprite disc, scale rule, selection tint / cull | the product painter `SparseCloudPainter`, `lib/ui/official_capture/sparse_cloud_view.dart` (:27, :235, :382-384, :812-828, :1056-1253, :1459-1531, :1598-1723) and `SelectionBox.contains` (`lib/official_capture/selection_box.dart:119-126`), pocketworld 168 source | `86a45cf` | ours |
+| Tone maps carried by that painter | three.js r160 `src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js` (AgX, ACESFilmic); Khronos `PBR_Neutral/pbrNeutral.glsl` | `643680ed5fc7` (r160); `b5a2eed5ddf6` | MIT; Apache-2.0 |
+| v3 camera | the product's `CloudCamera.projectionFor -> CloudProjection` (`lib/ui/official_capture/cloud_camera.dart:68-128`) -- node size: `../pointcloud_lod/DEVIATIONS.md` D19 | `86a45cf` | ours |
 | Dawn C header (compile only; nothing vendored here) | `webgpu/webgpu.h` → `dawn/webgpu.h` sha256 `6d632738597019d0…` | Dawn `12ee391c` | BSD-3-Clause |
 
 ## Cross-platform self-certification
@@ -102,6 +105,54 @@ first octree arrives).
 **R13 `FrameRec::lowest_spacing`** carries the frame's `Selection::lowestSpacing`
 (both the sync and the async branch of `LodFrame`), for ABI v2 (A8).
 
+**R14 the product viewer's look (ABI v3, `PWLOD_PSIZE_VIEWER`, `psize_mode 2`).**
+A third point-size mode next to the bench's two, ported from the product painter
+(sparse_cloud_view.dart @ 86a45cf):
+- *colour*: the painter's `_displayColors` (:1206-1250: `_srgbDecode` -> tone ->
+  `_srgbEncode`, AgX / ACES / PBR Neutral / None, the uncoloured height ramp) runs
+  on the CPU in double at upload (`viewer_look.cpp`, `DisplayArgb`) and is baked
+  into the point record, so a colour is the painter's to the bit; the GPU draws it.
+- *sprite*: the painter draws a 16x16 white disc (`drawCircle(Offset(8,8), 7,
+  isAntiAlias)`, :819-825) with `drawRawAtlas` + `BlendMode.modulate` (:1715-1723),
+  anchored at `scale * 8` (:1702). Here: a quad of half-size `8 * scale` px, and a
+  fragment coverage `clamp(7 + 0.5 - r, 0, 1)` with `r` in sprite texels (a disc of
+  radius 7 texels, 1-texel anti-aliased rim), premultiplied source-over.
+- *scale*: `pointSize / 16` when orthoMix == 1, else
+  `min(pointSize/16 * camDist / divisor, 50/16)` (:1669-1677); the divisor is the
+  fragment's clip.w, which the v3 `view_proj` defines as `divisorAt(depth)`.
+- *selection*: `SelectionBox.contains` (`|rot^T (p - c)| <= size / 2`,
+  selection_box.dart:119-126) per point in the vertex shader, with `p - c` formed
+  as (node origin - c, double then cast, `NodeU.sel_off`) + node-relative point;
+  outside -> `selection_out_argb` (TINT, :1680-1682) or not drawn (CULL, :1610).
+- *occlusion*: the painter sorts far -> near every frame (:1692-1694) to imitate
+  "WebGL's depth buffer" (its own comment, :1588-1591). Here the depth buffer
+  itself: pass 1 draws the fully covered texels with depth write, pass 2 the rim
+  texels, depth-tested, not written, blended. The result differs from the
+  painter's only where two or more rims lie in front of the nearest fully
+  covered texel (blended in draw order, not depth order) and where two points
+  are a depth tie for a float32 depth buffer; measured, see Verification.
+New objects: `ViewerU` (binding 4), `NodeU.sel_off` (NodeU 80 -> 96 B), pipelines
+`viewer_core` / `viewer_rim`, the compute probe `cs_viewer_probe` that runs the
+vertex shader's own `viewerPoint()` for per-point parity (test only).
+The bench's two modes are unchanged (the 36M / 216M reference numbers still hold).
+
+**R15 the draw half of `LodFrame` is shared** (`EncodeDraws`), so a flat point
+set (`FlatSet`, `UploadFlat`, `FlatFrame`; ABI v3 `set_points`) is drawn by the
+identical code: one or more chunks of <= 2^20 points, positions relative to the
+set's box centre, colours baked like a node's.
+
+**R16 `FrameU` under the v3 camera.** Potree's adaptive size needs
+`0.5 H / tan(fov/2)` (= `focal_px`) and, orthographic, `orthoWidth` (= `W *
+orbit_distance / focal_px`); with the product projection clip.w is the divisor,
+so the perspective formula reads `focal / divisor` at every orthoMix < 1.
+
+**R17 `RetargetPipe`: a new target size / format keeps the GPU copies.** Found
+while adding v3: the v2 viewer rebuilt its whole `Pipe` when a frame came with a
+different target size (e.g. `render_once` at another size than the ring), leaving
+every resident node's bind group pointing at the released uniform buffers.
+Now only the pipelines and the depth buffer are rebuilt; the bind-group layout
+and buffers stay (a bind group is valid with any group-equivalent layout).
+
 Inherited from the bench unchanged: P1–P6 (listed at `BuildVisibleNodeTable`).
 
 ## Interface glue decisions (A) — no upstream exists for these
@@ -166,6 +217,28 @@ History: the first v2 build (engine `740c1dd`, artifact `libpw_lod_740c1ddd.a`)
 used the old select.cpp placement (accepted nodes only) and reported 0 when
 nothing was drawn; superseded.
 
+**A9 flat source and point-size modes.** A flat set has no octree, so
+`PWLOD_PSIZE_ADAPTIVE` (Potree's getLOD needs the visible-node table) falls back
+to the viewer's own rule on it; `FIXED` stays `FIXED`.
+
+**A10 a flat set is drawn whole.** No selection, no budget, no controller update
+(there is no pixel size to choose); `stats.nodes_drawn` counts its chunks,
+`lowest_spacing` is 0 (nothing was popped), `source` 1. A non-finite point is
+left out (the painter's arithmetic turns it into NaN, which the canvas drops).
+
+**A11 colour cache.** Display colours are baked into the GPU copies, keyed like
+the painter's own cache (`_displayColors`, :1197-1213: cloud, exposure, tone) plus
+the uncoloured ramp domain and the mode; a new key re-bakes: the flat set is
+re-uploaded, the octree's GPU copies are dropped and re-streamed. The selection
+box and all camera terms are per-frame uniforms, never baked.
+
+**A12 source switching.** `set_points` and `load_octree` share one generation
+counter; whichever came last is the source at the next frame boundary. Camera,
+style and the controller state are not touched by a switch. With
+`async_loading = 1` the first octree frames draw only what has loaded (Potree's
+behaviour: nothing until the root arrives); the viewer does not keep the flat set
+on screen meanwhile (reported to the coordinator, not decided here).
+
 **A7 C2 in bytes.** `pwlod_verify_octree` reports gap and overlap BYTES instead
 of stopping at the first break; it passes iff both are 0, which is exactly when
 `test_octree.cpp` `checkTiling` passes.
@@ -196,3 +269,36 @@ through" holds on 36M (orbit_mid: production 7.97 %, adaptive 0.00 %, floor
 bench's own Mac run, i.e. a property of Potree's adaptive size at that LOD cut,
 not of the move. Not registered as a ctest on 216M for that reason; reported.
 Coordinator decision 2026-09-24: record as is, no change.
+
+### ABI v3 (look, flat source, camera) — `tests/pointcloud_lod_render/test_viewer.cpp`
+
+Reference: `painter_ref.{h,cpp}`, the painter transcribed in double (projection,
+depth / off-screen cuts, scale rule, display colour, selection) plus a far->near
+source-over rasterizer of its sprites. The fixture's 25,000-point `source.ply`,
+600 x 800, 13 camera / style cases (orthographic, perspective, orthoMix 0.5,
+rolled + panned, zoomed; coloured, uncoloured ramp, AgX / ACES / PBR Neutral /
+None, TINT, CULL, mask).
+
+- Per point (the probe runs the vertex shader's own `viewerPoint()`): every
+  drawn point's colour identical to the bit, cull flag identical, screen
+  position within 1.4e-4 px (limit 0.02 px), scale within 1e-5.
+- Whole image: pixels with a channel off by > 8 outside the pixels the
+  reference marks order-sensitive (>= 2 rims in front of the nearest covered
+  texel, or a float32 depth tie) <= 0.011 % (limit 0.05 %); inside that set
+  0.002-0.12 %; PSNR 48.9-66.9 dB.
+- Negative controls caught: transposed `view_proj` (every point off, 17 % of the
+  image), a wrong tone (24,984 / 25,000 colours, 3.9 % of the image), TINT dropped
+  (8,016 colours), mask ignored (8,334 extra points).
+- `set_points` copies its arrays (image identical after the caller overwrote
+  them), the mask hides exactly its 8,334 points, `source` 1, `lowest_spacing` 0.
+- Flat -> octree (the fixture tree = the same points): the first frame after
+  `load_octree` reports `source` 2; converged (all 25,000 points drawn),
+  coverage 0.1609 vs 0.1609 and 0.135 % pixels off by > 8 (PSNR 50.5 dB) --
+  the octree's positions are the int32 grid of the conversion, not the PLY
+  floats. Negatives: another tone 13 % of pixels, shuffled flat colours 13.6 %.
+- The bench's two point-size modes are unaffected: the 36M render judges still
+  reproduce the Mac reference number for number.
+
+The Dart painter's own numbers (`~/Developer/pw_lod_data/parity_fixture_v3/`,
+from the product side) had not arrived when this was written; the same
+comparisons take them in place of `painter_ref` when they do.
