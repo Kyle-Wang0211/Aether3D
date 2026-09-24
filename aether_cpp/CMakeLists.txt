@@ -1328,3 +1328,88 @@ foreach(pwlod_reader_test octree select stream)
     set_tests_properties(test_pointcloud_lod_build_then_${pwlod_reader_test}
         PROPERTIES FIXTURES_REQUIRED pwlod_built_octree)
 endforeach()
+
+# [2026-09-24] Point-cloud LOD viewer: the render pass moved from the Mac-verified
+# PWLodBench (pw_splat_ab_bench Sources/lod/pw_lod_bench.cpp), the frozen C ABI
+# include/aether/pointcloud_lod_render/pwlod_viewer.h (render thread, ring of
+# caller-provided WGPUTexture targets), the on-device build/verify entries, and
+# the bench's own pwlod_run carried unchanged for device measurement.
+# Changes against the bench are R-numbers in src/pointcloud_lod_render/DEVIATIONS.md.
+#
+# The library needs only the Dawn C header (webgpu/webgpu.h); every wgpu* symbol
+# stays undefined in it and is bound by whoever links it (the app's Dawn). It is
+# built when a Dawn header is available: the in-tree dawn::webgpu_dawn target, or
+# AETHER_PWLOD_DAWN_INCLUDE_DIRS (e.g. a pinned generated-header snapshot).
+# Host tests additionally need a Dawn to link: the in-tree target, or
+# AETHER_PWLOD_DAWN_LINK (a prebuilt libwebgpu_dawn plus the system libraries it
+# needs on the host, given at configure time).
+set(AETHER_PWLOD_DAWN_INCLUDE_DIRS "" CACHE STRING
+    "Dawn headers (containing webgpu/webgpu.h) for the point-cloud LOD viewer")
+set(AETHER_PWLOD_DAWN_LINK "" CACHE STRING
+    "Link line for the LOD viewer host tests: prebuilt Dawn + its host system libraries")
+set(AETHER_PWLOD_REAL_OCTREE "" CACHE PATH
+    "Optional full-size octree directory: also run the LOD viewer render judges on it")
+set(AETHER_PWLOD_REAL_PLY "" CACHE FILEPATH
+    "Optional full-size PLY: also run the LOD viewer on-device build judges on it")
+if(TARGET dawn::webgpu_dawn OR AETHER_PWLOD_DAWN_INCLUDE_DIRS)
+    add_library(aether_pointcloud_lod_render STATIC
+        src/pointcloud_lod_render/lod_render.cpp
+        src/pointcloud_lod_render/pwlod_viewer.cpp
+        src/pointcloud_lod_render/pwlod_build.cpp
+        src/pointcloud_lod_render/m1_bench/pw_lod_bench.cpp)
+    target_include_directories(aether_pointcloud_lod_render
+        PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/pointcloud_lod_render/m1_bench
+                ${AETHER_PWLOD_DAWN_INCLUDE_DIRS})
+    if(TARGET dawn::webgpu_dawn)
+        target_include_directories(aether_pointcloud_lod_render PUBLIC
+            $<TARGET_PROPERTY:dawn::webgpu_dawn,INTERFACE_INCLUDE_DIRECTORIES>)
+    endif()
+    target_compile_options(aether_pointcloud_lod_render PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+    target_link_libraries(aether_pointcloud_lod_render
+        PUBLIC aether_pointcloud_lod aether_pointcloud_lod_build Threads::Threads)
+
+    set(_pwlod_dawn_link "")
+    if(TARGET dawn::webgpu_dawn)
+        set(_pwlod_dawn_link dawn::webgpu_dawn)
+    elseif(AETHER_PWLOD_DAWN_LINK)
+        set(_pwlod_dawn_link ${AETHER_PWLOD_DAWN_LINK})
+    endif()
+    if(_pwlod_dawn_link)
+        add_library(pwlod_render_judges STATIC tests/pointcloud_lod_render/judges.cpp)
+        target_link_libraries(pwlod_render_judges PUBLIC aether_pointcloud_lod_render)
+        target_compile_options(pwlod_render_judges PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+        # Same list idiom as the reader/builder tests above; each takes the fixture
+        # octree (or PLY) and a scratch directory.
+        foreach(pwlod_test render capi ring build)
+            add_executable(test_pointcloud_lod_render_${pwlod_test}
+                tests/pointcloud_lod_render/test_${pwlod_test}.cpp)
+            target_link_libraries(test_pointcloud_lod_render_${pwlod_test}
+                PRIVATE pwlod_render_judges ${_pwlod_dawn_link})
+            target_compile_options(test_pointcloud_lod_render_${pwlod_test}
+                PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+            add_test(NAME test_pointcloud_lod_render_${pwlod_test}
+                COMMAND test_pointcloud_lod_render_${pwlod_test}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pointcloud_lod/fixture
+                        ${CMAKE_CURRENT_BINARY_DIR}/pointcloud_lod_render_out/${pwlod_test})
+            set_tests_properties(test_pointcloud_lod_render_${pwlod_test} PROPERTIES TIMEOUT 1800)
+        endforeach()
+        # The render-thread judges time a 60 Hz consumer against a 10 ms producer:
+        # run them alone so other tests' CPU load is not what they measure.
+        set_tests_properties(test_pointcloud_lod_render_ring PROPERTIES RUN_SERIAL TRUE)
+        if(AETHER_PWLOD_REAL_OCTREE)
+            foreach(pwlod_test render capi)
+                add_test(NAME test_pointcloud_lod_render_${pwlod_test}_real
+                    COMMAND test_pointcloud_lod_render_${pwlod_test} ${AETHER_PWLOD_REAL_OCTREE}
+                            ${CMAKE_CURRENT_BINARY_DIR}/pointcloud_lod_render_out/${pwlod_test}_real)
+                set_tests_properties(test_pointcloud_lod_render_${pwlod_test}_real PROPERTIES TIMEOUT 3600)
+            endforeach()
+        endif()
+        if(AETHER_PWLOD_REAL_PLY)
+            add_test(NAME test_pointcloud_lod_render_build_real
+                COMMAND test_pointcloud_lod_render_build ${AETHER_PWLOD_REAL_PLY}
+                        ${CMAKE_CURRENT_BINARY_DIR}/pointcloud_lod_render_out/build_real)
+            set_tests_properties(test_pointcloud_lod_render_build_real PROPERTIES TIMEOUT 3600)
+        endif()
+    endif()
+endif()

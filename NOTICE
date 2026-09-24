@@ -32,17 +32,23 @@ https://github.com/nlohmann/json
 Full text: aether_cpp/third_party/nlohmann/LICENSE
 
 -------------------------------------------------------------------------------
-Point-cloud LOD core (aether_cpp/src/pointcloud_lod/) and on-device octree
-builder (aether_cpp/src/pointcloud_lod_build/)
+Point-cloud LOD core (aether_cpp/src/pointcloud_lod/), on-device octree
+builder (aether_cpp/src/pointcloud_lod_build/) and LOD viewer render pass
+(aether_cpp/src/pointcloud_lod_render/)
 -------------------------------------------------------------------------------
 Algorithms and constants in these modules are transliterated from the upstreams
 below; no upstream source file is vendored. Each formula is cited to a file and
-line in aether_cpp/src/pointcloud_lod/DEVIATIONS.md and
-aether_cpp/src/pointcloud_lod_build/DEVIATIONS.md, and each licence text is
+line in aether_cpp/src/pointcloud_lod/DEVIATIONS.md,
+aether_cpp/src/pointcloud_lod_build/DEVIATIONS.md and
+aether_cpp/src/pointcloud_lod_render/DEVIATIONS.md, and each licence text is
 kept verbatim in aether_cpp/src/pointcloud_lod/upstream_licenses/ at the pinned
 revision listed in REVISIONS.txt there.
 
-  Potree (octree reader, node selection)
+  Potree (octree reader, node selection; the viewer's WGSL adaptive point
+  size / getLOD and visible-node table are transliterated from its
+  pointcloud.vs and PointCloudOctree.js, see the licence in the header of
+  aether_cpp/src/pointcloud_lod_render/lod_render.cpp and in
+  aether_cpp/src/pointcloud_lod_render/m1_bench/NOTICE)
     Copyright (c) 2011-2020, Markus Schütz
     BSD 2-Clause License
     https://github.com/potree/potree
@@ -60,7 +66,14 @@ revision listed in REVISIONS.txt there.
     MIT License
     https://github.com/mrdoob/three.js
 
-  CesiumJS (multiplicative screen-space-error controller)
+  CesiumJS (multiplicative screen-space-error controller; orthographic node
+  screen size from Cesium3DTile.js, DEVIATIONS.md D17)
     Copyright 2011-2026 CesiumJS Contributors
     Licensed under the Apache License, Version 2.0
     https://github.com/CesiumGS/cesium
+
+  Dawn (the LOD viewer compiles against Dawn's C header webgpu/webgpu.h; no
+  Dawn source or binary is part of that library)
+    Copyright 2017-2023 The Dawn & Tint Authors
+    BSD 3-Clause License
+    https://dawn.googlesource.com/dawn
