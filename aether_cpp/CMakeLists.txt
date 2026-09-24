@@ -1355,6 +1355,8 @@ set(AETHER_PWLOD_IOS_ARTIFACT_DIR "" CACHE PATH
     "Optional vendor/aether_lod directory: run the iOS archive judges (build_ios_lod.sh --verify-only + negative controls)")
 set(AETHER_PWLOD_IOS_DAWN_MEMBER "" CACHE FILEPATH
     "Optional iOS Dawn object that defines wgpu* (negative control for the iOS archive judges)")
+set(AETHER_PWLOD_PARITY_FIXTURE "" CACHE PATH
+    "Optional parity_fixture_v3 directory (the product painter's numbers and PNGs): run the viewer-look parity judges on it")
 if(AETHER_PWLOD_IOS_ARTIFACT_DIR)
     add_test(NAME test_pointcloud_lod_render_ios_artifact
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/pointcloud_lod_render/test_ios_artifact.sh
@@ -1410,6 +1412,28 @@ if(TARGET dawn::webgpu_dawn OR AETHER_PWLOD_DAWN_INCLUDE_DIRS)
         # The render-thread judges time a 60 Hz consumer against a 10 ms producer:
         # run them alone so other tests' CPU load is not what they measure.
         set_tests_properties(test_pointcloud_lod_render_ring PROPERTIES RUN_SERIAL TRUE)
+        # The viewer look against the product painter's own output (numbers + PNGs,
+        # produced on the product side; not committed here). Always built; run when
+        # AETHER_PWLOD_PARITY_FIXTURE names the fixture directory. stb_image is
+        # third-party C: its TU is compiled without the strict warning set.
+        add_executable(test_pointcloud_lod_render_parity
+            tests/pointcloud_lod_render/test_parity.cpp
+            tests/pointcloud_lod_render/png_read.cpp)
+        target_include_directories(test_pointcloud_lod_render_parity PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+        target_link_libraries(test_pointcloud_lod_render_parity
+            PRIVATE pwlod_render_judges ${_pwlod_dawn_link})
+        target_compile_options(test_pointcloud_lod_render_parity
+            PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+        set_source_files_properties(tests/pointcloud_lod_render/png_read.cpp
+            PROPERTIES COMPILE_OPTIONS "-w")
+        if(AETHER_PWLOD_PARITY_FIXTURE)
+            add_test(NAME test_pointcloud_lod_render_parity
+                COMMAND test_pointcloud_lod_render_parity ${AETHER_PWLOD_PARITY_FIXTURE}
+                        ${CMAKE_CURRENT_BINARY_DIR}/pointcloud_lod_render_out/parity)
+            set_tests_properties(test_pointcloud_lod_render_parity PROPERTIES TIMEOUT 1800)
+        endif()
         if(AETHER_PWLOD_REAL_OCTREE)
             foreach(pwlod_test render capi)
                 add_test(NAME test_pointcloud_lod_render_${pwlod_test}_real

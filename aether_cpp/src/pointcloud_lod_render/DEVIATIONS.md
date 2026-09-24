@@ -266,6 +266,18 @@ style and the controller state are not touched by a switch. With
 behaviour: nothing until the root arrives); the viewer does not keep the flat set
 on screen meanwhile (reported to the coordinator, not decided here).
 
+**A13 what the shell hands over, as the parity judge exercises it.** Not new
+ABI, the header's units spelled out: `pwlod_style` and `pwlod_camera` are in
+TARGET pixels, so a shell drawing at device pixel ratio d passes `focal_px`,
+the view origin (inside `view_proj`), `point_size` and `max_sprite_scale`
+multiplied by d -- the painter scales its canvas instead (`canvas.scale(3)` in
+the fixture's 3x PNGs, which the engine then matches). The painter's near cull
+is `depth <= 0.02 R` (:1618); the engine drops what the shell's `view_proj`
+clips, so a shell that wants that cut exactly puts its near plane there. A
+visibility mask whose length differs from the cloud is ignored by the painter
+(:1545-1548); the ABI takes a pointer without a length, so the shell drops such
+a mask (passes NULL) -- the engine cannot.
+
 **A7 C2 in bytes.** `pwlod_verify_octree` reports gap and overlap BYTES instead
 of stopping at the first break; it passes iff both are 0, which is exactly when
 `test_octree.cpp` `checkTiling` passes.
@@ -330,3 +342,35 @@ Since R18 `painter_ref`'s rasterizer is the painter's 8-bit canvas with the
 nearest-sampled sprite table -- the model the Dart PNGs confirm (test_parity.cpp) -- and the
 numbers above were re-run with it: outside the order-sensitive set <= 0.013 %
 (persp roll zoom), all other cases <= 0.011 %, negatives unchanged in kind.
+
+### Parity with the product painter itself — `tests/pointcloud_lod_render/test_parity.cpp`
+
+Input: parity_fixture_v3 (product side, `SHA256SUMS` sha256 `c4070a6a…`, all
+entries OK; `index.json` `c8e2ac52…`; 27 groups, 1536 points, contract = the v3
+header `4e867aa3…`), given to ctest as `AETHER_PWLOD_PARITY_FIXTURE` (not
+committed). The test plays the shell (A13) at 1x and 3x.
+
+- T0 sprite: 1,595,711 single-covered 3x pixels, 0 differ from the table;
+  analytic disc (NEG) 353,034 differ.
+- R0 / R1 `painter_ref` vs Dart: `ProjectionFor` reproduces the projection
+  scalars exactly (max |diff| 0 over 27 groups x 14 scalars); `PaintPoint`
+  over 30,045 drawn points: drawn set identical, argb identical, position within
+  5.9e-5 px and scale within 5.8e-8 relative -- the fixture's numbers are the
+  painter's float32 atlas (`vx = rst[2] + 8 scale`), so that is float32 rounding.
+- P1 engine per point, 27 groups x {1x, 3x}: drawn set identical (mask, CULL,
+  near cull, off-screen skip), argb identical, position within 2.6e-4 logical px
+  (limit 0.02), scale within 3.1e-7 relative (limit 1e-5).
+- P2 engine whole frame vs the Dart PNG (RGB, black clear): outside the
+  order-sensitive set <= 0.0010 % of pixels (1x) / 0.0005 % (3x), limit 0.005 %;
+  PSNR there >= 60.0 / 62.8 dB, limit 50 dB. The painter's own per-point numbers
+  rasterized by `painter_ref` differ from its PNG on up to 0.0009 % (texel-edge
+  ties decided in Skia's float32), which is the floor. The order-sensitive set is
+  0.000-0.044 % of the frame at the product point size and 4.3 % at the 50/16
+  size cap (`persp_maxsize`), where 1.16 % of the frame differs by > 8: large
+  overlapping sprites whose rims the painter blends far->near and the GPU in
+  draw order (R14).
+- Negative controls, each caught by both the per-point and the image judge:
+  transposed `view_proj` (224 positions + 997 drawn-set of 1536; 2.73 % px),
+  ACES for PBR Neutral (1533 / 1533 argb; 1.90 %), TINT dropped (723 argb;
+  1.33 %), mask ignored (649 drawn-set; 0.89 %), the analytic disc = the engine
+  before R18 (0.561 % px).
