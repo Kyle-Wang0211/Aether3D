@@ -25,6 +25,8 @@
 //       must catch a write into the held target. (A 60 Hz consumer cannot
 //       trigger it: with 3 targets a plain rotation only reaches the held one
 //       after 3 frames.)
+//   B6  inputs stop changing: after loads finish and the controller settles
+//       the render thread stops rendering (it waits on its condition variable).
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -241,6 +243,35 @@ int main(int argc, char** argv) {
             d.probe.held_overwrites > 0,
             Fmt("%llu writes into the held target in %llu frames", (unsigned long long)d.probe.held_overwrites,
                 (unsigned long long)d.probe.frames_rendered));
+
+  // B6: inputs stop changing -> once loads finish and the controller settles,
+  // the render thread goes idle (waits on its condition variable).
+  {
+    pwlod_viewer_set_params(v, &base);
+    if (pwlod_viewer_start(v, nullptr, nullptr) == PWLOD_OK) {
+      const plr::ViewerProbe s0 = plr::GetViewerProbe(v);
+      uint64_t prev = s0.frames_rendered;
+      double idleAfterMs = -1;
+      const Clock::time_point t0 = Clock::now();
+      int stable = 0;
+      while (Ms(Clock::now() - t0) < 8000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const uint64_t cur = plr::GetViewerProbe(v).frames_rendered;
+        stable = (cur == prev) ? stable + 1 : 0;
+        prev = cur;
+        if (stable >= 2) { idleAfterMs = Ms(Clock::now() - t0); break; }
+      }
+      const uint64_t atIdle = plr::GetViewerProbe(v).frames_rendered;
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      const uint64_t later = plr::GetViewerProbe(v).frames_rendered;
+      pwlod_viewer_stop(v);
+      rep.check("B6 no input change -> render thread goes idle",
+                idleAfterMs >= 0 && later == atIdle,
+                Fmt("idle after %.0f ms (%llu frames), %llu frames in the next 500 ms", idleAfterMs,
+                    (unsigned long long)(atIdle - s0.frames_rendered),
+                    (unsigned long long)(later - atIdle)));
+    }
+  }
 
   pwlod_viewer_destroy(v);
   for (auto& x : t) ReleaseTarget(&x);

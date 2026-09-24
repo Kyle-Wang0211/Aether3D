@@ -357,20 +357,28 @@ int ChooseTarget(pwlod_viewer* v) {
   return chosen;
 }
 
-bool InputsChanged(pwlod_viewer* v) {   // caller holds v->mu
-  return v->params_gen != v->rs.params_gen || v->camera_gen != v->rs.camera_gen ||
-         v->octree_gen != v->rs.octree_gen;
-}
+// Input generations the render loop has already rendered (or tried to render)
+// with. Kept apart from RenderState's "applied" counters so that a frame that
+// could not run (no octree / camera yet, viewport mismatch) does not make the
+// loop spin on the same unchanged inputs.
+struct SeenGens {
+  uint64_t p = 0, c = 0, o = 0;
+  bool differs(const pwlod_viewer* v) const {   // caller holds v->mu
+    return v->params_gen != p || v->camera_gen != c || v->octree_gen != o;
+  }
+  void take(const pwlod_viewer* v) { p = v->params_gen; c = v->camera_gen; o = v->octree_gen; }
+};
 
 void RenderLoop(pwlod_viewer* v) {
   bool more = true;
+  SeenGens seen;
   Clock::time_point last_start = Clock::now() - std::chrono::hours(1);
   for (;;) {
     double target_ms;
     int sleep_ms;
     {
       std::unique_lock<std::mutex> lk(v->mu);
-      v->cv.wait(lk, [&] { return v->stop_req || more || InputsChanged(v); });
+      v->cv.wait(lk, [&] { return v->stop_req || more || seen.differs(v); });
       if (v->stop_req) break;
       // at most once per target_frame_ms
       target_ms = v->params.target_frame_ms;
@@ -378,6 +386,7 @@ void RenderLoop(pwlod_viewer* v) {
       v->cv.wait_until(lk, next, [&] { return v->stop_req; });
       if (v->stop_req) break;
       sleep_ms = v->params.debug_render_sleep_ms;
+      seen.take(v);   // FrameBody snapshots these (or newer) inputs next
     }
     last_start = Clock::now();
     const int idx = ChooseTarget(v);
