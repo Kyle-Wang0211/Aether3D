@@ -1256,7 +1256,7 @@ target_link_libraries(aether_pointcloud_lod PUBLIC Threads::Threads)
 # (tests/pointcloud_lod/fixture). Checks whose premise needs a full-size cloud
 # report SKIP here with the reason; run the same binaries against a real octree
 # directory to exercise them.
-foreach(pwlod_test octree select stream corrupt async)
+foreach(pwlod_test octree select stream corrupt async ortho)
     add_executable(test_pointcloud_lod_${pwlod_test}
         tests/pointcloud_lod/test_${pwlod_test}.cpp)
     target_link_libraries(test_pointcloud_lod_${pwlod_test} PRIVATE aether_pointcloud_lod)
