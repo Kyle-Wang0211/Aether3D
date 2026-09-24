@@ -262,6 +262,42 @@ old 0.018300574272871017, new 0.0091502871364355087 (103 popped, 77 accepted).
 Test instrumentation (part of D18): `SelectParams::onPop(node, ctx)` is
 called once per pop when non-null; every product path leaves it null.
 
+**D19 node screen size under the product viewer's CloudProjection** *(product + Potree + CesiumJS)* — 2026-09-24
+ABI v3 describes the camera as the product viewer's own projection, not as a
+fov: `CloudCamera.projectionFor -> CloudProjection`
+(`lib/ui/official_capture/cloud_camera.dart:68-128` @ `86a45cf`, the 168
+shipping source): a point at view depth `d` lands at `f * x / divisorAt(d)`,
+`divisorAt(d) = orthoMix == 1 ? camDist : (orthoMix == 0 ? d : d + (camDist - d) * orthoMix)`
+(`:126-128`). `Camera` gains `cloudProjection`, `focalPx` (= `f`),
+`orbitDistance` (= `camDist`), `orthoMix`. With it set, the child weight is
+
+| orthoMix | screenPixelRadius | matches |
+|---|---|---|
+| `== 1` | `radius / (orbitDistance / focalPx)` | CesiumJS `Cesium3DTile.js:951-954` (`pixelSize` = world per pixel of the orthographic view = `camDist / f`), i.e. D17 |
+| `== 0` | `radius * (focalPx / distance)`, `distance` = Euclidean eye -> centre | Potree `Potree_update_visibility.js:370-371` (`0.5 * domHeight / tan(fov/2) == f`) |
+| otherwise | `radius * (focalPx / (distance + (orbitDistance - distance) * orthoMix))` | the product's own `divisorAt` (the interpolation is the product projection itself, there is no library upstream for it) |
+
+`:379-381` (eye inside the node's sphere -> `MAX_VALUE`) stays with every
+`orthoMix < 1` (the divisor still has a depth term, as in Potree's perspective
+branch) and is dropped at `orthoMix == 1` (Cesium's branch has no distance term),
+the same rule as D17. The endpoints are exact comparisons, as the product's own
+consumers branch on them (`cloud_camera.dart:120-123`).
+
+Measured (`tests/pointcloud_lod/test_cloudproj.cpp`, the 9,600-call sweep of
+`selection_sweep.h`): the orthographic endpoint gives the D17 selection bit for
+bit (0 / 3,192 differ on the fixture and on 36M). The perspective endpoint
+gives Potree's node SET, point count, nodesConsidered, hitBudget, promoted /
+unloaded sets and lowestSpacing bit for bit in every call (0 / 6,408); the node
+ORDER differs in 12 / 6,408 calls on 36M (0 on the fixture), every one a swap of
+two nodes whose Potree weights are equal to within 4 ulp (checked, first case
+`r25543666` / `r25547266`, both 35.672255745197546). Cause: with `focal_px` in
+the ABI the endpoint computes `radius * (f / d)` where Potree computes
+`radius * (0.5H / (tan(fov/2) * d))`; the two differ by at most 2 ulp (measured on
+all 16,227 36M nodes), enough to break a rounding tie the other way in the
+priority queue and nothing else. Bit-identical ORDER would need the fov in the
+ABI. Negative control: each pose fed through the wrong endpoint differs
+(6,366 / 6,408 and 3,186 / 3,192 on 36M).
+
 ## Operating notes found by testing, not by reading
 
 - `PotreeConverter --attributes` **must not be given `position`**:

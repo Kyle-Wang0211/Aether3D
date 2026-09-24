@@ -49,6 +49,17 @@ struct Camera {
   double orthoWidth = 0;    // frustum.right - frustum.left, world units
   double orthoHeight = 0;   // frustum.top - frustum.bottom, world units
   int screenWidthPx = 0;    // Cesium's drawingBufferWidth; only the orthographic branch reads it
+  // The product viewer's CloudProjection (D19; lib/ui/official_capture/
+  // cloud_camera.dart:68-128 @ 86a45cf, pw-review-cache-168). When set, a node's
+  // screen size is radius * focalPx / divisor with CloudProjection.divisorAt:
+  //   orthoMix == 1 : Cesium's orthographic branch, pixelSize = orbitDistance / focalPx
+  //   orthoMix == 0 : Potree's perspective form, divisor = Euclidean eye -> centre distance
+  //   otherwise     : divisor = d + (orbitDistance - d) * orthoMix
+  // The fields above (fovYDegrees, orthographic, orthoWidth/Height) are then unused.
+  bool cloudProjection = false;
+  double focalPx = 0;       // CloudProjection.f
+  double orbitDistance = 0; // CloudProjection.camDist
+  double orthoMix = 0;      // CloudProjection.orthoMix
 };
 
 struct SelectParams {

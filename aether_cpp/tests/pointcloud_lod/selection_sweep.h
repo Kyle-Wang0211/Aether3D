@@ -76,12 +76,15 @@ inline Camera SweepCamera(const Octree& oct, int i) {
 inline NodeState SyntheticState(int32_t n, void*) { return (NodeState)((n * 2654435761u >> 7) % 3); }
 
 // visit(cam, params, selection, streaming) is called after every call (may be empty).
+// xform(cam, i) may replace each sweep camera (e.g. the same view in another
+// camera model); null = the sweep camera as is.
 inline uint64_t SweepHash(const Octree& oct, long* calls,
-                          const std::function<void(const Camera&, const SelectParams&, const Selection&, bool)>& visit = nullptr) {
+                          const std::function<void(const Camera&, const SelectParams&, const Selection&, bool)>& visit = nullptr,
+                          const std::function<Camera(const Camera&, int)>& xform = nullptr) {
   uint64_t h = 1469598103934665603ull;
   long n = 0;
   for (int i = 0; i < 400; ++i) {
-    const Camera cam = SweepCamera(oct, i);
+    const Camera cam = xform ? xform(SweepCamera(oct, i), i) : SweepCamera(oct, i);
     for (double px : {150.0, 30.0, 8.16, 1.0})
       for (long long b : {1000000LL, 3630000LL, 20000000LL}) {
         SelectParams p;
