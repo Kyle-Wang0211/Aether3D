@@ -41,6 +41,14 @@ struct Camera {
   double viewProj[16]{};    // row-major
   double fovYDegrees = 60;  // vertical field of view
   int screenHeightPx = 1080;
+  // Orthographic projection (D17). A node's screen size then follows CesiumJS
+  // Cesium3DTile.js:943-954 @ 113c068e9af3: pixelSize = max(frustum height,
+  // frustum width) / max(viewport width, viewport height), no distance term.
+  // Off by default: the perspective walk is unchanged, bit for bit.
+  bool orthographic = false;
+  double orthoWidth = 0;    // frustum.right - frustum.left, world units
+  double orthoHeight = 0;   // frustum.top - frustum.bottom, world units
+  int screenWidthPx = 0;    // Cesium's drawingBufferWidth; only the orthographic branch reads it
 };
 
 struct SelectParams {

@@ -76,6 +76,12 @@ Selection selectImpl(const Octree& oct, const Camera& cam, const SelectParams& p
   const double fovRad = cam.fovYDegrees * kPi / 180.0;   // :368
   const double slope = std::tan(fovRad / 2.0);            // :369
   const double halfH = 0.5 * static_cast<double>(cam.screenHeightPx);
+  // D17 -- CesiumJS Cesium3DTile.js:951-953 @ 113c068e9af3:
+  //   pixelSize = max(frustum.top - frustum.bottom, frustum.right - frustum.left)
+  //               / max(width, height)
+  const double orthoPixelSize =
+      std::max(cam.orthoHeight, cam.orthoWidth) /
+      static_cast<double>(std::max(cam.screenWidthPx, cam.screenHeightPx));
 
   while (!pq.empty()) {
     const Item it = pq.top();
@@ -131,13 +137,25 @@ Selection selectImpl(const Octree& oct, const Camera& cam, const SelectParams& p
       const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
       const double radius = child.box.boundingSphereRadius();
 
-      const double projFactor = halfH / (slope * distance);   // :370
-      const double screenPixelRadius = radius * projFactor;   // :371
+      double screenPixelRadius;
+      if (!cam.orthographic) {
+        const double projFactor = halfH / (slope * distance);   // :370
+        screenPixelRadius = radius * projFactor;                // :371
+      } else {
+        // D17 -- Cesium3DTile.js:954 `error = geometricError / pixelSize`, with
+        // Potree's bounding-sphere radius as the geometric error: Potree's :370-371
+        // is Cesium's perspective branch (:959, sseDenominator = 2 tan(fovy/2),
+        // PerspectiveFrustum.js:206) with geometricError = radius, so this is the
+        // same quantity in pixels for an orthographic frustum.
+        screenPixelRadius = radius / orthoPixelSize;
+      }
 
       if (screenPixelRadius < p.minimumNodePixelSize) continue;  // :373-375
 
       double weight = screenPixelRadius;                      // :377
-      if (distance - radius < 0) weight = std::numeric_limits<double>::max();  // :379-381
+      // :379-381 sits inside Potree's perspective branch (:353); Cesium's
+      // orthographic branch has no distance term. So: perspective only.
+      if (!cam.orthographic && distance - radius < 0) weight = std::numeric_limits<double>::max();
 
       pq.push({ci, weight, drawable});   // :392 -- pushed whether or not `node` is drawn
     }

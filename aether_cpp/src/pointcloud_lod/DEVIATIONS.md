@@ -78,10 +78,11 @@ would silently mis-place the near plane.
 feature, so that block is omitted. It cannot change which nodes are selected when
 no clip box exists.
 
-**D7 no orthographic path** *(Potree port)*
+**D7 no orthographic path** *(Potree port)* — **superseded 2026-09-24 by D17**
 `Potree_update_visibility.js:382-390`'s ortho branch is `// TODO ortho visibility`
 upstream and uses the box diagonal, ignoring distance. Omitted rather than
-copied; the viewer is perspective.
+copied. The LOD viewer keeps the product's orthographic projection (user
+decision), so D17 takes CesiumJS's orthographic branch instead.
 
 **D8 (RESOLVED 2026-09-23) GPU-upload throttle and asynchronous loading**
 The first version said "the throttle belongs to the loader" and then never put
@@ -183,6 +184,48 @@ Potree's `WorkerPool.js` creates a worker per concurrent request on demand;
 concurrency is capped by `maxNodesLoading` anyway. Here `Config::workers`
 threads are started once; with `workers >= maxNodesLoading` the behaviour is
 the same.
+
+**D17 orthographic node size from CesiumJS, not Potree** *(Potree + CesiumJS)*
+User decision 2026-09-24: the LOD viewer stays orthographic, and the node screen
+size in that case is CesiumJS's. `Camera` gains `orthographic`, `orthoWidth`,
+`orthoHeight`, `screenWidthPx` (default off). With `orthographic = true` the
+child weight becomes
+
+    pixelSize         = max(orthoHeight, orthoWidth) / max(screenWidthPx, screenHeightPx)
+    screenPixelRadius = radius / pixelSize
+
+from `packages/engine/Source/Scene/Cesium3DTile.js` @ `113c068e9af3`
+(Apache-2.0, already our controller's upstream): `:943-946` the branch test
+(`frustum instanceof OrthographicFrustum`), `:951-953` `pixelSize`, `:954`
+`error = geometricError / pixelSize`.
+
+Why `radius` is the geometric error: Potree's perspective size (`:370-371`,
+`radius * 0.5 * domHeight / (tan(fov/2) * distance)`) is exactly Cesium's
+perspective branch (`Cesium3DTile.js:959`,
+`geometricError * height / (distance * sseDenominator)`, with
+`sseDenominator = 2 tan(fovy/2)` from `PerspectiveFrustum.js:206`) when
+`geometricError = radius`. Both are "node size in pixels"; Cesium's ortho
+branch is the same quantity with the distance term replaced by the frustum's
+world-per-pixel size. The comparison against `minimumNodePixelSize`
+(`:373-375`) and `weight = screenPixelRadius` (`:377`) are unchanged.
+
+Not carried over, each for a stated reason:
+- `:379-381` (`distance - radius < 0` → `MAX_VALUE`) lives inside Potree's
+  perspective branch (`:353`) and Cesium's ortho branch has no distance term,
+  so the orthographic walk does not apply it.
+- `Cesium3DTile.js:968` `error /= frameState.pixelRatio`: our screen sizes are
+  already physical pixels (the same convention as `screenHeightPx`), i.e.
+  `pixelRatio = 1`.
+- `:947-950` `offCenterFrustum`: the caller hands us the frustum's width and
+  height directly, which is what the off-centre frustum's `top - bottom` /
+  `right - left` are.
+
+Perspective stays bit-identical: a differential harness (old vs new
+`select.cpp`, same harness source) over 400 poses x 4 pixel sizes x 3 budgets,
+both overloads (plain and streaming with a synthetic residency), hashed every
+returned node list, `numPoints`, `nodesConsidered`, `lowestSpacing`,
+`hitBudget`, `promoted`, `unloaded`: identical hashes on the fixture, the 36M
+and the 216M trees (9,600 calls each).
 
 ## Operating notes found by testing, not by reading
 
