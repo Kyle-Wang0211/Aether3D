@@ -16,6 +16,7 @@ This module is **moved code plus interface glue**. Nothing algorithmic is new.
 | M1 measurement entry `pwlod_run` (`m1_bench/`) | `pw_lod_bench.{cpp,h}` **byte-identical** | `b792d57` | ours + Potree notice in `m1_bench/NOTICE` |
 | **v3 look** (`viewer_look.{h,cpp}`, the VIEWER WGSL): display colour, tone maps, height ramp, sprite disc, scale rule, selection tint / cull | the product painter `SparseCloudPainter`, `lib/ui/official_capture/sparse_cloud_view.dart` (:27, :235, :382-384, :812-828, :1056-1253, :1459-1531, :1598-1723) and `SelectionBox.contains` (`lib/official_capture/selection_box.dart:119-126`), pocketworld 168 source | `86a45cf` | ours |
 | Tone maps carried by that painter | three.js r160 `src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js` (AgX, ACESFilmic); Khronos `PBR_Neutral/pbrNeutral.glsl` | `643680ed5fc7` (r160); `b5a2eed5ddf6` | MIT; Apache-2.0 |
+| Sprite image (R18, `kPainterSpriteAlpha`) | the painter's `_buildSprite` output as its own frames show it: parity_fixture_v3 from `test/point_cloud_lod/painter_parity_fixture_v3_test.dart` (product `feat/lod-on-dense-168`) | `44bf12f` | ours |
 | v3 camera | the product's `CloudCamera.projectionFor -> CloudProjection` (`lib/ui/official_capture/cloud_camera.dart:68-128`) -- node size: `../pointcloud_lod/DEVIATIONS.md` D19 | `86a45cf` | ours |
 | Dawn C header (compile only; nothing vendored here) | `webgpu/webgpu.h` → `dawn/webgpu.h` sha256 `6d632738597019d0…` | Dawn `12ee391c` | BSD-3-Clause |
 
@@ -114,9 +115,10 @@ A third point-size mode next to the bench's two, ported from the product painter
   into the point record, so a colour is the painter's to the bit; the GPU draws it.
 - *sprite*: the painter draws a 16x16 white disc (`drawCircle(Offset(8,8), 7,
   isAntiAlias)`, :819-825) with `drawRawAtlas` + `BlendMode.modulate` (:1715-1723),
-  anchored at `scale * 8` (:1702). Here: a quad of half-size `8 * scale` px, and a
-  fragment coverage `clamp(7 + 0.5 - r, 0, 1)` with `r` in sprite texels (a disc of
-  radius 7 texels, 1-texel anti-aliased rim), premultiplied source-over.
+  anchored at `scale * 8` (:1702). Here: a quad of half-size `8 * scale` px and,
+  per fragment, the sprite's alpha -- since R18 the painter's own 16x16 image
+  sampled nearest (first written as the analytic `clamp(7 + 0.5 - r, 0, 1)`, which
+  the painter's PNGs rejected, see R18) -- premultiplied source-over.
 - *scale*: `pointSize / 16` when orthoMix == 1, else
   `min(pointSize/16 * camDist / divisor, 50/16)` (:1669-1677); the divisor is the
   fragment's clip.w, which the v3 `view_proj` defines as `divisorAt(depth)`.
@@ -152,6 +154,31 @@ different target size (e.g. `render_once` at another size than the ring), leavin
 every resident node's bind group pointing at the released uniform buffers.
 Now only the pipelines and the depth buffer are rebuilt; the bind-group layout
 and buffers stay (a bind group is valid with any group-equivalent layout).
+
+**R18 the sprite is the painter's 16x16 image, sampled nearest.** The painter's
+own output (parity_fixture_v3, product `feat/lod-on-dense-168` @ `44bf12f`,
+`test/point_cloud_lod/painter_parity_fixture_v3_test.dart`: the real
+`SparseCloudPainter` and sprite) showed two things R14's analytic disc got wrong:
+(1) `drawRawAtlas` is called with `Paint()`, whose `filterQuality` defaults to
+`FilterQuality.none` -- the sprite is sampled NEAREST: a pixel whose centre lies
+at sprite coordinate `(u, v) = (pixel centre - (centre - 8 s)) / s` takes texel
+`[floor v][floor u]`, blocky at 3x, not a smooth ramp; (2) the texel values are
+the rasterizer's coverage of that circle (e.g. 224 and 232 where the analytic
+disc gives 250), not symmetric to the bit. The table (`kPainterSpriteAlpha`,
+`viewer_look.{h,cpp}`) is those 256 bytes, recovered from the painter's 3x PNGs:
+all 1,595,711 pixels covered by exactly one sprite (>= 0.02 texel from a texel
+edge) equal `round(colour * alpha / 255)` with it, 0 exceptions (judge T0 of
+`test_parity.cpp` re-checks it on every run); the analytic disc fails 353,034 of
+them. The fragment derives `(u, v)` from its own position and the point's flat
+centre (VsOut `spr`), not from interpolated vertex attributes: the rasterizer
+snaps quad vertices to its sub-pixel grid, which moved texel edges by up to 0.02
+texel at 1x and flipped 79 pixels of one 1x frame to the neighbouring texel. Any
+other sprite geometry than the product's (16 px, radius 7) keeps the analytic
+disc. Not verified: the phone's rasterizer (the fixture ran under the host test
+renderer); a dump of `_sprite.toByteData()` on the device would settle it, and
+would only change table data. The frozen header still describes the sprite as
+"a disc ... with a 1 px anti-aliased rim" -- the painter's intent; what is drawn
+is its actual image (a wording for the next header revision, not an ABI change).
 
 Inherited from the bench unchanged: P1–P6 (listed at `BuildVisibleNodeTable`).
 
@@ -299,6 +326,7 @@ None, TINT, CULL, mask).
 - The bench's two point-size modes are unaffected: the 36M render judges still
   reproduce the Mac reference number for number.
 
-The Dart painter's own numbers (`~/Developer/pw_lod_data/parity_fixture_v3/`,
-from the product side) had not arrived when this was written; the same
-comparisons take them in place of `painter_ref` when they do.
+Since R18 `painter_ref`'s rasterizer is the painter's 8-bit canvas with the
+nearest-sampled sprite table -- the model the Dart PNGs confirm (test_parity.cpp) -- and the
+numbers above were re-run with it: outside the order-sensitive set <= 0.013 %
+(persp roll zoom), all other cases <= 0.011 %, negatives unchanged in kind.

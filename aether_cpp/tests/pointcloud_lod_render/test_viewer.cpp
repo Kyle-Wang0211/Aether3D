@@ -4,9 +4,10 @@
 //   test_pointcloud_lod_render_viewer <fixture dir> <scratch dir>
 //
 // Reference: painter_ref.{h,cpp}, a double-precision transcription of the
-// product painter (sparse_cloud_view.dart / cloud_camera.dart @ 86a45cf). The
-// Dart painter's own per-point numbers and PNGs (parity_fixture_v3, from the
-// product side) plug into the same comparisons when they arrive.
+// product painter (sparse_cloud_view.dart / cloud_camera.dart @ 86a45cf) with
+// its 8-bit canvas and nearest-sampled sprite (R18). The Dart painter's own
+// per-point numbers and PNGs (parity_fixture_v3, from the product side) judge
+// both the engine and painter_ref in test_parity.cpp.
 //
 //   V1  per point, GPU (the vertex shader's own function, run by the parity
 //       probe) vs the painter: screen x / y within 0.02 px, sprite scale within
@@ -23,7 +24,8 @@
 //       only where two or more anti-aliased rims lie in front of the nearest
 //       fully covered fragment (the painter blends those far->near, the GPU in
 //       draw order; the reference marks these pixels "order-sensitive"), plus
-//       8-bit rounding of a blend step and float32 vs double coverage on a rim.
+//       8-bit rounding of a blend step and the texel picked where a pixel
+//       centre sits on a sprite texel edge (float32 vs double position).
 //       Judge: pixels with any of the four premultiplied channels off by > 8
 //       OUTSIDE the order-sensitive set <= 0.05 % of the image, and PSNR >= 30 dB
 //       over the whole image.

@@ -1,6 +1,6 @@
-// A CPU transcription of the product viewer's painter, the reference the GPU
-// viewer look is judged against until the Dart painter's own numbers arrive
-// (~/Developer/pw_lod_data/parity_fixture_v3/, produced by the product side).
+// A CPU transcription of the product viewer's painter: the reference of
+// test_viewer.cpp, itself judged against the Dart painter's own numbers and PNGs
+// (parity_fixture_v3, produced by the product side) in test_parity.cpp.
 //
 // Source: lib/ui/official_capture/cloud_camera.dart (CloudCamera.projectionFor,
 // CloudProjection) and lib/ui/official_capture/sparse_cloud_view.dart
@@ -63,9 +63,10 @@ Pt PaintPoint(const Proj& p, const plr::ViewerStyle& st, bool colored, const flo
 void ViewProj(const Proj& p, double width, double height, double zn, double zf, double vp[16],
               double eye[3]);
 
-// Far->near source-over of every drawn point's sprite: a disc of radius
-// disc_radius texels with a 1-texel AA rim, scaled by `scale` (the painter's
-// drawRawAtlas + BlendMode.modulate + sort, :1692-1723), on a (0,0,0,0) canvas.
+// Far->near source-over of every drawn point's sprite (the painter's
+// drawRawAtlas + BlendMode.modulate + sort, :1692-1723) on a (0,0,0,0) canvas,
+// in the canvas's 8 bits: the 16x16 sprite sampled nearest (R18,
+// kPainterSpriteAlpha) for the product geometry, else the analytic disc.
 // Returns RGBA8 (premultiplied, as the GPU target holds it).
 // `orderSensitive` (optional) receives, per pixel, 1 where two or more partially
 // covering sprite fragments (anti-aliased rims) lie in front of the nearest

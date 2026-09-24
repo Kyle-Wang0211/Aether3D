@@ -52,4 +52,23 @@ bool SelectionContains(const ViewerStyle& s, double wx, double wy, double wz);
 // painter's colour cache key, :1207-1213, plus the uncoloured ramp domain).
 bool ColourKeyDiffers(const ViewerStyle& a, const ViewerStyle& b);
 
+// R18: the painter's sprite as it is actually drawn. _buildSprite (:812-828)
+// rasterizes drawCircle(Offset(8, 8), 7, isAntiAlias) into a 16x16 image, and
+// drawRawAtlas (:1715-1723) samples it with Paint()'s default FilterQuality.none,
+// i.e. NEAREST texel: a screen pixel whose centre lies at sprite coordinate (u, v)
+// (texels, origin top-left) gets alpha kPainterSpriteAlpha[floor v][floor u] / 255.
+// The values are the Flutter rasterizer's coverage of that circle, recovered bit
+// for bit from the painter's own output (parity_fixture_v3, product
+// feat/lod-on-dense-168 @ 44bf12f, test/point_cloud_lod/
+// painter_parity_fixture_v3_test.dart): every single-covered pixel of its 3x PNGs
+// equals round(colour * alpha / 255) with these alphas (judge T0 of
+// tests/pointcloud_lod_render/test_parity.cpp re-checks it on every run).
+// Rows top -> bottom (screen down), columns left -> right.
+extern const uint8_t kPainterSpriteAlpha[16][16];
+
+// True for the product sprite geometry (16 px sprite, radius 7): the only one the
+// table above describes. Any other pwlod_style geometry keeps the analytic disc
+// (radius + 0.5 - distance, clamped), the header's own description.
+bool UsesPainterSprite(const ViewerStyle& s);
+
 }  // namespace aether::pointcloud_lod_render

@@ -90,9 +90,10 @@ struct ViewerU {
   float orbit_distance;
   uint32_t sel_mode;                 // 0 none, 1 tint, 2 cull
   uint32_t ortho_end;                // 1 iff orthoMix == 1 exactly
-  float pad;
+  uint32_t sprite_table;             // R18: 1 = the painter's 16x16 sprite, nearest texel
+  uint32_t sprite[16][4];            // R18: kPainterSpriteAlpha, row j = 16 bytes little-endian
 };
-static_assert(sizeof(ViewerU) == 112, "ViewerU must be 112 bytes");
+static_assert(sizeof(ViewerU) == 368, "ViewerU must be 368 bytes");
 
 // R14: one point as the viewer shader computed it (the parity probe's output).
 struct ViewerProbePoint {
@@ -101,7 +102,8 @@ struct ViewerProbePoint {
   uint32_t rgba;       // pack4x8unorm of the drawn colour (r | g<<8 | b<<16 | a<<24)
   uint32_t culled;     // 1 = CULL_OUTSIDE removed it
   float w;             // clip.w (= the projection divisor)
-  float pad[2];
+  float z;             // clip.z / clip.w (outside [0, 1] = clipped by the near / far plane)
+  float pad;
 };
 static_assert(sizeof(ViewerProbePoint) == 32, "ViewerProbePoint must be 32 bytes");
 

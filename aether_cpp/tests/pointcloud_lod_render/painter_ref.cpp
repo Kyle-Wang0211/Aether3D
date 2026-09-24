@@ -141,31 +141,50 @@ void ViewProj(const Proj& p, double W, double H, double zn, double zf, double vp
   for (int k = 0; k < 3; ++k) eye[k] = p.pivot[k] - p.camDist * c[k];
 }
 
+namespace {
+// The painter's sprite alpha (0..255) at a pixel centre, or -1 outside the
+// sprite quad. R18: the 16x16 image sampled NEAREST (viewer_look.h); any other
+// geometry: the analytic disc, quantized to the 8 bits an image holds.
+int SpriteAlpha8(const Pt& q, const plr::ViewerStyle& st, bool table, int x, int y) {
+  const double half = st.sprite_px / 2, s = q.scale;
+  const double u = (x + 0.5 - (q.vx - half * s)) / s, v = (y + 0.5 - (q.vy - half * s)) / s;
+  if (!(u >= 0 && u < st.sprite_px && v >= 0 && v < st.sprite_px)) return -1;
+  if (table) return plr::kPainterSpriteAlpha[(int)std::floor(v)][(int)std::floor(u)];
+  const double cov = std::clamp(st.disc_radius + 0.5 - std::hypot(u - half, v - half), 0.0, 1.0);
+  return (int)std::lround(cov * 255.0);
+}
+inline int Div255(int x) { return (x + 127) / 255; }
+}  // namespace
+
 std::vector<uint8_t> Rasterize(const std::vector<Pt>& pts, const plr::ViewerStyle& st, int W, int H,
                                std::vector<uint8_t>* orderSensitive) {
-  std::vector<double> acc((size_t)W * H * 4, 0.0);
+  // The painter's canvas: 8-bit premultiplied RGBA, BlendMode.modulate of the
+  // white sprite by the colour (src = colour * a / 255) then source-over,
+  // dst = src + dst * (255 - a) / 255 (round to nearest). Checked against the
+  // Dart painter's PNGs (parity_fixture_v3): <= 1 LSB on >= 99.94 % of pixels.
+  const bool table = plr::UsesPainterSprite(st);
+  std::vector<int> acc((size_t)W * H * 4, 0);
   std::vector<size_t> order;
   for (size_t i = 0; i < pts.size(); ++i) if (pts[i].drawn) order.push_back(i);
   std::stable_sort(order.begin(), order.end(), [&](size_t x, size_t y) { return pts[x].depth > pts[y].depth; });  // :1693-1694
+  auto box = [&](const Pt& q, int* x0, int* x1, int* y0, int* y1) {
+    const double half = st.sprite_px / 2 * q.scale;
+    *x0 = std::max(0, (int)std::floor(q.vx - half) - 1); *x1 = std::min(W - 1, (int)std::ceil(q.vx + half) + 1);
+    *y0 = std::max(0, (int)std::floor(q.vy - half) - 1); *y1 = std::min(H - 1, (int)std::ceil(q.vy + half) + 1);
+  };
   for (size_t i : order) {
     const Pt& q = pts[i];
-    const double s = q.scale, half = st.sprite_px / 2 * s;
-    const double cr = ((q.argb >> 16) & 0xFF) / 255.0, cg = ((q.argb >> 8) & 0xFF) / 255.0,
-                 cb = (q.argb & 0xFF) / 255.0, ca = ((q.argb >> 24) & 0xFF) / 255.0;
-    const int x0 = std::max(0, (int)std::floor(q.vx - half)), x1 = std::min(W - 1, (int)std::ceil(q.vx + half));
-    const int y0 = std::max(0, (int)std::floor(q.vy - half)), y1 = std::min(H - 1, (int)std::ceil(q.vy + half));
+    const int c[4] = {(int)((q.argb >> 16) & 0xFF), (int)((q.argb >> 8) & 0xFF), (int)(q.argb & 0xFF),
+                      (int)((q.argb >> 24) & 0xFF)};
+    int x0, x1, y0, y1;
+    box(q, &x0, &x1, &y0, &y1);
     for (int y = y0; y <= y1; ++y)
       for (int x = x0; x <= x1; ++x) {
-        const double dx = (x + 0.5 - q.vx) / s, dy = (y + 0.5 - q.vy) / s;
-        if (std::fabs(dx) > st.sprite_px / 2 || std::fabs(dy) > st.sprite_px / 2) continue;   // the sprite quad
-        const double cov = std::clamp(st.disc_radius + 0.5 - std::sqrt(dx * dx + dy * dy), 0.0, 1.0);
-        if (cov <= 0) continue;
-        const double a = cov * ca;
-        double* d = &acc[((size_t)y * W + x) * 4];
-        d[0] = cr * a + d[0] * (1 - a);
-        d[1] = cg * a + d[1] * (1 - a);
-        d[2] = cb * a + d[2] * (1 - a);
-        d[3] = a + d[3] * (1 - a);
+        const int a = SpriteAlpha8(q, st, table, x, y);
+        if (a <= 0) continue;
+        int* d = &acc[((size_t)y * W + x) * 4];
+        const int sa = Div255(c[3] * a);
+        for (int k = 0; k < 4; ++k) d[k] = Div255(c[k] * a) + Div255(d[k] * (255 - sa));
       }
   }
   if (orderSensitive) {
@@ -177,17 +196,15 @@ std::vector<uint8_t> Rasterize(const std::vector<Pt>& pts, const plr::ViewerStyl
     for (int passNo = 0; passNo < 2; ++passNo)
       for (size_t i : order) {
         const Pt& q = pts[i];
-        const double s = q.scale, half = st.sprite_px / 2 * s;
-        const int x0 = std::max(0, (int)std::floor(q.vx - half)), x1 = std::min(W - 1, (int)std::ceil(q.vx + half));
-        const int y0 = std::max(0, (int)std::floor(q.vy - half)), y1 = std::min(H - 1, (int)std::ceil(q.vy + half));
+        int x0, x1, y0, y1;
+        box(q, &x0, &x1, &y0, &y1);
         for (int y = y0; y <= y1; ++y)
           for (int x = x0; x <= x1; ++x) {
-            const double dx = (x + 0.5 - q.vx) / s, dy = (y + 0.5 - q.vy) / s;
-            if (std::fabs(dx) > st.sprite_px / 2 || std::fabs(dy) > st.sprite_px / 2) continue;
-            const double cov = std::clamp(st.disc_radius + 0.5 - std::sqrt(dx * dx + dy * dy), 0.0, 1.0);
+            const int a = SpriteAlpha8(q, st, table, x, y);
+            if (a <= 0) continue;
             const size_t px = (size_t)y * W + x;
             if (passNo == 0) {
-              if (cov >= 1.0) {
+              if (a >= 255) {
                 if (q.depth < zfull[px]) {
                   zfull2[px] = zfull[px]; zn2[px] = zn1[px];
                   zfull[px] = q.depth; zn1[px] = q.zndc;
@@ -196,7 +213,7 @@ std::vector<uint8_t> Rasterize(const std::vector<Pt>& pts, const plr::ViewerStyl
                 }
               }
             }
-            else if (cov > 0.0 && cov < 1.0 && q.depth < zfull[px] && partial[px] < 60000) partial[px]++;
+            else if (a < 255 && q.depth < zfull[px] && partial[px] < 60000) partial[px]++;
           }
       }
     orderSensitive->assign((size_t)W * H, 0);
@@ -211,7 +228,7 @@ std::vector<uint8_t> Rasterize(const std::vector<Pt>& pts, const plr::ViewerStyl
     }
   }
   std::vector<uint8_t> out((size_t)W * H * 4);
-  for (size_t i = 0; i < out.size(); ++i) out[i] = (uint8_t)std::lround(std::clamp(acc[i], 0.0, 1.0) * 255.0);
+  for (size_t i = 0; i < out.size(); ++i) out[i] = (uint8_t)std::clamp(acc[i], 0, 255);
   return out;
 }
 

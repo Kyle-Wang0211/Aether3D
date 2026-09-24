@@ -288,7 +288,8 @@ struct ViewerU {
     orbit_distance: f32,
     sel_mode: u32,
     ortho_end: u32,
-    pad: f32,
+    sprite_table: u32,
+    sprite: array<vec4u, 16>,
 }
 
 // pointcloud.vs:158-175
@@ -355,7 +356,9 @@ const char* kWgslRender = R"LODWGSL(
 struct VsOut {
     @builtin(position) clip: vec4f,
     @location(0) @interpolate(flat) color: vec4f,
-    @location(1) uv: vec2f,
+    // R18: the point's sprite centre (framebuffer px, y down) and scale; the
+    // fragment derives its sprite texel from its own position (discCoverage)
+    @location(1) @interpolate(flat) spr: vec3f,
 }
 
 @vertex fn vs_quad(@builtin(vertex_index) vi: u32) -> VsOut {
@@ -372,7 +375,6 @@ struct VsOut {
     if (fu.mode == 2u) {                                  // R14: the product viewer
         let v = viewerPoint(ii);
         var ov: VsOut;
-        ov.uv = off * vu.sprite_half;                     // sprite texels from the disc centre
         ov.color = v.color;
         if (v.culled == 1u) {                             // CULL_OUTSIDE (:1610)
             ov.clip = vec4f(2.0, 2.0, 2.0, 1.0);          // outside the clip volume: dropped
@@ -380,6 +382,8 @@ struct VsOut {
         }
         let half_px = vu.sprite_half * v.scale;           // the atlas anchor, scale * 8 (:1702)
         ov.clip = vec4f(v.clip.xy + off * half_px * 2.0 / fu.img_size * v.clip.w, v.clip.z, v.clip.w);
+        ov.spr = vec3f((v.clip.x / v.clip.w * 0.5 + 0.5) * fu.img_size.x,
+                       (0.5 - v.clip.y / v.clip.w * 0.5) * fu.img_size.y, v.scale);   // R18
         return ov;
     }
     let p = pts[ii];
@@ -408,7 +412,7 @@ struct VsOut {
     var o: VsOut;
     o.clip = clip;
     o.color = unpack4x8unorm(p.rgba);
-    o.uv = vec2f(0.0, 0.0);
+    o.spr = vec3f(0.0, 0.0, 1.0);
     return o;
 }
 
@@ -416,19 +420,32 @@ struct VsOut {
     return in.color;
 }
 
-// R14: the painter's sprite, a disc of radius 7 texels with a 1-texel
-// anti-aliased rim (drawCircle(Offset(8, 8), 7, isAntiAlias), :819-825), drawn
-// through BlendMode.modulate (:1720): white disc x the point's colour,
-// premultiplied. Coverage is evaluated at the fragment's sprite position.
-fn discCoverage(uv: vec2f) -> f32 {
-    return clamp(vu.disc_radius + 0.5 - length(uv), 0.0, 1.0);
+// R14: the painter's sprite (drawCircle(Offset(8, 8), 7, isAntiAlias) into a
+// 16x16 image, :812-828), drawn through BlendMode.modulate (:1720): white sprite
+// x the point's colour, premultiplied.
+// R18: the painter samples that image at the pixel centre with the default
+// FilterQuality.none (NEAREST): alpha = kPainterSpriteAlpha[floor v][floor u]
+// (viewer_look.h) with (u, v) = (pixel centre - (centre - 8 * scale)) / scale,
+// u right, v down, as drawRawAtlas maps it. (u, v) comes from the fragment's own
+// position and the point's flat centre, not from interpolated vertex attributes:
+// the rasterizer snaps vertices to its sub-pixel grid, which moves texel edges by
+// up to ~0.02 texel at 1x and picks the neighbouring texel there. Other sprite
+// geometries keep the analytic disc (radius + 0.5 - distance from the centre).
+fn discCoverage(in: VsOut) -> f32 {
+    let t = (in.clip.xy - in.spr.xy) / in.spr.z + vec2f(vu.sprite_half);
+    if (vu.sprite_table == 1u) {
+        let i = clamp(vec2i(floor(t)), vec2i(0), vec2i(15));
+        let word = vu.sprite[i.y][i.x >> 2u];
+        return f32((word >> (8u * u32(i.x & 3))) & 0xFFu) / 255.0;
+    }
+    return clamp(vu.disc_radius + 0.5 - length(t - vec2f(vu.sprite_half)), 0.0, 1.0);
 }
 @fragment fn fs_viewer_core(in: VsOut) -> @location(0) vec4f {
-    if (discCoverage(in.uv) < 1.0) { discard; }
+    if (discCoverage(in) < 1.0) { discard; }
     return vec4f(in.color.rgb * in.color.a, in.color.a);
 }
 @fragment fn fs_viewer_rim(in: VsOut) -> @location(0) vec4f {
-    let cov = discCoverage(in.uv);
+    let cov = discCoverage(in);
     if (cov <= 0.0 || cov >= 1.0) { discard; }
     let a = cov * in.color.a;
     return vec4f(in.color.rgb * a, a);
@@ -487,7 +504,7 @@ struct ProbeOut { x: f32, y: f32, scale: f32, rgba: u32, culled: u32, w: f32, p0
     o.rgba = pack4x8unorm(v.color);
     o.culled = v.culled;
     o.w = v.clip.w;
-    o.p0 = 0.0;
+    o.p0 = v.clip.z / v.clip.w;
     o.p1 = 0.0;
     outP[i] = o;
 }
@@ -962,6 +979,12 @@ ViewerU MakeViewerU(const DrawParams& dp, const CamState& cs) {
   u.orbit_distance = (float)cs.cam.orbitDistance;
   u.sel_mode = (uint32_t)st.selection_mode;
   u.ortho_end = (cs.cam.cloudProjection && cs.cam.orthoMix == 1.0) ? 1u : 0u;
+  u.sprite_table = UsesPainterSprite(st) ? 1u : 0u;   // R18
+  for (int j = 0; j < 16; ++j)
+    for (int w = 0; w < 4; ++w)
+      u.sprite[j][w] = (uint32_t)kPainterSpriteAlpha[j][w * 4] | ((uint32_t)kPainterSpriteAlpha[j][w * 4 + 1] << 8) |
+                       ((uint32_t)kPainterSpriteAlpha[j][w * 4 + 2] << 16) |
+                       ((uint32_t)kPainterSpriteAlpha[j][w * 4 + 3] << 24);
   return u;
 }
 
