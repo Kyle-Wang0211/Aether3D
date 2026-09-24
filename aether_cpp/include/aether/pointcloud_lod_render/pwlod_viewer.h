@@ -3,6 +3,7 @@
 // (iOS now; Android / HarmonyOS later).
 //
 // v2 (2026-09-24): pwlod_frame_stats.lowest_spacing added (last field), ABI version 2.
+// v2 comment fix (2026-09-24): lowest_spacing defined exactly as Potree computes it (layout unchanged).
 // Frozen by the coordinating session on 2026-09-24 (plan LOD_ARLOOPBENCH_PLAN_20260924.md,
 // user choices A1 + B1 + orthographic via Cesium). Neither side edits this file; a needed
 // change is reported back to the coordinator, who changes it for both sides at once.
@@ -112,9 +113,11 @@ typedef struct pwlod_frame_stats {
   double min_node_pixel_size;     /* controller state after this frame */
   double cpu_ms;                  /* select + stream bookkeeping + encode + submit */
   double gpu_ms;                  /* submit -> OnSubmittedWorkDone; -1 if not yet known */
-  /* v2: Potree's per-frame lowestSpacing (Potree_update_visibility.js :114, :276-280, :413
-     @5636cd4) = the smallest spacing among the nodes drawn this frame; <= 0 if none drawn.
-     The shell feeds it to Potree Viewer.update's near/far rule (viewer.js:1749-1771). */
+  /* v2: Potree's per-frame lowestSpacing exactly as Potree_update_visibility.js :114, :276-280,
+     :413 @5636cd4 computes it: min spacing over EVERY node popped from the priority queue this
+     frame, taken before the budget break (:282) and the visibility test (:286) -- so nodes
+     outside the frustum and the node that trips the budget count too. <= 0 if the queue was
+     empty. The shell feeds it to Potree Viewer.update's near/far rule (viewer.js:1749-1771). */
   double lowest_spacing;
 } pwlod_frame_stats;
 

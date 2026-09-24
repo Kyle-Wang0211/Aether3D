@@ -19,7 +19,8 @@
 //       pwlod_frame_stats.lowest_spacing is bit-identical to selectVisible's
 //       Selection::lowestSpacing for the same camera / budget / pixel size,
 //       through render_once (perspective and orthographic) and through the
-//       render thread's first published frame; <= 0 when no node was drawn.
+//       render thread's first published frame, and in the async first frame
+//       where no node is drawn yet (Potree's value is over popped nodes).
 //       Negative control: the viewer made to fill the root's (largest)
 //       spacing must be caught by the same comparison.
 #include <algorithm>
@@ -317,15 +318,18 @@ int main(int argc, char** argv) {
                 Fmt("frame %llu: %.17g vs %.17g", (unsigned long long)first.st.frame_number,
                     first.st.lowest_spacing, wantP));
     }
-    // nothing drawn: async, first frame (nodes are only being requested)
+    // Potree's definition (D18) is over every POPPED node, so it does not depend
+    // on what was drawn: the async first frame (0 nodes drawn, nodes only being
+    // requested) must still report select's value. (Under the first v2 wording,
+    // "among the nodes drawn", this frame reported 0.)
     {
       pwlod_params pa = prm; pa.async_loading = 1;
       pwlod_frame_stats sa{};
       viaC(ToCamera(persp, ps, W, H, false), pa, &pts, &sa);
-      rep.check("V2 no node drawn -> lowest_spacing <= 0",
-                sa.nodes_drawn == 0 && sa.lowest_spacing <= 0 && wantP > 0,
-                Fmt("async first frame: %d nodes drawn, lowest_spacing %g (select's own value %g)",
-                    sa.nodes_drawn, sa.lowest_spacing, wantP));
+      rep.check("V2 async first frame (0 drawn) lowest_spacing == selectVisible's",
+                sa.nodes_drawn == 0 && wantP > 0 && bits(sa.lowest_spacing, wantP),
+                Fmt("%d nodes drawn, lowest_spacing %.17g vs select %.17g", sa.nodes_drawn,
+                    sa.lowest_spacing, wantP));
     }
     // negative control: the largest spacing filled in must be caught
     {

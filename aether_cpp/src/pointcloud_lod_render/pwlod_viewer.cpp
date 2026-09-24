@@ -183,13 +183,15 @@ void OnWorkDone(WGPUQueueWorkDoneStatus status, WGPUStringView, void* u1, void*)
   }
 }
 
-// v2 lowest_spacing (A8): the frame's Selection::lowestSpacing as selectVisible
-// computed it; <= 0 (here 0) when no node was drawn or nothing was accepted.
+// v2 lowest_spacing (A8, resolved per Potree): the frame's Selection::lowestSpacing
+// as selectVisible computed it -- min over every node popped from the queue
+// (Potree_update_visibility.js:276-280). It does not depend on what was drawn.
+// 0 when nothing was popped (+infinity; the header's "<= 0 if the queue was empty").
 // fill_max is the test-only negative control (viewer_probe.h): the root's
 // spacing, i.e. the LARGEST spacing in the tree.
 double LowestSpacingFor(const plr::FrameRec& fr, const lod::Octree* oct, bool fill_max) {
   if (fill_max && oct && !oct->nodes.empty()) return oct->nodes[0].spacing;
-  if (fr.nodes_drawn <= 0 || !std::isfinite(fr.lowest_spacing)) return 0.0;
+  if (!std::isfinite(fr.lowest_spacing)) return 0.0;
   return fr.lowest_spacing;
 }
 

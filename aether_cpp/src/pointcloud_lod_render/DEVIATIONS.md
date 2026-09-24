@@ -147,23 +147,24 @@ stays; the shell passes the bench's measured 3 × 15 × budget explicitly.
 `memory_budget_mb <= 0` → no memory cap on `optionsForBudget`'s thread count
 (its own `min(4, cores)`), `threads <= 0` → that default.
 
-**A8 ABI v2 `lowest_spacing`** (header sha256 `fb6459d6…`, `PWLOD_ABI_VERSION 2`,
-`pwlod_version()` = `"<sha8> abi=" PWLOD_ABI_VERSION`). Filled on both paths (render
-thread, `render_once`, and the early-publish negative control) with
-`Selection::lowestSpacing` from the frame's own `selectVisible` call
-(`src/pointcloud_lod/select.cpp:106`), and with 0 when no node was drawn or
-nothing was accepted (the header's "<= 0 if none drawn"). Judged bit for bit
-against a direct `selectVisible` call (test_capi V2), with a negative control that
-fills the root's spacing (`SetFillMaxSpacing`, viewer_probe.h).
-**Three definitions disagree — reported, not changed here:**
-(1) Potree `Potree_update_visibility.js:276-280` @ `5636cd4` updates
-lowestSpacing for EVERY node popped from the queue, before the budget break
-(`:282`) and before the visibility test (`:286`), so frustum-culled nodes and the
-node that trips the budget count; (2) `select.cpp:106` (PR #98) updates it only
-for accepted nodes (after both tests); (3) the frozen header's comment says
-"among the nodes drawn this frame" — in async mode accepted nodes that are not
-yet drawable count in (2) but are not drawn. The coordinator asked for (2); (1)
-would change `aether::pointcloud_lod`, which this module uses as-is.
+**A8 ABI v2 `lowest_spacing` — RESOLVED 2026-09-24 per Potree** (header sha256
+`4b047f1f…`, comment-only change over `fb6459d6…`; `PWLOD_ABI_VERSION 2`,
+`pwlod_version()` = `"<sha8> abi=" PWLOD_ABI_VERSION`). Filled on every path
+(render thread, `render_once`, the early-publish negative control) with the
+frame's `Selection::lowestSpacing`, which is now Potree's
+`Potree_update_visibility.js:276-280` exactly: min spacing over EVERY node
+popped from the queue, before the budget break and the visibility test
+(`../pointcloud_lod/DEVIATIONS.md` D18). It does not depend on what was drawn,
+so the async first frame (0 nodes drawn) reports select's value too; 0 only if
+nothing was popped (+infinity; an empty tree). Judged bit for bit against a
+direct `selectVisible` call through `render_once` (perspective, orthographic),
+the render thread's first published frame and the async first frame
+(test_capi V2), with a negative control that fills the root's (largest)
+spacing (`SetFillMaxSpacing`, viewer_probe.h); the definition itself is judged
+in `tests/pointcloud_lod/test_spacing.cpp`.
+History: the first v2 build (engine `740c1dd`, artifact `libpw_lod_740c1ddd.a`)
+used the old select.cpp placement (accepted nodes only) and reported 0 when
+nothing was drawn; superseded.
 
 **A7 C2 in bytes.** `pwlod_verify_octree` reports gap and overlap BYTES instead
 of stopping at the first break; it passes iff both are 0, which is exactly when
