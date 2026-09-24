@@ -70,9 +70,13 @@ perspective factor stays finite. Potree's orthographic `attenuated` branch
 
 **R7 `r_min` / `r_max` are parameters** (bench: 0 / 64 written unconditionally,
 still the defaults). The C ABI's `PWLOD_PSIZE_FIXED` sets both to 1, which is
-Potree's `PointSizeType.FIXED`: `pointcloud.vs:680-681` `pointSize = size`
-clamped by `:699-700` with `PointCloudMaterial.js:32-34` (size 1, minSize 2) →
-2 px diameter → half-size 1 (P4). Reason: the bench's mode 0 is the product's
+Potree's `PointSizeType.FIXED` (potree @ `5636cd471d9e`, BSD-2-Clause):
+`src/materials/PointCloudMaterial.js:235-236` (FIXED → `#define fixed_point_size`;
+FIXED is also the material default, `:37`), `src/materials/shaders/pointcloud.vs:680-681`
+`pointSize = size`, clamped by `:699-700` with `PointCloudMaterial.js:32-34`
+(size 1, minSize 2, maxSize 50) → 2 px diameter → half-size 1 (P4).
+Decided by the coordinating session 2026-09-24: keep this; no orbit-distance
+field is added to the ABI. Reason: the bench's mode 0 is the product's
 orbit formula `base * camDist / depth`, and `pwlod_camera` carries no orbit
 distance, so the ABI's FIXED arm cannot be that formula; the C++ path keeps it
 (`CamState::cam_dist`) and `pwlod_run` keeps its own copy.
@@ -95,12 +99,17 @@ a feature the adapter lacks is an error. A device-lost callback feeds R1's log.
 **R12 `ResetLod` with no octree only releases** (the viewer resets before the
 first octree arrives).
 
+**R13 `FrameRec::lowest_spacing`** carries the frame's `Selection::lowestSpacing`
+(both the sync and the async branch of `LodFrame`), for ABI v2 (A8).
+
 Inherited from the bench unchanged: P1–P6 (listed at `BuildVisibleNodeTable`).
 
 ## Interface glue decisions (A) — no upstream exists for these
 
 **A1 render loop.** A `std::thread` owned by the viewer. It renders when an
-input changed (camera / params / octree generation counters), or the last
+input changed since it last looked (camera / params / octree generation
+counters, remembered by the loop itself so a frame that could not run does not
+make it retry the same inputs), or the last
 frame left work (loads in flight or queued, nodes promoted, controller moved),
 at most once per `target_frame_ms`; otherwise it waits on a condition variable.
 One frame in flight at a time: submit → wait for `OnSubmittedWorkDone` on the
@@ -128,7 +137,8 @@ the same quantity (frame start → after the GPU wait and eviction).
 `cache_bytes = 15 × budget` and never less (header: "default and minimum");
 background (0,0,0,1). **Note:** the bench ran with 3 × 15 B × budget; with the
 header's floor a drawn node can be evicted by a burst of loads in async mode
-(visible as `dropped_for_cache`). A shell may pass more.
+(visible as `dropped_for_cache`). Coordinator decision 2026-09-24: the header
+stays; the shell passes the bench's measured 3 × 15 × budget explicitly.
 
 **A6 error classes.** Missing file → `ERR_IO`; `loadOctree` error text starting
 "cannot read" → `ERR_IO`, other parse errors → `ERR_FORMAT`.
@@ -136,6 +146,24 @@ header's floor a drawn node can be evicted by a burst of loads in async mode
 (truncated, malformed, zero points, non-finite), else `ERR_IO` (writing the tree).
 `memory_budget_mb <= 0` → no memory cap on `optionsForBudget`'s thread count
 (its own `min(4, cores)`), `threads <= 0` → that default.
+
+**A8 ABI v2 `lowest_spacing`** (header sha256 `fb6459d6…`, `PWLOD_ABI_VERSION 2`,
+`pwlod_version()` = `"<sha8> abi=" PWLOD_ABI_VERSION`). Filled on both paths (render
+thread, `render_once`, and the early-publish negative control) with
+`Selection::lowestSpacing` from the frame's own `selectVisible` call
+(`src/pointcloud_lod/select.cpp:106`), and with 0 when no node was drawn or
+nothing was accepted (the header's "<= 0 if none drawn"). Judged bit for bit
+against a direct `selectVisible` call (test_capi V2), with a negative control that
+fills the root's spacing (`SetFillMaxSpacing`, viewer_probe.h).
+**Three definitions disagree — reported, not changed here:**
+(1) Potree `Potree_update_visibility.js:276-280` @ `5636cd4` updates
+lowestSpacing for EVERY node popped from the queue, before the budget break
+(`:282`) and before the visibility test (`:286`), so frustum-culled nodes and the
+node that trips the budget count; (2) `select.cpp:106` (PR #98) updates it only
+for accepted nodes (after both tests); (3) the frozen header's comment says
+"among the nodes drawn this frame" — in async mode accepted nodes that are not
+yet drawable count in (2) but are not drawn. The coordinator asked for (2); (1)
+would change `aether::pointcloud_lod`, which this module uses as-is.
 
 **A7 C2 in bytes.** `pwlod_verify_octree` reports gap and overlap BYTES instead
 of stopping at the first break; it passes iff both are 0, which is exactly when
@@ -166,3 +194,4 @@ through" holds on 36M (orbit_mid: production 7.97 %, adaptive 0.00 %, floor
 (production 0.80 %, adaptive 0.51 %, floor 0.15 %) — the same numbers as the
 bench's own Mac run, i.e. a property of Potree's adaptive size at that LOD cut,
 not of the move. Not registered as a ctest on 216M for that reason; reported.
+Coordinator decision 2026-09-24: record as is, no change.

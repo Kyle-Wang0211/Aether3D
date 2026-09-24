@@ -196,6 +196,9 @@ struct FrameRec {
   // R3/R4 (viewer bookkeeping, not in the bench)
   double submit_ms = 0;         // t0 -> wgpuQueueSubmit returned
   bool access_failed = false;   // BeginAccess refused: nothing was submitted
+  // R13: Selection::lowestSpacing of this frame's selectVisible call, as computed
+  // there (+infinity when nothing was accepted).
+  double lowest_spacing = 0;
 };
 
 // Frame parameters that only the draw needs.

@@ -6,7 +6,9 @@
 //     consumer holds (or the latest published one) -- counted at the moment the
 //     target is chosen, under the same lock acquire_latest takes;
 //   * a switch that removes the "not the consumer's target" rule, so the first
-//     count can be shown to fire (negative control).
+//     count can be shown to fire (negative control);
+//   * a switch that fills the v2 lowest_spacing with a wrong value (the root's,
+//     i.e. the largest spacing), so the lowest_spacing judge can be shown to fire.
 #pragma once
 
 #include <cstdint>
@@ -26,5 +28,9 @@ ViewerProbe GetViewerProbe(pwlod_viewer* viewer);
 
 // Negative control only: the ring choice ignores which target the consumer holds.
 void SetIgnoreHeldExclusion(pwlod_viewer* viewer, bool on);
+
+// Negative control only: pwlod_frame_stats.lowest_spacing is filled with the
+// root's spacing (the LARGEST in the tree) instead of the frame's lowestSpacing.
+void SetFillMaxSpacing(pwlod_viewer* viewer, bool on);
 
 }  // namespace aether::pointcloud_lod_render

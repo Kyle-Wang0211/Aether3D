@@ -45,6 +45,8 @@
 #ifndef PWLOD_ENGINE_SHA8
 #define PWLOD_ENGINE_SHA8 "unknown"
 #endif
+#define PWLOD_STR2(x) #x
+#define PWLOD_STR(x) PWLOD_STR2(x)
 
 namespace plr = aether::pointcloud_lod_render;
 namespace lod = aether::pointcloud_lod;
@@ -126,6 +128,7 @@ struct pwlod_viewer {
   std::atomic<uint64_t> frames_rendered{0}, held_overwrites{0}, latest_overwrites{0},
       published_ahead{0};
   std::atomic<bool> ignore_held{false};
+  std::atomic<bool> debug_fill_max_spacing{false};
 
   // ---- render thread ----
   std::thread th_;
@@ -166,6 +169,8 @@ struct HookCtx {
   double t_submit = 0;
   double t_done = -1;
   pwlod_frame_stats* early = nullptr;   // filled if published early
+  const lod::Octree* oct = nullptr;
+  bool fill_max_spacing = false;
 };
 
 void OnWorkDone(WGPUQueueWorkDoneStatus status, WGPUStringView, void* u1, void*) {
@@ -176,6 +181,16 @@ void OnWorkDone(WGPUQueueWorkDoneStatus status, WGPUStringView, void* u1, void*)
   uint64_t cur = h->v->completed.load();
   while (cur < h->frame_number && !h->v->completed.compare_exchange_weak(cur, h->frame_number)) {
   }
+}
+
+// v2 lowest_spacing (A8): the frame's Selection::lowestSpacing as selectVisible
+// computed it; <= 0 (here 0) when no node was drawn or nothing was accepted.
+// fill_max is the test-only negative control (viewer_probe.h): the root's
+// spacing, i.e. the LARGEST spacing in the tree.
+double LowestSpacingFor(const plr::FrameRec& fr, const lod::Octree* oct, bool fill_max) {
+  if (fill_max && oct && !oct->nodes.empty()) return oct->nodes[0].spacing;
+  if (fr.nodes_drawn <= 0 || !std::isfinite(fr.lowest_spacing)) return 0.0;
+  return fr.lowest_spacing;
 }
 
 void FillStats(const plr::FrameRec& fr, uint64_t frame_number, pwlod_frame_stats* st) {
@@ -203,6 +218,7 @@ void SubmitHookFn(void* ctx, const plr::FrameRec& fr) {
     FillStats(fr, h->frame_number, h->early);
     h->early->completed_frame_number = v->completed.load();
     h->early->min_node_pixel_size = fr.px;
+    h->early->lowest_spacing = LowestSpacingFor(fr, h->oct, h->fill_max_spacing);
     Publish(v, h->ring_index, *h->early);
   }
   plr::WaitFuture(v->g, f);   // render thread (or render_once's caller) only
@@ -312,6 +328,8 @@ pwlod_status FrameBody(pwlod_viewer* v, const plr::Target& rt, WGPUTextureFormat
   hc.ring_index = ring_index;
   hc.publish_early = params.debug_publish_before_done != 0;
   hc.early = &early;
+  hc.oct = rs.oct.get();
+  hc.fill_max_spacing = v->debug_fill_max_spacing.load();
   hc.t_frame0 = NowMs();
   plr::SubmitHook hook;
   hook.fn = &SubmitHookFn;
@@ -328,6 +346,7 @@ pwlod_status FrameBody(pwlod_viewer* v, const plr::Target& rt, WGPUTextureFormat
   st.completed_frame_number = v->completed.load();
   st.min_node_pixel_size = rs.qc.pixelSize();
   st.gpu_ms = hc.t_done >= 0 ? hc.t_done - hc.t_submit : -1.0;
+  st.lowest_spacing = LowestSpacingFor(fr, rs.oct.get(), hc.fill_max_spacing);
   if (out) *out = st;
 
   // Something may still change without a new input: loads in flight or
@@ -468,6 +487,10 @@ ViewerProbe GetViewerProbe(pwlod_viewer* v) {
 
 void SetIgnoreHeldExclusion(pwlod_viewer* v, bool on) {
   if (v) v->ignore_held.store(on);
+}
+
+void SetFillMaxSpacing(pwlod_viewer* v, bool on) {
+  if (v) v->debug_fill_max_spacing.store(on);
 }
 
 }  // namespace aether::pointcloud_lod_render
@@ -678,6 +701,7 @@ void pwlod_viewer_destroy(pwlod_viewer* v) {
   delete v;
 }
 
-const char* pwlod_version(void) { return PWLOD_ENGINE_SHA8 " abi=1"; }
+// "<engine git sha8> abi=<PWLOD_ABI_VERSION>" -- the ABI number comes from the frozen header.
+const char* pwlod_version(void) { return PWLOD_ENGINE_SHA8 " abi=" PWLOD_STR(PWLOD_ABI_VERSION); }
 
 }  // extern "C"

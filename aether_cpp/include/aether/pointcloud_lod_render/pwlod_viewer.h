@@ -1,7 +1,8 @@
-// pwlod_viewer.h -- FROZEN C ABI (v1) between the PocketWorld point-cloud LOD engine
+// pwlod_viewer.h -- FROZEN C ABI (v2) between the PocketWorld point-cloud LOD engine
 // (Aether3D, aether_cpp/include/aether/pointcloud_lod_render/) and each platform shell
 // (iOS now; Android / HarmonyOS later).
 //
+// v2 (2026-09-24): pwlod_frame_stats.lowest_spacing added (last field), ABI version 2.
 // Frozen by the coordinating session on 2026-09-24 (plan LOD_ARLOOPBENCH_PLAN_20260924.md,
 // user choices A1 + B1 + orthographic via Cesium). Neither side edits this file; a needed
 // change is reported back to the coordinator, who changes it for both sides at once.
@@ -30,7 +31,7 @@
 extern "C" {
 #endif
 
-#define PWLOD_ABI_VERSION 1
+#define PWLOD_ABI_VERSION 2
 #define PWLOD_TARGET_COUNT 3 /* ring size; the only accepted value in v1 */
 
 typedef enum pwlod_status {
@@ -111,6 +112,10 @@ typedef struct pwlod_frame_stats {
   double min_node_pixel_size;     /* controller state after this frame */
   double cpu_ms;                  /* select + stream bookkeeping + encode + submit */
   double gpu_ms;                  /* submit -> OnSubmittedWorkDone; -1 if not yet known */
+  /* v2: Potree's per-frame lowestSpacing (Potree_update_visibility.js :114, :276-280, :413
+     @5636cd4) = the smallest spacing among the nodes drawn this frame; <= 0 if none drawn.
+     The shell feeds it to Potree Viewer.update's near/far rule (viewer.js:1749-1771). */
+  double lowest_spacing;
 } pwlod_frame_stats;
 
 /* One ring slot. `memory` is the shared-texture memory `texture` was created from; the engine
@@ -225,7 +230,7 @@ pwlod_status pwlod_verify_octree(const char* octree_dir, pwlod_verify_report* ou
 /* pwlod_run() from pw_splat_ab_bench Sources/lod/pw_lod_bench.h is carried into the same
    library unchanged, declared in its own header pw_lod_bench.h (not repeated here). */
 
-/* "<engine git sha8> abi=1" -- checked against the vendored artifact's receipt. */
+/* "<engine git sha8> abi=2" -- checked against the vendored artifact's receipt. */
 const char* pwlod_version(void);
 
 #ifdef __cplusplus

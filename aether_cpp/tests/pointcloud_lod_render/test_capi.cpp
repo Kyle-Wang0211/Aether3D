@@ -15,16 +15,27 @@
 //   A1  argument / state contract of pwlod_viewer.h: count != 3, bad format,
 //       non-finite camera, unknown projection, start without targets, acquire /
 //       get_stats before anything is published, missing and corrupt octree.
+//   V2  ABI v2: pwlod_version() ends in "abi=2" == PWLOD_ABI_VERSION, and
+//       pwlod_frame_stats.lowest_spacing is bit-identical to selectVisible's
+//       Selection::lowestSpacing for the same camera / budget / pixel size,
+//       through render_once (perspective and orthographic) and through the
+//       render thread's first published frame; <= 0 when no node was drawn.
+//       Negative control: the viewer made to fill the root's (largest)
+//       spacing must be caught by the same comparison.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <chrono>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "aether/pointcloud_lod_render/pwlod_viewer.h"
+#include "aether/pointcloud_lod_render/viewer_probe.h"
 #include "judges.h"
 
 using namespace pwlod_judges;
@@ -145,15 +156,18 @@ int main(int argc, char** argv) {
     plr::ResetLod(&L, 0);
     return im;
   };
-  auto viaC = [&](const pwlod_camera& cam, const pwlod_params& p, int64_t* pts) {
+  auto viaC = [&](const pwlod_camera& cam, const pwlod_params& p, int64_t* pts,
+                  pwlod_frame_stats* out = nullptr, bool fillMax = false) {
     pwlod_viewer* vv = nullptr;
     pwlod_viewer_create(&gpu, &vv);             // fresh viewer: controller at Potree's 150 px
+    plr::SetFillMaxSpacing(vv, fillMax);
     pwlod_viewer_load_octree(vv, dir.c_str());
     pwlod_viewer_set_params(vv, &p);
     pwlod_viewer_set_camera(vv, &cam);
     pwlod_frame_stats st{};
     const pwlod_status s = pwlod_viewer_render_once(vv, &ct, WGPUTextureFormat_RGBA8Unorm, W, H, &st);
     *pts = s == PWLOD_OK ? st.points_drawn : -1;
+    if (out) *out = st;
     Img im = Readback(g, tgt.tex, W, H);
     pwlod_viewer_destroy(vv);
     return im;
@@ -242,6 +256,84 @@ int main(int argc, char** argv) {
       rep.check("N2 NEG orthographic shader branch off differs", ImgDiff(a, b).pixels > 0,
                 Fmt("%llu pixels differ, both draw the same %zu nodes / %lld points",
                     (unsigned long long)ImgDiff(a, b).pixels, da.size(), (long long)pa));
+    }
+  }
+
+  // ---- V2: ABI v2 lowest_spacing ----
+  {
+    const std::string ver = pwlod_version();
+    const std::string tail = std::string("abi=") + std::to_string(PWLOD_ABI_VERSION);
+    rep.check("V2 pwlod_version() reports abi=2",
+              PWLOD_ABI_VERSION == 2 && ver.size() > tail.size() &&
+                  ver.compare(ver.size() - tail.size(), tail.size(), tail) == 0,
+              "\"" + ver + "\"");
+    auto bits = [](double a, double b) { return std::memcmp(&a, &b, sizeof a) == 0; };
+    auto selLowest = [&](const plr::CamState& cs) {
+      SelectParams sp; sp.pointBudget = prm.point_budget; sp.minimumNodePixelSize = 150.0;
+      return lod::selectVisible(oct, cs.cam, sp).lowestSpacing;
+    };
+    const Pose ps = PoseAt(T, 0.35, &seg);   // the leaf pose: deep nodes, small spacing
+    double zn, zf; NearFar(T, ps, &zn, &zf);
+    plr::CamState persp = MakeCam(ps, (int)W, (int)H, zn, zf);
+    persp.cam.screenWidthPx = (int)W;
+    const double oh = 2.0 * (ps.target - ps.eye).length() * std::tan(30.0 * kPi / 180.0);
+    const plr::CamState ortho = MakeOrthoCam(ps, (int)W, (int)H, oh, zn, zf);
+    int64_t pts = 0;
+    pwlod_frame_stats sp{}, so{};
+    viaC(ToCamera(persp, ps, W, H, false), prm, &pts, &sp);
+    viaC(ToCamera(ortho, ps, W, H, true), prm, &pts, &so);
+    const double wantP = selLowest(persp), wantO = selLowest(ortho);
+    rep.check("V2 render_once lowest_spacing == selectVisible's (bit for bit)",
+              sp.nodes_drawn > 0 && so.nodes_drawn > 0 && wantP > 0 && bits(sp.lowest_spacing, wantP) &&
+                  bits(so.lowest_spacing, wantO),
+              Fmt("perspective %.17g vs %.17g, orthographic %.17g vs %.17g", sp.lowest_spacing, wantP,
+                  so.lowest_spacing, wantO));
+    // the render thread: first published frame (sync, controller still at 150 px)
+    {
+      OwnedTarget r0 = MakeTarget(g, W, H), r1 = MakeTarget(g, W, H), r2 = MakeTarget(g, W, H);
+      const pwlod_target rts[3] = {{r0.tex, nullptr}, {r1.tex, nullptr}, {r2.tex, nullptr}};
+      pwlod_viewer* vr = nullptr;
+      pwlod_viewer_create(&gpu, &vr);
+      pwlod_viewer_load_octree(vr, dir.c_str());
+      pwlod_viewer_set_params(vr, &prm);
+      const pwlod_camera cam = ToCamera(persp, ps, W, H, false);
+      pwlod_viewer_set_camera(vr, &cam);
+      pwlod_viewer_set_targets(vr, rts, 3, WGPUTextureFormat_RGBA8Unorm, W, H);
+      struct First { std::mutex mu; bool got = false; pwlod_frame_stats st{}; } first;
+      pwlod_viewer_start(vr, [](void* u, uint32_t, const pwlod_frame_stats* st) {
+        First* f = static_cast<First*>(u);
+        std::lock_guard<std::mutex> lk(f->mu);
+        if (!f->got && st->frame_number == 1) { f->st = *st; f->got = true; }
+      }, &first);
+      for (int i = 0; i < 400; ++i) {
+        { std::lock_guard<std::mutex> lk(first.mu); if (first.got) break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      pwlod_viewer_stop(vr);
+      pwlod_viewer_destroy(vr);
+      for (OwnedTarget* x : {&r0, &r1, &r2}) ReleaseTarget(x);
+      rep.check("V2 render thread lowest_spacing == selectVisible's (bit for bit)",
+                first.got && first.st.nodes_drawn > 0 && bits(first.st.lowest_spacing, wantP),
+                Fmt("frame %llu: %.17g vs %.17g", (unsigned long long)first.st.frame_number,
+                    first.st.lowest_spacing, wantP));
+    }
+    // nothing drawn: async, first frame (nodes are only being requested)
+    {
+      pwlod_params pa = prm; pa.async_loading = 1;
+      pwlod_frame_stats sa{};
+      viaC(ToCamera(persp, ps, W, H, false), pa, &pts, &sa);
+      rep.check("V2 no node drawn -> lowest_spacing <= 0",
+                sa.nodes_drawn == 0 && sa.lowest_spacing <= 0 && wantP > 0,
+                Fmt("async first frame: %d nodes drawn, lowest_spacing %g (select's own value %g)",
+                    sa.nodes_drawn, sa.lowest_spacing, wantP));
+    }
+    // negative control: the largest spacing filled in must be caught
+    {
+      pwlod_frame_stats sn{};
+      viaC(ToCamera(persp, ps, W, H, false), prm, &pts, &sn, true);
+      rep.check("V2 NEG largest spacing filled in -> judge reports it",
+                !bits(sn.lowest_spacing, wantP) && sn.lowest_spacing == oct.nodes[0].spacing,
+                Fmt("filled %.17g (root) vs select %.17g", sn.lowest_spacing, wantP));
     }
   }
 

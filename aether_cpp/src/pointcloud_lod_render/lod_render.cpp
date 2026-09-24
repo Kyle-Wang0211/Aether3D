@@ -764,6 +764,7 @@ FrameRec LodFrame(const GpuCtx& g, Lod* L, Pipe* P, const Target& rt, const CamS
     t2 = NowMs();
     fr.nodes_sel = (int)sel.nodes.size();
     fr.pts_sel = sel.numPoints;
+    fr.lowest_spacing = sel.lowestSpacing;   // R13
     fr.hit_budget = sel.hitBudget;
     fr.dropped = (int)st.droppedForCache;          // library now reports the silent drop
     fr.decoded = st.nodesDecoded; fr.reads = st.reads;
@@ -821,6 +822,7 @@ FrameRec LodFrame(const GpuCtx& g, Lod* L, Pipe* P, const Target& rt, const CamS
     L->aloader->request(sel.unloaded);
     fr.nodes_sel = (int)sel.nodes.size();
     fr.pts_sel = sel.numPoints;
+    fr.lowest_spacing = sel.lowestSpacing;   // R13
     fr.hit_budget = sel.hitBudget;
     fr.dropped = (int)sel.nodes.size() - (int)drawIds.size();   // must stay 0
     fr.pending_nodes = (int)sel.unloaded.size();
