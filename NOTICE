@@ -32,11 +32,13 @@ https://github.com/nlohmann/json
 Full text: aether_cpp/third_party/nlohmann/LICENSE
 
 -------------------------------------------------------------------------------
-Point-cloud LOD core (aether_cpp/src/pointcloud_lod/)
+Point-cloud LOD core (aether_cpp/src/pointcloud_lod/) and on-device octree
+builder (aether_cpp/src/pointcloud_lod_build/)
 -------------------------------------------------------------------------------
-Algorithms and constants in this module are transliterated from the upstreams
+Algorithms and constants in these modules are transliterated from the upstreams
 below; no upstream source file is vendored. Each formula is cited to a file and
-line in aether_cpp/src/pointcloud_lod/DEVIATIONS.md, and each licence text is
+line in aether_cpp/src/pointcloud_lod/DEVIATIONS.md and
+aether_cpp/src/pointcloud_lod_build/DEVIATIONS.md, and each licence text is
 kept verbatim in aether_cpp/src/pointcloud_lod/upstream_licenses/ at the pinned
 revision listed in REVISIONS.txt there.
 
@@ -45,7 +47,10 @@ revision listed in REVISIONS.txt there.
     BSD 2-Clause License
     https://github.com/potree/potree
 
-  PotreeConverter (octree on-disk format)
+  PotreeConverter (octree on-disk format; the octree builder in
+  aether_cpp/src/pointcloud_lod_build/ is a port of its source code --
+  counting-sort chunking, indexer, Poisson sampler, octree and hierarchy
+  writers -- modified for portability, see DEVIATIONS.md there)
     Copyright 2020 Markus Schütz
     BSD 2-Clause License
     https://github.com/potree/PotreeConverter

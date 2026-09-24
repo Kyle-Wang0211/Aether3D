@@ -1279,3 +1279,52 @@ endforeach()
 add_executable(pointcloud_lod_ab_knob tests/pointcloud_lod/test_ab_knob.cpp)
 target_link_libraries(pointcloud_lod_ab_knob PRIVATE aether_pointcloud_lod)
 target_compile_options(pointcloud_lod_ab_knob PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+
+# [2026-09-23] On-device octree builder: PotreeConverter 2.0 @ 8bfad98 (BSD-2-Clause)
+# ported to run inside the app -- the product has no cloud, so the dense cloud
+# fused on the phone is also turned into the octree on the phone.
+#   chunking  counting sort        chunker_countsort_laszip.cpp
+#   indexing  bottom-up Poisson    indexer.cpp + sampler_poisson.h
+#   hierarchy 22 B/node            HierarchyBuilder.h
+# Output is read by aether_pointcloud_lod above. Every change against upstream is
+# pinned to a file:line in src/pointcloud_lod_build/DEVIATIONS.md. Pure C++20: no
+# per-OS branch, no vendor API, errors returned (never abort()).
+find_package(Threads REQUIRED)
+add_library(aether_pointcloud_lod_build STATIC
+    src/pointcloud_lod_build/build.cpp
+    src/pointcloud_lod_build/chunker_countsort.cpp
+    src/pointcloud_lod_build/indexer.cpp
+    src/pointcloud_lod_build/writer.cpp
+    src/pointcloud_lod_build/ply_source.cpp)
+target_include_directories(aether_pointcloud_lod_build
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_compile_options(aether_pointcloud_lod_build PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+target_link_libraries(aether_pointcloud_lod_build PUBLIC Threads::Threads)
+
+# Measurement driver (not a pass/fail test): builds an octree from a PLY, or from
+# a LAS through a test-only reader so the port sees exactly what the desktop
+# PotreeConverter sees.
+add_executable(pointcloud_lod_build_cli tests/pointcloud_lod_build/pwlod_build_cli.cpp)
+target_link_libraries(pointcloud_lod_build_cli PRIVATE aether_pointcloud_lod_build)
+target_compile_options(pointcloud_lod_build_cli PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+
+# Builder tests on the committed fixture. test_pointcloud_lod_build compares the
+# port with the desktop-built fixture octree node by node and checks losslessness
+# and bad-input handling; it leaves its product-path output in
+# pointcloud_lod_build_out/ply, which the reader's own tests then consume.
+add_executable(test_pointcloud_lod_build tests/pointcloud_lod_build/test_build.cpp)
+target_link_libraries(test_pointcloud_lod_build PRIVATE aether_pointcloud_lod_build aether_pointcloud_lod)
+target_compile_options(test_pointcloud_lod_build PRIVATE ${AETHER_STRICT_COMPILE_OPTIONS})
+add_test(NAME test_pointcloud_lod_build
+    COMMAND test_pointcloud_lod_build
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/pointcloud_lod/fixture
+            ${CMAKE_CURRENT_BINARY_DIR}/pointcloud_lod_build_out)
+set_tests_properties(test_pointcloud_lod_build PROPERTIES FIXTURES_SETUP pwlod_built_octree)
+foreach(pwlod_reader_test octree select stream)
+    add_test(NAME test_pointcloud_lod_build_then_${pwlod_reader_test}
+        COMMAND test_pointcloud_lod_${pwlod_reader_test}
+                ${CMAKE_CURRENT_BINARY_DIR}/pointcloud_lod_build_out/ply)
+    set_tests_properties(test_pointcloud_lod_build_then_${pwlod_reader_test}
+        PROPERTIES FIXTURES_REQUIRED pwlod_built_octree)
+endforeach()
